@@ -62,6 +62,7 @@ enum AnalyticsSource: String, AnalyticsDescribable {
     case userSatisfactionSurvey = "user_satisfaction_survey"
     case recommendations
     case playlistEditor = "playlist_editor"
+    case voiceCommands = "voice_commands"
     case unknown
 
     var analyticsDescription: String { rawValue }

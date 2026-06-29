@@ -66,7 +66,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }()
     #endif
 
-    private lazy var sleepTimerManager = SleepTimerManager()
+    lazy var sleepTimerManager = SleepTimerManager()
 
     /// The player we should fallback to
     private var fallbackToPlayer: PlaybackProtocol.Type? = nil
@@ -622,6 +622,14 @@ class PlaybackManager: ServerPlaybackDelegate {
         if let episodeToPlay = queue.episodeAt(index: upNextIndex) {
             switchTo(episodeToPlay: episodeToPlay, moveExistingToUpNext: true, autoPlay: true)
         }
+    }
+
+    func skipToNextUpNextEpisode() -> String? {
+        let nextTitle = queue.episodeAt(index: 0)?.displayableTitle()
+        if queue.upNextCount() > 0 {
+            playNextEpisode(autoPlay: playing())
+        }
+        return nextTitle
     }
 
     private func playNextEpisode(autoPlay: Bool) {
