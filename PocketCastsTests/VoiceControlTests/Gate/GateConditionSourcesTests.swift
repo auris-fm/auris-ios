@@ -37,4 +37,29 @@ final class GateConditionSourcesTests: XCTestCase {
         // Initial state should be unknown
         if case .unknown = monitor.setup.enabledByUser {} else { XCTFail() }
     }
+
+    func test_gateConflicts_isClear_withOtherAppPlaying() {
+        let conflicts = GateConflicts(
+            notOnCall: .allowed,
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        XCTAssertTrue(conflicts.isClear)
+
+        let blocked = GateConflicts(
+            notOnCall: .allowed,
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .blocked(reason: "other_app_playing")
+        )
+        XCTAssertFalse(blocked.isClear)
+    }
+
+    func test_otherAppPlayingSource_returnsCondition() {
+        let source = OtherAppPlayingConditionSource()
+        let condition = source.current
+        // In test environment, other audio is typically not playing
+        XCTAssertEqual(condition, .allowed)
+    }
 }

@@ -26,30 +26,46 @@ final class RouteChangeTests: XCTestCase {
     }
 
     func test_gate_modeResolution_matrix() {
-        // Foreground always continuous
-        let foregroundGate = VoiceControlGate(
+        let attendedSignal = AttendedSignal()
+        let gracePeriodSignal = GracePeriodSignal()
+        let playbackRecencySignal = PlaybackRecencySignal()
+        let recentPlaybackSignal = PlaybackRecencySignal()
+        recentPlaybackSignal.update(isPlaying: true)
+
+        // Foreground + attended = continuous
+        attendedSignal.onUserInteraction()
+        let foregroundAttendedGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .appInForeground,
-            micExposure: .exposed
+            micExposure: .exposed,
+            attendedSignal: attendedSignal,
+            gracePeriodSignal: gracePeriodSignal,
+            playbackRecencySignal: playbackRecencySignal
         )
-        XCTAssertEqual(foregroundGate.state, .listening(mode: .continuous))
+        XCTAssertEqual(foregroundAttendedGate.state, .listening(mode: .continuous))
 
         // Background + exposed = wakeWord
         let backgroundExposedGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .playbackActive,
-            micExposure: .exposed
+            micExposure: .exposed,
+            attendedSignal: AttendedSignal(),
+            gracePeriodSignal: GracePeriodSignal(),
+            playbackRecencySignal: PlaybackRecencySignal()
         )
         XCTAssertEqual(backgroundExposedGate.state, .listening(mode: .wakeWord))
 
-        // Background + isolated = continuous
+        // Background + isolated + playback recent = continuous
         let backgroundIsolatedGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .playbackActive,
-            micExposure: .isolated
+            micExposure: .isolated,
+            attendedSignal: AttendedSignal(),
+            gracePeriodSignal: GracePeriodSignal(),
+            playbackRecencySignal: recentPlaybackSignal
         )
         XCTAssertEqual(backgroundIsolatedGate.state, .listening(mode: .continuous))
     }

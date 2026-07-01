@@ -28,6 +28,8 @@ final class WakeWordDetectorTests: XCTestCase {
         detector.release()
     }
 
+    // MARK: - Command window lifecycle
+
     func test_commandWindow_opensOnWakeWord() {
         let manager = CommandWindowManager()
         XCTAssertFalse(manager.isOpen)
@@ -35,14 +37,11 @@ final class WakeWordDetectorTests: XCTestCase {
         XCTAssertTrue(manager.isOpen)
     }
 
-    func test_commandWindow_closesAfterTimeout() {
+    func test_commandWindow_staysOpenBeforeTimeout() {
         let manager = CommandWindowManager()
         manager.onWakeWordDetected()
-        // Advance last speech time past timeout
-        XCTAssertTrue(manager.isOpen)
-        // tick with no recent speech should close
+        // tick immediately — window should still be open (30s timeout not expired)
         manager.tick()
-        // Immediately after detection, window should still be open
         XCTAssertTrue(manager.isOpen)
     }
 
@@ -52,5 +51,46 @@ final class WakeWordDetectorTests: XCTestCase {
         manager.onSpeechActivity()
         manager.tick()
         XCTAssertTrue(manager.isOpen)
+    }
+
+    // MARK: - Break methods
+
+    func test_onAudioRouteChanged_closesWindow() {
+        let manager = CommandWindowManager()
+        manager.onWakeWordDetected()
+        XCTAssertTrue(manager.isOpen)
+        manager.onAudioRouteChanged()
+        XCTAssertFalse(manager.isOpen)
+    }
+
+    func test_onAppBackgrounded_closesWindow() {
+        let manager = CommandWindowManager()
+        manager.onWakeWordDetected()
+        XCTAssertTrue(manager.isOpen)
+        manager.onAppBackgrounded()
+        XCTAssertFalse(manager.isOpen)
+    }
+
+    func test_breakMethod_onClosedWindow_noops() {
+        let manager = CommandWindowManager()
+        XCTAssertFalse(manager.isOpen)
+        // Should not crash or change state
+        manager.onAudioRouteChanged()
+        manager.onAppBackgrounded()
+        XCTAssertFalse(manager.isOpen)
+    }
+
+    // MARK: - State change callback
+
+    func test_onWindowStateChange_calledForOpenAndClose() {
+        let manager = CommandWindowManager()
+        var states: [Bool] = []
+        manager.onWindowStateChange = { states.append($0) }
+
+        manager.onWakeWordDetected()
+        XCTAssertEqual(states, [true])
+
+        manager.onAudioRouteChanged()
+        XCTAssertEqual(states, [true, false])
     }
 }

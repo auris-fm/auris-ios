@@ -14,6 +14,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     var mockPlaybackQuerySink: MockPlaybackQuerySink!
     var mockStatsQuerySink: MockStatsQuerySink!
     var mockCloudRouteSink: MockCloudRouteSink!
+    var gracePeriodSignal: GracePeriodSignal!
 
     override func setUp() {
         super.setUp()
@@ -27,6 +28,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         mockPlaybackQuerySink = MockPlaybackQuerySink()
         mockStatsQuerySink = MockStatsQuerySink()
         mockCloudRouteSink = MockCloudRouteSink()
+        gracePeriodSignal = GracePeriodSignal()
         executor = VoiceIntentExecutor(
             playbackSink: mockPlaybackSink,
             effectsSink: mockEffectsSink,
@@ -37,7 +39,8 @@ final class VoiceIntentExecutorTests: XCTestCase {
             queueSink: mockQueueSink,
             playbackQuerySink: mockPlaybackQuerySink,
             statsQuerySink: mockStatsQuerySink,
-            cloudRouteSink: mockCloudRouteSink
+            cloudRouteSink: mockCloudRouteSink,
+            gracePeriodSignal: gracePeriodSignal
         )
     }
 
@@ -104,6 +107,12 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(intent)
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")
+    }
+
+    func test_execute_success_activatesGracePeriod() async {
+        XCTAssertFalse(gracePeriodSignal.isActive)
+        _ = await executor.execute(PlaybackIntent.pause)
+        XCTAssertTrue(gracePeriodSignal.isActive)
     }
 }
 
