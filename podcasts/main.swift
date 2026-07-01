@@ -7,6 +7,6 @@ let appDelegateClass = isRunningTests ? "TestingAppDelegate" : NSStringFromClass
 UIApplicationMain(
     CommandLine.argc,
     CommandLine.unsafeArgv,
-    nil,
+    NSStringFromClass(VoiceControlApplication.self),
     appDelegateClass
 )

@@ -8,7 +8,7 @@ class EarconPlayer {
     init(engine: AVAudioEngine) {
         self.engine = engine
         engine.attach(player)
-        player.connect(to: engine.mainMixerNode, format: nil)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
         preloadAll()
     }
 

@@ -35,12 +35,7 @@ class AVSpeechTtsEngine: TtsEngineProtocol {
     func release() { synthesizer.stopSpeaking(at: .immediate) }
 
     private func bestVoice(for language: String) -> AVSpeechSynthesisVoice {
-        if #available(iOS 17.0, *) {
-            return AVSpeechSynthesisVoice.enhancedVoices()
-                .first { $0.language == language }
-                ?? AVSpeechSynthesisVoice(language: language)
-                ?? AVSpeechSynthesisVoice(language: "en-US")!
-        }
-        return AVSpeechSynthesisVoice(language: language) ?? AVSpeechSynthesisVoice(language: "en-US")!
+        return AVSpeechSynthesisVoice(language: language)
+            ?? AVSpeechSynthesisVoice(language: "en-US")!
     }
 }

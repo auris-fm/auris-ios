@@ -5,7 +5,7 @@ struct ToolCall {
     let arguments: [String: Any]
 }
 
-enum FunctionGemmaParser {
+struct FunctionGemmaParser {
     private static let pattern = #/<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>/#
 
     static func parse(_ output: String) -> ToolCall? {

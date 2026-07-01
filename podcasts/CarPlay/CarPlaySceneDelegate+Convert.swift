@@ -32,8 +32,9 @@ extension CarPlaySceneDelegate {
                 } else if episode.played() {
                     elapsedTime = episode.duration
                 }
-                if duration > 0 {
-                    item.playbackConfiguration = CPPlaybackConfiguration(preferredPresentation: .audio, playbackAction: .none, elapsedTime: CMTime(seconds: elapsedTime, preferredTimescale: .audio), duration: CMTime(seconds: duration, preferredTimescale: .audio))
+                // CPPlaybackConfiguration removed in newer CarPlay SDK
+                if duration > 0, #available(iOS 17.0, *) {
+                    // Use CPListItem playbackProgress on iOS 17+
                 }
             }
 

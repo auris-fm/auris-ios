@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsDataModel
 
 class EffectsManagerSink: VoiceEffectsSink {
     private let playbackManager: PlaybackManager

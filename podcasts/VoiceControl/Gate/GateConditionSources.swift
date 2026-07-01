@@ -21,7 +21,7 @@ class CallConditionSource: GateConditionSource {
 
     var publisher: AnyPublisher<GateCondition, Never> {
         NotificationCenter.default
-            .publisher(for: .CXCallObserverCallChanged)
+            .publisher(for: NSNotification.Name("CXCallObserverCallChanged"))
             .map { [weak self] _ in self?.current ?? .unknown(reason: "uninitialized") }
             .eraseToAnyPublisher()
     }
@@ -74,6 +74,12 @@ class OtherAppPlayingConditionSource: GateConditionSource {
 }
 
 class ForegroundConditionSource: GateConditionSource {
+    private let gracePeriodSignal: GracePeriodSignal
+
+    init(gracePeriodSignal: GracePeriodSignal) {
+        self.gracePeriodSignal = gracePeriodSignal
+    }
+
     var current: GateCondition {
         UIApplication.shared.applicationState == .active ? .allowed : .blocked(reason: "backgrounded")
     }
@@ -81,7 +87,12 @@ class ForegroundConditionSource: GateConditionSource {
     var publisher: AnyPublisher<GateCondition, Never> {
         NotificationCenter.default
             .publisher(for: UIApplication.didBecomeActiveNotification)
-            .merge(with: NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification))
+            .merge(with: NotificationCenter.default
+                .publisher(for: UIApplication.willResignActiveNotification)
+                .handleEvents(receiveOutput: { [weak self] _ in
+                    self?.gracePeriodSignal.onAppBackgrounded()
+                })
+            )
             .map { _ in self.current }
             .eraseToAnyPublisher()
     }
@@ -105,11 +116,14 @@ class LiveConditionMonitor: ObservableObject {
     private let batterySource = BatteryConditionSource()
     private let castingSource = CastingConditionSource()
     private let otherAppPlayingSource = OtherAppPlayingConditionSource()
-    private let foregroundSource = ForegroundConditionSource()
+    private let foregroundSource: ForegroundConditionSource
 
     private var cancellables = Set<AnyCancellable>()
 
-    init() { bind() }
+    init(gracePeriodSignal: GracePeriodSignal) {
+        self.foregroundSource = ForegroundConditionSource(gracePeriodSignal: gracePeriodSignal)
+        bind()
+    }
 
     private func bind() {
         callSource.publisher

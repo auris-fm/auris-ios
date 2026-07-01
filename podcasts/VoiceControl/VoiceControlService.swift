@@ -46,6 +46,22 @@ class VoiceControlService: ObservableObject {
         self.attendedSignal = attendedSignal
         self.gracePeriodSignal = gracePeriodSignal
         self.playbackRecencySignal = playbackRecencySignal
+
+        TouchEventMonitor.shared.touchEvent
+            .sink { [weak self] in self?.attendedSignal.onUserInteraction() }
+            .store(in: &cancellables)
+
+        NotificationCenter.default
+            .publisher(for: Constants.Notifications.playbackStarted)
+            .map { _ in true }
+            .merge(with: NotificationCenter.default
+                .publisher(for: Constants.Notifications.playbackPaused)
+                .map { _ in false }
+            )
+            .sink { [weak self] isPlaying in
+                self?.playbackRecencySignal.update(isPlaying: isPlaying)
+            }
+            .store(in: &cancellables)
     }
 
     func startIfAllowed() {

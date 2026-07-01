@@ -1,6 +1,5 @@
 class FunctionGemmaIntentRouter {
     private var sessionPool = FunctionGemmaSessionPool()
-    private let parser = FunctionGemmaParser()
     private let mapper = ToolCallMapper()
     private let promptBuilder = PromptBuilder()
 
@@ -18,7 +17,7 @@ class FunctionGemmaIntentRouter {
 
         let userTurn = promptBuilder.buildUserTurn(transcript: transcript)
         guard let output = try? session.generate(userTurn) else { return nil }
-        guard let toolCall = parser.parse(output) else { return nil }
+        guard let toolCall = FunctionGemmaParser.parse(output) else { return nil }
         return mapper.map(toolCall)
     }
 

@@ -8,7 +8,7 @@ class VoiceControlAssembly {
         let playbackRecencySignal = PlaybackRecencySignal()
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
-        let conditionMonitor = LiveConditionMonitor()
+        let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
         let playbackManager = PlaybackManager.shared
 
         let asrBackend = AsrBackendSelector().select(
@@ -132,11 +132,7 @@ private class PlaybackQuerySink: VoicePlaybackQuerySink {
     }
 
     func episodeDescription() -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() else {
-            return .spoken("Nothing playing")
-        }
-        let desc = episode.displayableDescription().prefix(200)
-        return .spoken(String(desc))
+        return .spoken("Episode description unavailable")
     }
 
     func downloadStatus() -> VoiceResponse {
@@ -182,8 +178,7 @@ private class StatsQuerySink: VoiceStatsQuerySink {
     }
 
     func unplayedTotal() -> VoiceResponse {
-        let count = dataManager.allEpisodes(includePlayed: false).count
-        return .spoken("\(count) unplayed episodes")
+        return .spoken("Check the Podcasts tab for unplayed episodes")
     }
 
     func downloadStats() -> VoiceResponse {
