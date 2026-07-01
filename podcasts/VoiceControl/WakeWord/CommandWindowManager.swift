@@ -1,7 +1,7 @@
 import Foundation
 
 class CommandWindowManager {
-    private let conversationTimeout: TimeInterval = 10.0
+    private let conversationTimeout: TimeInterval = 30.0
     private var windowOpen = false
     private var lastSpeechTime: Date?
     var onWindowStateChange: ((Bool) -> Void)?
@@ -23,6 +23,22 @@ class CommandWindowManager {
             windowOpen = false
             onWindowStateChange?(false)
         }
+    }
+
+    /// Immediately close the command window on audio route change
+    /// to avoid exposing the user's voice after unplugging headphones.
+    func onAudioRouteChanged() {
+        guard windowOpen else { return }
+        windowOpen = false
+        onWindowStateChange?(false)
+    }
+
+    /// Immediately close the command window when the app backgrounds.
+    /// Privacy fails closed.
+    func onAppBackgrounded() {
+        guard windowOpen else { return }
+        windowOpen = false
+        onWindowStateChange?(false)
     }
 
     var isOpen: Bool { windowOpen }
