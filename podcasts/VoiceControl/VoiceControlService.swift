@@ -14,6 +14,9 @@ class VoiceControlService: ObservableObject {
     private let executor: VoiceIntentExecutor
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
+    private let attendedSignal: AttendedSignal
+    private let gracePeriodSignal: GracePeriodSignal
+    private let playbackRecencySignal: PlaybackRecencySignal
 
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
@@ -27,7 +30,10 @@ class VoiceControlService: ObservableObject {
         intentRouter: FunctionGemmaIntentRouter,
         executor: VoiceIntentExecutor,
         dialogManager: VoiceDialogManager,
-        audioRenderer: AudioFeedbackRenderer
+        audioRenderer: AudioFeedbackRenderer,
+        attendedSignal: AttendedSignal,
+        gracePeriodSignal: GracePeriodSignal,
+        playbackRecencySignal: PlaybackRecencySignal
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -37,6 +43,9 @@ class VoiceControlService: ObservableObject {
         self.executor = executor
         self.dialogManager = dialogManager
         self.audioRenderer = audioRenderer
+        self.attendedSignal = attendedSignal
+        self.gracePeriodSignal = gracePeriodSignal
+        self.playbackRecencySignal = playbackRecencySignal
     }
 
     func startIfAllowed() {
@@ -46,8 +55,16 @@ class VoiceControlService: ObservableObject {
             conditionMonitor.$context,
             routeMonitor.$micExposure
         )
-        .map { setup, conflicts, context, exposure in
-            VoiceControlGate(setup: setup, conflicts: conflicts, context: context, micExposure: exposure).state
+        .map { [self] setup, conflicts, context, exposure in
+            VoiceControlGate(
+                setup: setup,
+                conflicts: conflicts,
+                context: context,
+                micExposure: exposure,
+                attendedSignal: attendedSignal,
+                gracePeriodSignal: gracePeriodSignal,
+                playbackRecencySignal: playbackRecencySignal
+            ).state
         }
         .sink { [weak self] state in
             self?.gateState = state

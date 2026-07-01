@@ -3,7 +3,11 @@ import PocketCastsDataModel
 
 class VoiceControlAssembly {
     func buildVoiceControlService() -> VoiceControlService {
-        let routeMonitor = IOSAudioRouteMonitor()
+        let attendedSignal = AttendedSignal()
+        let gracePeriodSignal = GracePeriodSignal()
+        let playbackRecencySignal = PlaybackRecencySignal()
+
+        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
         let conditionMonitor = LiveConditionMonitor()
         let playbackManager = PlaybackManager.shared
 
@@ -38,7 +42,8 @@ class VoiceControlAssembly {
             queueSink: QueueSink(playbackManager: playbackManager, dataManager: .sharedManager),
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
-            cloudRouteSink: CloudRouteSink()
+            cloudRouteSink: CloudRouteSink(),
+            gracePeriodSignal: gracePeriodSignal
         )
 
         let audioEngine = AVAudioEngine()
@@ -54,7 +59,10 @@ class VoiceControlAssembly {
             intentRouter: intentRouter,
             executor: executor,
             dialogManager: VoiceDialogManager(),
-            audioRenderer: audioRenderer
+            audioRenderer: audioRenderer,
+            attendedSignal: attendedSignal,
+            gracePeriodSignal: gracePeriodSignal,
+            playbackRecencySignal: playbackRecencySignal
         )
     }
 

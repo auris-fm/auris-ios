@@ -32,9 +32,11 @@ class IOSAudioRouteMonitor: ObservableObject {
     @Published var currentRoute: AudioRoute = .unknown
     @Published var micExposure: MicExposure = .noMic
 
+    private let gracePeriodSignal: GracePeriodSignal
     private var cancellables = Set<AnyCancellable>()
 
-    init() {
+    init(gracePeriodSignal: GracePeriodSignal = GracePeriodSignal()) {
+        self.gracePeriodSignal = gracePeriodSignal
         updateRoute(AVAudioSession.sharedInstance().currentRoute)
         NotificationCenter.default
             .publisher(for: AVAudioSession.routeChangeNotification)
@@ -49,13 +51,14 @@ class IOSAudioRouteMonitor: ObservableObject {
                 ]
                 guard validReasons.contains(reason) else { return }
                 self.updateRoute(AVAudioSession.sharedInstance().currentRoute)
+                self.gracePeriodSignal.onAudioRouteChanged()
             }
             .store(in: &cancellables)
     }
 
     private func updateRoute(_ avRoute: AVAudioSessionRouteDescription) {
         let output = classifyOutput(avRoute.outputs.first)
-        let input = avRoute.inputs.first.map { classifyInput($0) }
+        let input = avRoute.inputs.first.flatMap { classifyInput($0) }
         currentRoute = AudioRoute(output: output, input: input)
         micExposure = MicExposureClassifier.classify(currentRoute)
     }

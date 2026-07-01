@@ -9,6 +9,7 @@ class VoiceIntentExecutor {
     private let playbackQuerySink: VoicePlaybackQuerySink
     private let statsQuerySink: VoiceStatsQuerySink
     private let cloudRouteSink: VoiceCloudRouteSink
+    private let gracePeriodSignal: GracePeriodSignal
 
     init(
         playbackSink: VoicePlaybackSink,
@@ -20,7 +21,8 @@ class VoiceIntentExecutor {
         queueSink: VoiceQueueSink,
         playbackQuerySink: VoicePlaybackQuerySink,
         statsQuerySink: VoiceStatsQuerySink,
-        cloudRouteSink: VoiceCloudRouteSink
+        cloudRouteSink: VoiceCloudRouteSink,
+        gracePeriodSignal: GracePeriodSignal
     ) {
         self.playbackSink = playbackSink
         self.effectsSink = effectsSink
@@ -32,27 +34,38 @@ class VoiceIntentExecutor {
         self.playbackQuerySink = playbackQuerySink
         self.statsQuerySink = statsQuerySink
         self.cloudRouteSink = cloudRouteSink
+        self.gracePeriodSignal = gracePeriodSignal
     }
 
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
+        let response: VoiceResponse
         switch intent {
-        case let p as PlaybackIntent: return executePlayback(p)
-        case let e as EffectsIntent: return executeEffects(e)
-        case let v as VolumeIntent: return executeVolume(v)
-        case let s as SleepIntent: return executeSleep(s)
-        case let c as ChapterIntent: return executeChapter(c)
-        case let b as BookmarkIntent: return executeBookmark(b)
-        case let q as QueueIntent: return executeQueue(q)
-        case let pq as PlaybackQueryIntent: return executePlaybackQuery(pq)
-        case let sq as StatsQueryIntent: return executeStatsQuery(sq)
+        case let p as PlaybackIntent: response = executePlayback(p)
+        case let e as EffectsIntent: response = executeEffects(e)
+        case let v as VolumeIntent: response = executeVolume(v)
+        case let s as SleepIntent: response = executeSleep(s)
+        case let c as ChapterIntent: response = executeChapter(c)
+        case let b as BookmarkIntent: response = executeBookmark(b)
+        case let q as QueueIntent: response = executeQueue(q)
+        case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
+        case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
         case let cr as CloudRouteIntent:
-            return await cloudRouteSink.routeToCloud(
+            response = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
                 context: cr.context
             )
-        default: return .earcon(.error)
+        default: response = .earcon(.error)
         }
+
+        // Start grace period after any successful (non-error) command
+        if case .earcon(.error) = response {
+            // error — do not extend grace period
+        } else {
+            gracePeriodSignal.onCommandRecognized()
+        }
+
+        return response
     }
 
     private func executePlayback(_ intent: PlaybackIntent) -> VoiceResponse {
