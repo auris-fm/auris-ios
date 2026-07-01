@@ -1,5 +1,6 @@
 import CallKit
 import UIKit
+import AVFoundation
 import Combine
 
 protocol GateConditionSource {
@@ -56,6 +57,22 @@ class CastingConditionSource: GateConditionSource {
     }
 }
 
+class OtherAppPlayingConditionSource: GateConditionSource {
+    var current: GateCondition {
+        AVAudioSession.sharedInstance().isOtherAudioPlaying
+            ? .blocked(reason: "other_app_playing")
+            : .allowed
+    }
+
+    var publisher: AnyPublisher<GateCondition, Never> {
+        NotificationCenter.default
+            .publisher(for: AVAudioSession.silenceSecondaryAudioHintNotification)
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .map { [weak self] _ in self?.current ?? .unknown(reason: "uninitialized") }
+            .eraseToAnyPublisher()
+    }
+}
+
 class ForegroundConditionSource: GateConditionSource {
     var current: GateCondition {
         UIApplication.shared.applicationState == .active ? .allowed : .blocked(reason: "backgrounded")
@@ -79,13 +96,15 @@ class LiveConditionMonitor: ObservableObject {
     @Published var conflicts: GateConflicts = .init(
         notOnCall: .unknown(reason: "initializing"),
         notCasting: .unknown(reason: "initializing"),
-        batteryOk: .unknown(reason: "initializing")
+        batteryOk: .unknown(reason: "initializing"),
+        otherAppPlaying: .unknown(reason: "initializing")
     )
     @Published var context: GateContext = .none
 
     private let callSource = CallConditionSource()
     private let batterySource = BatteryConditionSource()
     private let castingSource = CastingConditionSource()
+    private let otherAppPlayingSource = OtherAppPlayingConditionSource()
     private let foregroundSource = ForegroundConditionSource()
 
     private var cancellables = Set<AnyCancellable>()
@@ -99,7 +118,8 @@ class LiveConditionMonitor: ObservableObject {
                 self.conflicts = GateConflicts(
                     notOnCall: $0,
                     notCasting: self.conflicts.notCasting,
-                    batteryOk: self.conflicts.batteryOk
+                    batteryOk: self.conflicts.batteryOk,
+                    otherAppPlaying: self.conflicts.otherAppPlaying
                 )
             }
             .store(in: &cancellables)
@@ -110,7 +130,8 @@ class LiveConditionMonitor: ObservableObject {
                 self.conflicts = GateConflicts(
                     notOnCall: self.conflicts.notOnCall,
                     notCasting: self.conflicts.notCasting,
-                    batteryOk: $0
+                    batteryOk: $0,
+                    otherAppPlaying: self.conflicts.otherAppPlaying
                 )
             }
             .store(in: &cancellables)
@@ -121,7 +142,20 @@ class LiveConditionMonitor: ObservableObject {
                 self.conflicts = GateConflicts(
                     notOnCall: self.conflicts.notOnCall,
                     notCasting: $0,
-                    batteryOk: self.conflicts.batteryOk
+                    batteryOk: self.conflicts.batteryOk,
+                    otherAppPlaying: self.conflicts.otherAppPlaying
+                )
+            }
+            .store(in: &cancellables)
+
+        otherAppPlayingSource.publisher
+            .sink { [weak self] in
+                guard let self else { return }
+                self.conflicts = GateConflicts(
+                    notOnCall: self.conflicts.notOnCall,
+                    notCasting: self.conflicts.notCasting,
+                    batteryOk: self.conflicts.batteryOk,
+                    otherAppPlaying: $0
                 )
             }
             .store(in: &cancellables)

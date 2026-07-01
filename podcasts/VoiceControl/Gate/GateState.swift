@@ -18,15 +18,17 @@ struct GateConflicts: Equatable {
     let notOnCall: GateCondition
     let notCasting: GateCondition
     let batteryOk: GateCondition
+    let otherAppPlaying: GateCondition
 
     var isClear: Bool {
-        notOnCall.isAllowed && notCasting.isAllowed && batteryOk.isAllowed
+        notOnCall.isAllowed && notCasting.isAllowed && batteryOk.isAllowed && otherAppPlaying.isAllowed
     }
 
     static let noneBlocked = GateConflicts(
         notOnCall: .allowed,
         notCasting: .allowed,
-        batteryOk: .allowed
+        batteryOk: .allowed,
+        otherAppPlaying: .allowed
     )
 }
 
