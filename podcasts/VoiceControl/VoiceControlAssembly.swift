@@ -9,6 +9,7 @@ class VoiceControlAssembly {
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
         let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
+        let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
 
         let asrBackend = AsrBackendSelector().select(
@@ -58,6 +59,7 @@ class VoiceControlAssembly {
         return VoiceControlService(
             conditionMonitor: conditionMonitor,
             routeMonitor: routeMonitor,
+            interruptionHandler: interruptionHandler,
             asrEngine: asrEngine,
             wakeWordDetector: wakeWordDetector,
             intentRouter: intentRouter,
