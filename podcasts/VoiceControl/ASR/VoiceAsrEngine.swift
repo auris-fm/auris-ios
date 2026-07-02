@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 class VoiceAsrEngine {
     private let capture: NativeAudioCapture
@@ -19,24 +20,35 @@ class VoiceAsrEngine {
     }
 
     func start() {
+        FileLog.shared.addMessage("[VoiceControl/ASR] Engine starting")
         segmenter.onUtterance = { [weak self] utterance in
             Task { await self?.processUtterance(utterance) }
         }
         capture.onSamples = { [weak self] samples in
             self?.segmenter.process(samples)
         }
-        try? capture.start()
+        do {
+            try capture.start()
+            FileLog.shared.addMessage("[VoiceControl/ASR] Engine started")
+        } catch {
+            FileLog.shared.addMessage("[VoiceControl/ASR] Engine start failed: \(error)")
+        }
     }
 
     func stop() {
+        FileLog.shared.addMessage("[VoiceControl/ASR] Engine stopping")
         capture.stop()
     }
 
     private func processUtterance(_ utterance: [Float]) async {
         if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
-            return // drop bleed
+            FileLog.shared.addMessage("[VoiceControl/ASR] Utterance dropped (playback bleed)")
+            return
         }
         let result = await backend.transcribe(samples: utterance, sampleRateHz: 16000)
+        if !result.text.isEmpty {
+            FileLog.shared.addMessage("[VoiceControl/ASR] Transcript: \"\(result.text)\"")
+        }
         guard !result.text.isEmpty else { return }
         onTranscript?(result.text)
     }
@@ -46,6 +58,9 @@ class VoiceAsrEngine {
     }
 
     func setExposedSpeakerRoute(_ exposed: Bool) {
+        if isExposedSpeakerRoute != exposed {
+            FileLog.shared.addMessage("[VoiceControl/ASR] ExposedSpeakerRoute: \(exposed)")
+        }
         isExposedSpeakerRoute = exposed
     }
 }

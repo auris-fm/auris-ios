@@ -2,6 +2,7 @@ import CallKit
 import UIKit
 import AVFoundation
 import Combine
+import PocketCastsUtils
 
 protocol GateConditionSource {
     var current: GateCondition { get }
@@ -129,6 +130,7 @@ class LiveConditionMonitor: ObservableObject {
         callSource.publisher
             .sink { [weak self] in
                 guard let self else { return }
+                FileLog.shared.addMessage("[VoiceControl/Gate] Call: \($0)")
                 self.conflicts = GateConflicts(
                     notOnCall: $0,
                     notCasting: self.conflicts.notCasting,
@@ -141,6 +143,7 @@ class LiveConditionMonitor: ObservableObject {
         batterySource.publisher
             .sink { [weak self] in
                 guard let self else { return }
+                FileLog.shared.addMessage("[VoiceControl/Gate] Battery: \($0)")
                 self.conflicts = GateConflicts(
                     notOnCall: self.conflicts.notOnCall,
                     notCasting: self.conflicts.notCasting,
@@ -153,6 +156,7 @@ class LiveConditionMonitor: ObservableObject {
         castingSource.publisher
             .sink { [weak self] in
                 guard let self else { return }
+                FileLog.shared.addMessage("[VoiceControl/Gate] Casting: \($0)")
                 self.conflicts = GateConflicts(
                     notOnCall: self.conflicts.notOnCall,
                     notCasting: $0,
@@ -165,6 +169,7 @@ class LiveConditionMonitor: ObservableObject {
         otherAppPlayingSource.publisher
             .sink { [weak self] in
                 guard let self else { return }
+                FileLog.shared.addMessage("[VoiceControl/Gate] OtherAppPlaying: \($0)")
                 self.conflicts = GateConflicts(
                     notOnCall: self.conflicts.notOnCall,
                     notCasting: self.conflicts.notCasting,
@@ -181,11 +186,15 @@ class LiveConditionMonitor: ObservableObject {
         .map { foregroundCondition, _ in
             foregroundCondition.isAllowed ? GateContext.appInForeground : GateContext.none
         }
-        .sink { [weak self] in self?.context = $0 }
+        .sink { [weak self] in
+            FileLog.shared.addMessage("[VoiceControl/Gate] Context: \($0)")
+            self?.context = $0
+        }
         .store(in: &cancellables)
     }
 
     func updateModelsReady(_ condition: GateCondition) {
+        FileLog.shared.addMessage("[VoiceControl/Gate] ModelsReady: \(condition)")
         setup = GateSetup(
             enabledByUser: setup.enabledByUser,
             deviceSupported: setup.deviceSupported,
@@ -194,6 +203,7 @@ class LiveConditionMonitor: ObservableObject {
     }
 
     func updateUserEnabled(_ enabled: Bool) {
+        FileLog.shared.addMessage("[VoiceControl/Gate] UserEnabled: \(enabled)")
         setup = GateSetup(
             enabledByUser: enabled ? .allowed : .blocked(reason: "user_disabled"),
             deviceSupported: setup.deviceSupported,

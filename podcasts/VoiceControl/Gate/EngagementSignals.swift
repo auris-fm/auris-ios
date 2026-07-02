@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import PocketCastsUtils
 
 // MARK: - Attended Signal
 
@@ -11,6 +12,9 @@ class AttendedSignal: ObservableObject {
     private var timer: Timer?
 
     func onUserInteraction() {
+        if !isAttended {
+            FileLog.shared.addMessage("[VoiceControl/Signal] Attended: true")
+        }
         isAttended = true
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
@@ -30,6 +34,9 @@ class GracePeriodSignal: ObservableObject {
     private var timer: Timer?
 
     func onCommandRecognized() {
+        if !isActive {
+            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: true (command recognized)")
+        }
         isActive = true
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
@@ -40,12 +47,18 @@ class GracePeriodSignal: ObservableObject {
     /// Audio route change (e.g. unplugging headphones) breaks the grace period
     /// to avoid exposing the user's voice when they may not expect it.
     func onAudioRouteChanged() {
+        if isActive {
+            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: false (route changed)")
+        }
         timer?.invalidate()
         isActive = false
     }
 
     /// App backgrounding breaks the grace period — privacy fails closed.
     func onAppBackgrounded() {
+        if isActive {
+            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: false (backgrounded)")
+        }
         timer?.invalidate()
         isActive = false
     }
@@ -64,6 +77,9 @@ class PlaybackRecencySignal: ObservableObject {
 
     func update(isPlaying: Bool) {
         if isPlaying {
+            if !isRecent {
+                FileLog.shared.addMessage("[VoiceControl/Signal] PlaybackRecency: true")
+            }
             isRecent = true
             lastPlayingTime = Date()
             timer?.invalidate()

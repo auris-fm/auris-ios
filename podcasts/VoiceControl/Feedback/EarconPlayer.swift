@@ -1,4 +1,5 @@
 import AVFoundation
+import PocketCastsUtils
 
 class EarconPlayer {
     private let engine: AVAudioEngine
@@ -13,7 +14,10 @@ class EarconPlayer {
     }
 
     func play(_ id: EarconId) {
-        guard let buffer = cachedEarcons[id] else { return }
+        guard let buffer = cachedEarcons[id] else {
+            FileLog.shared.addMessage("[VoiceControl/Earcon] Missing: \(id)")
+            return
+        }
         player.scheduleBuffer(buffer, at: nil, options: .interrupts) {
             // Earcon finished
         }

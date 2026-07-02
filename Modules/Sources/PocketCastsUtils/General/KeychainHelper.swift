@@ -6,7 +6,7 @@ public class KeychainHelper {
         case status(OSStatus)
     }
 
-    private let prefix = "au.com.shiftyjelly.podcasts."
+    private let prefix = "fm.auris."
 
     private static let shared = KeychainHelper()
 

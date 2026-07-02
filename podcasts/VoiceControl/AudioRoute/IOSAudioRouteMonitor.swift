@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import PocketCastsUtils
 
 enum AudioRouteOutput {
     case headphones, bluetoothHFP, bluetoothA2DP, bluetoothLE, builtInSpeaker, airPlay, unknown
@@ -59,8 +60,12 @@ class IOSAudioRouteMonitor: ObservableObject {
     private func updateRoute(_ avRoute: AVAudioSessionRouteDescription) {
         let output = classifyOutput(avRoute.outputs.first)
         let input = avRoute.inputs.first.flatMap { classifyInput($0) }
+        let previousExposure = micExposure
         currentRoute = AudioRoute(output: output, input: input)
         micExposure = MicExposureClassifier.classify(currentRoute)
+        if micExposure != previousExposure {
+            FileLog.shared.addMessage("[VoiceControl/Route] MicExposure: \(previousExposure) → \(micExposure) (output: \(output), input: \(input.map { "\($0)" } ?? "nil"))")
+        }
     }
 
     private func classifyOutput(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {

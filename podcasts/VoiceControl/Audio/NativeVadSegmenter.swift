@@ -1,5 +1,6 @@
 import Foundation
 import Accelerate
+import PocketCastsUtils
 
 class NativeVadSegmenter {
     private let threshold: Float
@@ -29,6 +30,7 @@ class NativeVadSegmenter {
             speechFrameCount += 1
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
+                FileLog.shared.addMessage("[VoiceControl/VAD] Speech started")
             }
             silenceStart = nil
         } else if speechActive {
@@ -39,6 +41,8 @@ class NativeVadSegmenter {
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
                 let utterance = buffer
+                let durationMs = Int(Float(utterance.count) / 16.0)
+                FileLog.shared.addMessage("[VoiceControl/VAD] Utterance ended (\(durationMs)ms, \(utterance.count) samples)")
                 buffer.removeAll()
                 speechActive = false
                 silenceStart = nil

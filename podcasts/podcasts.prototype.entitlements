@@ -27,7 +27,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.au.com.shiftyjelly.pocketcasts.prototype</string>
+		<string>group.fm.auris.prototype</string>
 	</array>
 </dict>
 </plist>

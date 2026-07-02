@@ -1,4 +1,5 @@
 import AVFoundation
+import PocketCastsUtils
 
 class AVSpeechTtsEngine: TtsEngineProtocol {
     private let synthesizer = AVSpeechSynthesizer()
@@ -14,6 +15,7 @@ class AVSpeechTtsEngine: TtsEngineProtocol {
     }
 
     func speak(text: String, language: String) async {
+        FileLog.shared.addMessage("[VoiceControl/TTS] Speaking: \"\(text)\" (\(language))")
         if isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }

@@ -1,4 +1,5 @@
 import AVFoundation
+import PocketCastsUtils
 
 class NativeAudioCapture {
     let engine = AVAudioEngine()
@@ -7,6 +8,7 @@ class NativeAudioCapture {
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
+        FileLog.shared.addMessage("[VoiceControl/Capture] Configuring audio session (playAndRecord, 16kHz, 20ms buffer)")
         try session.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetooth])
         try session.setMode(.spokenAudio)
         try session.setPreferredIOBufferDuration(0.02)
@@ -39,9 +41,11 @@ class NativeAudioCapture {
 
         engine.prepare()
         try engine.start()
+        FileLog.shared.addMessage("[VoiceControl/Capture] Audio engine started (input: \(inputFormat.sampleRate)Hz → \(sampleRate)Hz)")
     }
 
     func stop() {
+        FileLog.shared.addMessage("[VoiceControl/Capture] Stopping audio engine")
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)

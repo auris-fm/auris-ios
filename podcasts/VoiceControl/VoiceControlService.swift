@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import PocketCastsUtils
 
 class VoiceControlService: ObservableObject {
     @Published private(set) var isListening = false
@@ -83,12 +84,17 @@ class VoiceControlService: ObservableObject {
             ).state
         }
         .sink { [weak self] state in
-            self?.gateState = state
+            guard let self else { return }
+            let previous = self.gateState
+            self.gateState = state
+            if gateDescription(previous) != gateDescription(state) {
+                FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(state))")
+            }
             switch state {
             case .off:
-                self?.stop()
+                self.stop()
             case .listening(let mode):
-                self?.start(in: mode)
+                self.start(in: mode)
             }
         }
         .store(in: &cancellables)
@@ -100,9 +106,13 @@ class VoiceControlService: ObservableObject {
 
     private func start(in mode: ListeningMode) {
         guard !isListening else {
-            listeningMode = mode
+            if listeningMode != mode {
+                FileLog.shared.addMessage("[VoiceControl] Mode switch: \(listeningMode) → \(mode)")
+                listeningMode = mode
+            }
             return
         }
+        FileLog.shared.addMessage("[VoiceControl] Start listening (\(mode))")
         asrEngine.start()
         isListening = true
         listeningMode = mode
@@ -112,6 +122,8 @@ class VoiceControlService: ObservableObject {
     }
 
     func stop() {
+        guard isListening else { return }
+        FileLog.shared.addMessage("[VoiceControl] Stop listening")
         asrEngine.stop()
         isListening = false
     }
@@ -120,14 +132,24 @@ class VoiceControlService: ObservableObject {
         let dialogContext = dialogManager.pendingDialog
         guard let intent = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext) else {
             consecutiveNulls += 1
+            FileLog.shared.addMessage("[VoiceControl] Unclassified transcript (\(consecutiveNulls)/\(maxConsecutiveNulls)): \"\(transcript)\"")
             if consecutiveNulls >= maxConsecutiveNulls {
+                FileLog.shared.addMessage("[VoiceControl] Too many unclassified — error earcon")
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
             }
             return
         }
         consecutiveNulls = 0
+        FileLog.shared.addMessage("[VoiceControl] Intent: \(String(describing: type(of: intent))) — \"\(transcript)\"")
         let response = await executor.execute(intent)
         audioRenderer.render(response)
+    }
+}
+
+private func gateDescription(_ state: GateState) -> String {
+    switch state {
+    case .off(let reason): return "off(\(reason))"
+    case .listening(let mode): return "listening(\(mode))"
     }
 }

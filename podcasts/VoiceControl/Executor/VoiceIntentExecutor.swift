@@ -1,3 +1,5 @@
+import PocketCastsUtils
+
 class VoiceIntentExecutor {
     private let playbackSink: VoicePlaybackSink
     private let effectsSink: VoiceEffectsSink
@@ -60,8 +62,9 @@ class VoiceIntentExecutor {
 
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {
-            // error — do not extend grace period
+            FileLog.shared.addMessage("[VoiceControl/Executor] Command failed — no grace period")
         } else {
+            FileLog.shared.addMessage("[VoiceControl/Executor] Command succeeded — grace period")
             gracePeriodSignal.onCommandRecognized()
         }
 
