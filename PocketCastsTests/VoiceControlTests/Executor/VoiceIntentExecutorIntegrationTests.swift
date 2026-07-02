@@ -55,11 +55,80 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
+    // MARK: - Analytics Wiring
+
+    func test_execute_recordsAnalytics() async {
+        let mockAnalytics = MockIntegrationAnalytics()
+        let voiceAnalytics = VoiceAnalytics(analytics: mockAnalytics)
+        let executor = makeExecutor(analytics: voiceAnalytics)
+
+        _ = await executor.execute(PlaybackIntent.pause)
+
+        XCTAssertTrue(mockAnalytics.recordCalled)
+        XCTAssertEqual(mockAnalytics.lastEvent, "voice_command_executed")
+        XCTAssertEqual(mockAnalytics.lastProperties?["tool"] as? String, "playback")
+        XCTAssertEqual(mockAnalytics.lastProperties?["source"] as? String, "voice_commands")
+    }
+
+    func test_execute_recordsAnalyticsWithSpokenResponse() async {
+        let mockAnalytics = MockIntegrationAnalytics()
+        let voiceAnalytics = VoiceAnalytics(analytics: mockAnalytics)
+        let executor = makeExecutor(analytics: voiceAnalytics)
+
+        _ = await executor.execute(EffectsIntent.query)
+
+        XCTAssertTrue(mockAnalytics.recordCalled)
+        XCTAssertEqual(mockAnalytics.lastProperties?["tool"] as? String, "effects")
+        XCTAssertEqual(mockAnalytics.lastProperties?["response_type"] as? String, "spoken")
+    }
+
+    // MARK: - Dialog Control Routing
+
+    func test_dialogControl_begin_returnsQuestion() {
+        let dialogManager = VoiceDialogManager()
+        let result = dialogManager.handle(.begin(targetTool: "sleep", targetAction: "set"))
+        XCTAssertNil(result.intent)
+        XCTAssertNotNil(result.question)
+        XCTAssertEqual(result.question, "For how many minutes?")
+    }
+
+    func test_dialogControl_provideSlot_afterBegin_returnsIntent() {
+        let dialogManager = VoiceDialogManager()
+        _ = dialogManager.handle(.begin(targetTool: "sleep", targetAction: "set"))
+        let result = dialogManager.handle(.provideSlot(
+            targetTool: "sleep", targetAction: "set", slot: "minutes", value: "30"
+        ))
+        XCTAssertNotNil(result.intent)
+        XCTAssertNil(result.question)
+        if let intent = result.intent as? SleepIntent {
+            XCTAssertEqual(intent, .set(minutes: 30))
+        } else {
+            XCTFail("Expected SleepIntent.set(30), got \(String(describing: result.intent))")
+        }
+    }
+
+    func test_dialogControl_cancel_clearsState() {
+        let dialogManager = VoiceDialogManager()
+        _ = dialogManager.handle(.begin(targetTool: "sleep", targetAction: "set"))
+        let result = dialogManager.handle(.cancel)
+        XCTAssertNil(result.intent)
+        XCTAssertNil(result.question)
+        XCTAssertNil(dialogManager.pendingDialog)
+    }
+
+    func test_dialogControl_deny_clearsPendingAction() {
+        let dialogManager = VoiceDialogManager()
+        let result = dialogManager.handle(.deny)
+        XCTAssertNil(result.intent)
+        XCTAssertNil(result.question)
+    }
+
     // MARK: - Helpers
 
     private func makeExecutor(
         playbackSink: VoicePlaybackSink = IntegrationPlaybackSink(currentPosition: 0, episodeDuration: 0),
-        cloudRouteSink: VoiceCloudRouteSink = IntegrationCloudRouteSink()
+        cloudRouteSink: VoiceCloudRouteSink = IntegrationCloudRouteSink(),
+        analytics: VoiceAnalytics? = nil
     ) -> VoiceIntentExecutor {
         VoiceIntentExecutor(
             playbackSink: playbackSink,
@@ -71,8 +140,28 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
             queueSink: NoOpQueueSink(),
             playbackQuerySink: NoOpPlaybackQuerySink(),
             statsQuerySink: NoOpStatsQuerySink(),
-            cloudRouteSink: cloudRouteSink
+            cloudRouteSink: cloudRouteSink,
+            gracePeriodSignal: gracePeriodSignal,
+            analytics: analytics
         )
+    }
+
+    private var gracePeriodSignal: GracePeriodSignal {
+        GracePeriodSignal()
+    }
+}
+
+// MARK: - Mock Analytics
+
+private final class MockIntegrationAnalytics: AnalyticsService {
+    var recordCalled = false
+    var lastEvent: String?
+    var lastProperties: [String: Any]?
+
+    func track(_ event: String, properties: [String: Any]) {
+        recordCalled = true
+        lastEvent = event
+        lastProperties = properties
     }
 }
 
