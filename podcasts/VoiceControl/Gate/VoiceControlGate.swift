@@ -27,6 +27,21 @@ class VoiceControlGate {
         return .listening(mode: resolvedMode)
     }
 
+    var posture: GatePosture {
+        GatePosture(
+            allowed: state.isListening,
+            listeningMode: state.listeningMode,
+            setup: setup,
+            conflicts: conflicts,
+            context: context,
+            micExposure: micExposure,
+            attended: attendedSignal.isAttended,
+            gracePeriodActive: gracePeriodSignal.isActive,
+            playbackRecent: playbackRecencySignal.isRecent,
+            offReason: state.offReason
+        )
+    }
+
     private var resolvedMode: ListeningMode {
         // Priority 1: Grace period overrides everything
         if gracePeriodSignal.isActive { return .continuous }

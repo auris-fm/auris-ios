@@ -7,6 +7,13 @@ class VoiceControlService: ObservableObject {
     @Published private(set) var isListening = false
     @Published private(set) var listeningMode: ListeningMode = .wakeWord
     @Published private(set) var gateState: GateState = .off(reason: .noContext)
+    @Published private(set) var gatePosture: GatePosture = GatePosture(
+        allowed: false, listeningMode: nil,
+        setup: .allAllowed, conflicts: .noneBlocked,
+        context: .none, micExposure: .noMic,
+        attended: false, gracePeriodActive: false,
+        playbackRecent: false, offReason: .noContext
+    )
 
     private let conditionMonitor: LiveConditionMonitor
     private let routeMonitor: IOSAudioRouteMonitor
@@ -100,16 +107,17 @@ class VoiceControlService: ObservableObject {
                 attendedSignal: attendedSignal,
                 gracePeriodSignal: gracePeriodSignal,
                 playbackRecencySignal: playbackRecencySignal
-            ).state
+            )
         }
-        .sink { [weak self] state in
+        .sink { [weak self] gate in
             guard let self else { return }
             let previous = self.gateState
-            self.gateState = state
-            if gateDescription(previous) != gateDescription(state) {
-                FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(state))")
+            self.gateState = gate.state
+            self.gatePosture = gate.posture
+            if gateDescription(previous) != gateDescription(gate.state) {
+                FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
-            switch state {
+            switch gate.state {
             case .off:
                 self.stop()
             case .listening(let mode):

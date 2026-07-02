@@ -144,4 +144,30 @@ final class VoiceControlGateTests: XCTestCase {
         let gate = makeGate(context: .playbackActive, micExposure: .isolated, playbackRecent: false)
         XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
+
+    // MARK: - GatePosture
+
+    func test_posture_blockedByCall_showsConflictBlocking() {
+        let conflicts = GateConflicts(
+            notOnCall: .blocked(reason: "inCall"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        let gate = makeGate(conflicts: conflicts)
+        let posture = gate.posture
+        XCTAssertFalse(posture.allowed)
+        XCTAssertEqual(posture.offReason, .conflictBlocking)
+        XCTAssertFalse(posture.conflicts.notOnCall.isAllowed)
+    }
+
+    func test_posture_foregroundAttended_showsContinuous() {
+        let gate = makeGate(context: .appInForeground, micExposure: .exposed, attended: true)
+        let posture = gate.posture
+        XCTAssertTrue(posture.allowed)
+        XCTAssertEqual(posture.listeningMode, .continuous)
+        XCTAssertTrue(posture.attended)
+        XCTAssertEqual(posture.context, .appInForeground)
+        XCTAssertEqual(posture.micExposure, .exposed)
+    }
 }
