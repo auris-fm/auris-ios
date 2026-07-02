@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import Foundation
 import PocketCastsUtils
@@ -9,6 +10,7 @@ class VoiceControlService: ObservableObject {
 
     private let conditionMonitor: LiveConditionMonitor
     private let routeMonitor: IOSAudioRouteMonitor
+    private let interruptionHandler: AudioSessionInterruptionHandler
     private let asrEngine: VoiceAsrEngine
     private let wakeWordDetector: WakeWordDetectorProtocol
     private let intentRouter: FunctionGemmaIntentRouter
@@ -23,9 +25,15 @@ class VoiceControlService: ObservableObject {
     private var consecutiveNulls = 0
     private let maxConsecutiveNulls = 3
 
+    // Command debounce: skip intents of the same type within 2 seconds
+    private var lastIntentType: String?
+    private var lastExecutionTime: Date?
+    private let debounceInterval: TimeInterval = 2.0
+
     init(
         conditionMonitor: LiveConditionMonitor,
         routeMonitor: IOSAudioRouteMonitor,
+        interruptionHandler: AudioSessionInterruptionHandler,
         asrEngine: VoiceAsrEngine,
         wakeWordDetector: WakeWordDetectorProtocol,
         intentRouter: FunctionGemmaIntentRouter,
@@ -38,6 +46,7 @@ class VoiceControlService: ObservableObject {
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
+        self.interruptionHandler = interruptionHandler
         self.asrEngine = asrEngine
         self.wakeWordDetector = wakeWordDetector
         self.intentRouter = intentRouter
@@ -63,6 +72,16 @@ class VoiceControlService: ObservableObject {
                 self?.playbackRecencySignal.update(isPlaying: isPlaying)
             }
             .store(in: &cancellables)
+
+        interruptionHandler.onInterruptionBegan = { [weak self] in
+            self?.stop()  // stops capture, discards current pipeline state
+        }
+
+        interruptionHandler.onInterruptionEnded = { [weak self] in
+            // Reactivate audio session
+            try? AVAudioSession.sharedInstance().setActive(true)
+            // Gate will recompute the mode via CombineLatest4 — no explicit restart needed
+        }
     }
 
     func startIfAllowed() {
@@ -143,8 +162,21 @@ class VoiceControlService: ObservableObject {
             return
         }
         consecutiveNulls = 0
-        FileLog.shared.addMessage("[VoiceControl] Intent: \(String(describing: type(of: intent))) — \"\(transcript)\"")
+
+        // Debounce: skip if same intent type was executed within the debounce window
+        let intentType = String(describing: type(of: intent))
+        if let lastType = lastIntentType,
+           let lastTime = lastExecutionTime,
+           lastType == intentType,
+           Date().timeIntervalSince(lastTime) < debounceInterval {
+            FileLog.shared.addMessage("[VoiceControl] Debounced \(intentType) — within \(debounceInterval)s window")
+            return
+        }
+
+        FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
         let response = await executor.execute(intent)
+        lastIntentType = intentType
+        lastExecutionTime = Date()
         audioRenderer.render(response)
     }
 }
