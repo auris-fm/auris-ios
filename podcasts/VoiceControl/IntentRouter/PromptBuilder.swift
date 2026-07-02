@@ -6,8 +6,11 @@ class PromptBuilder {
         return "<bos><start_of_turn>developer\n\(developerMessage)\n\(toolDeclarations)<end_of_turn>"
     }
 
-    func buildUserTurn(transcript: String) -> String {
-        "<start_of_turn>user\n\(transcript)<end_of_turn>\n<start_of_turn>model\n"
+    func buildUserTurn(transcript: String, pendingDialog: PendingVoiceDialog? = nil) -> String {
+        if let dialog = pendingDialog {
+            return "<start_of_turn>user\n\(transcript)<end_of_turn>\n<start_of_turn>model\n<start_function_call>call:dialog_control{action:provide_slot,target_tool:\(dialog.targetTool),target_action:\(dialog.targetAction),slot:\(dialog.missingSlots.first ?? ""),value:\(transcript)}<end_function_call><end_of_turn>\n<start_of_turn>user\n\(dialog.lastQuestion)\n\(transcript)<end_of_turn>\n<start_of_turn>model\n"
+        }
+        return "<start_of_turn>user\n\(transcript)<end_of_turn>\n<start_of_turn>model\n"
     }
 
     private func formatToolDeclaration(_ tool: [String: Any]) -> String {

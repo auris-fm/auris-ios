@@ -13,15 +13,23 @@ final class FunctionGemmaIntentRouterTests: XCTestCase {
         }
     }
 
-    func test_classify_withoutSession_returnsNil() {
+    func test_classify_withoutSession_returnsNone() {
         let router = FunctionGemmaIntentRouter()
         let result = router.classify(transcript: "pause the podcast")
-        XCTAssertNil(result)
+        if case .none = result {
+            // Expected when no Core ML session is available
+        } else {
+            XCTFail("Expected .none without model session, got \(result)")
+        }
     }
 
-    func test_classify_emptyTranscript_returnsNil() {
+    func test_classify_emptyTranscript_returnsNone() {
         let router = FunctionGemmaIntentRouter()
         let result = router.classify(transcript: "")
-        XCTAssertNil(result)
+        if case .none = result {
+            // Expected for empty transcript
+        } else {
+            XCTFail("Expected .none for empty transcript, got \(result)")
+        }
     }
 }

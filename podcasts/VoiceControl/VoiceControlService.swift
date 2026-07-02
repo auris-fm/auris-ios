@@ -129,6 +129,10 @@ class VoiceControlService: ObservableObject {
         asrEngine.onTranscript = { [weak self] transcript in
             Task { await self?.handleTranscript(transcript) }
         }
+
+        asrEngine.onWakeWordDetected = { [weak self] in
+            self?.audioRenderer.playEarcon(.wakeWord)
+        }
     }
 
     private func start(in mode: ListeningMode) {
@@ -155,11 +159,49 @@ class VoiceControlService: ObservableObject {
         FileLog.shared.addMessage("[VoiceControl] Stop listening")
         asrEngine.stop()
         isListening = false
+        audioRenderer.release()
     }
 
     func handleTranscript(_ transcript: String) async {
         let dialogContext = dialogManager.pendingDialog
-        guard let intent = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext) else {
+        let result = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext)
+
+        switch result {
+        case .intent(let intent):
+            consecutiveNulls = 0
+
+            // Debounce: skip if same intent type was executed within the debounce window
+            let intentType = String(describing: type(of: intent))
+            if let lastType = lastIntentType,
+               let lastTime = lastExecutionTime,
+               lastType == intentType,
+               Date().timeIntervalSince(lastTime) < debounceInterval {
+                FileLog.shared.addMessage("[VoiceControl] Debounced \(intentType) — within \(debounceInterval)s window")
+                return
+            }
+
+            FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
+            let response = await executor.execute(intent)
+            lastIntentType = intentType
+            lastExecutionTime = Date()
+            audioRenderer.render(response)
+
+        case .dialogControl(let action):
+            consecutiveNulls = 0
+            FileLog.shared.addMessage("[VoiceControl] Dialog: \(action) — \"\(transcript)\"")
+            let dialogResult = dialogManager.handle(action)
+
+            if let intent = dialogResult.intent {
+                let response = await executor.execute(intent)
+                lastIntentType = String(describing: type(of: intent))
+                lastExecutionTime = Date()
+                audioRenderer.render(response)
+            } else if let question = dialogResult.question {
+                audioRenderer.render(.spoken(question))
+            }
+            // If dialogResult has no intent and no question (e.g., cancel), do nothing
+
+        case .none:
             consecutiveNulls += 1
             FileLog.shared.addMessage("[VoiceControl] Unclassified transcript (\(consecutiveNulls)/\(maxConsecutiveNulls)): \"\(transcript)\"")
             if consecutiveNulls >= maxConsecutiveNulls {
@@ -167,25 +209,7 @@ class VoiceControlService: ObservableObject {
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
             }
-            return
         }
-        consecutiveNulls = 0
-
-        // Debounce: skip if same intent type was executed within the debounce window
-        let intentType = String(describing: type(of: intent))
-        if let lastType = lastIntentType,
-           let lastTime = lastExecutionTime,
-           lastType == intentType,
-           Date().timeIntervalSince(lastTime) < debounceInterval {
-            FileLog.shared.addMessage("[VoiceControl] Debounced \(intentType) — within \(debounceInterval)s window")
-            return
-        }
-
-        FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
-        let response = await executor.execute(intent)
-        lastIntentType = intentType
-        lastExecutionTime = Date()
-        audioRenderer.render(response)
     }
 }
 

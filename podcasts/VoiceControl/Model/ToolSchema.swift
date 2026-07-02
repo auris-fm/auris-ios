@@ -13,6 +13,7 @@ enum ToolSchema {
             playbackQueryTool,
             statsQueryTool,
             cloudRouteTool,
+            dialogControlTool,
         ]
     }
 
@@ -112,6 +113,18 @@ enum ToolSchema {
         "description": "Route complex queries to the cloud",
         "parameters": [
             "request": ["type": "string"],
+        ],
+    ]
+
+    private static let dialogControlTool: [String: Any] = [
+        "name": "dialog_control",
+        "description": "Manage multi-turn dialog state for slot filling and confirmations",
+        "parameters": [
+            "action": ["enum": ["begin", "provide_slot", "confirm", "deny", "cancel", "new_command"]],
+            "target_tool": ["type": "string"],
+            "target_action": ["type": "string"],
+            "slot": ["type": "string"],
+            "value": ["type": "string"],
         ],
     ]
 }
