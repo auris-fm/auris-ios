@@ -42,7 +42,7 @@ enum ToolSchema {
         "name": "volume",
         "description": "Control playback volume",
         "parameters": [
-            "action": ["enum": ["set", "adjust", "query"]],
+            "action": ["enum": ["set_volume", "adjust_volume", "query"]],
             "level": ["type": "integer"],
             "delta": ["type": "integer"],
         ],

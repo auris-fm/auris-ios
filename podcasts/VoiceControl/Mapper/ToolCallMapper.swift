@@ -55,10 +55,10 @@ class ToolCallMapper {
     private func mapVolume(_ args: [String: Any]) -> VolumeIntent? {
         guard let action = args["action"] as? String else { return nil }
         switch action {
-        case "set":
+        case "set_volume":
             guard let level = args["level"] as? Int else { return nil }
             return .setVolume(level)
-        case "adjust":
+        case "adjust_volume":
             let delta = args["delta"] as? Int ?? 10
             return .adjustVolume(delta: delta)
         case "query": return .query
