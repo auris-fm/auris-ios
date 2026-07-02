@@ -66,11 +66,15 @@ class OtherAppPlayingConditionSource: GateConditionSource {
     }
 
     var publisher: AnyPublisher<GateCondition, Never> {
-        NotificationCenter.default
-            .publisher(for: AVAudioSession.silenceSecondaryAudioHintNotification)
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
-            .map { [weak self] _ in self?.current ?? .unknown(reason: "uninitialized") }
-            .eraseToAnyPublisher()
+        Publishers.Merge(
+            NotificationCenter.default
+                .publisher(for: AVAudioSession.silenceSecondaryAudioHintNotification),
+            NotificationCenter.default
+                .publisher(for: AVAudioSession.routeChangeNotification)
+        )
+        .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+        .map { [weak self] _ in self?.current ?? .unknown(reason: "uninitialized") }
+        .eraseToAnyPublisher()
     }
 }
 

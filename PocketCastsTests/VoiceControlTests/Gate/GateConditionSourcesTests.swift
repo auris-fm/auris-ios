@@ -62,4 +62,22 @@ final class GateConditionSourcesTests: XCTestCase {
         // In test environment, other audio is typically not playing
         XCTAssertEqual(condition, .allowed)
     }
+
+    func test_otherAppPlayingSource_publisherFiresOnRouteChange() {
+        let source = OtherAppPlayingConditionSource()
+        let expectation = expectation(description: "publisher emits on route change")
+        var receivedValue: GateCondition?
+        let cancellable = source.publisher
+            .dropFirst() // ignore initial/current value
+            .sink { condition in
+                receivedValue = condition
+                expectation.fulfill()
+            }
+
+        NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil)
+
+        wait(for: [expectation], timeout: 2.0)
+        XCTAssertNotNil(receivedValue)
+        cancellable.cancel()
+    }
 }
