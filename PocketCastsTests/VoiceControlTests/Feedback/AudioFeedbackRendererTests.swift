@@ -21,9 +21,11 @@ final class AudioFeedbackRendererTests: XCTestCase {
 
     func test_silentResponse_doesNothing() {
         let earconPlayer = MockEarconPlayer()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: MockTtsEngine())
+        let ttsEngine = MockTtsEngine()
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
         renderer.render(.silent)
         XCTAssertNil(earconPlayer.lastPlayed)
+        XCTAssertNil(ttsEngine.lastSpokenText)
     }
 
     func test_playEarcon_delegatesToRender() {
@@ -32,6 +34,35 @@ final class AudioFeedbackRendererTests: XCTestCase {
         renderer.playEarcon(.listeningStart)
         XCTAssertTrue(earconPlayer.didPlay(.listeningStart))
     }
+
+    func test_combinedResponse_playsEarconAndSpeaks() async {
+        let earconPlayer = MockEarconPlayer()
+        let ttsEngine = MockTtsEngine()
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
+        renderer.render(.combined(earcon: .success, spokenText: "Done"))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(earconPlayer.didPlay(.success))
+        XCTAssertEqual(ttsEngine.lastSpokenText, "Done")
+    }
+
+    func test_newRenderCancelsPrevious() async {
+        let ttsEngine = MockTtsEngine()
+        let renderer = AudioFeedbackRenderer(earconPlayer: MockEarconPlayer(), ttsEngine: ttsEngine)
+        renderer.render(.spoken("First"))
+        renderer.render(.spoken("Second"))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        // Second should have cancelled first; cancel should have been called
+        XCTAssertTrue(ttsEngine.wasCancelled)
+    }
+
+    func test_release_releasesBothEngines() {
+        let earconPlayer = MockEarconPlayer()
+        let ttsEngine = MockTtsEngine()
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
+        renderer.release()
+        XCTAssertTrue(earconPlayer.wasReleased)
+        XCTAssertTrue(ttsEngine.wasReleased)
+    }
 }
 
 // MARK: - Mocks
@@ -39,6 +70,7 @@ final class AudioFeedbackRendererTests: XCTestCase {
 private final class MockEarconPlayer: EarconPlayer {
     var lastPlayed: EarconId?
     var didPlay: [EarconId] = []
+    var wasReleased = false
 
     init() {
         // Skip actual AVAudioEngine setup for tests
@@ -53,12 +85,19 @@ private final class MockEarconPlayer: EarconPlayer {
     func didPlay(_ id: EarconId) -> Bool {
         didPlay.contains(id)
     }
+
+    override func release() {
+        wasReleased = true
+        super.release()
+    }
 }
 
 private final class MockTtsEngine: TtsEngineProtocol {
     var lastSpokenText: String?
     var lastLanguage: String?
     var wasWarmedUp = false
+    var wasCancelled = false
+    var wasReleased = false
 
     func warmUp(language: String) {
         wasWarmedUp = true
@@ -69,5 +108,11 @@ private final class MockTtsEngine: TtsEngineProtocol {
         lastLanguage = language
     }
 
-    func release() {}
+    func cancel() {
+        wasCancelled = true
+    }
+
+    func release() {
+        wasReleased = true
+    }
 }
