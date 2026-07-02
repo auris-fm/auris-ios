@@ -12,6 +12,7 @@ class VoiceIntentExecutor {
     private let statsQuerySink: VoiceStatsQuerySink
     private let cloudRouteSink: VoiceCloudRouteSink
     private let gracePeriodSignal: GracePeriodSignal
+    private let analytics: VoiceAnalytics?
 
     init(
         playbackSink: VoicePlaybackSink,
@@ -24,7 +25,8 @@ class VoiceIntentExecutor {
         playbackQuerySink: VoicePlaybackQuerySink,
         statsQuerySink: VoiceStatsQuerySink,
         cloudRouteSink: VoiceCloudRouteSink,
-        gracePeriodSignal: GracePeriodSignal
+        gracePeriodSignal: GracePeriodSignal,
+        analytics: VoiceAnalytics? = nil
     ) {
         self.playbackSink = playbackSink
         self.effectsSink = effectsSink
@@ -37,6 +39,7 @@ class VoiceIntentExecutor {
         self.statsQuerySink = statsQuerySink
         self.cloudRouteSink = cloudRouteSink
         self.gracePeriodSignal = gracePeriodSignal
+        self.analytics = analytics
     }
 
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
@@ -59,6 +62,9 @@ class VoiceIntentExecutor {
             )
         default: response = .earcon(.error)
         }
+
+        // Record analytics after every command
+        analytics?.recordCommand(intent, response: response)
 
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {

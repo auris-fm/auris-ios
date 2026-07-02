@@ -1,5 +1,6 @@
 import AVFoundation
 import PocketCastsDataModel
+import PocketCastsUtils
 
 class VoiceControlAssembly {
     func buildVoiceControlService() -> VoiceControlService {
@@ -37,6 +38,9 @@ class VoiceControlAssembly {
 
         let intentRouter = FunctionGemmaIntentRouter()
 
+        let analyticsService = DefaultAnalyticsService()
+        let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)
+
         let executor = VoiceIntentExecutor(
             playbackSink: PlaybackManagerSink(playbackManager: playbackManager),
             effectsSink: EffectsManagerSink(playbackManager: playbackManager),
@@ -48,7 +52,8 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(),
-            gracePeriodSignal: gracePeriodSignal
+            gracePeriodSignal: gracePeriodSignal,
+            analytics: voiceAnalytics
         )
 
         let audioEngine = AVAudioEngine()
@@ -91,6 +96,24 @@ class VoiceControlAssembly {
         guard let majorStr = components.first?.replacingOccurrences(of: "iPhone", with: ""),
               let major = Int(majorStr) else { return true }
         return major >= 11
+    }
+}
+
+// MARK: - Analytics Service Bridge
+
+private class DefaultAnalyticsService: AnalyticsService {
+    func track(_ event: String, properties: [String: Any]) {
+        // VoiceAnalytics always produces Sendable-safe property values
+        // (String, Int, Double, Bool), so this conversion is safe.
+        let sendableProps = properties.reduce(into: [String: any Sendable]()) { result, pair in
+            if let sendable = pair.value as? (any Sendable) {
+                result[pair.key] = sendable
+            }
+        }
+        FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(sendableProps)")
+        // TODO: Wire to Analytics shared instance when a public API for raw event
+        // names is exposed. Currently Analytics.track() requires an AnalyticsEvent
+        // enum case, but voice events use dynamic string names.
     }
 }
 
