@@ -1025,7 +1025,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Pocket Casts uses this to find Google Cast devices on your network. If you don't use this feature feel free to say no.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Pocket Casts needs to access your microphone in order to detect nearby Google Cast devices.</string>
+	<string>Auris uses the microphone to listen for voice commands like &quot;skip forward&quot; or &quot;play faster&quot; when you are in a playback context. Audio is processed entirely on-device and is never recorded or shared.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Pocket Casts needs permission to save this image to your photo library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
