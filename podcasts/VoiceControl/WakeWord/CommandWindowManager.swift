@@ -41,5 +41,20 @@ class CommandWindowManager {
         onWindowStateChange?(false)
     }
 
+    /// Reset state for a new listening session.
+    func reset() {
+        windowOpen = false
+        lastSpeechTime = nil
+    }
+
+    /// Close the command window (no state change callback).
+    func close() {
+        windowOpen = false
+        lastSpeechTime = nil
+    }
+
     var isOpen: Bool { windowOpen }
+
+    /// Alias for isOpen — used by ASR engine.
+    var isActive: Bool { windowOpen }
 }

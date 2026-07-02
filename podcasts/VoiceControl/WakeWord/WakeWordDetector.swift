@@ -21,20 +21,51 @@ class WakeWordDetector: WakeWordDetectorProtocol {
 
     /// Processes audio samples through the 3-stage openWakeWord pipeline.
     /// Uses sliding windows of ~2 seconds with 0.5 second stride to match the Python ring-buffer.
-    /// Returns the maximum confidence score across all windows.
-    func detect(samples: [Float], sampleRate: Int) -> Float {
-        guard let handle = nativeHandle, !samples.isEmpty else { return 0.0 }
-        var scores: [Float] = []
+    /// When the wake word is detected, computes the remainder audio after the wake word
+    /// so ASR receives only the command, not "Auris" noise.
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        guard let handle = nativeHandle, !samples.isEmpty else {
+            return WakeWordResult(detected: false, confidence: 0, remainderSamples: nil)
+        }
         let windowSize = sampleRate * 2   // 2 seconds
         let stride = sampleRate / 2       // 0.5 second stride
+
+        var maxScore: Float = 0
+        var maxOffset: Int = 0
         var offset = 0
+
         while offset + windowSize <= samples.count {
             let window = Array(samples[offset..<offset + windowSize])
             let score = wakeword_detect(handle, window, Int32(sampleRate))
-            scores.append(score)
+            if score > maxScore {
+                maxScore = score
+                maxOffset = offset
+            }
             offset += stride
         }
-        return scores.max() ?? 0.0
+
+        let detected = maxScore >= threshold
+        guard detected else {
+            return WakeWordResult(detected: false, confidence: maxScore, remainderSamples: nil)
+        }
+
+        // The wake word occupies roughly the first 600ms of the segment.
+        // The detection window that fired tells us where the wake word starts;
+        // we cut after ~600ms from that window's start.
+        let wakeWordDurationMs = 600
+        let wakeWordEndSample = maxOffset + (wakeWordDurationMs * sampleRate / 1000)
+
+        // Safety: if the cut point is too close to the start or end, or if the
+        // segment is too short, return nil so the caller falls back to full audio.
+        let minRemainderSamples = sampleRate / 5  // 200ms minimum remainder
+        guard wakeWordEndSample > 0,
+              wakeWordEndSample < samples.count - minRemainderSamples
+        else {
+            return WakeWordResult(detected: true, confidence: maxScore, remainderSamples: nil)
+        }
+
+        let remainder = Array(samples[wakeWordEndSample..<samples.count])
+        return WakeWordResult(detected: true, confidence: maxScore, remainderSamples: remainder)
     }
 
     func release() {

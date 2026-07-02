@@ -109,10 +109,12 @@ class VoiceControlService: ObservableObject {
             if listeningMode != mode {
                 FileLog.shared.addMessage("[VoiceControl] Mode switch: \(listeningMode) → \(mode)")
                 listeningMode = mode
+                asrEngine.listeningMode = mode
             }
             return
         }
         FileLog.shared.addMessage("[VoiceControl] Start listening (\(mode))")
+        asrEngine.listeningMode = mode
         asrEngine.start()
         isListening = true
         listeningMode = mode

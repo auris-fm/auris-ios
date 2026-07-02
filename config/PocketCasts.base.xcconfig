@@ -10,4 +10,4 @@ CURRENT_PROJECT_VERSION = $(VERSION_LONG)
 // Define a root bundle identifier so that extensions can append to it
 PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris
 
-DEVELOPMENT_TEAM = 3Y7WBG7UC4
+DEVELOPMENT_TEAM = 6LL2R2A55F

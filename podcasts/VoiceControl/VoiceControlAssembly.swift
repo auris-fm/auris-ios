@@ -16,18 +16,22 @@ class VoiceControlAssembly {
             hasNPU: hasNeuralEngine(),
             senseVoiceShipped: false
         )
-        let asrEngine = VoiceAsrEngine(
-            capture: NativeAudioCapture(),
-            segmenter: NativeVadSegmenter(),
-            backend: asrBackend,
-            signalFilter: SignalFilter()
-        )
-
         let wakeWordDetector = WakeWordDetector(
             melModel: bundleURL("melspectrogram.onnx"),
             embedModel: bundleURL("embedding_model.onnx"),
             classifierModel: bundleURL("auris.onnx"),
             threshold: 0.5
+        )
+
+        let commandWindow = CommandWindowManager()
+
+        let asrEngine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(),
+            backend: asrBackend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: wakeWordDetector,
+            commandWindow: commandWindow
         )
 
         let intentRouter = FunctionGemmaIntentRouter()
