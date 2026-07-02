@@ -1,0 +1,81 @@
+/* Effects */
+"effects.set_speed" = "%gx speed";
+"effects.speed_increased" = "Speed increased to %gx";
+"effects.speed_decreased" = "Speed decreased to %gx";
+"effects.query" = "Speed %gx, trim %@, boost %@";
+
+/* Sleep Timer */
+"sleep.set" = "Sleep timer set for %d minutes";
+"sleep.add_time" = "Added %d minutes";
+"sleep.query_remaining" = "%d minutes remaining";
+"sleep.query_after_episode" = "Sleep after episode";
+"sleep.query_inactive" = "Sleep timer is not active";
+
+/* Playback */
+"playback.playing" = "Playing %@";
+"playback.next_episode" = "Playing %@";
+"playback.nothing_playing" = "Nothing is playing";
+
+/* Seek / Position */
+"position.current" = "%d minutes %d seconds";
+"position.remaining" = "%d minutes remaining";
+"position.duration" = "%d minutes total";
+
+/* Chapters */
+"chapter.next" = "Next chapter";
+"chapter.previous" = "Previous chapter";
+"chapter.jumped_to_index" = "Jumped to chapter %d";
+"chapter.jumped_to_title" = "Jumped to %@";
+"chapter.not_found" = "Chapter not found";
+"chapter.no_link" = "No link available";
+"chapter.list" = "%d chapters: %@";
+"chapter.current" = "Chapter %d: %@";
+"chapter.no_active" = "No active chapter";
+"chapter.count" = "%d chapters";
+"chapter.next_label" = "Next: %@";
+"chapter.no_more" = "No more chapters";
+
+/* Volume */
+"volume.current" = "Volume is %d%%";
+
+/* Stats / Queries */
+"stats.check_profile" = "Check Stats in the Profile tab for %@";
+"stats.check_profile_listening_time" = "Check Stats in the Profile tab for detailed listening time";
+"stats.check_profile_top_podcasts" = "Check Stats in the Profile tab for your top podcasts";
+"stats.check_profile_completed" = "Check Stats in the Profile tab for completed episodes";
+"stats.check_profile_streak" = "Check Stats in the Profile tab for your listening streak";
+"stats.check_podcasts_tab" = "Check the Podcasts tab for %@";
+"stats.check_podcasts_unplayed" = "Check the Podcasts tab for unplayed episodes";
+"stats.check_podcasts_new" = "Check the Podcasts tab for new episodes";
+"stats.subscription_count" = "%d subscriptions";
+"stats.downloaded_count" = "%d downloaded episodes";
+"stats.time_since_listen" = "Check Stats in the Profile tab";
+
+/* General */
+"general.episode_description_unavailable" = "Episode description unavailable";
+"general.downloaded" = "Downloaded";
+"general.streaming" = "Streaming";
+"general.unknown_publish_date" = "Unknown publish date";
+"general.cloud_coming_soon" = "Cloud processing is coming soon";
+
+/* Queue */
+"queue.episode_not_found" = "Episode not found";
+"queue.episode_not_in_queue" = "Episode not found in queue";
+"queue.contents" = "%d episodes in queue: %@";
+"queue.next" = "Next: %@";
+"queue.empty" = "Queue is empty";
+"queue.remaining_hours" = "%d hours %d minutes remaining";
+"queue.remaining_minutes" = "%d minutes remaining";
+"queue.yes" = "Yes";
+"queue.no" = "No";
+
+/* Bookmarks */
+"bookmark.not_found" = "Bookmark not found";
+"bookmark.all_deleted" = "All bookmarks deleted";
+"bookmark.list" = "%d bookmarks: %@";
+"bookmark.count" = "%d bookmarks";
+"bookmark.no_nearby" = "No nearby bookmarks";
+"bookmark.nearby" = "%d bookmarks nearby";
+
+/* Publication Date */
+"date.published" = "Published %@";
