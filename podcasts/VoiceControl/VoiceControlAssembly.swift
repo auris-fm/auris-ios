@@ -61,6 +61,11 @@ class VoiceControlAssembly {
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 
+        // Pre-warm TTS engine so first speak() has no init penalty.
+        // Language matches the device locale (same as ASR pipeline).
+        let language = Locale.current.language.languageCode?.identifier ?? "en"
+        ttsEngine.warmUp(language: language)
+
         return VoiceControlService(
             conditionMonitor: conditionMonitor,
             routeMonitor: routeMonitor,
@@ -103,14 +108,7 @@ class VoiceControlAssembly {
 
 private class DefaultAnalyticsService: AnalyticsService {
     func track(_ event: String, properties: [String: Any]) {
-        // VoiceAnalytics always produces Sendable-safe property values
-        // (String, Int, Double, Bool), so this conversion is safe.
-        let sendableProps = properties.reduce(into: [String: any Sendable]()) { result, pair in
-            if let sendable = pair.value as? (any Sendable) {
-                result[pair.key] = sendable
-            }
-        }
-        FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(sendableProps)")
+        FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(properties)")
         // TODO: Wire to Analytics shared instance when a public API for raw event
         // names is exposed. Currently Analytics.track() requires an AnalyticsEvent
         // enum case, but voice events use dynamic string names.
