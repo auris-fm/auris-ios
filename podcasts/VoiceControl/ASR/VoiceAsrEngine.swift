@@ -14,6 +14,7 @@ class VoiceAsrEngine {
     var listeningMode: ListeningMode = .wakeWord
 
     var onTranscript: ((String) -> Void)?
+    var onWakeWordDetected: (() -> Void)?
 
     init(
         capture: NativeAudioCapture,
@@ -75,6 +76,7 @@ class VoiceAsrEngine {
                 let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
                 if result.detected {
                     commandWindow.onWakeWordDetected()
+                    onWakeWordDetected?()
                     // Strip the wake word: use remainder if available, otherwise full audio
                     audioForAsr = result.remainderSamples ?? utterance
                     FileLog.shared.addMessage("[VoiceControl/ASR] Wake word detected (confidence: \(result.confidence)), sending to ASR")
