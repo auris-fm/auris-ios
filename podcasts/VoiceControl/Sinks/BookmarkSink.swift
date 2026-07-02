@@ -2,12 +2,13 @@ import Foundation
 
 class BookmarkSink: VoiceBookmarkSink {
     private let playbackManager: PlaybackManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
     func add(title: String?) -> VoiceResponse {
         guard let episode = playbackManager.currentEpisode() else {
-            return .spoken("Nothing playing")
+            return .spoken(templates.resolve("playback.nothing_playing"))
         }
         playbackManager.bookmarkManager.add(
             to: episode,
@@ -19,7 +20,7 @@ class BookmarkSink: VoiceBookmarkSink {
 
     func rename(ref: String, title: String) -> VoiceResponse {
         guard let bookmark = playbackManager.bookmarkManager.bookmark(for: ref) else {
-            return .spoken("Bookmark not found")
+            return .spoken(templates.resolve("bookmark.not_found"))
         }
         Task {
             await playbackManager.bookmarkManager.update(title: title, for: bookmark)
@@ -29,7 +30,7 @@ class BookmarkSink: VoiceBookmarkSink {
 
     func play(ref: String) -> VoiceResponse {
         guard let bookmark = playbackManager.bookmarkManager.bookmark(for: ref) else {
-            return .spoken("Bookmark not found")
+            return .spoken(templates.resolve("bookmark.not_found"))
         }
         playbackManager.playBookmark(bookmark, source: .voiceCommands)
         return .earcon(.success)
@@ -37,7 +38,7 @@ class BookmarkSink: VoiceBookmarkSink {
 
     func delete(ref: String) -> VoiceResponse {
         guard let bookmark = playbackManager.bookmarkManager.bookmark(for: ref) else {
-            return .spoken("Bookmark not found")
+            return .spoken(templates.resolve("bookmark.not_found"))
         }
         Task {
             await playbackManager.bookmarkManager.remove([bookmark])
@@ -50,18 +51,18 @@ class BookmarkSink: VoiceBookmarkSink {
         Task {
             await playbackManager.bookmarkManager.remove(all)
         }
-        return .spoken("All bookmarks deleted")
+        return .spoken(templates.resolve("bookmark.all_deleted"))
     }
 
     func queryList() -> VoiceResponse {
         let bookmarks = playbackManager.bookmarkManager.allBookmarks()
         let titles = bookmarks.prefix(5).map { $0.title }.joined(separator: ", ")
-        return .spoken("\(bookmarks.count) bookmarks: \(titles)")
+        return .spoken(templates.resolve("bookmark.list", bookmarks.count, titles))
     }
 
     func queryCount() -> VoiceResponse {
         let count = playbackManager.bookmarkManager.allBookmarks().count
-        return .spoken("\(count) bookmarks")
+        return .spoken(templates.resolve("bookmark.count", count))
     }
 
     func queryNearby() -> VoiceResponse {
@@ -69,8 +70,8 @@ class BookmarkSink: VoiceBookmarkSink {
         let nearby = playbackManager.bookmarkManager.allBookmarks()
             .filter { abs($0.time - currentTime) < 60 }
         if nearby.isEmpty {
-            return .spoken("No nearby bookmarks")
+            return .spoken(templates.resolve("bookmark.no_nearby"))
         }
-        return .spoken("\(nearby.count) bookmarks nearby")
+        return .spoken(templates.resolve("bookmark.nearby", nearby.count))
     }
 }

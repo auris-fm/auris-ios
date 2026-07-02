@@ -2,25 +2,26 @@ import Foundation
 
 class ChapterSink: VoiceChapterSink {
     private let playbackManager: PlaybackManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
     func next() -> VoiceResponse {
         playbackManager.skipToNextChapter(startPlaybackAfterSkip: true)
-        return .spoken("Next chapter")
+        return .spoken(templates.resolve("chapter.next"))
     }
 
     func previous() -> VoiceResponse {
         playbackManager.skipToPreviousChapter(startPlaybackAfterSkip: true)
-        return .spoken("Previous chapter")
+        return .spoken(templates.resolve("chapter.previous"))
     }
 
     func byIndex(_ index: Int) -> VoiceResponse {
         guard let chapter = playbackManager.chapterAt(index: index) else {
-            return .spoken("Chapter not found")
+            return .spoken(templates.resolve("chapter.not_found"))
         }
         playbackManager.skipToChapter(chapter, startPlaybackAfterSkip: true)
-        return .spoken("Jumped to chapter \(index + 1)")
+        return .spoken(templates.resolve("chapter.jumped_to_index", index + 1))
     }
 
     func byTitle(_ title: String) -> VoiceResponse {
@@ -29,10 +30,10 @@ class ChapterSink: VoiceChapterSink {
             if let chapter = playbackManager.playableChapterAt(index: i),
                chapter.title.localizedCaseInsensitiveContains(title) {
                 playbackManager.skipToChapter(chapter, startPlaybackAfterSkip: true)
-                return .spoken("Jumped to \(chapter.title)")
+                return .spoken(templates.resolve("chapter.jumped_to_title", chapter.title))
             }
         }
-        return .spoken("Chapter not found")
+        return .spoken(templates.resolve("chapter.not_found"))
     }
 
     func openLink(index: Int?, query: String?) -> VoiceResponse {
@@ -41,7 +42,7 @@ class ChapterSink: VoiceChapterSink {
             UIApplication.shared.open(url)
             return .earcon(.success)
         }
-        return .spoken("No link available")
+        return .spoken(templates.resolve("chapter.no_link"))
     }
 
     func queryList() -> VoiceResponse {
@@ -53,28 +54,28 @@ class ChapterSink: VoiceChapterSink {
             }
         }
         let list = items.joined(separator: ", ")
-        return .spoken("\(count) chapters: \(list)")
+        return .spoken(templates.resolve("chapter.list", count, list))
     }
 
     func queryCurrent() -> VoiceResponse {
         let chapters = playbackManager.currentChapters()
         if let visible = chapters.visibleChapter {
-            return .spoken("Chapter \(chapters.index): \(visible.title)")
+            return .spoken(templates.resolve("chapter.current", chapters.index, visible.title))
         }
-        return .spoken("No active chapter")
+        return .spoken(templates.resolve("chapter.no_active"))
     }
 
     func queryCount() -> VoiceResponse {
         let count = playbackManager.chapterCount()
-        return .spoken("\(count) chapters")
+        return .spoken(templates.resolve("chapter.count", count))
     }
 
     func queryNext() -> VoiceResponse {
         let chapters = playbackManager.currentChapters()
         let nextIndex = chapters.index + 1
         if let next = playbackManager.chapterAt(index: nextIndex) {
-            return .spoken("Next: \(next.title)")
+            return .spoken(templates.resolve("chapter.next_label", next.title))
         }
-        return .spoken("No more chapters")
+        return .spoken(templates.resolve("chapter.no_more"))
     }
 }

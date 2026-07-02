@@ -2,13 +2,14 @@ import Foundation
 
 class SleepTimerSink: VoiceSleepSink {
     private let playbackManager: PlaybackManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
     func set(minutes: Int) -> VoiceResponse {
         let interval = TimeInterval(minutes * 60)
         playbackManager.setSleepTimerInterval(interval)
-        return .spoken("Sleep timer set for \(minutes) minutes")
+        return .spoken(templates.resolve("sleep.set", minutes))
     }
 
     func endOfEpisode() -> VoiceResponse {
@@ -26,7 +27,7 @@ class SleepTimerSink: VoiceSleepSink {
         let added = TimeInterval(minutes * 60)
         playbackManager.sleepTimeRemaining += added
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.sleepTimerChanged)
-        return .spoken("Added \(minutes) minutes")
+        return .spoken(templates.resolve("sleep.add_time", minutes))
     }
 
     func cancel() -> VoiceResponse {
@@ -38,10 +39,10 @@ class SleepTimerSink: VoiceSleepSink {
         if playbackManager.sleepTimerActive() {
             let remaining = Int(playbackManager.sleepTimeRemaining / 60)
             if remaining > 0 {
-                return .spoken("\(remaining) minutes remaining")
+                return .spoken(templates.resolve("sleep.query_remaining", remaining))
             }
-            return .spoken("Sleep after episode")
+            return .spoken(templates.resolve("sleep.query_after_episode"))
         }
-        return .spoken("Sleep timer is not active")
+        return .spoken(templates.resolve("sleep.query_inactive"))
     }
 }

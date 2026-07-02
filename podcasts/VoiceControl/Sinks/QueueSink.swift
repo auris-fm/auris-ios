@@ -4,6 +4,7 @@ import PocketCastsDataModel
 class QueueSink: VoiceQueueSink {
     private let playbackManager: PlaybackManager
     private let dataManager: DataManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager, dataManager: DataManager = .sharedManager) {
         self.playbackManager = playbackManager
@@ -12,7 +13,7 @@ class QueueSink: VoiceQueueSink {
 
     func addTop(episode: String) -> VoiceResponse {
         guard let episode = dataManager.findBaseEpisode(uuid: episode) else {
-            return .spoken("Episode not found")
+            return .spoken(templates.resolve("queue.episode_not_found"))
         }
         playbackManager.addToUpNext(episode: episode, ignoringQueueLimit: false, toTop: true, userInitiated: false)
         return .earcon(.success)
@@ -20,7 +21,7 @@ class QueueSink: VoiceQueueSink {
 
     func addBottom(episode: String) -> VoiceResponse {
         guard let episode = dataManager.findBaseEpisode(uuid: episode) else {
-            return .spoken("Episode not found")
+            return .spoken(templates.resolve("queue.episode_not_found"))
         }
         playbackManager.addToUpNext(episode: episode, ignoringQueueLimit: false, toTop: false, userInitiated: false)
         return .earcon(.success)
@@ -35,7 +36,7 @@ class QueueSink: VoiceQueueSink {
     func moveToTop(episode: String) -> VoiceResponse {
         let episodes = dataManager.allUpNextEpisodes()
         guard let index = episodes.firstIndex(where: { $0.uuid == episode }) else {
-            return .spoken("Episode not found in queue")
+            return .spoken(templates.resolve("queue.episode_not_in_queue"))
         }
         dataManager.movePlaylistEpisode(from: index, to: 0)
         return .earcon(.success)
@@ -44,7 +45,7 @@ class QueueSink: VoiceQueueSink {
     func moveToBottom(episode: String) -> VoiceResponse {
         let episodes = dataManager.allUpNextEpisodes()
         guard let index = episodes.firstIndex(where: { $0.uuid == episode }) else {
-            return .spoken("Episode not found in queue")
+            return .spoken(templates.resolve("queue.episode_not_in_queue"))
         }
         dataManager.movePlaylistEpisode(from: index, to: episodes.count - 1)
         return .earcon(.success)
@@ -78,14 +79,14 @@ class QueueSink: VoiceQueueSink {
     func queryContents() -> VoiceResponse {
         let episodes = dataManager.allUpNextEpisodes()
         let titles = episodes.prefix(5).map { $0.displayableTitle() }.joined(separator: ", ")
-        return .spoken("\(episodes.count) episodes in queue: \(titles)")
+        return .spoken(templates.resolve("queue.contents", episodes.count, titles))
     }
 
     func queryNext() -> VoiceResponse {
         if let next = dataManager.allUpNextEpisodes().first {
-            return .spoken("Next: \(next.displayableTitle())")
+            return .spoken(templates.resolve("queue.next", next.displayableTitle()))
         }
-        return .spoken("Queue is empty")
+        return .spoken(templates.resolve("queue.empty"))
     }
 
     func queryLength() -> VoiceResponse {
@@ -94,13 +95,13 @@ class QueueSink: VoiceQueueSink {
         let hours = Int(total) / 3600
         let minutes = (Int(total) % 3600) / 60
         if hours > 0 {
-            return .spoken("\(hours) hours \(minutes) minutes remaining")
+            return .spoken(templates.resolve("queue.remaining_hours", hours, minutes))
         }
-        return .spoken("\(minutes) minutes remaining")
+        return .spoken(templates.resolve("queue.remaining_minutes", minutes))
     }
 
     func queryIsQueued(episode: String) -> VoiceResponse {
         let isInQueue = playbackManager.inUpNext(episode: dataManager.findBaseEpisode(uuid: episode))
-        return .spoken(isInQueue ? "Yes" : "No")
+        return .spoken(templates.resolve(isInQueue ? "queue.yes" : "queue.no"))
     }
 }

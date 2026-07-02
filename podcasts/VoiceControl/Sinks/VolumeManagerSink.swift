@@ -19,7 +19,8 @@ class VolumeManagerSink: VoiceVolumeSink {
 
     func queryVolume() -> VoiceResponse {
         let percent = Int(AVAudioSession.sharedInstance().outputVolume * 100)
-        return .spoken("Volume is \(percent)%")
+        let templates = SpokenTemplateResolver()
+        return .spoken(templates.resolve("volume.current", percent))
     }
 
     private func setSystemVolume(_ volume: Float) {

@@ -4,6 +4,7 @@ import PocketCastsUtils
 
 class EffectsManagerSink: VoiceEffectsSink {
     private let playbackManager: PlaybackManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
@@ -13,7 +14,7 @@ class EffectsManagerSink: VoiceEffectsSink {
         let effects = playbackManager.effects()
         effects.playbackSpeed = clamped
         playbackManager.changeEffects(effects)
-        return .spoken("Speed set to \(clamped)x")
+        return .spoken(templates.resolve("effects.set_speed", clamped))
     }
 
     func adjustSpeed(delta: Double) -> VoiceResponse {
@@ -22,7 +23,8 @@ class EffectsManagerSink: VoiceEffectsSink {
         FileLog.shared.addMessage("[VoiceControl/Effects] AdjustSpeed: \(delta >= 0 ? "+" : "")\(delta) → \(newSpeed)x")
         effects.playbackSpeed = newSpeed
         playbackManager.changeEffects(effects)
-        return .spoken("Speed \(delta > 0 ? "increased" : "decreased") to \(newSpeed)x")
+        let key = delta > 0 ? "effects.speed_increased" : "effects.speed_decreased"
+        return .spoken(templates.resolve(key, newSpeed))
     }
 
     func setTrimMode(_ mode: TrimMode) -> VoiceResponse {
@@ -44,7 +46,7 @@ class EffectsManagerSink: VoiceEffectsSink {
         let speed = effects.playbackSpeed
         let trim = effects.trimSilence.isEnabled() ? "on" : "off"
         let boost = effects.volumeBoost ? "on" : "off"
-        return .spoken("Speed \(speed)x, trim \(trim), boost \(boost)")
+        return .spoken(templates.resolve("effects.query", speed, trim, boost))
     }
 
     private func mapTrimMode(_ mode: TrimMode) -> TrimSilenceAmount {

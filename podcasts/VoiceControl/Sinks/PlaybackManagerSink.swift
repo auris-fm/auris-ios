@@ -2,6 +2,7 @@ import Foundation
 
 class PlaybackManagerSink: VoicePlaybackSink {
     private let playbackManager: PlaybackManager
+    private let templates = SpokenTemplateResolver()
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
@@ -39,6 +40,6 @@ class PlaybackManagerSink: VoicePlaybackSink {
     func nextEpisode() -> VoiceResponse {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         let title = playbackManager.skipToNextUpNextEpisode()
-        return .spoken("Playing \(title ?? "next episode")")
+        return .spoken(templates.resolve("playback.next_episode", title ?? "next episode"))
     }
 }
