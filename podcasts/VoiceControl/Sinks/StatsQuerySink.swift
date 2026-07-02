@@ -3,53 +3,52 @@ import PocketCastsDataModel
 
 class StatsQuerySink: VoiceStatsQuerySink {
     private let dataManager: DataManager
+    private let templates = SpokenTemplateResolver()
 
     init(dataManager: DataManager) { self.dataManager = dataManager }
 
     func listeningTime(period: String?) -> VoiceResponse {
         // TODO: Requires StatsRepository.listeningTime(period:) API
-        .spoken("Check Stats in the Profile tab for detailed listening time")
+        .spoken(templates.resolve("stats.check_profile_listening_time"))
     }
 
     func topPodcasts(period: String?) -> VoiceResponse {
         // TODO: Requires StatsRepository.topPodcasts(period:) API
-        .spoken("Check Stats in the Profile tab for your top podcasts")
+        .spoken(templates.resolve("stats.check_profile_top_podcasts"))
     }
 
     func episodesFinished(period: String?) -> VoiceResponse {
         // TODO: Requires StatsRepository.episodesFinished(period:) API
-        .spoken("Check Stats in the Profile tab for completed episodes")
+        .spoken(templates.resolve("stats.check_profile_completed"))
     }
 
     func listeningStreak() -> VoiceResponse {
         // TODO: Requires StatsRepository.listeningStreak() API
-        .spoken("Check Stats in the Profile tab for your listening streak")
+        .spoken(templates.resolve("stats.check_profile_streak"))
     }
 
     func subscriptionCount() -> VoiceResponse {
         let count = dataManager.allPodcasts(includeUnsubscribed: false).count
-        return .spoken("\(count) subscriptions")
+        return .spoken(templates.resolve("stats.subscription_count", count))
     }
 
     func unplayedTotal() -> VoiceResponse {
-        let count = dataManager.allUnplayedEpisodes().count
-        return .spoken("\(count) unplayed episodes")
+        // TODO: Requires DataManager.unplayedEpisodeCount or similar API
+        .spoken(templates.resolve("stats.check_podcasts_unplayed"))
     }
 
     func downloadStats() -> VoiceResponse {
         let count = dataManager.downloadedEpisodeCount()
-        return .spoken("\(count) downloaded episodes")
+        return .spoken(templates.resolve("stats.downloaded_count", count))
     }
 
     func newEpisodes(timeframe: String?) -> VoiceResponse {
         // TODO: Requires DataManager.newEpisodes(timeframe:) or similar query
-        // to filter episodes by publish date within the given timeframe
-        .spoken("Check the Podcasts tab for new episodes")
+        .spoken(templates.resolve("stats.check_podcasts_new"))
     }
 
     func timeSinceLastListen() -> VoiceResponse {
         // TODO: Requires PlaybackManager.lastPlaybackEndTime or similar API
-        // to compute the elapsed time since the last playback session ended
-        .spoken("Check Stats in the Profile tab")
+        .spoken(templates.resolve("stats.time_since_listen"))
     }
 }
