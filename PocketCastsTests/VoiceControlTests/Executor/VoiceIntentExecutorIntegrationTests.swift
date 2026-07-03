@@ -49,9 +49,11 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
 
     func test_execute_cloudRoute_asyncCompletion() async {
         let cloudSink = IntegrationCloudRouteSink()
-        let executor = makeExecutor(cloudRouteSink: cloudSink)
-        let context = PlaybackContext(episodeId: "ep1", positionMs: 0, recentTimestamps: [])
-        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium, context: context))
+        let executor = makeExecutor(
+            cloudRouteSink: cloudSink,
+            playbackContextProvider: IntegrationPlaybackContextProvider()
+        )
+        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium))
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
@@ -128,6 +130,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
     private func makeExecutor(
         playbackSink: VoicePlaybackSink = IntegrationPlaybackSink(currentPosition: 0, episodeDuration: 0),
         cloudRouteSink: VoiceCloudRouteSink = IntegrationCloudRouteSink(),
+        playbackContextProvider: PlaybackContextProvider = IntegrationPlaybackContextProvider(),
         analytics: VoiceAnalytics? = nil
     ) -> VoiceIntentExecutor {
         VoiceIntentExecutor(
@@ -141,6 +144,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
             playbackQuerySink: NoOpPlaybackQuerySink(),
             statsQuerySink: NoOpStatsQuerySink(),
             cloudRouteSink: cloudRouteSink,
+            playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,
             analytics: analytics
         )
@@ -194,6 +198,19 @@ private final class IntegrationPlaybackSink: VoicePlaybackSink {
 private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
         .spoken("Cloud response")
+    }
+}
+
+private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {
+    func current() -> PlaybackContext? {
+        PlaybackContext(
+            episodeId: "ep1",
+            podcastId: "pod1",
+            referencePositionMs: 0,
+            clientPositionMs: 0,
+            recentReferencePositions: [],
+            previousReferencePositionMs: nil
+        )
     }
 }
 

@@ -120,6 +120,14 @@ final class ToolCallMapperTests: XCTestCase {
         XCTAssertEqual(statsIntent, .listeningTime(period: "week"))
     }
 
+    func test_map_cloudRoute_returnsRequestOnlyIntent() {
+        let call = ToolCall(name: "cloud_route", arguments: ["request": "find that quote", "tier": "premium"])
+        let intent = ToolCallMapper().map(call)
+        guard let cloudIntent = intent as? CloudRouteIntent else { XCTFail(); return }
+        XCTAssertEqual(cloudIntent.request, "find that quote")
+        XCTAssertEqual(cloudIntent.tier, .premium)
+    }
+
     func test_parser_validToolCall_returnsToolCall() {
         let output = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
         let toolCall = LfmToolCallParser.parse(output)

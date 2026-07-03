@@ -102,11 +102,29 @@ final class VoiceIntentTests: XCTestCase {
     }
 
     func test_cloudRouteIntent_equality() {
-        let context = PlaybackContext(episodeId: "ep1", positionMs: 5000, recentTimestamps: [1000, 2000])
-        let intent = CloudRouteIntent(request: "find similar", tier: .premium, context: context)
+        let intent = CloudRouteIntent(request: "find similar", tier: .premium)
         XCTAssertEqual(intent.request, "find similar")
         XCTAssertEqual(intent.tier, .premium)
-        XCTAssertEqual(intent.context.episodeId, "ep1")
+    }
+
+    func test_playbackContext_equality() {
+        let lhs = PlaybackContext(
+            episodeId: "ep1",
+            podcastId: "pod1",
+            referencePositionMs: 1_000,
+            clientPositionMs: 2_000,
+            recentReferencePositions: [100, 200],
+            previousReferencePositionMs: 300
+        )
+        let rhs = PlaybackContext(
+            episodeId: "ep1",
+            podcastId: "pod1",
+            referencePositionMs: 1_000,
+            clientPositionMs: 2_000,
+            recentReferencePositions: [100, 200],
+            previousReferencePositionMs: 300
+        )
+        XCTAssertEqual(lhs, rhs)
     }
 
     func test_trimMode_rawValues() {

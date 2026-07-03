@@ -109,7 +109,6 @@ enum StatsQueryIntent: VoiceIntent, Equatable {
 struct CloudRouteIntent: VoiceIntent, Equatable {
     let request: String
     let tier: CloudTier
-    let context: PlaybackContext
 }
 
 enum CloudTier: String, Equatable {
@@ -120,6 +119,9 @@ enum CloudTier: String, Equatable {
 
 struct PlaybackContext: Equatable {
     let episodeId: String
-    let positionMs: Int64
-    let recentTimestamps: [Int64]
+    let podcastId: String?
+    let referencePositionMs: Int64?
+    let clientPositionMs: Int64
+    let recentReferencePositions: [Int64]
+    let previousReferencePositionMs: Int64?
 }

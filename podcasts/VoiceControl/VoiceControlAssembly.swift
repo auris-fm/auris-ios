@@ -61,6 +61,12 @@ class VoiceControlAssembly {
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)
+        let cloudPlaybackContextState = CloudPlaybackContextState()
+        let playbackContextProvider = DefaultPlaybackContextProvider(
+            playbackState: playbackManager,
+            fingerprintMapper: FingerprintTimingManager.shared,
+            cloudPlaybackContextState: cloudPlaybackContextState
+        )
 
         let executor = VoiceIntentExecutor(
             playbackSink: PlaybackManagerSink(playbackManager: playbackManager),
@@ -73,6 +79,7 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(),
+            playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,
             analytics: voiceAnalytics
         )

@@ -203,7 +203,6 @@ class ToolCallMapper {
         guard let request = args["request"] as? String else { return nil }
         let tierRaw = args["tier"] as? String ?? "unknown"
         let tier = CloudTier(rawValue: tierRaw) ?? .unknown
-        let context = PlaybackContext(episodeId: "", positionMs: 0, recentTimestamps: [])
-        return CloudRouteIntent(request: request, tier: tier, context: context)
+        return CloudRouteIntent(request: request, tier: tier)
     }
 }
