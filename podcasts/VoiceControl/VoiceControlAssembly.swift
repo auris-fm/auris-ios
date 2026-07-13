@@ -22,7 +22,7 @@ class VoiceControlAssembly {
             melModel: bundleURL("melspectrogram.onnx"),
             embedModel: bundleURL("embedding_model.onnx"),
             classifierModel: bundleURL("auris.onnx"),
-            threshold: 0.5
+            threshold: 0.923
         )
 
         let commandWindow = CommandWindowManager()
