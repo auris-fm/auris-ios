@@ -22,7 +22,9 @@ class VoiceControlAssembly {
             melModel: bundleURL("melspectrogram.onnx"),
             embedModel: bundleURL("embedding_model.onnx"),
             classifierModel: bundleURL("auris.onnx"),
-            threshold: 0.923
+            // Balanced threshold (elbow of recall-vs-FPPH curve): 86.0% recall, 10.0 FPPH.
+            // From auris_medium eval — update when retraining.
+            threshold: 0.54
         )
 
         let commandWindow = CommandWindowManager()
@@ -83,7 +85,7 @@ class VoiceControlAssembly {
     }
 
     private func bundleURL(_ filename: String) -> URL {
-        Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "oww")!
+        Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "wakeword")!
     }
 
     private func hasNeuralEngine() -> Bool {
