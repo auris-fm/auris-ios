@@ -20,7 +20,7 @@ final class GateConditionSourcesTests: XCTestCase {
     }
 
     func test_foreground_source_returnsCondition() {
-        let source = ForegroundConditionSource()
+        let source = ForegroundConditionSource(gracePeriodSignal: GracePeriodSignal())
         // In test environment, app may not be active
         let condition = source.current
         XCTAssertNotNil(condition)
@@ -33,7 +33,7 @@ final class GateConditionSourcesTests: XCTestCase {
     }
 
     func test_liveConditionMonitor_initialState() {
-        let monitor = LiveConditionMonitor()
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
         // Initial state should be unknown
         if case .unknown = monitor.setup.enabledByUser {} else { XCTFail() }
     }
