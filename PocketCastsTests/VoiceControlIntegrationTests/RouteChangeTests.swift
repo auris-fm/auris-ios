@@ -26,47 +26,47 @@ final class RouteChangeTests: XCTestCase {
     }
 
     func test_gate_modeResolution_matrix() {
-        let attendedSignal = AttendedSignal()
         let gracePeriodSignal = GracePeriodSignal()
-        let playbackRecencySignal = PlaybackRecencySignal()
-        let recentPlaybackSignal = PlaybackRecencySignal()
-        recentPlaybackSignal.update(isPlaying: true)
 
-        // Foreground + attended = continuous
-        attendedSignal.onUserInteraction()
-        let foregroundAttendedGate = VoiceControlGate(
+        // Grace period active → continuous
+        gracePeriodSignal.onCommandRecognized()
+        let graceGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .appInForeground,
             micExposure: .exposed,
-            attendedSignal: attendedSignal,
-            gracePeriodSignal: gracePeriodSignal,
-            playbackRecencySignal: playbackRecencySignal
+            gracePeriodSignal: gracePeriodSignal
         )
-        XCTAssertEqual(foregroundAttendedGate.state, .listening(mode: .continuous))
+        XCTAssertEqual(graceGate.state, .listening(mode: .continuous))
 
-        // Background + exposed = wakeWord
+        // No grace period → wake word (appInForeground, exposed)
+        let foregroundExposedGate = VoiceControlGate(
+            setup: .allAllowed,
+            conflicts: .noneBlocked,
+            context: .appInForeground,
+            micExposure: .exposed,
+            gracePeriodSignal: GracePeriodSignal()
+        )
+        XCTAssertEqual(foregroundExposedGate.state, .listening(mode: .wakeWord))
+
+        // No grace period → wake word (playbackActive, exposed)
         let backgroundExposedGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .playbackActive,
             micExposure: .exposed,
-            attendedSignal: AttendedSignal(),
-            gracePeriodSignal: GracePeriodSignal(),
-            playbackRecencySignal: PlaybackRecencySignal()
+            gracePeriodSignal: GracePeriodSignal()
         )
         XCTAssertEqual(backgroundExposedGate.state, .listening(mode: .wakeWord))
 
-        // Background + isolated + playback recent = continuous
+        // No grace period → wake word (playbackActive, isolated)
         let backgroundIsolatedGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .playbackActive,
             micExposure: .isolated,
-            attendedSignal: AttendedSignal(),
-            gracePeriodSignal: GracePeriodSignal(),
-            playbackRecencySignal: recentPlaybackSignal
+            gracePeriodSignal: GracePeriodSignal()
         )
-        XCTAssertEqual(backgroundIsolatedGate.state, .listening(mode: .continuous))
+        XCTAssertEqual(backgroundIsolatedGate.state, .listening(mode: .wakeWord))
     }
 }
