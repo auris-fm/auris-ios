@@ -11,8 +11,7 @@ class VoiceControlService: ObservableObject {
         allowed: false, listeningMode: nil,
         setup: .allAllowed, conflicts: .noneBlocked,
         context: .none, micExposure: .noMic,
-        attended: false, gracePeriodActive: false,
-        playbackRecent: false, offReason: .noContext
+        gracePeriodActive: false, offReason: .noContext
     )
 
     private let conditionMonitor: LiveConditionMonitor
@@ -24,9 +23,9 @@ class VoiceControlService: ObservableObject {
     private let executor: VoiceIntentExecutor
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
-    private let attendedSignal: AttendedSignal
     private let gracePeriodSignal: GracePeriodSignal
-    private let playbackRecencySignal: PlaybackRecencySignal
+
+    private let log = Logger(subsystem: "com.pocketcasts", category: "VoiceControl")
 
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
@@ -36,6 +35,13 @@ class VoiceControlService: ObservableObject {
     private var lastIntentType: String?
     private var lastExecutionTime: Date?
     private let debounceInterval: TimeInterval = 2.0
+
+    // Track prior capture state for lifecycle logging
+    private var priorCaptureActive = false
+    private var priorListingMode: ListeningMode? = nil
+    private var priorPostureBlockers: [String] = []
+    private var priorMicExposure: MicExposure = .noMic
+    private var priorRoute: AudioRoute? = nil
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -47,9 +53,7 @@ class VoiceControlService: ObservableObject {
         executor: VoiceIntentExecutor,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
-        attendedSignal: AttendedSignal,
-        gracePeriodSignal: GracePeriodSignal,
-        playbackRecencySignal: PlaybackRecencySignal
+        gracePeriodSignal: GracePeriodSignal
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -60,25 +64,7 @@ class VoiceControlService: ObservableObject {
         self.executor = executor
         self.dialogManager = dialogManager
         self.audioRenderer = audioRenderer
-        self.attendedSignal = attendedSignal
         self.gracePeriodSignal = gracePeriodSignal
-        self.playbackRecencySignal = playbackRecencySignal
-
-        TouchEventMonitor.shared.touchEvent
-            .sink { [weak self] in self?.attendedSignal.onUserInteraction() }
-            .store(in: &cancellables)
-
-        NotificationCenter.default
-            .publisher(for: Constants.Notifications.playbackStarted)
-            .map { _ in true }
-            .merge(with: NotificationCenter.default
-                .publisher(for: Constants.Notifications.playbackPaused)
-                .map { _ in false }
-            )
-            .sink { [weak self] isPlaying in
-                self?.playbackRecencySignal.update(isPlaying: isPlaying)
-            }
-            .store(in: &cancellables)
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             self?.stop()  // stops capture, discards current pipeline state
@@ -104,9 +90,7 @@ class VoiceControlService: ObservableObject {
                 conflicts: conflicts,
                 context: context,
                 micExposure: exposure,
-                attendedSignal: attendedSignal,
-                gracePeriodSignal: gracePeriodSignal,
-                playbackRecencySignal: playbackRecencySignal
+                gracePeriodSignal: gracePeriodSignal
             )
         }
         .sink { [weak self] gate in
@@ -114,6 +98,28 @@ class VoiceControlService: ObservableObject {
             let previous = self.gateState
             self.gateState = gate.state
             self.gatePosture = gate.posture
+
+            // Log posture transitions (blocker changes only, not every Combine publish)
+            let posture = gate.posture
+            let currentBlockers = self.blockers(for: posture)
+            let isActiveCapture = gate.state.isListening && self.isListening
+            if currentBlockers != self.priorPostureBlockers ||
+               posture.micExposure != self.priorMicExposure ||
+               isActiveCapture != self.priorCaptureActive ||
+               gate.state.listeningMode != self.priorListingMode {
+                self.logLifecycleEvent(
+                    posture: posture,
+                    priorCaptureActive: self.priorCaptureActive,
+                    newCaptureActive: isActiveCapture,
+                    currentBlockers: currentBlockers,
+                    priorBlockers: self.priorPostureBlockers
+                )
+                self.priorCaptureActive = isActiveCapture
+                self.priorPostureBlockers = currentBlockers
+                self.priorMicExposure = posture.micExposure
+                self.priorListingMode = gate.state.listeningMode
+            }
+
             if gateDescription(previous) != gateDescription(gate.state) {
                 FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
@@ -131,6 +137,7 @@ class VoiceControlService: ObservableObject {
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in
+            self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
         }
     }
@@ -210,6 +217,85 @@ class VoiceControlService: ObservableObject {
                 consecutiveNulls = 0
             }
         }
+    }
+
+    // MARK: - Lifecycle logging
+
+    /// Returns the ordered list of blocking reasons from the posture.
+    private func blockers(for posture: GatePosture) -> [String] {
+        var reasons: [String] = []
+        if posture.offReason == .setupNotReady { reasons.append("setupNotReady") }
+        if posture.offReason == .conflictBlocking { reasons.append("conflictBlocking") }
+        if posture.offReason == .noContext { reasons.append("noContext") }
+        if posture.offReason == .noMicrophone { reasons.append("noMicrophone") }
+        return reasons
+    }
+
+    /// Log a lifecycle event when posture or blocker state changes.
+    /// Blocked posture with no prior capture, or user-requested active stop → info.
+    /// Every other active-capture stop → error.
+    private func logLifecycleEvent(
+        posture: GatePosture,
+        priorCaptureActive: Bool,
+        newCaptureActive: Bool,
+        currentBlockers: [String],
+        priorBlockers: [String]
+    ) {
+        let event: String
+        if newCaptureActive {
+            event = "capture_started"
+        } else if !posture.allowed && priorCaptureActive {
+            // Active capture stopping because of a blocker
+            event = "capture_blocked"
+        } else if !posture.allowed && !priorCaptureActive {
+            // Already blocked, just posture change
+            event = "posture_blocked"
+        } else if posture.allowed && !newCaptureActive {
+            // Gate allowed but not capturing yet (initial state or mode switch)
+            event = "posture_allowed"
+        } else if priorBlockers.isEmpty && !currentBlockers.isEmpty {
+            event = "blocker_appeared"
+        } else if !priorBlockers.isEmpty && currentBlockers.isEmpty {
+            event = "blocker_cleared"
+        } else {
+            event = "posture_changed"
+        }
+
+        let level: OSLogType
+        if event == "capture_blocked" {
+            // Blocked posture with prior capture active
+            if currentBlockers.contains("setupNotReady") || currentBlockers.contains("noContext") {
+                // User-requested or expected stop → info
+                level = .info
+            } else {
+                // Unexpected stop (conflict, no mic) → error
+                level = .error
+            }
+        } else if event == "capture_started" || event == "posture_allowed" || event == "blocker_cleared" {
+            level = .info
+        } else {
+            level = .info
+        }
+
+        // Build log message with stable ordered fields.
+        // No audio or transcript text is ever included.
+        // Indirectly identifying metadata (route details) is marked private.
+        let modeString = posture.listeningMode.map { "\($0)" } ?? "none"
+        let blockersString = currentBlockers.joined(separator: ",")
+
+        log.log(
+            level: level,
+            """
+            event=\(event, privacy: .public) \
+            reasons=\(blockersString, privacy: .public) \
+            setup=\(posture.setup.isReady, privacy: .public) \
+            conflicts=\(posture.conflicts.isClear, privacy: .public) \
+            context=\(String(describing: posture.context), privacy: .public) \
+            micExposure=\(String(describing: posture.micExposure), privacy: .public) \
+            listeningMode=\(modeString, privacy: .public) \
+            priorCapture=\(priorCaptureActive, privacy: .public)
+            """
+        )
     }
 }
 

@@ -4,9 +4,7 @@ import PocketCastsUtils
 
 class VoiceControlAssembly {
     func buildVoiceControlService() -> VoiceControlService {
-        let attendedSignal = AttendedSignal()
         let gracePeriodSignal = GracePeriodSignal()
-        let playbackRecencySignal = PlaybackRecencySignal()
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
         let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
@@ -78,9 +76,7 @@ class VoiceControlAssembly {
             executor: executor,
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
-            attendedSignal: attendedSignal,
-            gracePeriodSignal: gracePeriodSignal,
-            playbackRecencySignal: playbackRecencySignal
+            gracePeriodSignal: gracePeriodSignal
         )
     }
 
@@ -116,5 +112,4 @@ private class DefaultAnalyticsService: AnalyticsService {
         // enum case, but voice events use dynamic string names.
     }
 }
-
 
