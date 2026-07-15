@@ -11,8 +11,9 @@ final class WakeWordDetectorTests: XCTestCase {
             classifierModel: URL(fileURLWithPath: "/nonexistent/auris.onnx"),
             threshold: 0.5
         )
-        let score = detector.detect(samples: [Float](repeating: 0, count: 32000), sampleRate: 16000)
-        XCTAssertEqual(score, 0.0)
+        let result = detector.detect(samples: [Float](repeating: 0, count: 32000), sampleRate: 16000)
+        XCTAssertFalse(result.detected)
+        XCTAssertEqual(result.confidence, 0.0)
         detector.release()
     }
 
@@ -23,8 +24,9 @@ final class WakeWordDetectorTests: XCTestCase {
             classifierModel: URL(fileURLWithPath: "/nonexistent/auris.onnx"),
             threshold: 0.5
         )
-        let score = detector.detect(samples: [], sampleRate: 16000)
-        XCTAssertEqual(score, 0.0)
+        let result = detector.detect(samples: [], sampleRate: 16000)
+        XCTAssertFalse(result.detected)
+        XCTAssertEqual(result.confidence, 0.0)
         detector.release()
     }
 

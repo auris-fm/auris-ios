@@ -11,8 +11,9 @@ final class WakeWordPipelineTests: XCTestCase {
             threshold: 0.5
         )
         // Detector should handle missing model gracefully
-        let score = detector.detect(samples: Array(repeating: 0, count: 32000), sampleRate: 16000)
-        XCTAssertLessThanOrEqual(score, 0.0)
+        let result = detector.detect(samples: Array(repeating: 0, count: 32000), sampleRate: 16000)
+        XCTAssertFalse(result.detected)
+        XCTAssertLessThanOrEqual(result.confidence, 0.0)
         detector.release()
     }
 
