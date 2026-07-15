@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import OSLog
 import PocketCastsUtils
 
 class VoiceControlService: ObservableObject {
@@ -36,12 +37,11 @@ class VoiceControlService: ObservableObject {
     private var lastExecutionTime: Date?
     private let debounceInterval: TimeInterval = 2.0
 
-    // Track prior capture state for lifecycle logging
-    private var priorCaptureActive = false
-    private var priorListingMode: ListeningMode? = nil
-    private var priorPostureBlockers: [String] = []
-    private var priorMicExposure: MicExposure = .noMic
-    private var priorRoute: AudioRoute = .unknown
+    // Last blocking reason set logged for a blocked-never-acquired posture.
+    // nil when the last lifecycle event was not a non-acquiring posture, so
+    // `mic_acquisition_skipped` is emitted once on entry and again only when
+    // the blocking reason set changes — never on every Combine publication.
+    private var loggedSkippedReasons: [String]?
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -67,7 +67,21 @@ class VoiceControlService: ObservableObject {
         self.gracePeriodSignal = gracePeriodSignal
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
-            self?.stop()  // stops capture, discards current pipeline state
+            guard let self else { return }
+            let wasCapturing = self.isListening
+            self.stop()  // stops capture, discards current pipeline state
+            if wasCapturing {
+                // Audio session reclaimed by the system — an active-capture stop
+                // that the user did not request → ERROR per the mic lifecycle spec.
+                self.loggedSkippedReasons = nil
+                self.emitLifecycleEvent(
+                    event: "mic_capture_stopped",
+                    level: .error,
+                    reasons: ["audio_session_reclaimed"],
+                    posture: self.gatePosture,
+                    priorCaptureActive: true
+                )
+            }
         }
 
         interruptionHandler.onInterruptionEnded = { [weak self] in
@@ -99,40 +113,18 @@ class VoiceControlService: ObservableObject {
             self.gateState = gate.state
             self.gatePosture = gate.posture
 
-            // Log posture transitions (blocker changes only, not every Combine publish)
-            let posture = gate.posture
-            let currentBlockers = self.blockers(for: posture)
-            let isActiveCapture = gate.state.isListening && self.isListening
-            let currentRoute = self.routeMonitor.currentRoute
-            if currentBlockers != self.priorPostureBlockers ||
-               posture.micExposure != self.priorMicExposure ||
-               isActiveCapture != self.priorCaptureActive ||
-               gate.state.listeningMode != self.priorListingMode ||
-               currentRoute != self.priorRoute {
-                self.logLifecycleEvent(
-                    posture: posture,
-                    priorCaptureActive: self.priorCaptureActive,
-                    newCaptureActive: isActiveCapture,
-                    currentBlockers: currentBlockers,
-                    priorBlockers: self.priorPostureBlockers,
-                    route: currentRoute
-                )
-                self.priorCaptureActive = isActiveCapture
-                self.priorPostureBlockers = currentBlockers
-                self.priorMicExposure = posture.micExposure
-                self.priorListingMode = gate.state.listeningMode
-                self.priorRoute = currentRoute
-            }
-
             if gateDescription(previous) != gateDescription(gate.state) {
                 FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
+
+            let wasCapturing = self.isListening
             switch gate.state {
             case .off:
                 self.stop()
             case .listening(let mode):
                 self.start(in: mode)
             }
+            self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
         }
         .store(in: &cancellables)
 
@@ -225,75 +217,80 @@ class VoiceControlService: ObservableObject {
 
     // MARK: - Lifecycle logging
 
-    /// Returns the ordered list of blocking reasons from the posture.
+    /// Deterministically ordered blocking reason set from the posture.
+    /// Gate-owned reasons use their condition names, in gate evaluation order
+    /// (setup → conflicts → context → mic exposure). Unknown conditions fail
+    /// closed, so they count as blocking.
     private func blockers(for posture: GatePosture) -> [String] {
         var reasons: [String] = []
-        if posture.offReason == .setupNotReady { reasons.append("setupNotReady") }
-        if posture.offReason == .conflictBlocking { reasons.append("conflictBlocking") }
-        if posture.offReason == .noContext { reasons.append("noContext") }
-        if posture.offReason == .noMicrophone { reasons.append("noMicrophone") }
+        if !posture.setup.enabledByUser.isAllowed { reasons.append("EnabledByUser") }
+        if !posture.setup.deviceSupported.isAllowed { reasons.append("DeviceSupported") }
+        if !posture.setup.modelsReady.isAllowed { reasons.append("ModelsReady") }
+        if !posture.conflicts.notOnCall.isAllowed { reasons.append("NotOnCall") }
+        if !posture.conflicts.notCasting.isAllowed { reasons.append("NotCasting") }
+        if !posture.conflicts.batteryOk.isAllowed { reasons.append("BatteryOk") }
+        if !posture.conflicts.otherAppPlaying.isAllowed { reasons.append("OtherAppPlaying") }
+        if posture.context == .none { reasons.append("ListeningContext") }
+        if posture.micExposure == .noMic { reasons.append("NoMic") }
         return reasons
     }
 
-    /// Log a lifecycle event when posture or blocker state changes.
-    /// Blocked posture with no prior capture, or user-requested active stop → info.
-    /// Every other active-capture stop → error.
-    private func logLifecycleEvent(
+    /// Emit mic lifecycle events on capture-state transitions only:
+    /// - capture acquired → `mic_capture_started` (INFO)
+    /// - active capture stopped → `mic_capture_stopped`; INFO only when the stop
+    ///   is a direct, attributable user request (voice control disabled by the
+    ///   user), ERROR for every other active-capture stop
+    /// - blocked and never acquired → `mic_acquisition_skipped` (INFO) once on
+    ///   entry, again only when the blocking reason set changes
+    private func logLifecycleTransition(posture: GatePosture, wasCapturing: Bool) {
+        let isCapturing = isListening
+        let reasons = blockers(for: posture)
+
+        if isCapturing && !wasCapturing {
+            loggedSkippedReasons = nil
+            emitLifecycleEvent(
+                event: "mic_capture_started", level: .info,
+                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
+            )
+        } else if wasCapturing && !isCapturing {
+            // The stop event already records the entry into the blocked posture;
+            // remember its reason set so `mic_acquisition_skipped` only fires if
+            // the blockers change afterwards.
+            loggedSkippedReasons = reasons
+            let userRequested = !posture.setup.enabledByUser.isAllowed
+            emitLifecycleEvent(
+                event: "mic_capture_stopped", level: userRequested ? .info : .error,
+                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
+            )
+        } else if !isCapturing && !posture.allowed && reasons != loggedSkippedReasons {
+            loggedSkippedReasons = reasons
+            emitLifecycleEvent(
+                event: "mic_acquisition_skipped", level: .info,
+                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
+            )
+        }
+    }
+
+    /// Write one structured lifecycle event with stable, ordered fields.
+    /// No audio or transcript text is ever included. Route details are
+    /// indirectly identifying metadata, so they are marked private.
+    private func emitLifecycleEvent(
+        event: String,
+        level: OSLogType,
+        reasons: [String],
         posture: GatePosture,
-        priorCaptureActive: Bool,
-        newCaptureActive: Bool,
-        currentBlockers: [String],
-        priorBlockers: [String],
-        route: AudioRoute
+        priorCaptureActive: Bool
     ) {
-        let event: String
-        if newCaptureActive {
-            event = "capture_started"
-        } else if !posture.allowed && priorCaptureActive {
-            // Active capture stopping because of a blocker
-            event = "capture_blocked"
-        } else if !posture.allowed && !priorCaptureActive {
-            // Already blocked, just posture change
-            event = "posture_blocked"
-        } else if posture.allowed && !newCaptureActive {
-            // Gate allowed but not capturing yet (initial state or mode switch)
-            event = "posture_allowed"
-        } else if priorBlockers.isEmpty && !currentBlockers.isEmpty {
-            event = "blocker_appeared"
-        } else if !priorBlockers.isEmpty && currentBlockers.isEmpty {
-            event = "blocker_cleared"
-        } else {
-            event = "posture_changed"
-        }
-
-        let level: OSLogType
-        if event == "capture_blocked" {
-            // Blocked posture with prior capture active
-            if currentBlockers.contains("setupNotReady") || currentBlockers.contains("noContext") {
-                // User-requested or expected stop → info
-                level = .info
-            } else {
-                // Unexpected stop (conflict, no mic) → error
-                level = .error
-            }
-        } else if event == "capture_started" || event == "posture_allowed" || event == "blocker_cleared" {
-            level = .info
-        } else {
-            level = .info
-        }
-
-        // Build log message with stable ordered fields.
-        // No audio or transcript text is ever included.
-        // Indirectly identifying metadata (route details) is marked private.
+        let route = routeMonitor.currentRoute
         let modeString = posture.listeningMode.map { "\($0)" } ?? "none"
-        let blockersString = currentBlockers.joined(separator: ",")
+        let reasonsString = reasons.joined(separator: ",")
         let routeString = "\(route.output):\(route.input.map { "\($0)" } ?? "nil")"
 
         log.log(
             level: level,
             """
             event=\(event, privacy: .public) \
-            reasons=\(blockersString, privacy: .public) \
+            reasons=\(reasonsString, privacy: .public) \
             setup=\(posture.setup.isReady, privacy: .public) \
             conflicts=\(posture.conflicts.isClear, privacy: .public) \
             context=\(String(describing: posture.context), privacy: .public) \
