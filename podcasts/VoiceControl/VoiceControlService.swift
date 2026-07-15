@@ -41,7 +41,7 @@ class VoiceControlService: ObservableObject {
     private var priorListingMode: ListeningMode? = nil
     private var priorPostureBlockers: [String] = []
     private var priorMicExposure: MicExposure = .noMic
-    private var priorRoute: AudioRoute? = nil
+    private var priorRoute: AudioRoute = .unknown
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -103,21 +103,25 @@ class VoiceControlService: ObservableObject {
             let posture = gate.posture
             let currentBlockers = self.blockers(for: posture)
             let isActiveCapture = gate.state.isListening && self.isListening
+            let currentRoute = self.routeMonitor.currentRoute
             if currentBlockers != self.priorPostureBlockers ||
                posture.micExposure != self.priorMicExposure ||
                isActiveCapture != self.priorCaptureActive ||
-               gate.state.listeningMode != self.priorListingMode {
+               gate.state.listeningMode != self.priorListingMode ||
+               currentRoute != self.priorRoute {
                 self.logLifecycleEvent(
                     posture: posture,
                     priorCaptureActive: self.priorCaptureActive,
                     newCaptureActive: isActiveCapture,
                     currentBlockers: currentBlockers,
-                    priorBlockers: self.priorPostureBlockers
+                    priorBlockers: self.priorPostureBlockers,
+                    route: currentRoute
                 )
                 self.priorCaptureActive = isActiveCapture
                 self.priorPostureBlockers = currentBlockers
                 self.priorMicExposure = posture.micExposure
                 self.priorListingMode = gate.state.listeningMode
+                self.priorRoute = currentRoute
             }
 
             if gateDescription(previous) != gateDescription(gate.state) {
@@ -239,7 +243,8 @@ class VoiceControlService: ObservableObject {
         priorCaptureActive: Bool,
         newCaptureActive: Bool,
         currentBlockers: [String],
-        priorBlockers: [String]
+        priorBlockers: [String],
+        route: AudioRoute
     ) {
         let event: String
         if newCaptureActive {
@@ -282,6 +287,7 @@ class VoiceControlService: ObservableObject {
         // Indirectly identifying metadata (route details) is marked private.
         let modeString = posture.listeningMode.map { "\($0)" } ?? "none"
         let blockersString = currentBlockers.joined(separator: ",")
+        let routeString = "\(route.output):\(route.input.map { "\($0)" } ?? "nil")"
 
         log.log(
             level: level,
@@ -292,6 +298,7 @@ class VoiceControlService: ObservableObject {
             conflicts=\(posture.conflicts.isClear, privacy: .public) \
             context=\(String(describing: posture.context), privacy: .public) \
             micExposure=\(String(describing: posture.micExposure), privacy: .public) \
+            route=\(routeString, privacy: .private) \
             listeningMode=\(modeString, privacy: .public) \
             priorCapture=\(priorCaptureActive, privacy: .public)
             """

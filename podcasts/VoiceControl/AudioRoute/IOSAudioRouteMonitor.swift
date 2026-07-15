@@ -10,7 +10,7 @@ enum AudioRouteInput {
     case headsetMic, bluetoothHFP, bluetoothLE, builtInMic
 }
 
-struct AudioRoute {
+struct AudioRoute: Equatable {
     let output: AudioRouteOutput
     let input: AudioRouteInput?
 
