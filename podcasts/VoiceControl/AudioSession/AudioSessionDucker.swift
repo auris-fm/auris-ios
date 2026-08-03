@@ -2,13 +2,20 @@ import AVFoundation
 import MediaPlayer
 import PocketCastsUtils
 
+/// Ducking boundary so the renderer is testable without a live audio session.
+protocol AudioSessionDucking {
+    func duck()
+    func unduck()
+}
+
 /// Lowers playback volume during TTS/earcon playback and restores it afterward.
 ///
 /// Uses the system volume slider (MPVolumeView) to temporarily reduce output
 /// volume so spoken responses are clearly audible over podcast audio.
 /// When playback is not active, ducking is a no-op.
-class AudioSessionDucker {
-    private let volumeView = MPVolumeView()
+class AudioSessionDucker: AudioSessionDucking {
+    /// Lazily create MPVolumeView to avoid side effects during VoiceControl init.
+    private lazy var volumeView: MPVolumeView = MPVolumeView()
     private var originalVolume: Float?
     private var isDucked = false
 

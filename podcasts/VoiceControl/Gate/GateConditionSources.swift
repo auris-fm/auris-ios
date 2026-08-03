@@ -105,17 +105,17 @@ class ForegroundConditionSource: GateConditionSource {
 
 class LiveConditionMonitor: ObservableObject {
     @Published var setup: GateSetup = .init(
-        enabledByUser: .unknown(reason: "initializing"),
-        deviceSupported: .unknown(reason: "initializing"),
-        modelsReady: .unknown(reason: "initializing")
+        enabledByUser: .allowed,
+        deviceSupported: .allowed,
+        modelsReady: .allowed
     )
     @Published var conflicts: GateConflicts = .init(
-        notOnCall: .unknown(reason: "initializing"),
-        notCasting: .unknown(reason: "initializing"),
-        batteryOk: .unknown(reason: "initializing"),
-        otherAppPlaying: .unknown(reason: "initializing")
+        notOnCall: .allowed,
+        notCasting: .allowed,
+        batteryOk: .allowed,
+        otherAppPlaying: .allowed
     )
-    @Published var context: GateContext = .none
+    @Published var context: GateContext = .appInForeground
 
     private let callSource = CallConditionSource()
     private let batterySource = BatteryConditionSource()

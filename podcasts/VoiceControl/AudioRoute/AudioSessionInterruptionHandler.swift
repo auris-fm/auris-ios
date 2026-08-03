@@ -29,10 +29,12 @@ class AudioSessionInterruptionHandler: ObservableObject {
                     self.onInterruptionBegan?()
 
                 case .ended:
-                    guard let options = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
+                    // The interruption has ended regardless of the resume option;
+                    // only the reactivation callback is gated on shouldResume.
+                    self.isInterrupted = false
+                    let options = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
                     FileLog.shared.addMessage("[VoiceControl/Interruption] Ended (shouldResume: \(shouldResume))")
-                    self.isInterrupted = false
                     if shouldResume {
                         self.onInterruptionEnded?()
                     }

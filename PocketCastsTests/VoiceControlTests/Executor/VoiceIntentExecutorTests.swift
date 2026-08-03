@@ -4,16 +4,16 @@ import XCTest
 final class VoiceIntentExecutorTests: XCTestCase {
 
     var executor: VoiceIntentExecutor!
-    var mockPlaybackSink: MockPlaybackSink!
-    var mockEffectsSink: MockEffectsSink!
-    var mockVolumeSink: MockVolumeSink!
-    var mockSleepSink: MockSleepSink!
-    var mockChapterSink: MockChapterSink!
-    var mockBookmarkSink: MockBookmarkSink!
-    var mockQueueSink: MockQueueSink!
-    var mockPlaybackQuerySink: MockPlaybackQuerySink!
-    var mockStatsQuerySink: MockStatsQuerySink!
-    var mockCloudRouteSink: MockCloudRouteSink!
+    fileprivate var mockPlaybackSink: MockPlaybackSink!
+    fileprivate var mockEffectsSink: MockEffectsSink!
+    fileprivate var mockVolumeSink: MockVolumeSink!
+    fileprivate var mockSleepSink: MockSleepSink!
+    fileprivate var mockChapterSink: MockChapterSink!
+    fileprivate var mockBookmarkSink: MockBookmarkSink!
+    fileprivate var mockQueueSink: MockQueueSink!
+    fileprivate var mockPlaybackQuerySink: MockPlaybackQuerySink!
+    fileprivate var mockStatsQuerySink: MockStatsQuerySink!
+    fileprivate var mockCloudRouteSink: MockCloudRouteSink!
     var gracePeriodSignal: GracePeriodSignal!
 
     override func setUp() {
@@ -204,7 +204,7 @@ private final class MockQueueSink: VoiceQueueSink {
     func moveToBottom(episode: String) -> VoiceResponse { .earcon(.success) }
     func clear() -> VoiceResponse { .earcon(.success) }
     func removeByPodcast(podcast: String) -> VoiceResponse { .earcon(.success) }
-    func sort(sortOrder: SortOrder) -> VoiceResponse { .earcon(.success) }
+    func sort(sortOrder: podcasts.SortOrder) -> VoiceResponse { .earcon(.success) }
     func queryContents() -> VoiceResponse { .spoken("5 episodes in queue") }
     func queryNext() -> VoiceResponse { .spoken("Next: The Daily") }
     func queryLength() -> VoiceResponse { .spoken("2 hours remaining") }

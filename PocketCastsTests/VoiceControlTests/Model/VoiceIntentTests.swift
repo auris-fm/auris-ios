@@ -117,8 +117,8 @@ final class VoiceIntentTests: XCTestCase {
     }
 
     func test_sortOrder_rawValues() {
-        XCTAssertEqual(SortOrder.newestFirst.rawValue, "newestFirst")
-        XCTAssertEqual(SortOrder.oldestFirst.rawValue, "oldestFirst")
+        XCTAssertEqual(podcasts.SortOrder.newestFirst.rawValue, "newestFirst")
+        XCTAssertEqual(podcasts.SortOrder.oldestFirst.rawValue, "oldestFirst")
     }
 
     func test_cloudTier_rawValues() {

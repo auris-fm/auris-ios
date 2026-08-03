@@ -31,7 +31,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         for intent in intents {
             let response = await executor.execute(intent)
             switch response {
-            case .silent, .earcon, .spoken: break // all valid
+            case .silent, .earcon, .spoken, .combined: break // all valid
             }
         }
     }
@@ -42,7 +42,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         for intent in intents {
             let response = await executor.execute(intent)
             switch response {
-            case .silent, .earcon, .spoken: break
+            case .silent, .earcon, .spoken, .combined: break
             }
         }
     }
@@ -202,7 +202,8 @@ private final class NoOpEffectsSink: VoiceEffectsSink {
     func adjustSpeed(delta: Double) -> VoiceResponse { .silent }
     func setTrimMode(_ mode: TrimMode) -> VoiceResponse { .silent }
     func setVolumeBoost(enabled: Bool) -> VoiceResponse { .silent }
-    func queryEffects() -> VoiceResponse { .silent }
+    // Matches production EffectsManagerSink: queries return spoken feedback.
+    func queryEffects() -> VoiceResponse { .spoken("Speed 1x, trim off, boost off") }
 }
 
 private final class NoOpVolumeSink: VoiceVolumeSink {
@@ -251,7 +252,7 @@ private final class NoOpQueueSink: VoiceQueueSink {
     func moveToBottom(episode: String) -> VoiceResponse { .silent }
     func clear() -> VoiceResponse { .silent }
     func removeByPodcast(podcast: String) -> VoiceResponse { .silent }
-    func sort(sortOrder: SortOrder) -> VoiceResponse { .silent }
+    func sort(sortOrder: podcasts.SortOrder) -> VoiceResponse { .silent }
     func queryContents() -> VoiceResponse { .silent }
     func queryNext() -> VoiceResponse { .silent }
     func queryLength() -> VoiceResponse { .silent }

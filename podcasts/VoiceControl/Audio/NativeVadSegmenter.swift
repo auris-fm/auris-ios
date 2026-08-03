@@ -6,10 +6,13 @@ class NativeVadSegmenter {
     private let threshold: Float
     private let silenceTimeoutMs: Int
     private let minSpeechFrames: Int
+    private let maxUtteranceSamples: Int?  // nil = unlimited
     private var buffer: [Float] = []
     private var speechActive = false
     private var silenceStart: Date?
     private var speechFrameCount = 0
+    private var frameCount: UInt = 0
+    private var energyLogged = false
 
     var onUtterance: (([Float]) -> Void)?
 
@@ -17,14 +20,31 @@ class NativeVadSegmenter {
     ///   - threshold: RMS energy threshold above which audio is considered speech
     ///   - silenceTimeoutMs: milliseconds of silence before ending an utterance
     ///   - minSpeechFrames: minimum consecutive speech frames before triggering
-    init(threshold: Float = 0.01, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5) {
+    ///   - maxUtteranceMs: maximum utterance duration in ms (nil = unlimited). Forces end when buffer exceeds this.
+    init(threshold: Float = 0.002, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
         self.threshold = threshold
         self.silenceTimeoutMs = silenceTimeoutMs
         self.minSpeechFrames = minSpeechFrames
+        self.maxUtteranceSamples = maxUtteranceMs.map { $0 * 16000 / 1000 }
     }
 
     func process(_ samples: [Float]) {
         let energy = rms(samples)
+        frameCount += 1
+
+        // Periodic energy logging every ~100 frames (~1.6s at 1024-sample buffers)
+        if frameCount % 100 == 1 {
+            let msg = "[VoiceControl/VAD] Frame #\(frameCount) RMS=\(String(format: "%.6f", energy)) threshold=\(String(format: "%.4f", threshold)) speechActive=\(speechActive)"
+            FileLog.shared.addMessage(msg)
+        }
+        // Log first frame to confirm VAD is receiving samples
+        if !energyLogged {
+            energyLogged = true
+            let msg = "[VoiceControl/VAD] First frame RMS=\(String(format: "%.6f", energy)) (threshold=\(String(format: "%.4f", threshold)))"
+            FileLog.shared.addMessage(msg)
+            FileLog.shared.forceFlush()
+        }
+
         if energy >= threshold {
             buffer.append(contentsOf: samples)
             speechFrameCount += 1
@@ -33,6 +53,11 @@ class NativeVadSegmenter {
                 FileLog.shared.addMessage("[VoiceControl/VAD] Speech started")
             }
             silenceStart = nil
+            // Max duration: force utterance end when buffer exceeds limit
+            if let maxSamples = maxUtteranceSamples, speechActive, buffer.count >= maxSamples {
+                emitUtterance()
+                return
+            }
         } else if speechActive {
             if silenceStart == nil {
                 silenceStart = Date()
@@ -40,17 +65,21 @@ class NativeVadSegmenter {
             buffer.append(contentsOf: samples)
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
-                let utterance = buffer
-                let durationMs = Int(Float(utterance.count) / 16.0)
-                FileLog.shared.addMessage("[VoiceControl/VAD] Utterance ended (\(durationMs)ms, \(utterance.count) samples)")
-                buffer.removeAll()
-                speechActive = false
-                silenceStart = nil
-                speechFrameCount = 0
-                onUtterance?(utterance)
+                emitUtterance()
             }
         }
         // Non-speech with no active utterance: drop samples
+    }
+
+    private func emitUtterance() {
+        let utterance = buffer
+        let durationMs = Int(Float(utterance.count) / 16.0)
+        FileLog.shared.addMessage("[VoiceControl/VAD] Utterance ended (\(durationMs)ms, \(utterance.count) samples)")
+        buffer.removeAll()
+        speechActive = false
+        silenceStart = nil
+        speechFrameCount = 0
+        onUtterance?(utterance)
     }
 
     func reset() {
@@ -64,8 +93,8 @@ class NativeVadSegmenter {
     /// Uses vDSP for vectorized computation.
     private func rms(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
-        var sum: Float = 0
-        vDSP_measqv(samples, 1, &sum, vDSP_Length(samples.count))
-        return sqrt(sum / Float(samples.count))
+        var meanSq: Float = 0
+        vDSP_measqv(samples, 1, &meanSq, vDSP_Length(samples.count))
+        return sqrt(meanSq)
     }
 }

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct VoiceControlSettingsView: View {
     @ObservedObject var service: VoiceControlService
-    @State private var voiceControlEnabled = false
 
     var body: some View {
         List {
@@ -55,9 +54,6 @@ struct VoiceControlSettingsView: View {
                 }
             }
 
-            Section {
-                Toggle("Voice Control", isOn: $voiceControlEnabled)
-            }
         }
         .navigationTitle("Voice Control")
     }

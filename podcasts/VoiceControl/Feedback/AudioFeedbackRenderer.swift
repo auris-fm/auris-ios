@@ -3,10 +3,10 @@ import Foundation
 class AudioFeedbackRenderer {
     private let earconPlayer: EarconPlayer
     private let ttsEngine: TtsEngineProtocol
-    private let ducker: AudioSessionDucker
+    private let ducker: any AudioSessionDucking
     private var renderTask: Task<Void, Never>?
 
-    init(earconPlayer: EarconPlayer, ttsEngine: TtsEngineProtocol, ducker: AudioSessionDucker = AudioSessionDucker()) {
+    init(earconPlayer: EarconPlayer, ttsEngine: TtsEngineProtocol, ducker: any AudioSessionDucking = AudioSessionDucker()) {
         self.earconPlayer = earconPlayer
         self.ttsEngine = ttsEngine
         self.ducker = ducker
@@ -24,6 +24,7 @@ class AudioFeedbackRenderer {
             case .silent:
                 break
             case .earcon(let id):
+                guard earconPlayer.hasEarcon(id) else { break }
                 ducker.duck()
                 earconPlayer.play(id)
                 // Earcon playback is synchronous and short; unduck after a brief delay
@@ -51,7 +52,7 @@ class AudioFeedbackRenderer {
     func release() {
         renderTask?.cancel()
         ttsEngine.cancel()
-        ttsEngine.release()
+        ttsEngine.releaseEngine()
         earconPlayer.release()
     }
 
