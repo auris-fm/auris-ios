@@ -5,10 +5,12 @@ import OSLog
 import PocketCastsUtils
 
 class VoiceControlService: ObservableObject {
+    static weak var shared: VoiceControlService?
+
     @Published private(set) var isListening = false
     @Published private(set) var listeningMode: ListeningMode = .wakeWord
     @Published private(set) var gateState: GateState = .off(reason: .noContext)
-    @Published private(set) var gatePosture: GatePosture = GatePosture(
+    @Published private(set) var gatePosture = GatePosture(
         allowed: false, listeningMode: nil,
         setup: .allAllowed, conflicts: .noneBlocked,
         context: .none, micExposure: .noMic,
@@ -25,6 +27,10 @@ class VoiceControlService: ObservableObject {
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
+    private let analytics: VoiceAnalytics
+
+    private var latestStageTiming: PipelineStageTiming?
+    private var latestRouterMetrics: RouterClassificationMetrics?
 
     private let log = Logger(subsystem: "com.pocketcasts", category: "VoiceControl")
 
@@ -53,7 +59,8 @@ class VoiceControlService: ObservableObject {
         executor: VoiceIntentExecutor,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
-        gracePeriodSignal: GracePeriodSignal
+        gracePeriodSignal: GracePeriodSignal,
+        analytics: VoiceAnalytics
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -65,6 +72,7 @@ class VoiceControlService: ObservableObject {
         self.dialogManager = dialogManager
         self.audioRenderer = audioRenderer
         self.gracePeriodSignal = gracePeriodSignal
+        self.analytics = analytics
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -136,6 +144,31 @@ class VoiceControlService: ObservableObject {
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
         }
+        asrEngine.onWakeOnly = { [weak self] in
+            self?.audioRenderer.playEarcon(.error)
+        }
+
+        asrEngine.onStageTiming = { [weak self] timing in
+            self?.latestStageTiming = timing
+        }
+        intentRouter.onMetrics = { [weak self] metrics in
+            self?.latestRouterMetrics = metrics
+        }
+
+        // Preload the intent router model so it's ready when the first transcript arrives
+        Task {
+            let result = await intentRouter.ensureReady()
+            switch result {
+            case .success:
+                FileLog.shared.addMessage("[VoiceControl] Intent router ready")
+                conditionMonitor.updateModelsReady(.allowed)
+            case .failure(let error):
+                FileLog.shared.addMessage("[VoiceControl] Intent router FAILED: \(error)")
+                // A router that cannot engage must block capture rather than
+                // silently returning no intent for every transcript.
+                conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
+            }
+        }
     }
 
     private func start(in mode: ListeningMode) {
@@ -168,6 +201,7 @@ class VoiceControlService: ObservableObject {
     func handleTranscript(_ transcript: String) async {
         let dialogContext = dialogManager.pendingDialog
         let result = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext)
+        recordPipelineLatency(transcript: transcript)
 
         switch result {
         case .intent(let intent):
@@ -185,6 +219,7 @@ class VoiceControlService: ObservableObject {
 
             FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
             let response = await executor.execute(intent)
+            gracePeriodSignal.onCommandRecognized()
             lastIntentType = intentType
             lastExecutionTime = Date()
             audioRenderer.render(response)
@@ -196,6 +231,7 @@ class VoiceControlService: ObservableObject {
 
             if let intent = dialogResult.intent {
                 let response = await executor.execute(intent)
+                gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
                 audioRenderer.render(response)
@@ -213,6 +249,31 @@ class VoiceControlService: ObservableObject {
                 consecutiveNulls = 0
             }
         }
+    }
+
+    /// Emits the pipeline latency event from the latest ASR-stage timing and
+    /// router metrics. No transcript text is included.
+    private func recordPipelineLatency(transcript: String) {
+        guard let stageTiming = latestStageTiming, let routerMetrics = latestRouterMetrics else { return }
+        let metric = PerformanceMetrics(
+            totalTranscriptToIntentMs: routerMetrics.totalMs,
+            prefillMs: 0,
+            timeToFirstTokenMs: 0,
+            decodeMs: 0,
+            parseResolveMs: 0,
+            backend: stageTiming.backend,
+            isFallback: false,
+            modelRelease: routerMetrics.modelRelease ?? "unknown",
+            inputTokens: 0,
+            outputTokens: 0,
+            pipeline: stageTiming,
+            classificationOutcome: routerMetrics.outcome,
+            routerModelRelease: routerMetrics.modelRelease,
+            transcriptTokenCount: transcript.utf8.count / 4
+        )
+        analytics.recordPipelineLatency(metric: metric)
+        latestStageTiming = nil
+        latestRouterMetrics = nil
     }
 
     // MARK: - Lifecycle logging

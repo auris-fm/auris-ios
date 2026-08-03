@@ -3,24 +3,27 @@ import XCTest
 
 final class WakeWordPipelineTests: XCTestCase {
 
-    func test_detector_initializesWithoutModels() {
+    func test_detector_missingModels_failsClosed() {
         let detector = WakeWordDetector(
             melModel: URL(fileURLWithPath: "/test/mel.onnx"),
             embedModel: URL(fileURLWithPath: "/test/embed.onnx"),
             classifierModel: URL(fileURLWithPath: "/test/auris.onnx"),
-            threshold: 0.5
+            threshold: 0.8
         )
-        // Detector should handle missing model gracefully
+        // Detector must report an error, never a zero-confidence notDetected.
         let result = detector.detect(samples: Array(repeating: 0, count: 32000), sampleRate: 16000)
-        XCTAssertFalse(result.detected)
-        XCTAssertLessThanOrEqual(result.confidence, 0.0)
+        if case .error(let code) = result {
+            XCTAssertFalse(code.isEmpty)
+        } else {
+            XCTFail("Expected .error for missing models, got \(result)")
+        }
         detector.release()
     }
 
-    func test_commandWindow_lifecycle() {
-        let manager = CommandWindowManager()
-        XCTAssertFalse(manager.isOpen)
-        manager.onWakeWordDetected()
-        XCTAssertTrue(manager.isOpen)
+    func test_gracePeriod_opensOnWakeWord() {
+        let signal = GracePeriodSignal()
+        XCTAssertFalse(signal.isActive)
+        signal.onWakeWordDetected()
+        XCTAssertTrue(signal.isActive)
     }
 }

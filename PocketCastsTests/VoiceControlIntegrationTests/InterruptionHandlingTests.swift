@@ -6,7 +6,7 @@ final class InterruptionHandlingTests: XCTestCase {
 
     func test_beganInterruption_stopsService() {
         let assembly = VoiceControlAssembly()
-        let service = assembly.buildVoiceControlService()
+        let service = assembly.buildVoiceControlService()!
 
         // Start the service (this sets up the gate subscription)
         service.startIfAllowed()
@@ -32,7 +32,7 @@ final class InterruptionHandlingTests: XCTestCase {
 
     func test_endedInterruptionWithShouldResume_reactivatesSession() {
         let assembly = VoiceControlAssembly()
-        let service = assembly.buildVoiceControlService()
+        let service = assembly.buildVoiceControlService()!
 
         service.startIfAllowed()
 

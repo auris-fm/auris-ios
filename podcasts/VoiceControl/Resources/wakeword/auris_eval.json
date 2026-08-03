@@ -1,13 +1,15 @@
 {
-  "aut": 0.0025020603174603175,
-  "fpph": 2.2285714285714286,
-  "recall": 0.9518666666666666,
-  "accuracy": 0.9753142857142857,
-  "threshold": 0.5,
-  "optimal_threshold": 0.923,
-  "optimal_recall": 0.9035,
-  "optimal_fpph": 0.343,
+  "deployment_threshold": 0.54,
+  "validation_recall": 0.8599,
+  "validation_fpph": 10.03,
   "n_positive": 15000,
   "n_negative": 21000,
-  "validation_hours": 11.67
+  "validation_hours": 11.67,
+  "asset_hashes": {
+    "melspectrogram.ort": "8d1bcfdfba974ceb2e02df0be9c84f9fb5d01f25d9cbadbe7c73c729cdc93455",
+    "embedding_model.ort": "df92e3a0b8b5af3c4f0b11bd9eeb3a5e946e620608070913e9323bb3bd7e99c5",
+    "auris.ort": "1742b28de080aeaa16b9541db664504ecc3d60db3053d605524f339703d628bf"
+  },
+  "provisional": true,
+  "provisional_note": "Provisional deployment_threshold (previously shipped balanced threshold 0.54) pending the recall-first selection required by wakeword-training.md. The current validation curve peaks at 86.4% recall, below the 95% deployment bar, so a spec-compliant threshold has not yet been produced."
 }

@@ -31,6 +31,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     lazy var whatsNew = WhatsNew()
 
+    private var voiceControlService: VoiceControlService?
+
     // MARK: - App Lifecycle
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
@@ -170,6 +172,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             }
         }
         PlaybackManager.shared.updateIdleTimer()
+
+        setupVoiceControlIfNeeded()
+        FileLog.shared.forceFlush()
+    }
+
+    private func setupVoiceControlIfNeeded() {
+        if voiceControlService == nil {
+            if let service = VoiceControlAssembly().buildVoiceControlService() {
+                voiceControlService = service
+                VoiceControlService.shared = service
+            } else {
+                FileLog.shared.addMessage("[VoiceControl] Assembly could not build service (wake-word manifest/models not ready)")
+            }
+        }
+        voiceControlService?.startIfAllowed()
     }
 
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {

@@ -3,7 +3,10 @@ import PocketCastsDataModel
 import PocketCastsUtils
 
 class VoiceControlAssembly {
-    func buildVoiceControlService() -> VoiceControlService {
+    /// Returns nil when the wake-word deployment manifest is missing or
+    /// mismatched (fail closed): voice control must not start without a valid
+    /// deployment threshold and verified assets.
+    func buildVoiceControlService() -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
@@ -16,24 +19,35 @@ class VoiceControlAssembly {
             hasNPU: hasNeuralEngine(),
             senseVoiceShipped: false
         )
-        let wakeWordDetector = WakeWordDetector(
-            melModel: bundleURL("melspectrogram.onnx"),
-            embedModel: bundleURL("embedding_model.onnx"),
-            classifierModel: bundleURL("auris.onnx"),
-            // Balanced threshold (elbow of recall-vs-FPPH curve): 86.0% recall, 10.0 FPPH.
-            // From auris_medium eval — update when retraining.
-            threshold: 0.54
-        )
 
-        let commandWindow = CommandWindowManager()
+        // Deployment threshold comes from the eval manifest (recognition-pipeline.md
+        // "Threshold"). A missing manifest or hash mismatch disables voice control.
+        let wakewordDir = bundleURL("melspectrogram.ort").deletingLastPathComponent()
+        let manifestURL = wakewordDir.appendingPathComponent("auris_eval.json")
+        let thresholdResult = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: wakewordDir)
+        guard case .success(let threshold) = thresholdResult else {
+            if case .failure(let error) = thresholdResult {
+                FileLog.shared.addMessage("[VoiceControl/Assembly] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
+            }
+            return nil
+        }
+
+        let wakeWordDetector = WakeWordDetector(
+            melModel: bundleURL("melspectrogram.ort"),
+            embedModel: bundleURL("embedding_model.ort"),
+            classifierModel: bundleURL("auris.ort"),
+            threshold: threshold
+        )
 
         let asrEngine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
-            segmenter: NativeVadSegmenter(),
+            segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: asrBackend,
             signalFilter: SignalFilter(),
             wakeWordDetector: wakeWordDetector,
-            commandWindow: commandWindow
+            gracePeriodSignal: gracePeriodSignal,
+            clock: SystemMonotonicClock(),
+            wakeThreshold: threshold
         )
 
         let intentRouter = FunctionGemmaIntentRouter()
@@ -76,12 +90,25 @@ class VoiceControlAssembly {
             executor: executor,
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
-            gracePeriodSignal: gracePeriodSignal
+            gracePeriodSignal: gracePeriodSignal,
+            analytics: voiceAnalytics
         )
     }
 
     private func bundleURL(_ filename: String) -> URL {
-        Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "wakeword")!
+        // Run Script "Copy Wakeword Models" copies models into bundle/wakeword/
+        guard let url = Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "wakeword") else {
+            // Log bundle path for diagnostics — the wakeword/ dir is injected post-build.
+            let bundlePath = Bundle.main.bundlePath
+            let wakewordDir = (bundlePath as NSString).appendingPathComponent("wakeword")
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: wakewordDir) {
+                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) in \(wakewordDir); contents: \(contents)")
+            } else {
+                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) — wakeword dir not found at \(wakewordDir)")
+            }
+            fatalError("Missing wakeword model in bundle: wakeword/\(filename)")
+        }
+        return url
     }
 
     private func hasNeuralEngine() -> Bool {
@@ -104,12 +131,27 @@ class VoiceControlAssembly {
 
 // MARK: - Analytics Service Bridge
 
+/// Bridges the VoiceControl analytics protocol to the app's real `Analytics`
+/// pipeline. Event names map to `AnalyticsEvent` cases (camelCase raw values are
+/// emitted as snake_case via `eventName`).
 private class DefaultAnalyticsService: AnalyticsService {
     func track(_ event: String, properties: [String: Any]) {
         FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(properties)")
-        // TODO: Wire to Analytics shared instance when a public API for raw event
-        // names is exposed. Currently Analytics.track() requires an AnalyticsEvent
-        // enum case, but voice events use dynamic string names.
+        let analyticsEvent: AnalyticsEvent?
+        switch event {
+        case "voice_command_executed": analyticsEvent = .voiceCommandExecuted
+        case "voice_router_latency": analyticsEvent = .voiceRouterLatency
+        case "voice_recognition_latency": analyticsEvent = .voiceRecognitionLatency
+        default: analyticsEvent = nil
+        }
+        guard let analyticsEvent else { return }
+        let sendableProperties: [String: any Sendable] = properties.mapValues { value in
+            if let string = value as? String { return string }
+            if let double = value as? Double { return double }
+            if let int = value as? Int { return int }
+            if let bool = value as? Bool { return bool }
+            return String(describing: value)
+        }
+        Analytics.track(analyticsEvent, properties: sendableProperties)
     }
 }
-
