@@ -72,7 +72,7 @@ final class ToolCallMapperTests: XCTestCase {
     }
 
     func test_map_effectsSetTrimMode_returnsSetTrimModeIntent() {
-        let call = ToolCall(name: "effects", arguments: ["action": "set_trim_mode", "trim_mode": "medium"])
+        let call = ToolCall(name: "effects", arguments: ["action": "set_trim_mode", "mode": "medium"])
         let intent = ToolCallMapper().map(call)
         guard let effectsIntent = intent as? EffectsIntent else { XCTFail(); return }
         XCTAssertEqual(effectsIntent, .setTrimMode(.medium))

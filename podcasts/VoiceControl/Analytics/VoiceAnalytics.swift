@@ -28,6 +28,50 @@ class VoiceAnalytics {
         ])
     }
 
+    /// Emits the pipeline-level `voice_recognition_latency` event defined by
+    /// recognition-pipeline.md "Production Recognition Latency Metrics".
+    /// No audio, transcript text, raw confidence scores, or device identifiers
+    /// are ever included.
+    func recordPipelineLatency(metric: PerformanceMetrics) {
+        var properties: [String: Any] = [
+            "total_transcript_to_intent_ms": metric.totalTranscriptToIntentMs,
+            "backend": metric.backend,
+            "fallback": metric.isFallback,
+            "model_release": metric.modelRelease,
+        ]
+        if let pipeline = metric.pipeline {
+            properties["segment_to_wake_ms"] = pipeline.segmentToWakeMs
+            properties["wake_to_asr_start_ms"] = pipeline.wakeToAsrStartMs
+            properties["asr_ms"] = pipeline.asrMs
+            if let wakeToAsr = pipeline.wakeToAsrResultMs {
+                properties["wake_to_asr_result_ms"] = wakeToAsr
+            }
+            properties["segment_to_asr_result_ms"] = pipeline.segmentToAsrResultMs
+            properties["wake_result"] = pipeline.wakeResult
+            if let margin = pipeline.confidenceMargin {
+                properties["confidence_margin"] = margin
+            }
+            properties["listening_mode"] = pipeline.listeningMode
+            properties["asr_backend"] = pipeline.backend
+        }
+        if let outcome = metric.classificationOutcome {
+            properties["classification_outcome"] = outcome
+        }
+        if let release = metric.routerModelRelease {
+            properties["router_model_release"] = release
+        }
+        if let tokens = metric.transcriptTokenCount {
+            properties["transcript_token_count"] = tokens
+        }
+        if let language = metric.backendLanguage {
+            properties["backend_language"] = language
+        }
+        if let code = metric.errorCode {
+            properties["error_code"] = code
+        }
+        analytics.track("voice_recognition_latency", properties: properties)
+    }
+
     private func toolName(from intent: any VoiceIntent) -> String {
         switch intent {
         case is PlaybackIntent: return "playback"
@@ -57,6 +101,7 @@ class VoiceAnalytics {
         case .silent: return "silent"
         case .earcon: return "earcon"
         case .spoken: return "spoken"
+        case .combined: return "combined"
         }
     }
 }
