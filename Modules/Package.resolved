@@ -1,5 +1,5 @@
 {
-  "originHash" : "780fcef279301a187dfc40b9533e4be314e8162023b14cc04088efc94290715f",
+  "originHash" : "989be0e9999af4832e8b39908e60b78b217e6db3dac048346387876e4656db30",
   "pins" : [
     {
       "identity" : "abseil-cpp-binary",
@@ -200,6 +200,14 @@
       }
     },
     {
+      "identity" : "litert-lm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/google-ai-edge/LiteRT-LM",
+      "state" : {
+        "revision" : "a0afb5a56acd106b23a2b2385b8469834dc268c0"
+      }
+    },
+    {
       "identity" : "lottie-ios",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/airbnb/lottie-ios.git",
@@ -267,8 +275,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-syntax.git",
       "state" : {
-        "revision" : "2bc86522d115234d1f588efe2bcb4ce4be8f8b82",
-        "version" : "510.0.3"
+        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
+        "version" : "603.0.2"
       }
     },
     {
@@ -323,6 +331,15 @@
       "state" : {
         "revision" : "4699794b08bb79a4d77785edaba6ea739e298e4b",
         "version" : "2.3.0"
+      }
+    },
+    {
+      "identity" : "whisper.spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ggml-org/whisper.spm",
+      "state" : {
+        "branch" : "master",
+        "revision" : "a2085436c2eb796af90956b62bd64731f5e5b823"
       }
     },
     {

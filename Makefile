@@ -9,7 +9,7 @@ SIMULATOR_NAME = $(shell xcrun simctl list devices available \
 	| grep "iPhone" \
 	| tail -1 | sed 's/^[[:space:]]*//' | sed 's/ *(.*) *$$//')
 
-.PHONY: help build clean test lint lint_lenient format install_dependencies
+.PHONY: help build clean test lint lint_lenient format install_dependencies build_mac launch_mac
 
 define run_in_buildtools
 	@pushd BuildTools && \
@@ -72,6 +72,24 @@ test_staging: ## Build and run Unit Tests using the StagingDebug configuration
 	    -scheme "Pocket Casts Staging" \
         -only-testing:$(ONLY_TESTING) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
+
+build_mac: ## Builds for iOS Simulator (use for log stream on Mac)
+	xcodebuild -project podcasts.xcodeproj \
+	       -scheme pocketcasts \
+	       -configuration Debug \
+	       -destination 'generic/platform=iOS Simulator' \
+	       ARCHS=arm64 \
+	       build
+
+launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
+	killall podcasts 2>/dev/null || true; \
+	APP="$$(find ~/Library/Developer/Xcode/DerivedData -name podcasts.app -path '*/Debug-iphonesimulator/*' -maxdepth 5 2>/dev/null | head -1)"; \
+	if [ -n "$$APP" ] && [ -d podcasts/VoiceControl/Resources/earcons ]; then \
+		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
+	fi; \
+	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \
+	xcrun simctl install booted "$$APP" && \
+	xcrun simctl launch booted fm.auris
 
 format: ## Lint and autocorrect linter errors
 	$(call run_in_buildtools,$(SWIFTLINT_FROM_BUILDTOOLS) --autocorrect)

@@ -426,6 +426,25 @@ struct DeveloperMenu: View {
             } header: {
                 Text("Bundle ID")
             }
+
+            Section {
+                if let service = VoiceControlService.shared {
+                    NavigationLink(destination: VoiceControlSettingsView(service: service)) {
+                        Text("Voice Control")
+                    }
+                } else {
+                    HStack {
+                        Text("Voice Control")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("Feature flag disabled")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } header: {
+                Text("Voice Control")
+            }
         }
         .miniPlayerSafeAreaInset()
     }
