@@ -51,6 +51,10 @@ final class FingerprintTimingManager: NSObject {
         let isStreaming: Bool
         let duration: Double
         let matcher: CheckpointMatcher
+        /// Cloud-alignment reference (Go-scheme fingerprints from the Auris
+        /// cloud), matched with CloudReferenceMatcher. Independent of the
+        /// transcript-sync (Rust engine) reference above.
+        let cloudMatcher: CloudReferenceMatcher?
         /// Raw bytes of the reference fingerprint JSON, used to validate the
         /// persistent mapping cache via SHA-256.
         let referenceData: Data
@@ -124,6 +128,12 @@ final class FingerprintTimingManager: NSObject {
     /// Source of `GenerationContext.generation`. Only touched on `queue`, where
     /// every context is built.
     private var lastGeneration = 0
+    /// Cloud-alignment reference matcher for the current episode, fetched from
+    /// the Auris cloud independently of the transcript-sync reference.
+    private var cloudMatcher: CloudReferenceMatcher?
+    /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
+    /// streamer; its windows are matched against [cloudMatcher].
+    private var cloudFingerprinter: CloudFingerprinter?
     private var cancellationFlag = CancellationFlag()
     private var fetchTask: Task<Void, Never>?
 
@@ -883,6 +893,24 @@ final class FingerprintTimingManager: NSObject {
 
     // MARK: - Track Preparation
 
+    /// Fetches the cloud-alignment reference (Go-scheme fingerprints) for the
+    /// episode from the Auris cloud, independent of the transcript-sync
+    /// reference. Stores nil when unconfigured or unavailable.
+    private func fetchCloudReference(uuid: String) async {
+        let baseUrl = CloudConfig.shared.baseUrl
+        guard !baseUrl.isEmpty else {
+            cloudMatcher = nil
+            return
+        }
+        let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid)
+        cloudMatcher = matcher
+        if let matcher {
+            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count) checkpoints) for \(uuid)")
+        } else {
+            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference unavailable for \(uuid)")
+        }
+    }
+
     private func prepareForEpisode(_ episode: BaseEpisode?) {
         updateState(.idle)
 
@@ -901,7 +929,15 @@ final class FingerprintTimingManager: NSObject {
         let uuid = episode.uuid
 
         if let loaded = loadReference(for: episode) {
-            configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
+            let flag = cancellationFlag
+            Task { [weak self] in
+                guard let self, !flag.isCancelled else { return }
+                await self.fetchCloudReference(uuid: uuid)
+                self.queue.async { [weak self] in
+                    guard let self, !flag.isCancelled else { return }
+                    self.configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
+                }
+            }
             return
         }
 
@@ -917,6 +953,8 @@ final class FingerprintTimingManager: NSObject {
         let flag = cancellationFlag
         fetchTask = Task { [weak self] in
             guard !flag.isCancelled else { return }
+
+            await self?.fetchCloudReference(uuid: uuid)
 
             let data = await FingerprintReferenceRetriever.shared.fetchReferenceData(
                 podcastUuid: episode.parentIdentifier(),
@@ -985,6 +1023,7 @@ final class FingerprintTimingManager: NSObject {
             isStreaming: isStreaming,
             duration: duration,
             matcher: matcher,
+            cloudMatcher: cloudMatcher,
             referenceData: referenceData,
             referenceFilePath: refPath,
             referenceDuration: reference.totalDuration,
@@ -1241,6 +1280,7 @@ final class FingerprintTimingManager: NSObject {
             if !windows.isEmpty {
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
+            feedCloudFingerprinter(interleaved, channels: Int(channels), sampleRate: Int(format.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1248,6 +1288,7 @@ final class FingerprintTimingManager: NSObject {
         if !tail.isEmpty {
             dispatchProcessMatches(windows: tail, startOffset: startSeconds, context: ctx)
         }
+        flushCloudFingerprinter(startOffset: startSeconds, context: ctx)
     }
 
     /// Bounded, one-shot variant of `streamFingerprint` used by the chapter
@@ -1461,6 +1502,7 @@ final class FingerprintTimingManager: NSObject {
                 windowsEmitted += windows.count
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
+            feedCloudFingerprinter(interleaved, channels: Int(fmt.channelCount), sampleRate: Int(fmt.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1471,6 +1513,7 @@ final class FingerprintTimingManager: NSObject {
                 dispatchProcessMatches(windows: tail, startOffset: startSeconds, context: ctx)
             }
         }
+        flushCloudFingerprinter(startOffset: startSeconds, context: ctx)
 
         let readSeconds = (format.map { Double(totalFramesRead) / $0.sampleRate }) ?? 0
         FileLog.shared.addMessage(
@@ -1708,6 +1751,106 @@ final class FingerprintTimingManager: NSObject {
         )
         #endif
         return inserted
+    }
+
+    // MARK: - Cloud Alignment
+
+    /// Feeds decoded PCM into the per-stream CloudFingerprinter and dispatches
+    /// any newly-emitted windows for cloud matching. No-op when the context has
+    /// no cloud reference (transcript-sync-only episodes).
+    private func feedCloudFingerprinter(
+        _ samples: [Float],
+        channels: Int,
+        sampleRate: Int,
+        startOffset: Double,
+        context ctx: GenerationContext
+    ) {
+        guard ctx.cloudMatcher != nil else { return }
+        let fp: CloudFingerprinter
+        if let existing = cloudFingerprinter {
+            fp = existing
+        } else {
+            let created = CloudFingerprinter()
+            cloudFingerprinter = created
+            fp = created
+        }
+        fp.pushSamples(samples, channels: channels, sampleRate: sampleRate)
+        let emitted = fp.drainWindows()
+        if !emitted.isEmpty {
+            dispatchCloudMatches(windows: emitted, startOffset: startOffset, context: ctx)
+        }
+    }
+
+    /// Finishes the per-stream CloudFingerprinter at end-of-stream, matching
+    /// any windows whose lookahead only became available at EOF.
+    private func flushCloudFingerprinter(startOffset: Double, context ctx: GenerationContext) {
+        guard let fp = cloudFingerprinter else { return }
+        cloudFingerprinter = nil
+        let tail = fp.finish()
+        if !tail.isEmpty {
+            dispatchCloudMatches(windows: tail, startOffset: startOffset, context: ctx)
+        }
+    }
+
+    private func dispatchCloudMatches(
+        windows: [CloudFingerprinter.Window],
+        startOffset: Double,
+        context ctx: GenerationContext
+    ) {
+        queue.async { [weak self] in
+            guard let self, self.context?.episodeUuid == ctx.episodeUuid else { return }
+            self.processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
+        }
+    }
+
+    /// Matches cloud-fingerprinter windows against the cloud reference and
+    /// routes candidates through the same drift filter as the transcript path.
+    /// Mirrors `processMatches` but uses `CloudReferenceMatcher` and the
+    /// Go-scheme window hashes (identical scheme to the server's reference).
+    private func processCloudMatches(
+        windows: [CloudFingerprinter.Window],
+        startOffset: Double,
+        context ctx: GenerationContext
+    ) {
+        guard let cloudMatcher = ctx.cloudMatcher else { return }
+
+        for window in windows {
+            let matches = cloudMatcher.findTopMatches(queryHashes: window.hashes, maxResults: 2)
+            guard let best = matches.first else { continue }
+            guard best.score >= FingerprintConstants.matchScoreThreshold else { continue }
+
+            let absolutePlaybackTime = startOffset + Double(window.timestampSec)
+            let candidate = TimeMappingEntry(
+                playbackTime: absolutePlaybackTime,
+                referenceTime: Double(best.timestampSeconds),
+                score: best.score
+            )
+
+            if best.score < FingerprintConstants.driftAnchorScoreThreshold {
+                recordRejection(candidate, reason: "cloud low score \(String(format: "%.2f", best.score))")
+                continue
+            }
+            let runnerUpScore = matches.dropFirst().first?.score ?? 0
+            let dominance = best.score - runnerUpScore
+            if dominance < FingerprintConstants.driftScoreDominanceGap {
+                recordRejection(candidate, reason: "cloud ambiguous top-1 vs top-2")
+                continue
+            }
+
+            _ = consider(candidate: candidate)
+        }
+
+        let coverage = playbackToReference.count
+        if coverage >= FingerprintConstants.minimumCoverageForActive {
+            updateState(.active(coverage: coverage))
+            if !hasReachedActive {
+                hasReachedActive = true
+                track(.syncedTranscriptsPreparationCompleted, properties: [
+                    "duration_ms": preparationDurationMs,
+                    "is_streaming": context?.isStreaming ?? false
+                ])
+            }
+        }
     }
 
     // MARK: - Drift Filter
