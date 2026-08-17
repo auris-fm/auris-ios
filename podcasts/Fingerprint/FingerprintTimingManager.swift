@@ -297,6 +297,7 @@ final class FingerprintTimingManager: NSObject {
             isStreaming: ctx.isStreaming,
             duration: ctx.duration,
             matcher: ctx.matcher,
+            cloudMatcher: ctx.cloudMatcher,
             referenceData: ctx.referenceData,
             referenceFilePath: ctx.referenceFilePath,
             referenceDuration: ctx.referenceDuration,
