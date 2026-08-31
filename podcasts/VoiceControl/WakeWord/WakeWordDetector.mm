@@ -12,6 +12,13 @@ static constexpr int kEmbeddingDim       = 96;
 static constexpr int kMaxEmbeddings      = 16;    // classifier context window
 static constexpr int kEmbedStride        = 8;     // mel frame stride for embedding windows
 static constexpr int kMelWindowFrames    = 76;    // mel frames per embedding window
+static constexpr int kVirtualContextSamples = 32000; // 2s before VAD onset
+static constexpr int kOnsetCutoffSamples = 32000;    // last eligible endpoint after onset
+static constexpr int kMelFrameStrideSamples = 160;
+static constexpr int kEmbeddingStrideSamples =
+    kEmbedStride * kMelFrameStrideSamples;
+static constexpr int kEmbeddingEndpointOffsetSamples =
+    kMelWindowFrames * kMelFrameStrideSamples;
 static constexpr float kMelGain          = 10.0f; // mel = data / gain + 2 (Android transform)
 static constexpr float kMelBias          = 2.0f;
 
@@ -258,10 +265,9 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
         // wake-only segments. Classifier-level padding is forbidden by the
         // recognition-pipeline detection-window policy; the virtual samples
         // exist only inside the detector (never captured, logged, or passed on).
-        const int virtualContextSamples = 2 * kSampleRateHz;
         std::vector<float> padded;
-        padded.reserve(virtualContextSamples + sampleCount);
-        padded.insert(padded.end(), virtualContextSamples, 0.0f);
+        padded.reserve(kVirtualContextSamples + sampleCount);
+        padded.insert(padded.end(), kVirtualContextSamples, 0.0f);
         padded.insert(padded.end(), samples, samples + sampleCount);
 
         Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -347,15 +353,26 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
             embeddings.insert(embeddings.end(), embData, embData + embElemCount);
         }
 
-        // ---- Stage 3: every valid 16-embedding window at stride 1, max score ----
-        int numWindows = nEmbeddings - kMaxEmbeddings + 1;
-        if (numWindows < 1) {
+        // ---- Stage 3: dense windows whose endpoints remain inside the onset gate ----
+        // For classifier window start w, the final embedding index is w+15 and
+        // its waveform endpoint relative to speech onset is:
+        //   76*160 + 8*160*(w+15) - virtualContext.
+        // With the frozen 2s context/cutoff this admits starts 0...25 (26 windows).
+        int totalWindows = nEmbeddings - kMaxEmbeddings + 1;
+        if (totalWindows < 1) {
             // The virtual 2s context must yield >= 16 embeddings; anything less
             // is a pipeline failure, never a padded "detection".
             g_lastError = "detect_segment: fewer than 16 embeddings after virtual context";
             NSLog(@"[WakeWord] detect_segment: %d embeddings, need %d", nEmbeddings, kMaxEmbeddings);
             return 0.0f;
         }
+        int maxLastEmbeddingIndex =
+            (kVirtualContextSamples + kOnsetCutoffSamples -
+             kEmbeddingEndpointOffsetSamples) /
+            kEmbeddingStrideSamples;
+        int maxEligibleWindowStart = maxLastEmbeddingIndex - (kMaxEmbeddings - 1);
+        int numWindows = std::min(totalWindows, maxEligibleWindowStart + 1);
+        if (numWindows < 1) return 0.0f;
 
         int64_t clsInShape[] = {1, kMaxEmbeddings, kEmbeddingDim};
         float maxScore = 0.0f;
@@ -385,8 +402,8 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
             if (score > maxScore) maxScore = score;
         }
 
-        NSLog(@"[WakeWord] detect_segment score=%.4f nMel=%lld nEmb=%d nWin=%d samples=%d",
-              maxScore, nMelFrames, nEmbeddings, numWindows, sampleCount);
+        NSLog(@"[WakeWord] detect_segment score=%.4f nMel=%lld nEmb=%d nWin=%d/%d samples=%d",
+              maxScore, nMelFrames, nEmbeddings, numWindows, totalWindows, sampleCount);
 
         return maxScore;
 

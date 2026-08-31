@@ -67,8 +67,13 @@ class NativeVadSegmenter {
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
                 emitUtterance()
             }
+        } else {
+            // Speech confirmation requires consecutive energetic frames. An
+            // interruption invalidates both the pending count and its audio.
+            buffer.removeAll(keepingCapacity: true)
+            speechFrameCount = 0
+            silenceStart = nil
         }
-        // Non-speech with no active utterance: drop samples
     }
 
     private func emitUtterance() {

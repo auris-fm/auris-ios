@@ -32,4 +32,27 @@ final class NativeAudioCaptureTests: XCTestCase {
         // But utterance won't fire until silence timeout, which won't happen synchronously
         XCTAssertFalse(utteranceReceived, "Utterance should not fire without silence timeout")
     }
+
+    func test_vadSegmenter_requiresConsecutiveSpeechFrames() {
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.5,
+            silenceTimeoutMs: -1,
+            minSpeechFrames: 2
+        )
+        var utterances: [[Float]] = []
+        segmenter.onUtterance = { utterances.append($0) }
+
+        segmenter.process([1, 1])
+        segmenter.process([0, 0])
+        segmenter.process([1, 1])
+        segmenter.process([0, 0])
+
+        XCTAssertTrue(utterances.isEmpty, "Interrupted energy bursts must not activate the VAD")
+
+        segmenter.process([1, 1])
+        segmenter.process([1, 1])
+        segmenter.process([0, 0])
+
+        XCTAssertEqual(utterances, [[1, 1, 1, 1, 0, 0]])
+    }
 }

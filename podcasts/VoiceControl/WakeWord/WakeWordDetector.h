@@ -28,9 +28,9 @@ float wakeword_detect(WakeWordPipeline* handle,
 /// Runs detection on a complete VAD segment per the recognition-pipeline
 /// detection-window policy: prepends 2 seconds of virtual zero waveform
 /// context, extracts mel frames and embeddings once over the combined input,
-/// and scores every valid 16-embedding classifier window at stride 1
-/// (~80 ms), including the final valid window. Returns the maximum score in
-/// [0, 1], or 0 with `wakeword_last_error()` set on failure.
+/// and scores 16-embedding classifier windows at stride 1 (~80 ms) whose
+/// endpoints fall no later than 2 seconds after VAD onset. Returns the maximum
+/// score in [0, 1], or 0 with `wakeword_last_error()` set on failure.
 float wakeword_detect_segment(WakeWordPipeline* handle,
                               const float* samples,
                               int sampleCount,

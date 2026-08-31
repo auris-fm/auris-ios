@@ -4,7 +4,6 @@ import PocketCastsUtils
 class NativeAudioCapture {
     let engine = AVAudioEngine()
     private let sampleRate = 16000.0
-    private var tickCount: UInt = 0
     private var energyLogged = false
     var onSamples: (([Float]) -> Void)?
 
@@ -65,11 +64,6 @@ class NativeAudioCapture {
                 return
             }
 
-            // Heartbeat every ~100 buffers to confirm audio capture is alive
-            let tick = self.tickCount; self.tickCount &+= 1
-            if tick % 100 == 0 {
-                FileLog.shared.addMessage("[VoiceControl/Capture] heartbeat #\(tick) — \(rawSamples.count) samples @ \(nativeRate)Hz")
-            }
             processingQueue.async { [weak self] in
                 guard let self else { return }
                 let converted: [Float]
