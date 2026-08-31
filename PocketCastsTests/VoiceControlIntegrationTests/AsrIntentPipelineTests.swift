@@ -20,11 +20,14 @@ final class AsrIntentPipelineTests: XCTestCase {
     }
 
     func test_asrEngine_initialization() {
+        let stubDetector = StubWakeWordDetector()
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: NativeVadSegmenter(),
             backend: WhisperCppBackend(modelPath: "/tmp/test"),
-            signalFilter: SignalFilter()
+            signalFilter: SignalFilter(),
+            wakeWordDetector: stubDetector,
+            gracePeriodSignal: GracePeriodSignal()
         )
         // Engine should not be running by default
         engine.stop() // Should not crash
@@ -44,4 +47,12 @@ final class AsrIntentPipelineTests: XCTestCase {
         let intent = ToolCallMapper().map(toolCall!)
         XCTAssertNotNil(intent)
     }
+}
+
+private final class StubWakeWordDetector: WakeWordDetectorProtocol {
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        .notDetected(confidence: 0)
+    }
+
+    func release() {}
 }

@@ -1,7 +1,6 @@
 import JLRoutes
 import UIKit
 import PocketCastsUtils
-
 class SceneDelegate: UIResponder, UISceneDelegate, UIWindowSceneDelegate {
     var window: UIWindow?
 

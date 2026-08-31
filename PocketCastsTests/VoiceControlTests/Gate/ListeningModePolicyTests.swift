@@ -8,62 +8,67 @@ final class ListeningModePolicyTests: XCTestCase {
     private func gateWith(
         context: GateContext,
         exposure: MicExposure,
-        attended: Bool = false,
-        gracePeriod: Bool = false,
-        playbackRecent: Bool = false
+        gracePeriod: Bool = false
     ) -> VoiceControlGate {
-        let attendedSignal = AttendedSignal()
         let gracePeriodSignal = GracePeriodSignal()
-        let playbackRecencySignal = PlaybackRecencySignal()
 
-        if attended { attendedSignal.onUserInteraction() }
         if gracePeriod { gracePeriodSignal.onCommandRecognized() }
-        if playbackRecent { playbackRecencySignal.update(isPlaying: true) }
 
         return VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: context,
             micExposure: exposure,
-            attendedSignal: attendedSignal,
-            gracePeriodSignal: gracePeriodSignal,
-            playbackRecencySignal: playbackRecencySignal
+            gracePeriodSignal: gracePeriodSignal
         )
     }
 
-    // MARK: - Grace period (Priority 1)
+    // MARK: - Rule 1: Grace period → continuous
 
-    func test_gracePeriod_overridesEverything() {
+    func test_gracePeriod_appInForeground_exposed_continuous() {
         let gate = gateWith(context: .appInForeground, exposure: .exposed, gracePeriod: true)
         XCTAssertEqual(gate.state, .listening(mode: .continuous))
     }
 
-    // MARK: - Foreground + attended/unattended
-
-    func test_foreground_attended_continuous() {
-        let gate = gateWith(context: .appInForeground, exposure: .exposed, attended: true)
+    func test_gracePeriod_playbackActive_isolated_continuous() {
+        let gate = gateWith(context: .playbackActive, exposure: .isolated, gracePeriod: true)
         XCTAssertEqual(gate.state, .listening(mode: .continuous))
     }
 
-    func test_foreground_unattended_wakeWord() {
-        let gate = gateWith(context: .appInForeground, exposure: .isolated, attended: false)
-        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
-    }
-
-    // MARK: - Background + playback recency
-
-    func test_backgroundPlayback_isolated_recent_continuous() {
-        let gate = gateWith(context: .playbackActive, exposure: .isolated, playbackRecent: true)
+    func test_gracePeriod_both_exposed_continuous() {
+        let gate = gateWith(context: .both, exposure: .exposed, gracePeriod: true)
         XCTAssertEqual(gate.state, .listening(mode: .continuous))
     }
 
-    func test_backgroundPlayback_isolated_notRecent_wakeWord() {
-        let gate = gateWith(context: .playbackActive, exposure: .isolated, playbackRecent: false)
+    // MARK: - Rule 2: Everything else → wake word
+
+    func test_noGracePeriod_appInForeground_exposed_wakeWord() {
+        let gate = gateWith(context: .appInForeground, exposure: .exposed, gracePeriod: false)
         XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
 
-    func test_backgroundPlayback_exposed_wakeWord() {
-        let gate = gateWith(context: .playbackActive, exposure: .exposed)
+    func test_noGracePeriod_appInForeground_isolated_wakeWord() {
+        let gate = gateWith(context: .appInForeground, exposure: .isolated, gracePeriod: false)
+        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
+    }
+
+    func test_noGracePeriod_playbackActive_exposed_wakeWord() {
+        let gate = gateWith(context: .playbackActive, exposure: .exposed, gracePeriod: false)
+        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
+    }
+
+    func test_noGracePeriod_playbackActive_isolated_wakeWord() {
+        let gate = gateWith(context: .playbackActive, exposure: .isolated, gracePeriod: false)
+        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
+    }
+
+    func test_noGracePeriod_both_exposed_wakeWord() {
+        let gate = gateWith(context: .both, exposure: .exposed, gracePeriod: false)
+        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
+    }
+
+    func test_noGracePeriod_both_isolated_wakeWord() {
+        let gate = gateWith(context: .both, exposure: .isolated, gracePeriod: false)
         XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
 
@@ -77,17 +82,5 @@ final class ListeningModePolicyTests: XCTestCase {
     func test_noContext_off() {
         let gate = gateWith(context: .none, exposure: .isolated)
         XCTAssertEqual(gate.state, .off(reason: .noContext))
-    }
-
-    // MARK: - Both context
-
-    func test_both_context_attended_continuous() {
-        let gate = gateWith(context: .both, exposure: .exposed, attended: true)
-        XCTAssertEqual(gate.state, .listening(mode: .continuous))
-    }
-
-    func test_both_context_unattended_wakeWord() {
-        let gate = gateWith(context: .both, exposure: .isolated, attended: false)
-        XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
 }

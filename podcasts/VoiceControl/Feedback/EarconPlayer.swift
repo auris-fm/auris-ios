@@ -8,15 +8,29 @@ open class EarconPlayer {
 
     init(engine: AVAudioEngine) {
         self.engine = engine
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
         preloadAll()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: cachedEarcons.values.first?.format)
+        engine.prepare()
     }
 
-    open func play(_ id: EarconId) {
+    /// Returns true if the earcon asset is loaded and can be played.
+    func hasEarcon(_ id: EarconId) -> Bool {
+        cachedEarcons[id] != nil
+    }
+
+    func play(_ id: EarconId) {
         guard let buffer = cachedEarcons[id] else {
             FileLog.shared.addMessage("[VoiceControl/Earcon] Missing: \(id)")
             return
+        }
+        if !engine.isRunning {
+            do {
+                try engine.start()
+            } catch {
+                FileLog.shared.addMessage("[VoiceControl/Earcon] Failed to start audio engine: \(error)")
+                return
+            }
         }
         player.scheduleBuffer(buffer, at: nil, options: .interrupts) {
             // Earcon finished
@@ -26,7 +40,7 @@ open class EarconPlayer {
 
     func stop() { player.stop() }
 
-    open func release() {
+    func release() {
         player.stop()
         engine.detach(player)
         cachedEarcons.removeAll()

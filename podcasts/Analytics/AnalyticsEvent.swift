@@ -10,6 +10,12 @@ enum AnalyticsEvent: String {
 
     case appClipOpened
 
+    // MARK: - Voice Control
+
+    case voiceCommandExecuted
+    case voiceRouterLatency
+    case voiceRecognitionLatency
+
     // MARK: - User Lifecycle
 
     case userSignedIn

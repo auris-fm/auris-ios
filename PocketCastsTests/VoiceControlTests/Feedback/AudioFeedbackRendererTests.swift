@@ -5,24 +5,24 @@ final class AudioFeedbackRendererTests: XCTestCase {
 
     func test_earconResponse_playsEarcon() {
         let earconPlayer = MockEarconPlayer()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: MockTtsEngine())
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: MockTtsEngine(), ducker: NoOpDucker())
         renderer.render(.earcon(.success))
+        XCTAssertTrue(pumpUntil { earconPlayer.didPlay(.success) })
         XCTAssertTrue(earconPlayer.didPlay(.success))
     }
 
-    func test_spokenResponse_speaksText() async {
+    func test_spokenResponse_speaksText() {
         let ttsEngine = MockTtsEngine()
-        let renderer = AudioFeedbackRenderer(earconPlayer: MockEarconPlayer(), ttsEngine: ttsEngine)
+        let renderer = AudioFeedbackRenderer(earconPlayer: MockEarconPlayer(), ttsEngine: ttsEngine, ducker: NoOpDucker())
         renderer.render(.spoken("Playing at 1.5x"))
-        // Allow async speak to complete
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(pumpUntil { ttsEngine.lastSpokenText != nil })
         XCTAssertEqual(ttsEngine.lastSpokenText, "Playing at 1.5x")
     }
 
     func test_silentResponse_doesNothing() {
         let earconPlayer = MockEarconPlayer()
         let ttsEngine = MockTtsEngine()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine, ducker: NoOpDucker())
         renderer.render(.silent)
         XCTAssertNil(earconPlayer.lastPlayed)
         XCTAssertNil(ttsEngine.lastSpokenText)
@@ -30,24 +30,25 @@ final class AudioFeedbackRendererTests: XCTestCase {
 
     func test_playEarcon_delegatesToRender() {
         let earconPlayer = MockEarconPlayer()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: MockTtsEngine())
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: MockTtsEngine(), ducker: NoOpDucker())
         renderer.playEarcon(.listeningStart)
+        XCTAssertTrue(pumpUntil { earconPlayer.didPlay(.listeningStart) })
         XCTAssertTrue(earconPlayer.didPlay(.listeningStart))
     }
 
-    func test_combinedResponse_playsEarconAndSpeaks() async {
+    func test_combinedResponse_playsEarconAndSpeaks() {
         let earconPlayer = MockEarconPlayer()
         let ttsEngine = MockTtsEngine()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine, ducker: NoOpDucker())
         renderer.render(.combined(earcon: .success, spokenText: "Done"))
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(pumpUntil { earconPlayer.didPlay(.success) && ttsEngine.lastSpokenText != nil })
         XCTAssertTrue(earconPlayer.didPlay(.success))
         XCTAssertEqual(ttsEngine.lastSpokenText, "Done")
     }
 
     func test_newRenderCancelsPrevious() async {
         let ttsEngine = MockTtsEngine()
-        let renderer = AudioFeedbackRenderer(earconPlayer: MockEarconPlayer(), ttsEngine: ttsEngine)
+        let renderer = AudioFeedbackRenderer(earconPlayer: MockEarconPlayer(), ttsEngine: ttsEngine, ducker: NoOpDucker())
         renderer.render(.spoken("First"))
         renderer.render(.spoken("Second"))
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -58,11 +59,25 @@ final class AudioFeedbackRendererTests: XCTestCase {
     func test_release_releasesBothEngines() {
         let earconPlayer = MockEarconPlayer()
         let ttsEngine = MockTtsEngine()
-        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
+        let renderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine, ducker: NoOpDucker())
         renderer.release()
         XCTAssertTrue(earconPlayer.wasReleased)
         XCTAssertTrue(ttsEngine.wasReleased)
     }
+
+    /// Pumps the main run loop until `condition` holds. The renderer's render
+    /// task is scheduled on the main run loop, and XCTest's wait(for:) does not
+    /// reliably advance it, so tests pump directly.
+    @discardableResult
+    private func pumpUntil(_ condition: () -> Bool, timeout: TimeInterval = 6.0) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        return condition()
+    }
+
 }
 
 // MARK: - Mocks
@@ -75,6 +90,10 @@ private final class MockEarconPlayer: EarconPlayer {
     init() {
         // Skip actual AVAudioEngine setup for tests
         super.init(engine: AVAudioEngine())
+    }
+
+    override func hasEarcon(_ id: EarconId) -> Bool {
+        true
     }
 
     override func play(_ id: EarconId) {
@@ -90,6 +109,11 @@ private final class MockEarconPlayer: EarconPlayer {
         wasReleased = true
         super.release()
     }
+}
+
+private final class NoOpDucker: AudioSessionDucking {
+    func duck() {}
+    func unduck() {}
 }
 
 private final class MockTtsEngine: TtsEngineProtocol {
@@ -112,7 +136,7 @@ private final class MockTtsEngine: TtsEngineProtocol {
         wasCancelled = true
     }
 
-    func release() {
+    func releaseEngine() {
         wasReleased = true
     }
 }

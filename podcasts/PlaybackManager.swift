@@ -800,6 +800,11 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     private func performDeactivate(audioSession: AVAudioSession) {
+        // If VoiceControl has configured the session for .playAndRecord,
+        // don't deactivate — it would kill the mic capture.
+        if audioSession.category == .playAndRecord {
+            return
+        }
         do {
             try audioSession.setActive(false)
             FileLog.shared.addMessage("deactiveAudioSession succeeded")
@@ -1436,6 +1441,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     func activateAudioSession(completion: ((Bool) -> Void)?) {
         #if !os(watchOS) && !APPCLIP && !os(tvOS)
             if GoogleCastManager.sharedManager.connectedOrConnectingToDevice() {
+                FileLog.shared.addMessage("PlaybackManager.activateAudioSession: casting, returning true")
                 completion?(true)
                 return
             }
@@ -1471,8 +1477,17 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     private func activateSession(completion: ((Bool) -> Void)?) {
         do {
-            try self.setAudioSessionProperties()
-            try AVAudioSession.sharedInstance().setActive(true)
+            let session = AVAudioSession.sharedInstance()
+            // If VoiceControl has already configured the session for recording,
+            // don't force it back to .playback — that fails with kAudioSessionNotInactive
+            // because the session is already active. .playAndRecord supports playback.
+            if session.category == .playAndRecord {
+                // VoiceControl has already configured the session for recording;
+                // .playAndRecord supports playback — don't force it back to .playback.
+            } else {
+                try self.setAudioSessionProperties()
+            }
+            try session.setActive(true)
             FileLog.shared.addMessage("activating audio session succeeded")
             completion?(true)
         } catch {

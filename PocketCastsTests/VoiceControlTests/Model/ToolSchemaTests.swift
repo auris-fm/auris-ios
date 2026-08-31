@@ -3,9 +3,9 @@ import XCTest
 
 final class ToolSchemaTests: XCTestCase {
 
-    func test_tools_returnsTenTools() {
+    func test_tools_returnsTwelveTools() {
         let tools = ToolSchema.tools()
-        XCTAssertEqual(tools.count, 10)
+        XCTAssertEqual(tools.count, 12)
     }
 
     func test_tools_containsPlayback() {
@@ -68,12 +68,46 @@ final class ToolSchemaTests: XCTestCase {
         XCTAssertNotNil(route)
     }
 
-    func test_eachTool_hasNameAndDescription() {
+    func test_tools_containsNoMatch() {
+        let tools = ToolSchema.tools()
+        let noMatch = tools.first { ($0["name"] as? String) == "no_match" }
+        XCTAssertNotNil(noMatch)
+    }
+
+    func test_effects_usesModeParameterNotTrimMode() {
+        let tools = ToolSchema.tools()
+        let effects = tools.first { ($0["name"] as? String) == "effects" }
+        let params = effects?["parameters"] as? [[String: Any]] ?? []
+        XCTAssertTrue(params.contains { ($0["name"] as? String) == "mode" })
+        XCTAssertFalse(params.contains { ($0["name"] as? String) == "trim_mode" })
+    }
+
+    func test_playback_parameterOrderMatchesTrainingSchema() {
+        let tools = ToolSchema.tools()
+        let playback = tools.first { ($0["name"] as? String) == "playback" }
+        let params = playback?["parameters"] as? [[String: Any]] ?? []
+        XCTAssertEqual(params.map { $0["name"] as? String }, ["action", "position_seconds", "delta_seconds"])
+    }
+
+    func test_eachTool_hasNameDescriptionAndOrderedParameters() {
         let tools = ToolSchema.tools()
         for tool in tools {
             XCTAssertNotNil(tool["name"] as? String, "Tool missing name")
             XCTAssertNotNil(tool["description"] as? String, "Tool missing description")
-            XCTAssertNotNil(tool["parameters"] as? [String: Any], "Tool missing parameters")
+            let params = tool["parameters"] as? [[String: Any]]
+            XCTAssertNotNil(params, "Tool missing ordered parameters")
+            for param in params ?? [] {
+                XCTAssertNotNil(param["name"] as? String, "Parameter missing name")
+                XCTAssertNotNil(param["type"] as? String, "Parameter missing type")
+            }
+        }
+    }
+
+    func test_eachTool_declaresActionRequired() {
+        let tools = ToolSchema.tools()
+        for tool in tools where tool["name"] as? String != "no_match" {
+            let required = tool["required"] as? [String]
+            XCTAssertEqual(required, ["action"])
         }
     }
 }

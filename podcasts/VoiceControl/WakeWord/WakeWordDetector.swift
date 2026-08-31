@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 class WakeWordDetector: WakeWordDetectorProtocol {
     private var nativeHandle: UnsafeMutableRawPointer?
@@ -8,64 +9,61 @@ class WakeWordDetector: WakeWordDetectorProtocol {
     ///   - melModel: Path to melspectrogram ONNX model
     ///   - embedModel: Path to embedding ONNX model
     ///   - classifierModel: Path to "Auris" classifier ONNX model
-    ///   - threshold: Confidence threshold above which a detection is triggered
+    ///   - threshold: Deployment threshold loaded from the eval manifest
     init(melModel: URL, embedModel: URL, classifierModel: URL, threshold: Float) {
         self.threshold = threshold
-        self.nativeHandle = wakeword_init(
-            melModel.path,
-            embedModel.path,
-            classifierModel.path,
-            threshold
-        )
+        fflush(stderr)
+        self.nativeHandle = melModel.path.withCString { melPath in
+            embedModel.path.withCString { embedPath in
+                classifierModel.path.withCString { clsPath in
+                    wakeword_init(melPath, embedPath, clsPath, threshold)
+                }
+            }
+        }
+        if nativeHandle == nil {
+            let errorDetail: String
+            if let cError = wakeword_last_error() {
+                errorDetail = " — \(String(cString: cError))"
+            } else {
+                errorDetail = ""
+            }
+            FileLog.shared.addMessage("[VoiceControl/WakeWord] Failed to initialize ONNX pipeline\(errorDetail)")
+        } else {
+            FileLog.shared.addMessage("[VoiceControl/WakeWord] ONNX pipeline initialized OK")
+        }
+        fflush(stderr)
     }
 
-    /// Processes audio samples through the 3-stage openWakeWord pipeline.
-    /// Uses sliding windows of ~2 seconds with 0.5 second stride to match the Python ring-buffer.
-    /// When the wake word is detected, computes the remainder audio after the wake word
-    /// so ASR receives only the command, not "Auris" noise.
+    /// Scores the utterance and returns the tagged result. An initialization or
+    /// scoring failure is never converted into a zero-confidence `notDetected`.
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
-        guard let handle = nativeHandle, !samples.isEmpty else {
-            return WakeWordResult(detected: false, confidence: 0, remainderSamples: nil)
+        guard let handle = nativeHandle else {
+            return .error(code: "init_failed")
         }
-        let windowSize = sampleRate * 2   // 2 seconds
-        let stride = sampleRate / 2       // 0.5 second stride
-
-        var maxScore: Float = 0
-        var maxOffset: Int = 0
-        var offset = 0
-
-        while offset + windowSize <= samples.count {
-            let window = Array(samples[offset..<offset + windowSize])
-            let score = wakeword_detect(handle, window, Int32(sampleRate))
-            if score > maxScore {
-                maxScore = score
-                maxOffset = offset
-            }
-            offset += stride
+        guard !samples.isEmpty else {
+            return .error(code: "no_samples")
         }
 
-        let detected = maxScore >= threshold
-        guard detected else {
-            return WakeWordResult(detected: false, confidence: maxScore, remainderSamples: nil)
+        // The native bridge implements the spec detection-window policy: 2s of
+        // virtual zero context, one mel/embedding pass, stride-1 classifier
+        // windows, max score. A new native error means the segment could not be
+        // scored; report it instead of interpreting a zero score as a miss.
+        let errorBefore = wakeword_last_error()
+        let maxScore = samples.withUnsafeBufferPointer { ptr in
+            wakeword_detect_segment(handle, ptr.baseAddress, Int32(samples.count), Int32(sampleRate))
         }
 
-        // The wake word occupies roughly the first 600ms of the segment.
-        // The detection window that fired tells us where the wake word starts;
-        // we cut after ~600ms from that window's start.
-        let wakeWordDurationMs = 600
-        let wakeWordEndSample = maxOffset + (wakeWordDurationMs * sampleRate / 1000)
-
-        // Safety: if the cut point is too close to the start or end, or if the
-        // segment is too short, return nil so the caller falls back to full audio.
-        let minRemainderSamples = sampleRate / 5  // 200ms minimum remainder
-        guard wakeWordEndSample > 0,
-              wakeWordEndSample < samples.count - minRemainderSamples
-        else {
-            return WakeWordResult(detected: true, confidence: maxScore, remainderSamples: nil)
+        if wakeword_last_error() != errorBefore {
+            let errorDetail = wakeword_last_error().map { String(cString: $0) } ?? "unknown"
+            FileLog.shared.addMessage("[VoiceControl/WakeWord] Scoring failed: \(errorDetail)")
+            return .error(code: "detect_failed")
         }
 
-        let remainder = Array(samples[wakeWordEndSample..<samples.count])
-        return WakeWordResult(detected: true, confidence: maxScore, remainderSamples: remainder)
+        FileLog.shared.addMessage(
+            "[VoiceControl/WakeWord] maxScore=\(String(format: "%.4f", maxScore)) threshold=\(String(format: "%.2f", threshold)) samples=\(samples.count)"
+        )
+
+        return maxScore >= threshold ? .detected(confidence: maxScore) : .notDetected(confidence: maxScore)
     }
 
     func release() {
@@ -78,76 +76,48 @@ class WakeWordDetector: WakeWordDetectorProtocol {
     deinit { release() }
 }
 
-// MARK: - C Bridge to openWakeWord ONNX Runtime pipeline
+// MARK: - C Bridge
 
-/// Initializes the 3-stage ONNX Runtime pipeline:
-/// - Mel spectrogram feature extractor
-/// - Audio embedding model
-/// - "Auris" wake-word classifier
-///
-/// Linked from WakeWordDetector.cpp via the bridging header.
-/// Returns an opaque handle to the initialized pipeline, or nil on failure.
-private func wakeword_init(
-    _ melModelPath: String,
-    _ embedModelPath: String,
-    _ classifierModelPath: String,
-    _ threshold: Float
-) -> UnsafeMutableRawPointer? {
-    #if canImport(onnxruntime)
-    guard let melPath = melModelPath.cString(using: .utf8),
-          let embedPath = embedModelPath.cString(using: .utf8),
-          let clsPath = classifierModelPath.cString(using: .utf8)
-    else { return nil }
-    return wakeword_init_c(melPath, embedPath, clsPath, threshold)
-    #else
-    // ONNX Runtime not linked — wake word will be unavailable
-    return nil
-    #endif
-}
+/// These C functions are implemented in WakeWordDetector.cpp and linked
+/// via the bridging header. They wrap the ONNX Runtime 3-stage pipeline
+/// (mel spectrogram → embedding → classifier).
 
-/// Runs detection on a single ~2-second window of 16kHz mono float PCM.
-/// Returns a confidence score in [0, 1].
-private func wakeword_detect(
-    _ handle: UnsafeMutableRawPointer,
-    _ samples: [Float],
-    _ sampleRate: Int32
-) -> Float {
-    #if canImport(onnxruntime)
-    return samples.withUnsafeBufferPointer { ptr in
-        wakeword_detect_c(handle, ptr.baseAddress, Int32(samples.count), sampleRate)
-    }
-    #else
-    return 0.0
-    #endif
-}
-
-/// Releases all ONNX Runtime resources held by the pipeline.
-private func wakeword_release(_ handle: UnsafeMutableRawPointer) {
-    #if canImport(onnxruntime)
-    wakeword_release_c(handle)
-    #endif
-}
-
-// These declarations match the C symbols exported from WakeWordDetector.cpp.
-// The actual implementations live in the C++ file linked via the bridging header.
-
-#if canImport(onnxruntime)
+/// Initializes the 3-stage ONNX Runtime pipeline.
+/// Returns an opaque handle, or nil if ONNX Runtime is not linked or
+/// any model fails to load.
 @_silgen_name("wakeword_init")
-private func wakeword_init_c(
-    _ mel: UnsafePointer<CChar>,
-    _ embed: UnsafePointer<CChar>,
-    _ cls: UnsafePointer<CChar>,
+private func wakeword_init(
+    _ melModelPath: UnsafePointer<CChar>,
+    _ embedModelPath: UnsafePointer<CChar>,
+    _ classifierModelPath: UnsafePointer<CChar>,
     _ threshold: Float
 ) -> UnsafeMutableRawPointer?
 
+/// Runs detection on a single window of 16kHz mono float PCM.
+/// Returns a confidence score in [0, 1].
 @_silgen_name("wakeword_detect")
-private func wakeword_detect_c(
+private func wakeword_detect(
     _ handle: UnsafeMutableRawPointer,
     _ samples: UnsafePointer<Float>?,
-    _ count: Int32,
+    _ sampleCount: Int32,
     _ sampleRate: Int32
 ) -> Float
 
+/// Runs detection on a complete VAD segment per the recognition-pipeline
+/// detection-window policy (virtual 2s context, single preprocessing pass,
+/// stride-1 classifier windows). Returns the maximum score in [0, 1].
+@_silgen_name("wakeword_detect_segment")
+private func wakeword_detect_segment(
+    _ handle: UnsafeMutableRawPointer,
+    _ samples: UnsafePointer<Float>?,
+    _ sampleCount: Int32,
+    _ sampleRate: Int32
+) -> Float
+
+/// Releases all ONNX Runtime resources.
 @_silgen_name("wakeword_release")
-private func wakeword_release_c(_ handle: UnsafeMutableRawPointer)
-#endif
+private func wakeword_release(_ handle: UnsafeMutableRawPointer)
+
+/// Returns the last C++ error message, or nil.
+@_silgen_name("wakeword_last_error")
+private func wakeword_last_error() -> UnsafePointer<CChar>?

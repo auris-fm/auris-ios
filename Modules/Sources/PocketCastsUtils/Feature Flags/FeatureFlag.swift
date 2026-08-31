@@ -319,6 +319,9 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable the Up Next sort button
     case upNextSort
 
+    /// Enable voice control with wakeword detection and voice intent execution
+    case voiceControl
+
     public var enabled: Bool {
         if let overriddenValue = FeatureFlagOverrideStore().overriddenValue(for: self) {
             return overriddenValue
@@ -535,6 +538,8 @@ public enum FeatureFlag: String, CaseIterable {
             BuildEnvironment.current == .debug
         case .upNextSort:
             BuildEnvironment.current == .debug
+        case .voiceControl:
+            true
         }
     }
 

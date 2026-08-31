@@ -35,8 +35,6 @@ struct GatePosture: Equatable {
     let conflicts: GateConflicts
     let context: GateContext
     let micExposure: MicExposure
-    let attended: Bool
     let gracePeriodActive: Bool
-    let playbackRecent: Bool
     let offReason: GateState.GateOffReason?
 }

@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 
 import PackageDescription
 import CompilerPluginSupport
@@ -39,7 +39,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "510.0.0"),
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "603.0.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.0.0"),
         .package(url: "https://github.com/danielebogo/Swime", branch: "master"),
@@ -58,6 +58,7 @@ let package = Package(
         .package(url: "https://github.com/ksemianov/WrappingHStack", from: "0.2.0"),
         .package(url: "https://github.com/Automattic/pocket-casts-ios-fingerprint", branch: "trunk"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.7.0"),
+        .package(url: "https://github.com/ggml-org/whisper.spm", branch: "master"),
     ],
     targets: XcodeSupport.targets + [
         .target(
@@ -171,7 +172,8 @@ let package = Package(
             dependencies: ["Modules"],
             path: "Tests/ModulesTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )
 
 // MARK: - XcodeSupport (Xcode Targets)
@@ -236,6 +238,7 @@ enum XcodeSupport {
                     .product(name: "GoogleCast", package: "google-cast"),
                     .product(name: "WrappingHStack", package: "WrappingHStack"),
                     .product(name: "Fingerprint", package: "pocket-casts-ios-fingerprint"),
+                    .product(name: "whisper", package: "whisper.spm"),
                     "EndOfYear",
                 ]
             ),

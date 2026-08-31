@@ -92,4 +92,5 @@ class PlayPauseButton: BasePlayPauseButton {
     func finishedTransition() {
         snapshot?.removeFromSuperview()
     }
+
 }

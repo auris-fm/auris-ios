@@ -21,9 +21,9 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         // Verifies no crash on cancel when not speaking
     }
 
-    func test_release_stopsEngine() {
+    func test_releaseEngine_stopsEngine() {
         let engine = AVSpeechTtsEngine()
-        engine.release()
+        engine.releaseEngine()
         // Verifies no crash on release
     }
 

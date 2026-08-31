@@ -2,7 +2,6 @@ import SwiftUI
 
 struct VoiceControlSettingsView: View {
     @ObservedObject var service: VoiceControlService
-    @State private var voiceControlEnabled = false
 
     var body: some View {
         List {
@@ -28,9 +27,7 @@ struct VoiceControlSettingsView: View {
                 statusRow(label: "Off Reason", value: offReasonText(posture))
                 statusRow(label: "Listening Mode", value: listeningModeText(posture))
                 statusRow(label: "Mic Exposure", value: "\(posture.micExposure)")
-                statusRow(label: "Attended", value: posture.attended ? "Yes" : "No")
                 statusRow(label: "Grace Period", value: posture.gracePeriodActive ? "Active" : "Inactive")
-                statusRow(label: "Playback Recent", value: posture.playbackRecent ? "Yes" : "No")
                 statusRow(label: "Context", value: "\(posture.context)")
 
                 // Per-condition breakdown
@@ -57,9 +54,6 @@ struct VoiceControlSettingsView: View {
                 }
             }
 
-            Section {
-                Toggle("Voice Control", isOn: $voiceControlEnabled)
-            }
         }
         .navigationTitle("Voice Control")
     }
@@ -143,10 +137,10 @@ struct VoiceControlSettingsView: View {
             return "No microphone on this route"
         }
         if posture.listeningMode == .continuous {
-            return "Active (continuous)"
+            return "Active (grace period)"
         }
         if posture.listeningMode == .wakeWord {
-            return "Active (wake-word)"
+            return "Active (wake word required)"
         }
         return "Unknown"
     }

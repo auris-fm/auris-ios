@@ -42,7 +42,7 @@ class ToolCallMapper {
             let delta = args["delta"] as? Double ?? 0.25
             return .adjustSpeed(delta: delta)
         case "set_trim_mode":
-            guard let raw = args["trim_mode"] as? String, let mode = TrimMode(rawValue: raw) else { return nil }
+            guard let raw = args["mode"] as? String, let mode = TrimMode(rawValue: raw) else { return nil }
             return .setTrimMode(mode)
         case "set_volume_boost":
             guard let enabled = args["enabled"] as? Bool else { return nil }

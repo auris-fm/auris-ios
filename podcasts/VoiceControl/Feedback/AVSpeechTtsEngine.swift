@@ -12,9 +12,7 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
 
     func warmUp(language: String) {
         let utterance = AVSpeechUtterance(string: "")
-        if let voice = bestVoice(for: language) {
-            utterance.voice = voice
-        }
+        utterance.voice = bestVoice(for: language)
         utterance.volume = 0
         synthesizer.speak(utterance)
     }
@@ -44,7 +42,7 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         continuation = nil
     }
 
-    func release() {
+    func releaseEngine() {
         synthesizer.stopSpeaking(at: .immediate)
         continuation?.resume()
         continuation = nil
@@ -53,16 +51,6 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     // MARK: - Voice Selection
 
     private func bestVoice(for language: String) -> AVSpeechSynthesisVoice {
-        // Prefer enhanced quality voices (iOS 17+), fall back to default
-        if #available(iOS 17.0, *) {
-            if let enhanced = AVSpeechSynthesisVoice(language: language, quality: .enhanced) {
-                return enhanced
-            }
-        }
-        if let defaultVoice = AVSpeechSynthesisVoice(language: language, quality: .default) {
-            return defaultVoice
-        }
-        // Last resort: any voice for the language, or en-US fallback
         return AVSpeechSynthesisVoice(language: language)
             ?? AVSpeechSynthesisVoice(language: "en-US")!
     }

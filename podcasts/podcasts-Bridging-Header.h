@@ -6,3 +6,4 @@
 #import "SJMediaMetadataHelper.h"
 #import "MNAVChapterReader.h"
 #include "VoiceBoostN.h"
+#include "VoiceControl/WakeWord/WakeWordDetector.h"

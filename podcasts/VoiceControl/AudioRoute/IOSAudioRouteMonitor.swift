@@ -10,7 +10,7 @@ enum AudioRouteInput {
     case headsetMic, bluetoothHFP, bluetoothLE, builtInMic
 }
 
-struct AudioRoute {
+struct AudioRoute: Equatable {
     let output: AudioRouteOutput
     let input: AudioRouteInput?
 
@@ -59,7 +59,13 @@ class IOSAudioRouteMonitor: ObservableObject {
 
     private func updateRoute(_ avRoute: AVAudioSessionRouteDescription) {
         let output = classifyOutput(avRoute.outputs.first)
-        let input = avRoute.inputs.first.flatMap { classifyInput($0) }
+        // On devices with a built-in mic (all iPhones/iPads), currentRoute.inputs
+        // may be empty before the audio session is configured for recording.
+        // Fall back to availableInputs so the gate doesn't deadlock itself
+        // (gate blocks → no recording session → inputs stay empty).
+        let inputPort = avRoute.inputs.first
+            ?? AVAudioSession.sharedInstance().availableInputs?.first
+        let input = inputPort.flatMap { classifyInput($0) }
         let previousExposure = micExposure
         currentRoute = AudioRoute(output: output, input: input)
         micExposure = MicExposureClassifier.classify(currentRoute)

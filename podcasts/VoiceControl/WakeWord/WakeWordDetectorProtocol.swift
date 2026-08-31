@@ -1,16 +1,18 @@
 import Foundation
 
-struct WakeWordResult {
-    let detected: Bool
-    let confidence: Float
-    /// Audio after the wake word, or nil if detection couldn't localize the cut point.
-    /// When non-nil, this should be passed to ASR instead of the full utterance.
-    let remainderSamples: [Float]?
+/// Tagged wake-word result per recognition-pipeline.md. `Error(code:)` carries
+/// neither a detection decision nor a confidence value, so callers cannot branch
+/// on a default boolean. `Detected` iff the maximum score >= deployment threshold.
+enum WakeWordResult: Equatable {
+    case detected(confidence: Float)
+    case notDetected(confidence: Float)
+    case error(code: String)
 }
 
 protocol WakeWordDetectorProtocol: AnyObject {
-    /// Runs wake word detection on the full VAD utterance.
-    /// Returns detection result including stripped remainder audio.
+    /// Runs wake-word detection on the full VAD utterance and returns the tagged
+    /// result. The complete original segment is always forwarded to ASR on a
+    /// positive result; the detector never cuts audio.
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult
     func release()
 }
