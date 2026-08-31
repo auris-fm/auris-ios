@@ -6,7 +6,8 @@ import PocketCastsUtils
 import AVFoundation
 
 /// Extracts artwork from a streaming episode (if there's any)
-class EpisodeArtwork {
+@MainActor
+final class EpisodeArtwork {
     private let imageManager: ImageManager
 
     /// Track in-progress artwork load tasks by episode UUID to prevent redundant requests and allow cancellation
@@ -39,14 +40,14 @@ class EpisodeArtwork {
             }
 
             // Priority 1: Show notes image URL (publisher intent takes precedence)
-            if await self.loadArtworkFromShowNotes(podcastUuid: podcastUuid, episodeUuid: episodeUuid) {
+            if await self.loadArtworkFromShowNotes(podcastUuid: podcastUuid, episodeUuid: episodeUuid) != nil {
                 return
             }
 
             guard !Task.isCancelled else { return }
 
             // Priority 2: Embedded artwork from audio file metadata
-            if let assetEpisodeArtwork = self.loadEpisodeArtwork(from: asset) {
+            if let assetEpisodeArtwork = await self.loadEpisodeArtwork(from: asset) {
                 self.imageManager.save(assetEpisodeArtwork, for: episodeUuid)
             }
         }
@@ -64,21 +65,48 @@ class EpisodeArtwork {
         imageManager.subscribedPodcastsCache.isCached(forKey: episodeUuid)
     }
 
-    private func loadEpisodeArtwork(from asset: AVAsset?) -> UIImage? {
-        guard let asset else {
+    private func loadEpisodeArtwork(from asset: AVAsset?) async -> UIImage? {
+        guard let asset, let commonMetadata = try? await asset.load(.commonMetadata) else {
             return nil
         }
-
-        let artworkItems = AVMetadataItem.metadataItems(from: asset.commonMetadata, filteredByIdentifier: .commonIdentifierArtwork)
-        return artworkItems.compactMap { $0.dataValue.flatMap { UIImage(data: $0) } }.first
+        let artworkItems = AVMetadataItem.metadataItems(from: commonMetadata, filteredByIdentifier: .commonIdentifierArtwork)
+        for item in artworkItems {
+            if let data = try? await item.load(.dataValue), let image = UIImage(data: data) {
+                return image
+            }
+        }
+        return nil
     }
 
-    /// Attempts to load episode artwork from show notes URL.
-    /// - Returns: true if artwork was successfully loaded and saved, false otherwise
-    private func loadArtworkFromShowNotes(podcastUuid: String, episodeUuid: String) async -> Bool {
-        guard let imageUrl = try? await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(podcastUuid: podcastUuid, episodeUuid: episodeUuid),
-              let url = URL(string: imageUrl) else {
-            return false
+    func artworkFromShowNotes(podcastUuid: String, episodeUuid: String) async -> UIImage? {
+        if let image = await imageFromCache(episodeUuid: episodeUuid) {
+            return image
+        }
+        return await loadArtworkFromShowNotes(podcastUuid: podcastUuid, episodeUuid: episodeUuid)
+    }
+
+    func imageFromCache(episodeUuid: String) async -> UIImage? {
+        return await withCheckedContinuation { continuation in
+            imageManager.subscribedPodcastsCache.retrieveImage(forKey: episodeUuid) { result in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let image = try? result.get().image {
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    /// Attempts to load episode artwork from the show notes URL, downsampling it and
+    /// caching it against the episode UUID.
+    /// - Returns: the loaded image if one was retrieved and saved, otherwise nil
+    func loadArtworkFromShowNotes(podcastUuid: String, episodeUuid: String) async -> UIImage? {
+        guard let url = try? await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(podcastUuid: podcastUuid, episodeUuid: episodeUuid) else {
+            return nil
         }
 
         // Resize image to avoid really big images that appear
@@ -90,14 +118,14 @@ class EpisodeArtwork {
         return await withCheckedContinuation { continuation in
             KingfisherManager.shared.retrieveImage(with: url, options: [.processor(resizeProcessor)]) { [weak self] result in
                 guard !Task.isCancelled else {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: nil)
                     return
                 }
                 if let image = try? result.get().image {
                     self?.imageManager.save(image, for: episodeUuid)
-                    continuation.resume(returning: true)
+                    continuation.resume(returning: image)
                 } else {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: nil)
                 }
             }
         }

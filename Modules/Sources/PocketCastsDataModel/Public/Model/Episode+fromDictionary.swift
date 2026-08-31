@@ -1,6 +1,40 @@
 import Foundation
 
 extension Episode {
+    /// MIME type we advertise for HLS streams we send elsewhere, e.g. to Google Cast.
+    public static let advertisedHLSMimeType = "application/x-mpegURL"
+
+    /// HLS content types we accept and play as video. Stored lowercased, so lookups must lowercase their input too.
+    public static let hlsEnclosureTypes = Set([
+        "application/x-mpegurl",
+        "application/mpegurl",
+        "application/vnd.apple.mpegurl"
+    ].map { $0.lowercased() })
+
+    /// Whether an `alternate_enclosures` type string advertises an HLS stream.
+    public static func isHLSEnclosureType(_ type: String?) -> Bool {
+        guard let type else { return false }
+        return hlsEnclosureTypes.contains(type.lowercased())
+    }
+
+    /// Extracts the HLS stream URL from a feed episode's `alternate_enclosures` array, if one is present.
+    ///
+    /// The structure looks like:
+    /// ```
+    /// "alternate_enclosures": [
+    ///   { "type": "application/x-mpegURL", "sources": [ { "uri": "https://.../file.m3u8" } ] }
+    /// ]
+    /// ```
+    public static func hlsUrl(fromEpisodeJson episodeJson: [String: Any]) -> String? {
+        guard let alternateEnclosures = episodeJson["alternate_enclosures"] as? [[String: Any]] else {
+            return nil
+        }
+
+        let hlsEnclosure = alternateEnclosures.first { isHLSEnclosureType($0["type"] as? String) }
+        let sources = hlsEnclosure?["sources"] as? [[String: Any]]
+        return sources?.first?["uri"] as? String
+    }
+
     public static func from(episodeJson: [String: Any], podcastId: Int64, podcastUuid: String, isoFormatter: ISO8601DateFormatter) -> Episode {
         let episode = Episode()
         episode.addedDate = Date()
@@ -44,6 +78,8 @@ extension Episode {
         } else {
             episode.hasGeneratedTranscript = nil
         }
+
+        episode.hlsUrl = hlsUrl(fromEpisodeJson: episodeJson)
 
         return episode
     }

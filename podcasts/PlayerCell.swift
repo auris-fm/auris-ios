@@ -95,10 +95,14 @@ class PlayerCell: ThemeableSwipeCell {
         }
     }
 
-    private var episode: BaseEpisode!
+    private var episode: BaseEpisode?
 
     override func awakeFromNib() {
         super.awakeFromNib()
+
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: PlayerCell, _) in
+            view.updateSize()
+        }
 
         NotificationCenter.default.addObserver(self, selector: #selector(updateCellForDownloadProgressChange), name: Constants.Notifications.downloadProgress, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateCellForDownloadStatusChange(_:)), name: Constants.Notifications.episodeDownloaded, object: nil)
@@ -199,6 +203,12 @@ class PlayerCell: ThemeableSwipeCell {
     }
 
     func updateDownloadStatus() {
+        guard let episode else {
+            downloadingIndicator.isHidden = true
+            downloadedIndicator.isHidden = true
+            return
+        }
+
         if let episode = episode as? UserEpisode, episode.uploadStatus == UploadStatus.missing.rawValue {
             episodeInfo.text = L10n.downloadErrorNotUploaded
             downloadingIndicator.isHidden = true
@@ -305,12 +315,6 @@ class PlayerCell: ThemeableSwipeCell {
 
         episodeTitle.updateNumberOfLines(regular: 2, accessibility: 3)
         dayName.updateNumberOfLines(regular: 1, accessibility: 2)
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        guard traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory else { return }
-        updateSize()
     }
 }
 

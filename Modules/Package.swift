@@ -6,13 +6,9 @@ import CompilerPluginSupport
 let package = Package(
     name: "Modules",
     platforms: [
-        .iOS(.v16), .watchOS(.v9), .macOS(.v10_15), .tvOS(.v17)
+        .iOS(.v17), .watchOS(.v10), .macOS(.v13), .tvOS(.v17)
     ],
     products: XcodeSupport.products + [
-        .library(
-            name: "PocketCastsDependencyInjection",
-            targets: ["PocketCastsDependencyInjection"]
-        ),
         .library(
             name: "GRDBMacros",
             targets: ["GRDBMacros"]
@@ -61,15 +57,6 @@ let package = Package(
         .package(url: "https://github.com/ggml-org/whisper.spm", branch: "master"),
     ],
     targets: XcodeSupport.targets + [
-        .target(
-            name: "PocketCastsDependencyInjection",
-            path: "Sources/PocketCastsDependencyInjection"
-        ),
-        .testTarget(
-            name: "PocketCastsDependencyInjectionTests",
-            dependencies: ["PocketCastsDependencyInjection"],
-            path: "Tests/PocketCastsDependencyInjectionTests"
-        ),
         .target(
             name: "GRDBMacros",
             dependencies: [
@@ -219,7 +206,6 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
-                    "PocketCastsDependencyInjection",
                     "EventHorizonSDK",
                     .product(name: "Lottie", package: "lottie-ios"),
                     .product(name: "DifferenceKit", package: "DifferenceKit"),
@@ -248,7 +234,6 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
-                    "PocketCastsDependencyInjection",
                     "EventHorizonSDK",
                     .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
                     .product(name: "FirebaseAnalyticsWithoutAdIdSupport", package: "firebase-ios-sdk"),
@@ -263,7 +248,6 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
-                    "PocketCastsDependencyInjection",
                     "EventHorizonSDK",
                     .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
                     .product(name: "Kingfisher", package: "Kingfisher"),
@@ -299,12 +283,12 @@ enum XcodeSupport {
                     "PocketCastsUtils",
                     "PocketCastsDataModel",
                     "PocketCastsServer",
-                    "PocketCastsDependencyInjection",
                     "EventHorizonSDK",
                     .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
                     .product(name: "Kingfisher", package: "Kingfisher"),
                     .product(name: "SwiftSubtitles", package: "SwiftSubtitles"),
                     .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
+                    .product(name: "FirebaseAnalyticsWithoutAdIdSupport", package: "firebase-ios-sdk"),
                     .product(name: "DifferenceKit", package: "DifferenceKit"),
                 ]
             ),

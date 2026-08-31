@@ -51,6 +51,9 @@ struct Constants {
         static let currentlyPlayingEpisodeUpdated = NSNotification.Name(rawValue: "SJCurrentlyPlayingEpisodeUpdated")
         static let sleepTimerChanged = NSNotification.Name(rawValue: "SJSleepTimerChanged")
         static let videoPlaybackEngineSwitched = NSNotification.Name(rawValue: "SJVideoPlaybackEngineSwitched")
+        /// Posted when the user toggles the audio/video shelf action. Distinct from
+        /// `videoPlaybackEngineSwitched` (runtime video detection) so it doesn't trigger auto-open behaviour.
+        static let videoRenderingToggled = NSNotification.Name(rawValue: "SJVideoRenderingToggled")
 
         // episode notifications
         static let episodePlayStatusChanged = NSNotification.Name(rawValue: "SJEpPlayStatusChanged")
@@ -181,6 +184,8 @@ struct Constants {
 
         static let shouldShowRecentlyPlayedSortingTip = "ShouldShowRecentlyPlayedSortingTip"
 
+        static let shouldShowUpNextSortDurationTip = "ShouldShowUpNextSortDurationTip"
+
         static let newFilterTip = "NewFilterTip"
         static let newFilterTipCreationView = "NewFilterTipCreationView"
         static let playlistDragAndDropTip = "PlaylistDragAndDropTip"
@@ -205,11 +210,15 @@ struct Constants {
             static let podcastSort = SettingValue("bookmarks.podcastSort", defaultValue: BookmarkSortOption.newestToOldest)
             static let episodeSort = SettingValue("bookmarks.episodeSort", defaultValue: BookmarkSortOption.newestToOldest)
             static let profileSort = SettingValue("bookmarks.profileSort", defaultValue: BookmarkSortOption.newestToOldest)
+
+            static let showPlayerTip = "bookmarks.showPlayerTip"
         }
 
         enum appearance {
             static let darkUpNextTheme = SettingValue("appearance.darkUpNextTheme", defaultValue: true)
-            static let tabBarMinimizingEnabled = SettingValue("appearance.tabBarMinimizingEnabled", defaultValue: true)
+            static var tabBarMinimizingEnabled: SettingValue<Bool> {
+                SettingValue("appearance.tabBarMinimizingEnabled", defaultValue: !FeatureFlag.minimizeTabsOptIn.enabled)
+            }
         }
 
         enum kidsProfile {
@@ -450,6 +459,10 @@ enum PlusUpgradeViewSource: String {
     case sonosLink = "sonos_link"
     case deepLink
     case deviceApproval = "device_approval"
+
+    /// Purchase completed with no record of its originating source (e.g. StoreKit re-delivering a
+    /// deferred/pending transaction). Keeps `source` defined and distinct from a real `unknown`.
+    case unattributed
 
     /// Converts the enum into a Firebase promotionId, this matches the values set on Android
     func promotionId() -> String {

@@ -16,8 +16,8 @@ struct DiscoverCategoryCell: View {
         static let iconSize = CGFloat(48)
     }
 
-    init(category: DiscoverCategory, colorIndex: Int) {
-        _model = State(wrappedValue: DiscoverCategoryModel(category: category))
+    init(category: DiscoverCategory, colorIndex: Int, source: String) {
+        _model = State(wrappedValue: DiscoverCategoryModel(category: category, source: source))
         self.colorIndex = colorIndex
     }
 
@@ -31,6 +31,7 @@ struct DiscoverCategoryCell: View {
                         .resizable()
                         .tint(isFocused ? Color.pcTextPrimary : Color.pcTextSecondary)
                         .frame(width: Layout.iconSize, height: Layout.iconSize)
+                        .accessibilityHidden(true)
                 }
                 Text(model.name)
                     .font(.headline)
@@ -89,7 +90,7 @@ struct DiscoverCategoryCell: View {
 }
 
 #Preview {
-    DiscoverCategoryCell(category: DiscoverCategory(id: 1, name: "True Crime"), colorIndex: 0)
+    DiscoverCategoryCell(category: DiscoverCategory(id: 1, name: "True Crime"), colorIndex: 0, source: DiscoverAnalytics.searchSource)
         .environment(AppCoordinator())
         .environment(MainTabViewModel())
 }

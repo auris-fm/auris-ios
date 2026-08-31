@@ -5,7 +5,8 @@ import SafariServices
 import UIKit
 import WebKit
 
-class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewControllerDelegate, WKNavigationDelegate {
+@MainActor
+class ShowNotesPlayerItemViewController: PlayerItemViewController, @preconcurrency SFSafariViewControllerDelegate, WKNavigationDelegate {
     @IBOutlet var episodeTitle: UILabel! {
         didSet {
             episodeTitle.font = UIFont.font(ofSize: 22, weight: .bold, scalingWith: .title2)
@@ -60,6 +61,10 @@ class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewC
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: ShowNotesPlayerItemViewController, _) in
+            controller.updateSize()
+        }
+
         setupWebView()
         updateColors()
         updateSize()
@@ -82,10 +87,6 @@ class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewC
         showNotesWebView.isOpaque = false
         showNotesWebView.backgroundColor = UIColor.clear
         showNotesWebView.scrollView.backgroundColor = UIColor.clear
-    }
-
-    deinit {
-        showNotesWebView?.navigationDelegate = nil
     }
 
     override func willBeAddedToPlayer() {
@@ -116,7 +117,7 @@ class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewC
     }
 
     @objc private func updateShowNotes() {
-        guard let episode = PlaybackManager.shared.currentEpisode() as? Episode else { return }
+        guard let episode = PlaybackManager.shared.currentEpisode as? Episode else { return }
         self.episode = episode
         let pubDate = DateFormatHelper.sharedHelper.longLocalizedFormat(episode.publishedDate)
         publishedDate.text = pubDate
@@ -178,7 +179,7 @@ class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewC
             strongSelf.loadingIndicator.stopAnimating()
             let tintColor = strongSelf.linkTintColor()
             if let showNotes {
-                let isCurrentEpisode = PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid)
+                let isCurrentEpisode = PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid)
                 let formattedNotes = ShowNotesFormatter.format(showNotes: showNotes, tintColor: tintColor, convertTimesToLinks: isCurrentEpisode, bgColor: nil, textColor: ThemeColor.playerContrast01())
                 strongSelf.showNotesWebView.loadHTMLString(formattedNotes, baseURL: URL(fileURLWithPath: Bundle.main.bundlePath))
                 // We need to ensure that the scroll view offset is back at 0,0 to cater for instances
@@ -270,12 +271,5 @@ class ShowNotesPlayerItemViewController: PlayerItemViewController, SFSafariViewC
         let size = max(metric.scaledValue(for: 24), 24)
         durationImageView.updateSizeConstraints(to: size)
         dateImageView.updateSizeConstraints(to: size)
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        if traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory {
-            updateSize()
-        }
     }
 }

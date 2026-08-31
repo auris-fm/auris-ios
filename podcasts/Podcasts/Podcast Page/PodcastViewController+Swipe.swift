@@ -6,7 +6,7 @@ extension PodcastViewController: SwipeTableViewCellDelegate, SwipeHandler {
     // MARK: - SwipeTableViewCellDelegate
 
     func tableView(_ tableView: UITableView, editActionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> [SwipeAction]? {
-        guard !isMultiSelectEnabled, indexPath.section == PodcastViewController.allEpisodesSection, let episode = episodeAtIndexPath(indexPath) else { return nil }
+        guard currentViewMode == .episodes, !isMultiSelectEnabled, indexPath.section == PodcastViewController.allEpisodesSection, let episode = episodeAtIndexPath(indexPath) else { return nil }
 
         switch orientation {
         case .left:
@@ -42,7 +42,7 @@ extension PodcastViewController: SwipeTableViewCellDelegate, SwipeHandler {
     }
 
     func archivingRemovesFromList() -> Bool {
-        !(podcast?.shouldShowArchived ?? false)
+        !(podcast?.showArchived ?? false)
     }
 
     func actionPerformed(willBeRemoved: Bool) {

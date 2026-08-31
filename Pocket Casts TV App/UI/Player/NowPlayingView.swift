@@ -7,6 +7,7 @@ struct NowPlayingView: View {
     @State private var isShowingDescription = false
     @State private var isShowingMarkAsPlayedConfirmation = false
     @State private var isShowingArchiveConfirmation = false
+    @State private var isShowingPodcast = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -14,10 +15,15 @@ struct NowPlayingView: View {
             model: model,
             isShowingDescription: $isShowingDescription,
             isShowingMarkAsPlayedConfirmation: $isShowingMarkAsPlayedConfirmation,
-            isShowingArchiveConfirmation: $isShowingArchiveConfirmation
+            isShowingArchiveConfirmation: $isShowingArchiveConfirmation,
+            isShowingPodcast: $isShowingPodcast
         )
         .onAppear {
             model.load()
+            Analytics.track(.playerShown)
+        }
+        .onDisappear {
+            Analytics.track(.playerDismissed)
         }
         .requireAccountSupport()
         .sheet(isPresented: $isShowingDescription) {
@@ -53,6 +59,12 @@ struct NowPlayingView: View {
         } message: {
             Text(L10n.playerArchivedConfirmationMessage)
         }
+        .fullScreenCover(isPresented: $isShowingPodcast) {
+            if let uuid = model.podcastUuid {
+                PodcastDetailView(model: PodcastDetailViewModel(podcastUuid: uuid))
+                    .background(Color.pcBackgroundSurface)
+            }
+        }
     }
 }
 
@@ -61,6 +73,7 @@ private struct NowPlayingPlayerRepresentable: UIViewControllerRepresentable {
     @Binding var isShowingDescription: Bool
     @Binding var isShowingMarkAsPlayedConfirmation: Bool
     @Binding var isShowingArchiveConfirmation: Bool
+    @Binding var isShowingPodcast: Bool
     // Read here (rather than in the parent `NowPlayingView`) so the gated
     // implementation installed by `.requireAccountSupport()` — applied to
     // this representable above — is the one we see. Reading it upstream
@@ -127,7 +140,7 @@ private struct NowPlayingPlayerRepresentable: UIViewControllerRepresentable {
             makePlaybackSpeedMenu(),
             makePlaybackEffectsMenu(),
             makeEpisodeActionsMenu()
-        ]
+        ].compactMap({$0})
         ensureEpisodeDescriptionInfoAction(on: uiViewController)
         // Suppress AVKit's system loading spinner while the player is still
         // preparing. Hiding playback controls also hides the spinner that
@@ -180,13 +193,16 @@ private struct NowPlayingPlayerRepresentable: UIViewControllerRepresentable {
     }
 
     private func makePlaybackSpeedMenu() -> UIMenu {
-        let speeds = Array(stride(from: SharedConstants.PlaybackEffects.minimumPlaybackSpeed, through: SharedConstants.PlaybackEffects.maximumPlaybackSpeed, by: 0.1))
+        let speeds = Array(stride(from: SharedConstants.PlaybackEffects.minimumPlaybackSpeed,
+                                  through: model.maxPlaybackSpeed,
+                                  by: 0.1))
         let actions = speeds.map { speed in
             UIAction(
                 title: String(format: "%.1fx", speed),
                 state: speed == model.playbackSpeed ? .on : .off
             ) { action in
                 model.playbackSpeed = speed
+                AnalyticsPlaybackHelper.shared.currentSource = .player
                 AnalyticsPlaybackHelper.shared.playbackSpeedChanged(to: speed)
                 if let menu = action.sender as? UIMenu {
                     menu.children.compactMap { $0 as? UIAction }.forEach { $0.state = .off }
@@ -202,41 +218,56 @@ private struct NowPlayingPlayerRepresentable: UIViewControllerRepresentable {
         )
     }
 
-    private func makePlaybackEffectsMenu() -> UIMenu {
-        let volumeBoostOff = UIAction(title: L10n.off, state: model.volumeBoost ? .off : .on) { _ in
-            ToastManager.shared.show(L10n.tvPlayerVolumeBoostOff)
-            model.volumeBoost = false
-            AnalyticsPlaybackHelper.shared.volumeBoostToggled(enabled: false)
-        }
-        let volumeBoostOn = UIAction(title: L10n.on, state: model.volumeBoost ? .on : .off) { _ in
-            ToastManager.shared.show(L10n.tvPlayerVolumeBoostOn)
-            model.volumeBoost = true
-            AnalyticsPlaybackHelper.shared.volumeBoostToggled(enabled: true)
-        }
-        let volumeBoostSection = UIMenu(
-            title: L10n.tvPlayerVolumeBoost,
-            options: [.displayInline, .singleSelection],
-            children: [volumeBoostOff, volumeBoostOn]
-        )
+    private func makePlaybackEffectsMenu() -> UIMenu? {
+        var sections: [UIMenu] = []
 
-        let trimActions = TrimSilenceAmount.allCases.map { option in
-            UIAction(title: option.description, state: model.trimSilence == option ? .on : .off) { _ in
-                model.trimSilence = option
-                AnalyticsPlaybackHelper.shared.trimSilenceAmountChanged(amount: option)
-                ToastManager.shared.show(L10n.tvPlayerTrimSilenceSet(option.description))
+        if model.isVolumeBoostAvailable {
+            let volumeBoostOff = UIAction(title: L10n.off, state: model.volumeBoost ? .off : .on) { _ in
+                ToastManager.shared.show(L10n.tvPlayerVolumeBoostOff)
+                model.volumeBoost = false
+                AnalyticsPlaybackHelper.shared.currentSource = .player
+                AnalyticsPlaybackHelper.shared.volumeBoostToggled(enabled: false)
             }
+            let volumeBoostOn = UIAction(title: L10n.on, state: model.volumeBoost ? .on : .off) { _ in
+                ToastManager.shared.show(L10n.tvPlayerVolumeBoostOn)
+                model.volumeBoost = true
+                AnalyticsPlaybackHelper.shared.currentSource = .player
+                AnalyticsPlaybackHelper.shared.volumeBoostToggled(enabled: true)
+            }
+            let volumeBoostSection = UIMenu(
+                title: L10n.tvPlayerVolumeBoost,
+                options: [.displayInline, .singleSelection],
+                children: [volumeBoostOff, volumeBoostOn]
+            )
+            sections.append(volumeBoostSection)
         }
-        let trimSection = UIMenu(
-            title: L10n.tvPlayerTrimSilence,
-            options: [.displayInline, .singleSelection],
-            children: trimActions
-        )
 
-        return UIMenu(
-            title: L10n.tvPlayerPlaybackEffects,
-            image: UIImage(systemName: "speaker.wave.3"),
-            children: [volumeBoostSection]
-        )
+        if  model.isTrimSilenceAvailable {
+            let trimActions = TrimSilenceAmount.allCases.map { option in
+                UIAction(title: option.description, state: model.trimSilence == option ? .on : .off) { _ in
+                    model.trimSilence = option
+                    AnalyticsPlaybackHelper.shared.currentSource = .player
+                    AnalyticsPlaybackHelper.shared.trimSilenceAmountChanged(amount: option)
+                    ToastManager.shared.show(L10n.tvPlayerTrimSilenceSet(option.description))
+                }
+            }
+
+            let trimSection = UIMenu(
+                title: L10n.tvPlayerTrimSilence,
+                options: [.displayInline, .singleSelection],
+                children: trimActions
+            )
+            sections.append(trimSection)
+        }
+        if sections.isEmpty {
+            return nil
+        } else {
+            return UIMenu(
+                title: L10n.tvPlayerPlaybackEffects,
+                image: UIImage(systemName: "speaker.wave.3"),
+                children: sections
+            )
+        }
     }
 
     /// Builds the ellipsis menu sitting alongside the playback-speed and
@@ -300,9 +331,20 @@ private struct NowPlayingPlayerRepresentable: UIViewControllerRepresentable {
             children.append(archiveToggle)
         }
 
+        if model.podcastUuid != nil {
+            let goToPodcast = UIAction(
+                title: L10n.goToPodcast,
+                image: UIImage(systemName: "mic.fill")
+            ) { _ in
+                isShowingPodcast = true
+            }
+            children.append(goToPodcast)
+        }
+
         // No title: the ellipsis icon already conveys "more", and the
         // action labels (Mark Played / Archive) speak for themselves.
         return UIMenu(
+            title: L10n.accessibilityMoreActions,
             image: UIImage(systemName: "ellipsis"),
             children: children
         )

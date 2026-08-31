@@ -270,7 +270,7 @@ final class BookmarkDataManagerTests: DataManagerTestCase {
 
             let bookmarks = dataManager.bookmarks.bookmarks(forEpisode: episode, sorted: .newestToOldest)
 
-            XCTAssertEqual(ordered.reversed(), bookmarks, "\(impl): should be sorted newest to oldest")
+            XCTAssertEqual(ordered.reversed().map(\.uuid), bookmarks.map(\.uuid), "\(impl): should be sorted newest to oldest")
         }
     }
 
@@ -284,7 +284,7 @@ final class BookmarkDataManagerTests: DataManagerTestCase {
 
             let bookmarks = dataManager.bookmarks.bookmarks(forEpisode: episode, sorted: .oldestToNewest)
 
-            XCTAssertEqual(ordered, bookmarks, "\(impl): should be sorted oldest to newest")
+            XCTAssertEqual(ordered.map(\.uuid), bookmarks.map(\.uuid), "\(impl): should be sorted oldest to newest")
         }
     }
 
@@ -303,7 +303,7 @@ final class BookmarkDataManagerTests: DataManagerTestCase {
 
             let bookmarks = dataManager.bookmarks.bookmarks(forEpisode: episode, sorted: .timestamp)
 
-            XCTAssertEqual(ordered, bookmarks, "\(impl): should be sorted by timestamp")
+            XCTAssertEqual(ordered.map(\.uuid), bookmarks.map(\.uuid), "\(impl): should be sorted by timestamp")
         }
     }
 
@@ -364,6 +364,130 @@ final class BookmarkDataManagerTests: DataManagerTestCase {
             _ = await dataManager.bookmarks.remove(bookmarks: [bookmark])
 
             XCTAssertEqual(dataManager.bookmarks.bookmarksToSync().count, 1, "\(impl): delete should mark for sync")
+        }
+    }
+
+    // MARK: - Passage
+
+    func testAddingBookmarkWithPassageRoundTrips() throws {
+        try runWithBothImplementations { dataManager, impl in
+            let passageModified = Date(timeIntervalSince1970: 100)
+            let referenceTimeModified = Date(timeIntervalSince1970: 200)
+
+            let uuid = try XCTUnwrap(dataManager.bookmarks.add(
+                episodeUuid: "episode-uuid",
+                podcastUuid: "podcast-uuid",
+                title: "Title",
+                time: 1,
+                passage: "A memorable passage",
+                passageLocation: 42,
+                passageModified: passageModified,
+                referenceTime: 118,
+                referenceTimeModified: referenceTimeModified
+            ), "\(impl): should return bookmark uuid")
+
+            let bookmark = try XCTUnwrap(dataManager.bookmarks.bookmark(for: uuid), "\(impl): bookmark should be persisted")
+            XCTAssertEqual(bookmark.passage, "A memorable passage", "\(impl): passage should round trip")
+            XCTAssertEqual(bookmark.passageLocation, 42, "\(impl): passageLocation should round trip")
+            XCTAssertEqual(bookmark.passageModified, passageModified, "\(impl): passageModified should round trip")
+            XCTAssertEqual(bookmark.referenceTime, 118, "\(impl): referenceTime should round trip")
+            XCTAssertEqual(bookmark.referenceTimeModified, referenceTimeModified, "\(impl): referenceTimeModified should round trip")
+        }
+    }
+
+    func testAddingBookmarkWithoutPassageIsNil() throws {
+        try runWithBothImplementations { dataManager, impl in
+            let bookmark = addBookmark(dataManager: dataManager)
+
+            XCTAssertNil(bookmark.passage, "\(impl): passage should be nil")
+            XCTAssertNil(bookmark.passageLocation, "\(impl): passageLocation should be nil")
+            XCTAssertNil(bookmark.passageModified, "\(impl): passageModified should be nil")
+            XCTAssertNil(bookmark.referenceTime, "\(impl): referenceTime should be nil")
+            XCTAssertNil(bookmark.referenceTimeModified, "\(impl): referenceTimeModified should be nil")
+        }
+    }
+
+    func testUpdatingPassageSaves() async throws {
+        try await runWithBothImplementations { dataManager, impl in
+            let bookmark = addBookmark(dataManager: dataManager)
+            let modified = Date(timeIntervalSince1970: 300)
+
+            await dataManager.bookmarks.update(bookmark: bookmark, passage: "New passage", passageLocation: 7, passageModified: modified)
+
+            let updated = dataManager.bookmarks.bookmark(for: bookmark.uuid)
+            XCTAssertEqual(updated?.passage, "New passage", "\(impl): passage should update")
+            XCTAssertEqual(updated?.passageLocation, 7, "\(impl): passageLocation should update")
+            XCTAssertEqual(updated?.passageModified, modified, "\(impl): passageModified should update")
+        }
+    }
+
+    func testUpdatingReferenceTimeSaves() async throws {
+        try await runWithBothImplementations { dataManager, impl in
+            let bookmark = addBookmark(dataManager: dataManager)
+            let modified = Date(timeIntervalSince1970: 300)
+
+            await dataManager.bookmarks.update(bookmark: bookmark, referenceTime: 45, referenceTimeModified: modified)
+
+            let updated = dataManager.bookmarks.bookmark(for: bookmark.uuid)
+            XCTAssertEqual(updated?.referenceTime, 45, "\(impl): referenceTime should update")
+            XCTAssertEqual(updated?.referenceTimeModified, modified, "\(impl): referenceTimeModified should update")
+        }
+    }
+
+    func testUpdatingTitleLeavesPassageUntouched() async throws {
+        try await runWithBothImplementations { dataManager, impl in
+            let uuid = try XCTUnwrap(dataManager.bookmarks.add(
+                episodeUuid: "episode-uuid",
+                podcastUuid: "podcast-uuid",
+                title: "Title",
+                time: 1,
+                passage: "A passage",
+                passageLocation: 3,
+                passageModified: Date(timeIntervalSince1970: 100)
+            ))
+            let bookmark = try XCTUnwrap(dataManager.bookmarks.bookmark(for: uuid))
+
+            await dataManager.bookmarks.update(bookmark: bookmark, title: "New Title")
+
+            let updated = dataManager.bookmarks.bookmark(for: bookmark.uuid)
+            XCTAssertEqual(updated?.title, "New Title", "\(impl): title should update")
+            XCTAssertEqual(updated?.passage, "A passage", "\(impl): passage should be untouched")
+            XCTAssertEqual(updated?.passageLocation, 3, "\(impl): passageLocation should be untouched")
+        }
+    }
+
+    func testUpdatingPassageWithoutModifiedDateIsIgnored() async throws {
+        try await runWithBothImplementations { dataManager, impl in
+            let bookmark = addBookmark(dataManager: dataManager)
+
+            await dataManager.bookmarks.update(bookmark: bookmark, passage: "New passage", passageLocation: 7)
+
+            let updated = dataManager.bookmarks.bookmark(for: bookmark.uuid)
+            XCTAssertNil(updated?.passage, "\(impl): passage without a modified date should be ignored")
+            XCTAssertNil(updated?.passageLocation, "\(impl): passageLocation without a modified date should be ignored")
+        }
+    }
+
+    func testClearingPassageSaves() async throws {
+        try await runWithBothImplementations { dataManager, impl in
+            let uuid = try XCTUnwrap(dataManager.bookmarks.add(
+                episodeUuid: "episode-uuid",
+                podcastUuid: "podcast-uuid",
+                title: "Title",
+                time: 1,
+                passage: "A passage",
+                passageLocation: 3,
+                passageModified: Date(timeIntervalSince1970: 100)
+            ))
+            let bookmark = try XCTUnwrap(dataManager.bookmarks.bookmark(for: uuid))
+            let modified = Date(timeIntervalSince1970: 300)
+
+            await dataManager.bookmarks.update(bookmark: bookmark, passageModified: modified)
+
+            let updated = dataManager.bookmarks.bookmark(for: bookmark.uuid)
+            XCTAssertNil(updated?.passage, "\(impl): passage should clear")
+            XCTAssertNil(updated?.passageLocation, "\(impl): passageLocation should clear")
+            XCTAssertEqual(updated?.passageModified, modified, "\(impl): passageModified should update")
         }
     }
 

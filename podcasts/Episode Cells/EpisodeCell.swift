@@ -2,6 +2,7 @@ import PocketCastsDataModel
 import PocketCastsServer
 import UIKit
 
+@MainActor
 class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
     private static let playedAlpha: CGFloat = 0.5
 
@@ -32,6 +33,7 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
         didSet {
             informationLabel.style = .primaryText02
             informationLabel.font = UIFont.font(ofSize: 13, scalingWith: .footnote)
+            informationLabel.adjustsFontForContentSizeCategory = true
         }
     }
 
@@ -69,7 +71,7 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
     @IBOutlet var dayName: ThemeableLabel! {
         didSet {
             dayName.style = .primaryText02
-            dayName.font = UIFont.font(ofSize: 11, weight: .semibold, scalingWith: .caption2)
+            dayName.font = UIFont.font(ofSize: 11, weight: .semibold, scalingWith: .footnote)
         }
     }
 
@@ -146,6 +148,10 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
 
     override func awakeFromNib() {
         super.awakeFromNib()
+
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: EpisodeCell, _) in
+            view.updateSize()
+        }
 
         NotificationCenter.default.addObserver(self, selector: #selector(updateCellFromGenericEvent), name: Constants.Notifications.playbackStarted, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateCellFromGenericEvent), name: Constants.Notifications.playbackEnded, object: nil)
@@ -238,7 +244,9 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
             setEpisodeTitle(episode: episode)
 
             starIndicator.isHidden = !episode.keepEpisode
-            videoIndicator.isHidden = !episode.videoPodcast()
+            // Treat episodes that will stream HLS as video, so we show the video indicator without parsing
+            // the stream. Downloaded episodes play their local audio-only file, so they get no icon.
+            videoIndicator.isHidden = !EpisodeManager.isVideo(episode)
             videoIndicator.tintColor = ThemeColor.support01()
             setUpNextIndicator(visible: PlaybackManager.shared.inUpNext(episode: episode), animated: false)
             upNextIndicator.tintColor = ThemeColor.support01()
@@ -513,6 +521,14 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
     }
 
     @objc private func uploadProgressDidUpdate() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { uploadProgressDidUpdateOnMain() }
+        } else {
+            Task { @MainActor in uploadProgressDidUpdateOnMain() }
+        }
+    }
+
+    private func uploadProgressDidUpdateOnMain() {
         guard let ourEpisode = episode as? UserEpisode, let _ = UploadManager.shared.progressManager.progressForEpisode(ourEpisode.uuid) else { return }
 
         // if this episode isn't listed as uploading, update it from the DB
@@ -520,15 +536,7 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
             episode = reloadEpisode()
         }
 
-        if Thread.isMainThread {
-            populate(progressOnly: true)
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-
-                self.populate(progressOnly: true)
-            }
-        }
+        populate(progressOnly: true)
     }
 
     @objc func reloadArtwork(_ notification: Notification) {
@@ -556,7 +564,7 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
         guard let episode else { return }
 
         // if the user tapped play from a featured list, record that. We just want the first play, if they are unpausing it, that's not relevant (hence the last check below)
-        if let podcastUuid, let listUuid, !PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid) {
+        if let podcastUuid, let listUuid, !PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid) {
             AnalyticsHelper.podcastEpisodePlayedFromList(listId: listUuid, podcastUuid: podcastUuid)
         }
 
@@ -707,11 +715,5 @@ class EpisodeCell: ThemeableSwipeCell, MainEpisodeActionViewDelegate {
         episodeTitle.updateNumberOfLines(regular: 2, accessibility: 3)
         dayName.updateNumberOfLines(regular: 1, accessibility: 3)
         informationLabel.updateNumberOfLines(regular: 1, accessibility: 3)
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        guard traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory else { return }
-        updateSize()
     }
 }

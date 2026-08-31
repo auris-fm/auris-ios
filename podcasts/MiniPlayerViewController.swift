@@ -152,7 +152,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         }
 
         let title = MiniPlayerScrollingTitleView()
-        title.font = .systemFont(ofSize: 13, weight: .medium)
+        title.font = .font(ofSize: 13, weight: .medium, scalingWith: .footnote, maxSizeCategory: .extraExtraLarge)
         episodeTitleLabel = title
         let titleVibrancy = Self.makeVibrancyWrapper(style: .label, content: title)
 
@@ -171,10 +171,10 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         let timeLeftVibrancy = Self.makeVibrancyWrapper(style: .secondaryLabel, content: timeLeftHost.view)
 
         let progressView = MiniPlayerGlassProgressView()
+        progressView.translatesAutoresizingMaskIntoConstraints = false
         glassProgressView = progressView
-        let progressVibrancy = Self.makeVibrancyWrapper(style: .fill, content: progressView)
 
-        let bottomRow = UIStackView(arrangedSubviews: [progressVibrancy, timeLeftVibrancy])
+        let bottomRow = UIStackView(arrangedSubviews: [progressView, timeLeftVibrancy])
         bottomRow.axis = .horizontal
         bottomRow.alignment = .center
         bottomRow.spacing = 6
@@ -185,10 +185,11 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         textStack.alignment = .leading
         textStack.spacing = 2
 
+        addPlayButtonBounce()
         let buttonStack = UIStackView(arrangedSubviews: [skipBackBtn, playPauseBtn, skipFwdBtn])
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
         buttonStack.axis = .horizontal
-        buttonStack.alignment = .center
+        buttonStack.alignment = .fill
         glassButtonStack = buttonStack
 
         view.addSubview(podcastArtwork)
@@ -221,18 +222,44 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         }
     }
 
+    /// Adds a springy scale-up-and-settle-back response to the play/pause
+    /// button so the translucent accent circle feels tactile on tap.
+    private func addPlayButtonBounce() {
+        playPauseBtn.addTarget(self, action: #selector(playButtonTouchedDown), for: .touchDown)
+        playPauseBtn.addTarget(self, action: #selector(playButtonReleased), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+    }
+
+    @objc private func playButtonTouchedDown() {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        UIView.animate(withDuration: 0.18, delay: 0, usingSpringWithDamping: 0.5, initialSpringVelocity: 0.8, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.playPauseBtn.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
+            self.playPauseBtn.alpha = 0.75
+        }
+    }
+
+    @objc private func playButtonReleased() {
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            playPauseBtn.transform = .identity
+            playPauseBtn.alpha = 1
+            return
+        }
+        UIView.animate(withDuration: 0.55, delay: 0, usingSpringWithDamping: 0.35, initialSpringVelocity: 0.7, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.playPauseBtn.transform = .identity
+            self.playPauseBtn.alpha = 1
+        }
+    }
+
     override func updateViewConstraints() {
         if #available(iOS 26.0, *), let glassButtonStack, let glassProgressView {
             let isInline = forcedInlineLayout ?? (view.traitCollection.tabAccessoryEnvironment == .inline)
-            let buttonWidth: CGFloat = 44
-            skipBackBtnWidthConstraint.constant = buttonWidth
-            playPauseBtnWidthConstraint.constant = buttonWidth
-            skipFwdBtnWidthConstraint.constant = buttonWidth
+            skipBackBtnWidthConstraint.constant = 47
+            playPauseBtnWidthConstraint.constant = 47
+            skipFwdBtnWidthConstraint.constant = 47
 
             NSLayoutConstraint.deactivate(accessoryEnvironmentConstraints)
             accessoryEnvironmentConstraints = [
                 glassProgressView.widthAnchor.constraint(equalToConstant: isInline ? 34 : 52),
-                glassButtonStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: isInline ? -4 : -8),
+                glassButtonStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
             ]
             NSLayoutConstraint.activate(accessoryEnvironmentConstraints)
         }
@@ -356,6 +383,13 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     }
 
     func finishedWithFullScreenPlayer() {
+        // Undo the blanking `PlayerZoomAnimator` applies to the mini player when
+        // presenting the full screen player. The animated dismissal already
+        // restores this itself, so re-applying it here is a no-op there, but it
+        // keeps the mini player visible after any teardown path.
+        view.alpha = 1
+        view.subviews.forEach { $0.alpha = 1 }
+
         guard rootViewController() != nil else { return }
 
         rootViewController()?.setNeedsStatusBarAppearanceUpdate()
@@ -367,6 +401,20 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         // update the mini player on full screen player close
         playbackStateDidChange()
         playbackProgressDidChange()
+    }
+
+    /// A `dismiss(animated: false)` anywhere up the presentation chain
+    /// (notification taps, deep links, stacked-sheet teardowns) never consults
+    /// the transitioning delegate, so the animators' dismiss completions —
+    /// which restore the mini player and close out `playerOpenState` — don't
+    /// run, leaving the mini player permanently empty and frozen. Called from
+    /// the player's presentation controller only for those non-animated
+    /// teardowns; animated dismissals are fully handled by the animators.
+    func fullScreenPlayerDidDismiss(_ player: PlayerContainerViewController) {
+        guard fullScreenPlayer == nil || fullScreenPlayer === player else { return }
+
+        playerOpenState = .closed
+        finishedWithFullScreenPlayer()
     }
 
     func changeHeightTo(_ height: CGFloat) {
@@ -381,6 +429,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     func addUINotificationObservers() {
         addCustomObserver(Constants.Notifications.playbackStarting, selector: #selector(playbackStarting))
         addCustomObserver(Constants.Notifications.playbackStarted, selector: #selector(playbackStarted))
+        addCustomObserver(Constants.Notifications.videoPlaybackEngineSwitched, selector: #selector(videoPlaybackEngineSwitched))
         addCustomObserver(Constants.Notifications.playbackEnded, selector: #selector(playbackStateDidChange))
         addCustomObserver(Constants.Notifications.playbackPaused, selector: #selector(playbackStateDidChange))
         addCustomObserver(Constants.Notifications.playbackTrackChanged, selector: #selector(playbackStateDidChange))
@@ -455,7 +504,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
 
     /// Shows the current chapter title when the episode has chapters, falling
     /// back to the episode title otherwise — matching the full screen player.
-    private func updateTitle(for episode: BaseEpisode? = PlaybackManager.shared.currentEpisode()) {
+    private func updateTitle(for episode: BaseEpisode? = PlaybackManager.shared.currentEpisode) {
         guard let episodeTitleLabel, let episode else { return }
 
         let chapters = PlaybackManager.shared.currentChapters()
@@ -473,32 +522,48 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
 
     @objc private func chapterDidChange() {
         updateTitle()
-        if let episode = PlaybackManager.shared.currentEpisode() {
+        if let episode = PlaybackManager.shared.currentEpisode {
             updateArtwork(for: episode)
         }
     }
 
     @objc private func playbackStarted() {
-        if let episode = PlaybackManager.shared.currentEpisode() {
+        if let episode = PlaybackManager.shared.currentEpisode {
+            // Forget the auto open marker once a different episode plays, otherwise coming back to a
+            // previously auto opened episode never opens the player again. Keeping it for the same
+            // episode still stops a reload (e.g. switching to the downloaded file) from re-opening it.
+            if lastEpisodeUuidAutoOpened != episode.uuid {
+                lastEpisodeUuidAutoOpened = ""
+            }
+
             setupForEpisode(episode)
             showMiniPlayer()
-            let shouldOpenAutomatically: Bool
-            if FeatureFlag.newSettingsStorage.enabled {
-                shouldOpenAutomatically = SettingsStore.appSettings.openPlayer
-            } else {
-                shouldOpenAutomatically = UserDefaults.standard.bool(forKey: Constants.UserDefaults.openPlayerAutomatically)
-            }
-            if shouldOpenAutomatically || episode.videoPodcast(), lastEpisodeUuidAutoOpened != episode.uuid {
-                lastEpisodeUuidAutoOpened = episode.uuid
-
-                // we called show mini player above, which might have spent time animating itself into view, so give that time to finish
-                DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Animation.defaultAnimationTime) {
-                    self.openFullScreenPlayer()
-                }
-            }
+            autoOpenFullScreenPlayerIfNeeded(for: episode)
         } else {
             hideMiniPlayer(true)
         }
+    }
+
+    /// Opens the full screen player automatically when the user's setting is on, or when the
+    /// current episode is video. For HLS the video isn't known at playback start, so this is also
+    /// called when video is detected at runtime (via `videoPlaybackEngineSwitched`).
+    private func autoOpenFullScreenPlayerIfNeeded(for episode: BaseEpisode) {
+        let shouldOpenAutomatically = UserDefaults.standard.bool(forKey: Constants.UserDefaults.openPlayerAutomatically)
+        if shouldOpenAutomatically || PlaybackManager.shared.isCurrentEpisodeVideo(), lastEpisodeUuidAutoOpened != episode.uuid {
+            lastEpisodeUuidAutoOpened = episode.uuid
+
+            // we called show mini player above, which might have spent time animating itself into view, so give that time to finish
+            DispatchQueue.main.asyncAfter(deadline: .now() + Constants.Animation.defaultAnimationTime) {
+                self.openFullScreenPlayer()
+            }
+        }
+    }
+
+    @objc private func videoPlaybackEngineSwitched() {
+        // Video can be detected after playback starts (e.g. an HLS stream), so give it the same
+        // automatic full screen treatment a video podcast gets.
+        guard let episode = PlaybackManager.shared.currentEpisode else { return }
+        autoOpenFullScreenPlayerIfNeeded(for: episode)
     }
 
     @objc private func playbackStarting() {
@@ -517,7 +582,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     }
 
     @objc private func playbackStateDidChange() {
-        guard let episodePlaying = PlaybackManager.shared.currentEpisode() else {
+        guard let episodePlaying = PlaybackManager.shared.currentEpisode else {
             hideMiniPlayer(true)
 
             return
@@ -543,7 +608,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
             progress = min(1, CGFloat(currentTime / duration))
         }
 
-        let isIndeterminate = PlaybackManager.shared.buffering() && PlaybackManager.shared.playing()
+        let isIndeterminate = PlaybackManager.shared.isBuffering && PlaybackManager.shared.isPlaying
 
         playbackProgressView.progress = progress
         playbackProgressView.indeterminant = isIndeterminate
@@ -589,7 +654,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
             updateColorsLegacy()
         }
 
-        playPauseBtn.isPlaying = PlaybackManager.shared.playing()
+        playPauseBtn.isPlaying = PlaybackManager.shared.isPlaying
     }
 
     private func updateColorsLegacy() {
@@ -614,7 +679,6 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     @available(iOS 26.0, *)
     private func updateColorsLiquidGlass() {
         let actionColor = currentPodcastTintColor()
-        let iconColor = ThemeColor.podcastIcon03(podcastColor: actionColor)
         let bgColor = ThemeColor.primaryUi02()
 
         // System color so the vibrancy wrapper can modulate it.
@@ -622,18 +686,18 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
         timeLeftModel?.color = Color(ThemeColor.primaryText02())
 
         playPauseBtn.playButtonColor = bgColor
-        playPauseBtn.circleColor = iconColor
+        playPauseBtn.circleColor = actionColor
 
-        skipBackBtn.tintColor = iconColor
-        skipFwdBtn.tintColor = iconColor
+        skipBackBtn.tintColor = actionColor
+        skipFwdBtn.tintColor = actionColor
 
         glassProgressView?.tintColorOverride = actionColor
     }
 
     private func currentPodcastTintColor() -> UIColor {
-        if let podcast = podcastForEpisode(PlaybackManager.shared.currentEpisode()) {
+        if let podcast = podcastForEpisode(PlaybackManager.shared.currentEpisode) {
             return Theme.isDarkTheme() ? ColorManager.darkThemeTintForPodcast(podcast) : ColorManager.lightThemeTintForPodcast(podcast)
-        } else if let episode = PlaybackManager.shared.currentEpisode() as? UserEpisode, episode.imageColor > 0 {
+        } else if let episode = PlaybackManager.shared.currentEpisode as? UserEpisode, episode.imageColor > 0 {
             return AppTheme.userEpisodeColor(number: Int(episode.imageColor))
         } else {
             return AppTheme.userEpisodeColor(number: 1)
@@ -641,7 +705,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     }
 
     private func podcastForEpisode(_ episode: BaseEpisode?) -> Podcast? {
-        if let episode = PlaybackManager.shared.currentEpisode() as? Episode {
+        if let episode = PlaybackManager.shared.currentEpisode as? Episode {
             return episode.parentPodcast()
         }
 
@@ -649,7 +713,7 @@ class MiniPlayerViewController: SimpleNotificationsViewController {
     }
 
     @objc private func updateRequired() {
-        guard let episode = PlaybackManager.shared.currentEpisode() else { return }
+        guard let episode = PlaybackManager.shared.currentEpisode else { return }
 
         updateColors()
         updateArtwork(for: episode, forceReload: true)

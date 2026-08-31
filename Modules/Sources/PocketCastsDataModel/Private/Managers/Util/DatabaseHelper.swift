@@ -10,8 +10,6 @@ class DatabaseHelper {
         var databaseWasCreated = false
         queue.write { db in
             do {
-                try db.executeQuery("PRAGMA busy_timeout = 10000", values: nil).close()
-
                 let startingSchemaVersion = db.pragmaUserVersion() ?? 0
                 databaseWasCreated = startingSchemaVersion < 1
 
@@ -916,6 +914,30 @@ class DatabaseHelper {
                 schemaVersion = 74
             } catch {
                 failedAt(74)
+                return
+            }
+        }
+
+        if schemaVersion < 75 {
+            do {
+                try db.executeUpdate("ALTER TABLE SJEpisode ADD COLUMN hlsUrl TEXT;", values: nil)
+                schemaVersion = 75
+            } catch {
+                failedAt(75)
+                return
+            }
+        }
+
+        if schemaVersion < 76 {
+            do {
+                try db.executeUpdate("ALTER TABLE Bookmark ADD COLUMN passage TEXT;", values: nil)
+                try db.executeUpdate("ALTER TABLE Bookmark ADD COLUMN passage_location INTEGER;", values: nil)
+                try db.executeUpdate("ALTER TABLE Bookmark ADD COLUMN passage_modified_date INTEGER;", values: nil)
+                try db.executeUpdate("ALTER TABLE Bookmark ADD COLUMN reference_time real;", values: nil)
+                try db.executeUpdate("ALTER TABLE Bookmark ADD COLUMN reference_time_modified_date INTEGER;", values: nil)
+                schemaVersion = 76
+            } catch {
+                failedAt(76)
                 return
             }
         }

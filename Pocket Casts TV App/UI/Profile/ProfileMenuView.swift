@@ -6,6 +6,8 @@ struct ProfileMenuView: View {
 
     @State private var isShowingLogoutConfirmation = false
 
+    @State private var isShowingSettings = false
+
     /// Called with the chosen destination when the signed-out user taps
     /// "Log in" or "Create account". The presenter is responsible for
     /// dismissing this menu and showing the destination.
@@ -29,12 +31,16 @@ struct ProfileMenuView: View {
     }
 
     var body: some View {
-        Group {
+        VStack {
             if coordinator.userState.isLoggedIn {
                 signedInMenu
             } else {
                 signedOutMenu
             }
+            Text(Settings.displayableVersion())
+                .font(.caption)
+                .foregroundStyle(Color.pcTextSecondary)
+                .padding(.top, 5)
         }
         .padding(80)
         .frame(width: 862, alignment: .center)
@@ -52,9 +58,14 @@ struct ProfileMenuView: View {
         } message: {
             Text(L10n.tvProfileMenuLogOutConfirmationMessageVersion2)
         }
+        .sheet(isPresented: $isShowingSettings) {
+            SettingsMenuView()
+                .environment(coordinator)
+        }
         .onAppear {
             Analytics.track(.profileShown)
         }
+        .remotePlayPause()
     }
 
     // MARK: - Signed-in
@@ -65,25 +76,15 @@ struct ProfileMenuView: View {
                 ProfileImage(email: email)
                     .frame(width: 160, height: 160)
                     .clipShape(Circle())
+                    .accessibilityHidden(true)
                 Text(email)
                     .font(.title3)
                     .foregroundStyle(Color.pcTextPrimary)
                     .padding(.bottom, 24)
             }
 
-            // Group 1
-            Button {
-                Analytics.track(.profileSettingsButtonTapped)
-                // Settings destination not yet implemented for TV
-            } label: {
-                Label(L10n.settings, systemImage: "gearshape")
-                    .frame(minWidth: 400)
-            }
-
             Divider()
                 .frame(maxWidth: 400)
-
-            // Group 2
             Button {
                 onProfileSelected(.starred)
             } label: {
@@ -96,11 +97,15 @@ struct ProfileMenuView: View {
                 Text(L10n.listeningHistory)
                     .frame(minWidth: 400)
             }
-
+            Button {
+                isShowingSettings = true
+            } label: {
+                Text(L10n.settings)
+                    .frame(minWidth: 400)
+            }
             Divider()
                 .frame(maxWidth: 400)
 
-            // Group 3
             Button {
                 isShowingLogoutConfirmation = true
             } label: {
@@ -126,6 +131,12 @@ struct ProfileMenuView: View {
                 onAuthSelected(.createAccount)
             } label: {
                 Label(L10n.tvProfileMenuCreateAccount, systemImage: "person.crop.circle.badge.plus")
+                    .frame(minWidth: 400)
+            }
+            Button {
+                isShowingSettings = true
+            } label: {
+                Text(L10n.settings)
                     .frame(minWidth: 400)
             }
         }
