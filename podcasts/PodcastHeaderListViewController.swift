@@ -8,7 +8,7 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
     var showRankingNumber = false
     var labelTitle: String?
 
-    @IBOutlet var chartsTable: UITableView!
+    @IBOutlet var chartsTable: ThemeableTable!
 
     private weak var delegate: DiscoverDelegate?
     private static let cellId = "DiscoverCell"
@@ -34,6 +34,12 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: PodcastHeaderListViewController, _) in
+            controller.chartsTable.reloadData()
+        }
+
+        chartsTable.themeStyle = .primaryUi02
+
         chartsTable.register(UINib(nibName: "DiscoverPodcastTableCell", bundle: nil), forCellReuseIdentifier: PodcastHeaderListViewController.cellId)
         chartsTable.register(UINib(nibName: "FeaturedTableViewCell", bundle: nil), forCellReuseIdentifier: PodcastHeaderListViewController.featuredCellId)
 
@@ -50,14 +56,6 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
         super.viewWillAppear(animated)
 
         chartsTable.reloadData()
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-
-        if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
-            chartsTable.reloadData()
-        }
     }
 
     @objc private func handleShare() {

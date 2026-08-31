@@ -2,6 +2,7 @@ import XCTest
 @testable import podcasts
 import PocketCastsDataModel
 import PocketCastsServer
+import PocketCastsUtils
 
 final class EpisodeManagerTests: DBTestCase {
 
@@ -203,5 +204,149 @@ final class EpisodeManagerTests: DBTestCase {
       // Then
       XCTAssertFalse(FileManager.default.fileExists(atPath: oldFilePath), "Old file should be removed")
       XCTAssertTrue(FileManager.default.fileExists(atPath: recentFilePath), "Recent file should be kept")
+    }
+
+    // MARK: - HLS streaming
+
+    override func tearDown() {
+        FeatureFlagOverrideStore().resetOverrides()
+        super.tearDown()
+    }
+
+    private func makeStreamingHLSEpisode() -> Episode {
+        let episode = Episode()
+        episode.uuid = "hls-episode"
+        episode.episodeStatus = DownloadStatus.notDownloaded.rawValue
+        episode.downloadUrl = "https://example.com/episode.mp3"
+        episode.hlsUrl = "https://example.com/stream.m3u8"
+        return episode
+    }
+
+    func testHasHLSStreamWhenFlagEnabledAndHlsUrlPresent() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+        XCTAssertTrue(EpisodeManager.hasHLSStream(makeStreamingHLSEpisode()))
+    }
+
+    func testDoesNotHaveHLSStreamWhenFlagDisabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: false)
+        XCTAssertFalse(EpisodeManager.hasHLSStream(makeStreamingHLSEpisode()))
+    }
+
+    func testDoesNotHaveHLSStreamWhenHlsUrlMissingOrEmpty() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let noHls = makeStreamingHLSEpisode()
+        noHls.hlsUrl = nil
+        XCTAssertFalse(EpisodeManager.hasHLSStream(noHls))
+
+        let emptyHls = makeStreamingHLSEpisode()
+        emptyHls.hlsUrl = ""
+        XCTAssertFalse(EpisodeManager.hasHLSStream(emptyHls))
+    }
+
+    func testDoesNotHaveHLSStreamForUserEpisode() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+        XCTAssertFalse(EpisodeManager.hasHLSStream(UserEpisode()))
+    }
+
+    func testUrlForEpisodeStreamsHLSWhenAvailableAndFlagEnabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let url = EpisodeManager.urlForEpisode(makeStreamingHLSEpisode())
+
+        XCTAssertEqual(url?.absoluteString, "https://example.com/stream.m3u8", "Should stream the HLS url when available")
+    }
+
+    func testUrlForEpisodeStreamsHLSWhenStreamingOnly() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let url = EpisodeManager.urlForEpisode(makeStreamingHLSEpisode(), streamingOnly: true)
+
+        XCTAssertEqual(url?.absoluteString, "https://example.com/stream.m3u8", "Should stream the HLS url when available")
+    }
+
+    func testUrlForEpisodeUsesProgressiveWhenHLSFlagDisabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: false)
+
+        let url = EpisodeManager.urlForEpisode(makeStreamingHLSEpisode())
+
+        XCTAssertEqual(url?.absoluteString, "https://example.com/episode.mp3", "Should fall back to the progressive file when the flag is off")
+    }
+
+    func testUrlForEpisodeUsesProgressiveWhenNoHLS() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let episode = makeStreamingHLSEpisode()
+        episode.hlsUrl = nil
+
+        let url = EpisodeManager.urlForEpisode(episode)
+
+        XCTAssertEqual(url?.absoluteString, "https://example.com/episode.mp3", "Should use the progressive file when there is no HLS url")
+    }
+
+    // MARK: - isVideo
+
+    private func makeVideoEpisode() -> Episode {
+        let episode = Episode()
+        episode.uuid = "video-episode"
+        episode.fileType = "video/mp4"
+        return episode
+    }
+
+    func testIsVideoForNativeVideoPodcastWhenHLSFlagDisabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: false)
+        XCTAssertTrue(EpisodeManager.isVideo(makeVideoEpisode()), "A native video podcast should be treated as video regardless of the HLS flag")
+    }
+
+    func testIsVideoForHLSStreamWhenFlagEnabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+        XCTAssertTrue(EpisodeManager.isVideo(makeStreamingHLSEpisode()), "An episode with a usable HLS stream should be treated as video")
+    }
+
+    func testIsNotVideoForHLSStreamWhenFlagDisabled() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: false)
+        XCTAssertFalse(EpisodeManager.isVideo(makeStreamingHLSEpisode()), "An audio episode should not be treated as video when the HLS flag is off")
+    }
+
+    func testIsNotVideoForAudioEpisodeWithoutHLS() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let episode = makeStreamingHLSEpisode()
+        episode.hlsUrl = nil
+
+        XCTAssertFalse(EpisodeManager.isVideo(episode), "A plain audio episode should not be treated as video")
+    }
+
+    func testIsNotVideoForDownloadedHLSEpisode() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let episode = makeStreamingHLSEpisode()
+        episode.episodeStatus = DownloadStatus.downloaded.rawValue
+        createDownloadedFile(for: episode)
+        defer { removeDownloadedFile(for: episode) }
+
+        XCTAssertFalse(EpisodeManager.isVideo(episode), "A downloaded episode plays its local audio file, so it should not be shown as video")
+    }
+
+    func testIsVideoForDownloadedNativeVideoPodcast() throws {
+        try FeatureFlagOverrideStore().override(FeatureFlag.hls, withValue: true)
+
+        let episode = makeVideoEpisode()
+        episode.episodeStatus = DownloadStatus.downloaded.rawValue
+        createDownloadedFile(for: episode)
+        defer { removeDownloadedFile(for: episode) }
+
+        XCTAssertTrue(EpisodeManager.isVideo(episode), "A downloaded video podcast still plays video from its local file")
+    }
+
+    private func createDownloadedFile(for episode: Episode) {
+        let path = DownloadManager.shared.pathForEpisode(episode)
+        let directory = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: path, contents: Data())
+    }
+
+    private func removeDownloadedFile(for episode: Episode) {
+        try? FileManager.default.removeItem(atPath: DownloadManager.shared.pathForEpisode(episode))
     }
 }

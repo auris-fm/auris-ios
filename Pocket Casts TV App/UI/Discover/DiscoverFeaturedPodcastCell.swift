@@ -43,36 +43,43 @@ struct DiscoverFeaturedPodcastCell: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 4) {
-                        if sponsored {
-                            Text(L10n.discoverSponsored.sentenceCased)
-                                .font(.body)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 4) {
+                            if sponsored {
+                                Text(L10n.discoverSponsored.sentenceCased)
+                                    .font(.body)
+                                    .foregroundColor(.pcTextPrimary)
+                                Text("·")
+                                    .foregroundColor(.pcTextSecondary)
+                            }
+                            if let author = podcast.author {
+                                Text(author)
+                                    .font(.body)
+                                    .foregroundColor(.pcTextSecondary)
+                            }
+                            Spacer()
+                        }
+                        if let title = podcast.title {
+                            Text(title)
+                                .font(.title2)
                                 .foregroundColor(.pcTextPrimary)
-                            Text("·")
-                                .foregroundColor(.pcTextSecondary)
                         }
-                        if let author = podcast.author {
-                            Text(author)
+                        if let description = podcast.shortDescription {
+                            Text(description)
+                                .lineLimit(2)
                                 .font(.body)
                                 .foregroundColor(.pcTextSecondary)
                         }
-                        Spacer()
                     }
-                    if let title = podcast.title {
-                        Text(title)
-                            .font(.title2)
-                            .foregroundColor(.pcTextPrimary)
-                    }
-                    if let description = podcast.shortDescription {
-                        Text(description)
-                            .lineLimit(2)
-                            .font(.body)
-                            .foregroundColor(.pcTextSecondary)
-                    }
+                    .accessibilityElement(children: .combine)
                     HStack(spacing: 24) {
                         Button(L10n.tvDiscoverFeaturedPlayLatestEpisode) {
                             Task {
+                                AnalyticsPlaybackHelper.shared.currentSource = .discover
                                 let successPlay = await TVDataManager.shared.playLatestEpisode(of: podcast)
+                                if successPlay {
+                                    trackEpisodeTapped()
+                                }
                                 await MainActor.run {
                                     if successPlay {
                                         showNowPlayingPlayer = true
@@ -87,9 +94,15 @@ struct DiscoverFeaturedPodcastCell: View {
                             Text(L10n.tvDiscoverFeaturedGoToPodcast)
                         }
                         .simultaneousGesture(TapGesture().onEnded {
-                            if let listId, let podcastUuid = podcast.uuid {
+                            guard let podcastUuid = podcast.uuid else {
+                                return
+                            }
+                            if let listId {
                                 DiscoverAnalytics.podcastTapped(listId: listId, podcastUuid: podcastUuid, source: source)
                             }
+                            Analytics.track(.discoverFeaturedPodcastTapped, properties: ["uuid": podcastUuid])
+                            AnalyticsHelper.openedFeaturedPodcast()
+                            DiscoverAnalytics.currentFeaturedPodcast = podcastUuid
                         })
                         .focused($focusedButton, equals: FocusValues.goPodcast)
                     }
@@ -103,7 +116,7 @@ struct DiscoverFeaturedPodcastCell: View {
             if axis == .vertical {
                 return Layout.cardHeight
             } else {
-                return length * 0.92
+                return length * 0.9
             }
         }
         .blurredCoverBackground(size: Layout.imageSize) {
@@ -114,7 +127,7 @@ struct DiscoverFeaturedPodcastCell: View {
         .background(Color.pcBackgroundSunken)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .focusedCardDepth(isFocused: focusedButton != nil, cornerRadius: 12)
-        .scaleEffect(focusedButton != nil ? 1 : 0.95)
+        .scaleEffect(focusedButton != nil ? 1.05 : 1)
         .animation(.default, value: focusedButton)
         .focusSection()
         .focusScope(ns)
@@ -122,6 +135,16 @@ struct DiscoverFeaturedPodcastCell: View {
             NowPlayingView()
                 .ignoresSafeArea()
         }
+    }
+
+    private func trackEpisodeTapped() {
+        guard let episodeUuid = PlaybackManager.shared.currentEpisode?.uuid,
+              let podcastUuid = podcast.uuid,
+              let listId else {
+            return
+        }
+        DiscoverAnalytics.episodeTapped(listId: listId, podcastUuid: podcastUuid, episodeUuid: episodeUuid, source: source)
+        DiscoverAnalytics.discoverPodcastPlayed(podcastUuid: podcastUuid, listID: listId)
     }
 }
 

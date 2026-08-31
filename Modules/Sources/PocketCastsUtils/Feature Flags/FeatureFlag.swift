@@ -14,12 +14,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Whether End Of Year feature is enabled
     case endOfYear
 
-    /// Store settings as JSON in User Defaults (global) or SQLite (podcast)
-    case newSettingsStorage
-
-    /// Syncing all app and podcast settings
-    case settingsSync
-
     /// Show the modal about the partnership with Slumber Studios
     case slumber
 
@@ -37,11 +31,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// This recently caused issues, syncing changes that shouldn't have been synced
     /// When `true`, we only mark podcasts as unsynced if the user never signed in before
     case onlyMarkPodcastsUnsyncedForNewUsers
-
-    /// Only update an episode if it fails playing
-    /// If set to `false`, it will use the previous mechanism that always update
-    /// but can lead to a bigger time between tapping play and actually playing it
-    case whenPlayingOnlyUpdateEpisodeIfPlaybackFails
 
     /// Enables the Kids banner
     case kidsProfile
@@ -75,9 +64,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// This makes the skip unusable as the player doesn't have its task set yet.
     /// If the player is not ready to play, we should use the same logic we use when the player doesn't exist yet.
     case playerIsReadyToPlay
-
-    // Shows the searchbar in Listening History view
-    case listeningHistorySearch
 
     /// Use the Mimetype library to check the file mimetype
     case useMimetypePackage
@@ -140,9 +126,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Avoid replace actions for Up Next episode queue when swapping the currently playing episode
     case avoidReplaceOnEpisodeSwap
 
-    /// Enable the new podcast sorting options
-    case podcastsSortChanges
-
     /// Recommendations including discover v3 support
     case recommendations
 
@@ -176,9 +159,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enabled the attributed text view in the Data Usage warning Sheet
     case useDescriptiveActionAttributedTextView
 
-    /// Use the new upgrade screens
-    case newOnboardingUpgrade
-
     /// Use the new upgrade screens with Variant B timeline before features
     case newOnboardingVariant
 
@@ -194,9 +174,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Limit playback position changes when switching episodes
     case limitPlaybackPositionChanges
 
-    /// Use the new upgrade screens for account creation
-    case newOnboardingAccountCreation
-
     /// Adds a sharing button to the transcript view
     case shareTranscripts
 
@@ -206,17 +183,8 @@ public enum FeatureFlag: String, CaseIterable {
     /// Do not show the free trial timeline on the upgrade screens on all variants
     case newOnboardingUpgradeTrialTimeline
 
-    /// Use the new interests and recommendations flow
-    case newOnboardingRecommendationChanges
-
-    /// Use the new search endpoint and new UI
-    case searchImprovements
-
     /// Use the new predictive endpoint and show predictions
     case searchPredictive
-
-    /// Render Bookmarks inline in PodcastViewController using SwiftUI BookmarksListView
-    case podcastBookmarksInline
 
     /// Enable reloading the subscription status in App Delegate
     case earlyReloadSubscriptionStatus
@@ -239,14 +207,12 @@ public enum FeatureFlag: String, CaseIterable {
     /// Uses the PlaylistMetadataLoader cache before running the query (the query will update when it's done)
     case playlistDataCacheBeforeQuery
 
-    /// Ignores play remote commands when other audio is playing
+    /// Ignores play remote commands when another app is playing non-mixable audio
     case ignorePlayWithOtherAudio
-
-    /// activates the audio session in the background to avoid locks in the main thread
-    case activateAudioSessionInBackground
 
     /// Use cellular-specific network APIs instead of expensive network APIs
     case useCellularNetworkApis
+
     /// Optimizes manual playlist queries with improved deduplication
     case optimizeManualPlaylistQueries
 
@@ -292,6 +258,10 @@ public enum FeatureFlag: String, CaseIterable {
     /// Remove the 50-episode limit when syncing Up Next to Apple Watch
     case unlimitedWatchUpNextSync
 
+    /// On pause, sync the playback position directly between the watch and phone over
+    /// WatchConnectivity (both directions) so progress appears on the other device without a manual refresh
+    case watchPlaybackProgressLocalSync
+
     /// Ensure that tmp files are removed when no longer needed
     case cleanUpTmpFiles
 
@@ -322,6 +292,36 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable voice control with wakeword detection and voice intent execution
     case voiceControl
 
+    /// Enable Generated Chapters
+    case generatedChapters
+
+    /// Enable HLS streaming playback
+    case hls
+
+    /// A new "Troubleshooting" screen for detecting orphaned episodes and more.
+    case troubleshooting
+
+    /// Enable Smart Bookmarks
+    case smartBookmarks
+
+    /// Use best frame when capturing a thumbnail for video cells
+    case captureBestFrame
+
+    /// Show the Categories and Curated rows on the tvOS Home screen
+    case tvHomeCategoriesAndCurated
+
+    /// Make the tab bar's minimize-on-scroll behavior opt-in: it's off unless the
+    /// user turns it on in Appearance
+    case minimizeTabsOptIn
+
+    /// Introduce Smart Bookmarks with a tip in the player and a "New" badge on the Add Bookmark row.
+    ///
+    /// The promo runs for 8.19, 8.20 and 8.21 only. Remove this flag and `SmartBookmarksPromo` when 8.22 is cut.
+    case smartBookmarksPromo
+
+    /// Show a Live Activity on the Lock Screen and Dynamic Island while the sleep timer is running
+    case sleepTimerLiveActivity
+
     public var enabled: Bool {
         if let overriddenValue = FeatureFlagOverrideStore().overriddenValue(for: self) {
             return overriddenValue
@@ -344,10 +344,6 @@ public enum FeatureFlag: String, CaseIterable {
             false
         case .endOfYear:
             false
-        case .newSettingsStorage:
-            shouldEnableSyncedSettings
-        case .settingsSync:
-            shouldEnableSyncedSettings
         case .slumber:
             false
         case .newAccountUpgradePromptFlow:
@@ -357,8 +353,6 @@ public enum FeatureFlag: String, CaseIterable {
         case .defaultPlayerFilterCallbackFix:
             true
         case .onlyMarkPodcastsUnsyncedForNewUsers:
-            true
-        case .whenPlayingOnlyUpdateEpisodeIfPlaybackFails:
             true
         case .kidsProfile:
             false
@@ -375,8 +369,6 @@ public enum FeatureFlag: String, CaseIterable {
         case .syncStats:
             true
         case .playerIsReadyToPlay:
-            true
-        case .listeningHistorySearch:
             true
         case .useMimetypePackage:
             true
@@ -418,8 +410,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .avoidReplaceOnEpisodeSwap:
             true
-        case .podcastsSortChanges:
-            true
         case .recommendations:
             true
         case .cancelSubscriptionSurvey:
@@ -442,8 +432,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .useDescriptiveActionAttributedTextView:
             true
-        case .newOnboardingUpgrade:
-            true
         case .newOnboardingVariant:
             true
         case .retryWithoutUserAgent:
@@ -454,21 +442,13 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .limitPlaybackPositionChanges:
             true
-        case .newOnboardingAccountCreation:
-            true
         case .shareTranscripts:
             true
         case .doNotSwitchToDownloadedFile:
             true
         case .newOnboardingUpgradeTrialTimeline:
             true
-        case .newOnboardingRecommendationChanges:
-            true
-        case .searchImprovements:
-            true
         case .searchPredictive:
-            true
-        case .podcastBookmarksInline:
             true
         case .earlyReloadSubscriptionStatus:
             true
@@ -486,10 +466,8 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .ignorePlayWithOtherAudio:
             true
-        case .activateAudioSessionInBackground:
-            true
         case .useCellularNetworkApis:
-			true
+            true
         case .optimizeManualPlaylistQueries:
             true
         case .useBackgroundQueueForStreamingCallback:
@@ -520,6 +498,8 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .unlimitedWatchUpNextSync:
             true
+        case .watchPlaybackProgressLocalSync:
+            true
         case .cleanUpTmpFiles:
             true
         case .displayErrorsOnPlayer:
@@ -537,14 +517,28 @@ public enum FeatureFlag: String, CaseIterable {
         case .shareProfile:
             BuildEnvironment.current == .debug
         case .upNextSort:
+            true
+        case .generatedChapters:
             BuildEnvironment.current == .debug
         case .voiceControl:
             true
+        case .hls:
+            true
+        case .troubleshooting:
+            true
+        case .smartBookmarks:
+            true
+        case .captureBestFrame:
+            true
+        case .tvHomeCategoriesAndCurated:
+            false
+        case .minimizeTabsOptIn:
+            true
+        case .smartBookmarksPromo:
+            true
+        case .sleepTimerLiveActivity:
+            true
         }
-    }
-
-    private var shouldEnableSyncedSettings: Bool {
-        false
     }
 
     /// Remote Feature Flag
@@ -553,10 +547,6 @@ public enum FeatureFlag: String, CaseIterable {
         switch self {
         case .newAccountUpgradePromptFlow:
             "new_account_upgrade_prompt_flow"
-        case .newSettingsStorage:
-            shouldEnableSyncedSettings ? "new_settings_storage" : nil
-        case .settingsSync:
-            shouldEnableSyncedSettings ? "settings_sync" : nil
         case .defaultPlayerFilterCallbackFix:
             "default_player_filter_callback_fix"
         case .endOfYear2025:

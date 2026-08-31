@@ -17,15 +17,14 @@ class HomeViewModel {
     enum State: Equatable, Hashable {
         case loading
         case ready
-        case empty
     }
 
     var state: State = .loading
 
-    var podcasts: [Podcast] = []
     var currentPlaying: EpisodeRowViewModel?
     var upNext: [EpisodeRowViewModel] = []
     var newReleases: [EpisodeRowViewModel] = []
+    var newVideoReleases: [EpisodeRowViewModel] = []
 
     /// True until playback first starts this session. Used to show the
     /// "Keep Listening" row on Home only before the user has played anything.
@@ -33,20 +32,15 @@ class HomeViewModel {
 
     func load() {
         Task {
-            let podcasts = fetchPodcasts()
             let upNextEpisodes = dataManager.allUpNextEpisodes()
-            var newEpisodes = [EpisodeRowViewModel]()
-            for podcast in podcasts.prefix(8) {
-                guard let latest: Episode = dataManager.findLatestEpisode(podcast: podcast) else {
-                    continue
-                }
-                let result = EpisodeRowViewModel(episode: latest, podcast: podcast)
-                newEpisodes.append(result)
+            let newEpisodes = dataManager.findNewReleaseEpisodes(limit: 12).map { episode in
+                makeRowViewModel(for: episode)
             }
-
+            let newVideoReleases = dataManager.findNewVideoReleaseEpisodes(limit: 12).map { episode in
+                makeRowViewModel(for: episode)
+            }
             await MainActor.run { [weak self, newEpisodes] in
                 guard let self else { return }
-                self.podcasts = podcasts
                 upNext = Array(upNextEpisodes.dropFirst().prefix(12)).map { episode in
                     self.makeRowViewModel(for: episode)
                 }
@@ -54,18 +48,20 @@ class HomeViewModel {
                     currentPlaying = makeRowViewModel(for: currentlyPlaying)
                 }
                 newReleases = newEpisodes
+                self.newVideoReleases = newVideoReleases
+
                 state = .ready
             }
         }
     }
 
-    private func fetchPodcasts() -> [Podcast] {
-        return Array(dataManager.allPodcasts(includeUnsubscribed: false, reloadFromDatabase: false).prefix(20))
+    func refresh() {
+        RefreshManager.shared.refreshPodcasts()
     }
 
     private func makeRowViewModel(for episode: BaseEpisode) -> EpisodeRowViewModel {
         let podcast = (episode as? Episode).flatMap { $0.parentPodcast(dataManager: dataManager) }
-        return EpisodeRowViewModel(episode: episode, podcast: podcast)
+        return EpisodeRowViewModel(episode: episode, podcast: podcast, source: .home)
     }
 
     private func observeDataChanges() {
@@ -74,6 +70,8 @@ class HomeViewModel {
             Constants.Notifications.podcastAdded,
             Constants.Notifications.podcastDeleted,
             Constants.Notifications.upNextQueueChanged,
+            Constants.Notifications.upNextEpisodeRemoved,
+            Constants.Notifications.upNextEpisodeAdded,
             Constants.Notifications.manyEpisodesChanged,
             ServerNotifications.podcastsRefreshed,
             ServerNotifications.syncCompleted,

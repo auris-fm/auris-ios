@@ -50,8 +50,6 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
 
-    var changedViaSwipeToRemove = false
-
     let remainingLabel = ThemeableLabel()
     // Use HitTargetButton so these small header controls meet Apple's recommended 44x44pt minimum tap target without changing their visible size.
     let shuffleButton = HitTargetButton(frame: CGRect(x: 0, y: 0, width: 24, height: 24))
@@ -189,6 +187,10 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: UpNextViewController, _) in
+            controller.updateSize()
+        }
+
         title = L10n.upNext
 
         (view as? ThemeableView)?.style = .primaryUi04
@@ -241,6 +243,8 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
         track(.upNextShown, properties: ["source": source])
 
         AnalyticsHelper.upNextOpened()
+
+        showUpNextSortDurationTipIfNeeded()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -371,6 +375,8 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     @objc private func sortButtonTapped() {
+        // If the tooltip is still up, opening the picker counts as discovering the feature: dismiss and mark it seen.
+        dismissUpNextSortDurationTip()
         let optionsPicker = makeSortOptionsPicker()
         optionsPicker.present(from: self)
     }
@@ -408,6 +414,9 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
 
     var userEpisodeDetailVC: UserEpisodeDetailViewController?
 
+    /// The "Sort by duration" tooltip popover, while it's on screen. See `UIViewController.presentTip` in TipView.swift.
+    var upNextSortDurationTip: UIViewController?
+
     func showEpisodeDetailViewController(for episode: BaseEpisode?) {
         if let episode = episode as? Episode, let parentPodcast = episode.parentPodcast() {
             let episodeController = EpisodeDetailViewController(episode: episode, podcast: parentPodcast, source: .upNext)
@@ -426,7 +435,7 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
 
     @objc func updateTimeRemainingLabel() {
         var totalDuration = PlaybackManager.shared.queue.upNextTotalDuration(includePlayingEpisode: false)
-        if let episode = PlaybackManager.shared.currentEpisode() {
+        if let episode = PlaybackManager.shared.currentEpisode {
             totalDuration += episode.duration.seconds - PlaybackManager.shared.currentTime()
         }
         let time = TimeFormatter.shared.multipleUnitFormattedShortTime(time: totalDuration)
@@ -459,6 +468,16 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
         isMultiSelectEnabled = true
     }
 
+    @objc func moreTapped() {
+        let optionsPicker = OptionsPicker(title: nil, themeOverride: themeOverride)
+        let clearAction = OptionAction(label: L10n.clearUpNext, icon: "episode-removenext") { [weak self] in
+            self?.clearQueueTapped()
+        }
+        clearAction.destructive = true
+        optionsPicker.addAction(action: clearAction)
+        optionsPicker.present(from: self)
+    }
+
     @objc func selectAllTapped() {
         guard DataManager.sharedManager.allUpNextEpisodes().count > 1 else { return }
         upNextTable.selectAllBelow(fromIndexPath: IndexPath(row: 0, section: sections.upNextSection.rawValue))
@@ -480,36 +499,41 @@ class UpNextViewController: UIViewController, UIGestureRecognizerDelegate {
         navigationController?.navigationBar.tintColor = AppTheme.navBarIconsColor(themeOverride: themeOverride)
 
         let leftButton: UIBarButtonItem?
-        let rightButton: UIBarButtonItem?
+        let rightButtons: [UIBarButtonItem]
 
         if isMultiSelectEnabled {
             if MultiSelectHelper.shouldSelectAll(onCount: selectedPlayListEpisodes.count, totalCount: PlaybackManager.shared.queue.upNextCount()) {
-                rightButton = UIBarButtonItem(title: L10n.selectAll, style: .plain, target: self, action: #selector(selectAllTapped))
+                rightButtons = [UIBarButtonItem(title: L10n.selectAll, style: .plain, target: self, action: #selector(selectAllTapped))]
             } else {
-                rightButton = UIBarButtonItem(title: L10n.deselectAll, style: .plain, target: self, action: #selector(deselectAllTapped))
+                rightButtons = [UIBarButtonItem(title: L10n.deselectAll, style: .plain, target: self, action: #selector(deselectAllTapped))]
             }
             leftButton = UIBarButtonItem(title: L10n.cancel, style: .plain, target: self, action: #selector(cancelTapped))
-        } else if !isMultiSelectEnabled, PlaybackManager.shared.queue.upNextCount() > 0 {
-            rightButton = UIBarButtonItem(title: L10n.select, style: .plain, target: self, action: #selector(selectTapped))
-            if showingInTab {
-                if FeatureFlag.upNextShuffle.enabled, PlaybackManager.shared.queue.upNextCount() > 0 {
-                    leftButton = UIBarButtonItem(title: L10n.clear, style: .plain, target: self, action: #selector(clearQueueTapped))
-                } else {
-                    leftButton = nil
-                }
-            } else {
-                leftButton = UIBarButtonItem(title: L10n.done, style: .plain, target: self, action: #selector(doneTapped))
-            }
         } else {
-            rightButton = nil
-            if showingInTab {
-                leftButton = nil
+            let hasEpisodes = PlaybackManager.shared.queue.upNextCount() > 0
+
+            if FeatureFlag.upNextShuffle.enabled {
+                if hasEpisodes {
+                    let selectButton = UIBarButtonItem(image: UIImage(named: "option-multiselect"), style: .plain, target: self, action: #selector(selectTapped))
+                    selectButton.accessibilityLabel = L10n.selectEpisodes
+                    let moreButton = UIBarButtonItem(image: UIImage(named: "more"), style: .plain, target: self, action: #selector(moreTapped))
+                    moreButton.accessibilityLabel = L10n.accessibilityMoreActions
+                    rightButtons = [selectButton, moreButton]
+                } else {
+                    rightButtons = []
+                }
+                leftButton = showingInTab ? nil : UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(doneTapped))
             } else {
-                leftButton = UIBarButtonItem(title: L10n.done, style: .plain, target: self, action: #selector(doneTapped))
+                let selectButton = UIBarButtonItem(title: L10n.select, style: .plain, target: self, action: #selector(selectTapped))
+                rightButtons = hasEpisodes ? [selectButton] : []
+                leftButton = showingInTab ? nil : UIBarButtonItem(title: L10n.done, style: .plain, target: self, action: #selector(doneTapped))
             }
         }
 
-        navigationItem.setRightBarButton(rightButton, animated: animated)
+        if rightButtons.count > 1 {
+            navigationItem.trailingItemGroups = [UIBarButtonItemGroup(barButtonItems: rightButtons, representativeItem: nil)]
+        } else {
+            navigationItem.setRightBarButtonItems(rightButtons, animated: animated)
+        }
         navigationItem.setLeftBarButton(leftButton, animated: animated)
     }
 
@@ -672,10 +696,46 @@ extension UpNextViewController {
             sortButton.updateSizeConstraints(to: buttonSize)
         }
     }
+}
 
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        guard traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory else { return }
-        updateSize()
+// MARK: - Sort by Duration tooltip
+
+/// Shows a one-time "Sort by duration" tooltip on the Up Next tab, only for upgrading users since AppDelegate suppresses the flag on fresh installs.
+extension UpNextViewController {
+    func showUpNextSortDurationTipIfNeeded() {
+        guard
+            Settings.shouldShowUpNextSortDurationTip,
+            FeatureFlag.upNextSort.enabled,
+            source == .tabBar,
+            upNextSortDurationTip == nil,
+            // Only when the sort button is actually on screen (it's hidden while the queue is empty).
+            !sortButton.isHidden,
+            PlaybackManager.shared.queue.upNextCount() > 0
+        else {
+            return
+        }
+        upNextSortDurationTip = presentTip(
+            title: L10n.upNextSortDurationTooltipTitle,
+            message: L10n.upNextSortDurationTooltipBody,
+            anchor: .item(sortButton),
+            onTap: { [weak self] in
+                self?.dismissUpNextSortDurationTip()
+            },
+            onDismiss: { [weak self] in
+                self?.dismissUpNextSortDurationTip()
+            },
+            onShow: { [weak self] in
+                self?.track(.upNextSortTooltipShown)
+            }
+        )
+    }
+
+    func dismissUpNextSortDurationTip() {
+        guard upNextSortDurationTip != nil else { return }
+        Settings.shouldShowUpNextSortDurationTip = false
+        track(.upNextSortTooltipClosed)
+        upNextSortDurationTip?.dismiss(animated: true) { [weak self] in
+            self?.upNextSortDurationTip = nil
+        }
     }
 }

@@ -3,10 +3,9 @@ import Combine
 import PocketCastsDataModel
 import PocketCastsUtils
 import DifferenceKit
-import PocketCastsDependencyInjection
 
 class PlaylistDetailViewModel: ObservableObject {
-    @Dependency(\.playlistMetadataLoader) var playlistMetadataLoader: PlaylistMetadataLoader
+    let playlistMetadataLoader = PlaylistMetadataLoader.shared
 
     typealias DataSourceValue = [ArraySection<Section, ListItem>]
 
@@ -162,20 +161,21 @@ class PlaylistDetailViewModel: ObservableObject {
             playlist: playlist,
             shouldShowArchived: playlist.showArchivedEpisodes
         ) { [weak self] newData, archivedEpisodeCount in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                self.archivedEpisodesCount = archivedEpisodeCount
-                let isFirstReload = self.firstTimeLoading
-                self.firstTimeLoading = false
-                let changeSetTuple = self.buildChangeSet(source: self.episodes, newData: newData)
-                let contentHasChanged = changeSetTuple.0
-                if contentHasChanged {
-                    self.dataManager.updatePlaylistUpdateDate(for: self.playlist)
-                }
-                self.onChange(changeSetTuple.1, animated && !isFirstReload, contentHasChanged)
-            }
+            self?.handleFetchCompletion(newData: newData, archivedEpisodeCount: archivedEpisodeCount, animated: animated)
         }
         operationQueue.addOperation(refreshOperation)
+    }
+
+    private func handleFetchCompletion(newData: [ListEpisode], archivedEpisodeCount: Int, animated: Bool) {
+        archivedEpisodesCount = archivedEpisodeCount
+        let isFirstReload = firstTimeLoading
+        firstTimeLoading = false
+        let changeSetTuple = buildChangeSet(source: episodes, newData: newData)
+        let contentHasChanged = changeSetTuple.0
+        if contentHasChanged {
+            dataManager.updatePlaylistUpdateDate(for: playlist)
+        }
+        onChange(changeSetTuple.1, animated && !isFirstReload, contentHasChanged)
     }
 
     func totalDuration() -> String? {
@@ -278,8 +278,7 @@ class PlaylistDetailViewModel: ObservableObject {
             for episode in episodes {
                 group.addTask {
                     if includingEpisodeArtwork,
-                       let imageUrl = try await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(podcastUuid: episode.episode.podcastUuid, episodeUuid: episode.episode.uuid),
-                       let url = URL(string: imageUrl) {
+                       let url = try await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(podcastUuid: episode.episode.podcastUuid, episodeUuid: episode.episode.uuid) {
                         return PlaylistArtworkView.ImageItem(id: episode.episode.uuid, url: url)
                     }
                     let url = self.imageManager.podcastUrl(imageSize: .detail, uuid: episode.episode.podcastUuid)

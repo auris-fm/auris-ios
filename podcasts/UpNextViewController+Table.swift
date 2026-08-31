@@ -61,7 +61,7 @@ extension UpNextViewController: UITableViewDelegate, UITableViewDataSource {
         if section == .nowPlayingSection {
             let nowPlayingCell = tableView.dequeueReusableCell(withIdentifier: UpNextViewController.nowPlayingCell, for: indexPath) as! UpNextNowPlayingCell
             nowPlayingCell.themeOverride = themeOverride
-            if let episode = PlaybackManager.shared.currentEpisode() {
+            if let episode = PlaybackManager.shared.currentEpisode {
                 nowPlayingCell.populateFrom(episode: episode)
             }
             return nowPlayingCell
@@ -256,7 +256,7 @@ extension UpNextViewController: UITableViewDelegate, UITableViewDataSource {
     func refreshSections() {
         var sections: [sections] = [.upNextSection]
 
-        if let _ = PlaybackManager.shared.currentEpisode() {
+        if let _ = PlaybackManager.shared.currentEpisode {
             sections.insert(.nowPlayingSection, at: 0)
             upNextTable.themeStyle = .primaryUi04
         } else {
@@ -271,17 +271,11 @@ extension UpNextViewController: UITableViewDelegate, UITableViewDataSource {
     }
 
     @objc func upNextChanged() {
-        if changedViaSwipeToRemove { return }
-
         if isMultiSelectEnabled {
-            let upNextUuids = DataManager.sharedManager.allUpNextPlaylistEpisodes().map(\.episodeUuid)
-            for (index, selectedEpisode) in selectedPlayListEpisodes.enumerated() {
-                if !upNextUuids.contains(selectedEpisode.episodeUuid), index > selectedPlayListEpisodes.count {
-                    selectedPlayListEpisodes.remove(at: index)
-                }
-            }
+            let upNextUuids = Set(DataManager.sharedManager.allUpNextPlaylistEpisodes().map(\.episodeUuid))
+            selectedPlayListEpisodes.removeAll { !upNextUuids.contains($0.episodeUuid) }
 
-            if let currentUuid = PlaybackManager.shared.currentEpisode()?.uuid {
+            if let currentUuid = PlaybackManager.shared.currentEpisode?.uuid {
                 selectedEpisodesRemove(uuid: currentUuid)
             }
             if upNextUuids.isEmpty {

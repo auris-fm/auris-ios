@@ -37,12 +37,6 @@ struct FolderDetailView: View {
             model.load()
         }
         .toolbar(.hidden, for: .tabBar)
-        .onAppear {
-            tabRouter.isShowingDetail = true
-        }
-        .onDisappear {
-            tabRouter.isShowingDetail = false
-        }
     }
 
     @ViewBuilder
@@ -60,6 +54,7 @@ struct FolderDetailView: View {
                                 .frame(width: Layout.gridSize, height: Layout.gridSize)
                         }
                         .buttonStyle(.card)
+                        .accessibilityLabel(podcast.title ?? "")
                         .prefersDefaultFocus(podcast.id == firstID, in: podcastGridNamespace)
                     }
                 }

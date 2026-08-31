@@ -1,14 +1,19 @@
 import SwiftUI
 import PocketCastsUtils
+import PocketCastsDataModel
 
 struct UpNextView: View {
     @Environment(AppCoordinator.self) var coordinator
     @Environment(MainTabViewModel.self) var tabRouter: MainTabViewModel
 
     @State private var model: UpNextViewModel
+    @State private var path = StackPath()
 
     @Namespace private var rowNamespace
     @FocusState private var rowFocus: EpisodeRowFocus?
+
+    @State private var lastFocus: String?
+    @FocusState private var currentFocus: String?
 
     init(model: UpNextViewModel) {
         _model = State(wrappedValue: model)
@@ -25,6 +30,7 @@ struct UpNextView: View {
                 emptyView
             }
         }
+        .focusScope(rowNamespace)
         .task {
             Analytics.track(.upNextShown, properties: ["source": "tab_bar"])
             model.load()
@@ -36,19 +42,35 @@ struct UpNextView: View {
     }
 
     var upNextView: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
-                headerRow
-                ForEach(model.episodes) { episode in
-                    EpisodeRowWithActions(model: episode, context: .upNext, focus: $rowFocus) {
-                        tabRouter.showFullScreenPlayer = true
+        NavigationStack(path: $path.navigationPath) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    headerRow
+                    ForEach(model.episodes) { episode in
+                        EpisodeRowWithActions(model: episode, context: .upNext, focus: $rowFocus, customPlayDisplayAction: {
+                            tabRouter.showFullScreenPlayer = true
+                        }, detailsDismissed: {
+                            currentFocus = lastFocus
+                        })
+                        .frame(width: 1160)
+                        .focused($currentFocus, equals: episode.id)
                     }
-                    .frame(width: 1160)
-                    .prefersDefaultFocus(episode.id == model.episodes.first?.id, in: rowNamespace)
                 }
             }
-            .focusScope(rowNamespace)
-        }
+            .focusSection()
+            .onChange(of: rowFocus) { _, new in
+                if let new {
+                    lastFocus = new.episodeID
+                }
+            }
+            .onAppear {
+                currentFocus = lastFocus
+            }
+            .navigationDestination(for: Podcast.self) { podcast in
+                PodcastDetailView(model: PodcastDetailViewModel(podcastUuid: podcast.uuid))
+            }
+            .syncNavigationDetail(path: path.navigationPath, tabRouter: tabRouter)
+        }.environment(path)
     }
 
     private var headerRow: some View {
@@ -86,6 +108,7 @@ struct UpNextView: View {
             Text(L10n.tvUpNextEmptySubtitle)
         } actions: {
             Button(L10n.tvUpNextEmptyActionTitle) {
+                Analytics.track(.upNextDiscoverButtonTapped)
                 tabRouter.selectedTab = .home
             }
         }

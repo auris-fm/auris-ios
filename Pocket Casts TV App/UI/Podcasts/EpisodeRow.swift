@@ -1,6 +1,7 @@
 import SwiftUI
 import PocketCastsUtils
 import PocketCastsDataModel
+import PocketCastsServer
 
 struct EpisodeRowButtonStyle: ButtonStyle {
     @Environment(\.isFocused) var isFocused: Bool
@@ -16,12 +17,14 @@ struct EpisodeRow: View {
 
     let model: EpisodeRowViewModel
     var isActive: Bool?
+    var showEpisodeNotesImage: Bool
 
     @Environment(\.isFocused) private var isFocused: Bool
 
-    init(model: EpisodeRowViewModel, isActive: Bool? = nil) {
+    init(model: EpisodeRowViewModel, isActive: Bool? = nil, showEpisodeNotesImage: Bool = false) {
         self.model = model
         self.isActive = isActive
+        self.showEpisodeNotesImage = showEpisodeNotesImage
     }
 
     enum Layout {
@@ -30,10 +33,15 @@ struct EpisodeRow: View {
 
     @ViewBuilder
     private var thumbnail: some View {
-        if let uuid = model.podcastUuid {
-            PodcastImage(uuid: uuid, size: .list)
+        if showEpisodeNotesImage {
+            EpisodeArtworkView(model: EpisodeArtworkViewModel(episode: model.episode, size: .list, showEpisodeNotesImage: showEpisodeNotesImage))
         } else {
-            Image(ImageResource.pcLogo)
+            if let uuid = model.podcastUuid {
+                PodcastImage(uuid: uuid, size: .list)
+            } else {
+                Image(ImageResource.pcLogo)
+                   .accessibilityHidden(true)
+            }
         }
     }
 
@@ -42,7 +50,7 @@ struct EpisodeRow: View {
             thumbnail
                 .frame(width: Layout.episodeImageSize, height: Layout.episodeImageSize)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     if model.isVideo {
                         Image(systemName: "play.rectangle.fill")
@@ -58,9 +66,21 @@ struct EpisodeRow: View {
                     .font(.body)
                     .foregroundColor(isFocused ? .pcTextPrimaryActive : .pcTextPrimary)
                     .lineLimit(2)
-                Text(model.displayDuration)
-                    .font(.caption)
-                    .foregroundColor(isFocused ? .pcTextSecondaryActive : .pcTextSecondary)
+                HStack(spacing: 8) {
+                    Text(isInProgress ? model.timeLeft : model.displayDuration)
+                        .font(.caption)
+                        .foregroundColor(isFocused ? .pcTextSecondaryActive : .pcTextSecondary)
+                    if isInProgress {
+                        let trackColor = (isFocused ? Color.pcTextSecondaryActive : Color.pcTextSecondary)
+                        RoundProgressView(trackColor: trackColor, progress: model.progress)
+                            .frame(width: 96, height: 6)
+                            .padding(.leading, 8)
+                    } else if model.isPlayed {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption2)
+                            .foregroundColor(isFocused ? .pcTextSecondaryActive : .pcTextSecondary)
+                    }
+                }
             }
             Spacer()
         }
@@ -70,6 +90,16 @@ struct EpisodeRow: View {
         .focusedCardDepth(isFocused: isFocused, cornerRadius: 12, style: .content)
         .opacity(archivedOpacity)
         .animation(.easeInOut(duration: 0.15), value: archivedOpacity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        "\(model.episode.displayableTitle()) \(model.episode.accessibilityDisplayableInfo()), \(model.displayDate)"
+    }
+
+    private var isInProgress: Bool {
+        model.episode.inProgress()
     }
 
     private var archivedOpacity: Double {
@@ -118,9 +148,12 @@ enum EpisodeRowFocus: Hashable {
 struct EpisodeRowWithActions: View {
 
     let model: EpisodeRowViewModel
-    var context: EpisodeActionContext = .default
+    var context: EpisodeActionContext = .other(showGoToPodcast: false)
+    var showEpisodeNotesImage: Bool = false
     @FocusState.Binding var focus: EpisodeRowFocus?
     var customPlayDisplayAction: (() -> ())? = nil
+    var detailsDismissed: (() -> ())? = nil
+
     @State private var isPlaying = false
     @State private var isShowingActions = false
     @State private var isShowingShowNotes = false
@@ -151,7 +184,7 @@ struct EpisodeRowWithActions: View {
                 model.play()
             } label: {
                 HStack(spacing: 0) {
-                    EpisodeRow(model: model, isActive: isEpisodeFocused)
+                    EpisodeRow(model: model, isActive: isEpisodeFocused, showEpisodeNotesImage: showEpisodeNotesImage)
                     Spacer()
                         .frame(width: !shouldShowMoreButton ? Layout.spacing + MoreButtonStyle.Layout.size : 0)
                 }
@@ -170,6 +203,7 @@ struct EpisodeRowWithActions: View {
                 }
                 .buttonStyle(MoreButtonStyle())
                 .focused($focus, equals: .more(model.id))
+                .accessibilityLabel(L10n.accessibilityMoreActions)
                 .transition(.opacity.combined(with: .scale(scale: 0.8)).animation(.easeOut(duration: 0.2).delay(0.15)))
             }
         }
@@ -197,6 +231,11 @@ struct EpisodeRowWithActions: View {
                 }
             }
         }
+        .onChange(of: isShowingShowNotes) { _, showing in
+            if !showing {
+                detailsDismissed?()
+            }
+        }
         .fullScreenCover(isPresented: $isPlaying) {
             NowPlayingView()
                 .ignoresSafeArea()
@@ -211,34 +250,59 @@ struct EpisodeRowWithActions: View {
 }
 
 enum EpisodeActionContext {
-    case `default`
+    case other(showGoToPodcast: Bool)
     case upNext
 }
 
 struct EpisodeActionButtons: View {
 
     let model: EpisodeRowViewModel
-    var context: EpisodeActionContext = .default
+    var context: EpisodeActionContext = .other(showGoToPodcast: false)
     @Binding var isShowingShowNotes: Bool
 
     @Environment(\.requireAccount) private var requireAccount
 
+    @Environment(StackPath.self) private var stackPath: StackPath?
+
     var body: some View {
-        if model.podcastUuid != nil {
-            Button(L10n.tvEpisodeShowNotesAction) { isShowingShowNotes = true }
-        }
-        switch context {
-        case .default:
-            Button(L10n.playNextInUpNext) { requireAccount { model.playNext() } }
-            Button(L10n.playLastInUpNext) { requireAccount { model.playLast() } }
-            Button(L10n.markPlayed) { requireAccount { model.markAsPlayed() } }
-            if model.canArchive {
-                Button(model.isArchived ? L10n.unarchive : L10n.archive) { requireAccount { model.isArchived ? model.unarchive() : model.archive() } }
+        Group {
+            if model.podcastUuid != nil {
+                Button(L10n.tvEpisodeShowNotesAction) { isShowingShowNotes = true }
             }
-        case .upNext:
-            Button(L10n.playNext) { requireAccount { model.playNext() } }
-            Button(L10n.playLast) { requireAccount { model.playLast() } }
-            Button(L10n.removeFromUpNext) { model.removeFromUpNext() }
+            switch context {
+            case .other(let showGoToPodcast):
+                if showGoToPodcast {
+                    Button(L10n.goToPodcast) { goToPodcast() }
+                }
+                Button(L10n.playNextInUpNext) { requireAccount { model.playNext() } }
+                Button(L10n.playLastInUpNext) { requireAccount { model.playLast() } }
+                Button(model.isPlayed ? L10n.markUnplayed : L10n.markPlayed) { requireAccount { model.isPlayed ? model.markAsUnplayed() : model.markAsPlayed() } }
+                if model.canArchive {
+                    Button(model.isArchived ? L10n.unarchive : L10n.archive) { requireAccount { model.isArchived ? model.unarchive() : model.archive() } }
+                }
+            case .upNext:
+                if model.podcast != nil {
+                    Button(L10n.goToPodcast) { goToPodcast() }
+                }
+                Button(L10n.playNext) { requireAccount { model.playNext() } }
+                Button(L10n.playLast) { requireAccount { model.playLast() } }
+                Button(L10n.removeFromUpNext) { model.removeFromUpNext() }
+            }
+        }.onAppear {
+            Analytics.track(.episodeActionsShown)
+        }
+    }
+
+    /// Pushes the episode's podcast onto the navigation stack, preferring the
+    /// loaded `Podcast` and falling back to a `DiscoverPodcast` built from the
+    /// episode's podcast UUID when only the episode is known.
+    private func goToPodcast() {
+        if let podcast = model.podcast {
+            stackPath?.navigationPath.append(podcast)
+        } else if let episode = model.episode as? Episode {
+            var podcast = DiscoverPodcast()
+            podcast.uuid = episode.podcastUuid
+            stackPath?.navigationPath.append(podcast)
         }
     }
 }
@@ -254,6 +318,7 @@ private struct EpisodeContextMenuModifier: ViewModifier {
         content
             .contextMenu {
                 EpisodeActionButtons(model: model, context: context, isShowingShowNotes: $isShowingShowNotes)
+                    .remotePlayPause()
             }
             .sheet(isPresented: $isShowingShowNotes) {
                 EpisodeShowNotesView(episode: model.episode, podcast: model.podcast)
@@ -262,7 +327,7 @@ private struct EpisodeContextMenuModifier: ViewModifier {
 }
 
 extension View {
-    func episodeContextMenu(model: EpisodeRowViewModel, context: EpisodeActionContext = .default) -> some View {
+    func episodeContextMenu(model: EpisodeRowViewModel, context: EpisodeActionContext = .other(showGoToPodcast: false)) -> some View {
         modifier(EpisodeContextMenuModifier(model: model, context: context))
     }
 }
@@ -283,10 +348,17 @@ struct DiscoveryEpisodeMenuButtons: View {
     let episodeUuid: String
     @Binding var showNotesEpisode: DiscoveryLoadedEpisode?
 
+    var podcast: DiscoverPodcast?
+
+    var podcastCallback: (()->())? = nil
+
     @Environment(\.requireAccount) private var requireAccount
+
+    @Environment(StackPath.self) private var stackPath: StackPath?
 
     var body: some View {
         Button(L10n.tvEpisodeShowNotesAction) { load { showNotesEpisode = $0 } }
+        Button(L10n.goToPodcast) { goToPodcast() }
         Button(L10n.playNextInUpNext) { requireAccount { load { EpisodeUpNextActions.playNext($0.episode) } } }
         Button(L10n.playLastInUpNext) { requireAccount { load { EpisodeUpNextActions.playLast($0.episode) } } }
     }
@@ -300,6 +372,12 @@ struct DiscoveryEpisodeMenuButtons: View {
             action(DiscoveryLoadedEpisode(episode: result.episode, podcast: result.podcast))
         }
     }
+
+    private func goToPodcast() {
+        var podcast = DiscoverPodcast()
+        podcast.uuid = podcastUuid
+        stackPath?.navigationPath.append(podcast)
+    }
 }
 
 private struct DiscoveryEpisodeContextMenuModifier: ViewModifier {
@@ -312,7 +390,7 @@ private struct DiscoveryEpisodeContextMenuModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .contextMenu {
-                DiscoveryEpisodeMenuButtons(podcastUuid: podcastUuid, episodeUuid: episodeUuid, showNotesEpisode: $showNotesEpisode)
+                DiscoveryEpisodeMenuButtons(podcastUuid: podcastUuid, episodeUuid: episodeUuid, showNotesEpisode: $showNotesEpisode, podcast: nil)
             }
             .sheet(item: $showNotesEpisode) { episode in
                 EpisodeShowNotesView(episode: episode.episode, podcast: episode.podcast)
@@ -328,7 +406,7 @@ extension View {
 
 #Preview {
     @Previewable @FocusState var focus: EpisodeRowFocus?
-    EpisodeRowWithActions(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!), focus: $focus)
+    EpisodeRowWithActions(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!, source: .unknown), focus: $focus)
     .environment(AppCoordinator())
     .environment(MainTabViewModel())
 }

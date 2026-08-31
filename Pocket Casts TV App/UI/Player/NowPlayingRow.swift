@@ -36,6 +36,7 @@ private struct NowPlayingRowLabel: View {
             PodcastImage(uuid: uuid, size: .page)
         } else {
             Image(ImageResource.pcLogo)
+                .accessibilityHidden(true)
         }
     }
 
@@ -53,15 +54,14 @@ private struct NowPlayingRowLabel: View {
                     .font(.title3)
                     .foregroundColor(isFocused ? .pcTextPrimaryActive : .pcTextPrimary)
                     .lineLimit(2)
-                ProgressView(value: model.progress)
-                    .foregroundStyle(.blue)
-                    .tint(model.currentPodcastTintColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 100))
+                let trackColor = isFocused ? Color.pcTextSecondaryActive : Color.pcTextSecondary
+                RoundProgressView(trackColor: trackColor, progress: model.progress)
                 Text(model.timeLeft)
                     .font(.body)
                     .foregroundColor(isFocused ? .pcTextSecondaryActive : .pcTextSecondary)
                 Spacer()
             }
+            .accessibilityElement(children: .combine)
             Spacer()
         }
         .padding(32)
@@ -73,7 +73,7 @@ private struct NowPlayingRowLabel: View {
 
 
 #Preview {
-    NowPlayingRow(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!))
+    NowPlayingRow(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!, source: .unknown))
     .environment(AppCoordinator())
     .environment(MainTabViewModel())
 }

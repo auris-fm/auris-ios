@@ -104,14 +104,11 @@ extension SyncTask {
         if podcastItem.hasIsDeleted, podcastItem.isDeleted.value {
             if let podcast = existingPodcast {
                 podcast.autoDownloadSetting = AutoDownloadSetting.off.rawValue
-                podcast.isPushEnabled = false
+                podcast.pushEnabled = false
                 podcast.autoArchiveEpisodeLimit = 0
                 podcast.subscribed = 0
                 podcast.autoAddToUpNext = AutoAddToUpNextSetting.off.rawValue
                 podcast.settings = PodcastSettings.defaults
-                if FeatureFlag.settingsSync.enabled {
-                    podcast.processSettings(podcastItem.settings)
-                }
 
                 DataManager.sharedManager.save(podcast: podcast)
             }
@@ -166,10 +163,6 @@ extension SyncTask {
 
         if checkIsDeleted, podcastItem.hasIsDeleted {
             podcast.subscribed = podcastItem.isDeleted.value ? 0 : 1
-        }
-
-        if FeatureFlag.settingsSync.enabled {
-            podcast.processSettings(podcastItem.settings)
         }
     }
 
@@ -231,7 +224,7 @@ extension SyncTask {
             DataManager.sharedManager.saveEpisode(playedUpTo: playedUpTo, episode: episode, updateSyncFlag: false)
 
             // if the episode is loaded into the player, and is currently paused seek to the new up to time
-            if let delegate = ServerConfig.shared.playbackDelegate, delegate.isNowPlayingEpisode(episodeUuid: episode.uuid), !delegate.playing() {
+            if let delegate = ServerConfig.shared.playbackDelegate, delegate.isCurrentEpisode(uuid: episode.uuid), !delegate.isPlaying {
                 if playedUpTo < 1 {
                     FileLog.shared.addMessage("Saving a time of \(playedUpTo) for episode \(episode.displayableTitle()) because that's what the server sent us during a sync")
                 }
@@ -384,7 +377,9 @@ extension SyncTask {
         let didAdd = DataManager.sharedManager.add(episodes: addedEpisodes, to: playlist)
         if !didAdd {
             let playlistCount = DataManager.sharedManager.allPlaylistEpisodeCount(for: playlist, episodeUuidToAdd: nil, includingArchivedEpisodes: true)
-            FileLog.shared.addMessage("SyncTask: Tried to add too many episodes to imported playlist \(playlist.playlistName) episodeCount: \(addedEpisodes) playlistCount: \(playlistCount)")
+            if !addedEpisodes.isEmpty {
+                FileLog.shared.addMessage("SyncTask: Tried to add too many episodes to imported playlist \(playlist.playlistName) episodeCount: \(addedEpisodes) playlistCount: \(playlistCount)")
+            }
         }
 
         updateEpisodePositionsIfNeeded(for: playlistItem, playlist: playlist)
@@ -425,13 +420,20 @@ extension SyncTask {
                 // If the podcast is for a user episode then we default to nil
                 let podcastUuid = apiBookmark.podcastUuid == DataConstants.userEpisodeFakePodcastId ? nil : apiBookmark.podcastUuid
 
-                let addedUuid = bookmarkManager.add(uuid: apiBookmark.bookmarkUuid,
-                                                    episodeUuid: apiBookmark.episodeUuid,
-                                                    podcastUuid: podcastUuid,
-                                                    title: apiBookmark.title.value,
-                                                    time: Double(apiBookmark.time.value),
-                                                    dateCreated: apiBookmark.createdAt.date,
-                                                    syncStatus: .synced)
+                let addedUuid = bookmarkManager.add(
+                    uuid: apiBookmark.bookmarkUuid,
+                    episodeUuid: apiBookmark.episodeUuid,
+                    podcastUuid: podcastUuid,
+                    title: apiBookmark.title.value,
+                    time: Double(apiBookmark.time.value),
+                    dateCreated: apiBookmark.createdAt.date,
+                    passage: apiBookmark.bookmarkPassage,
+                    passageLocation: apiBookmark.bookmarkPassageLocation,
+                    passageModified: apiBookmark.passageModifiedDate,
+                    referenceTime: apiBookmark.bookmarkReferenceTime,
+                    referenceTimeModified: apiBookmark.referenceTimeModifiedDate,
+                    syncStatus: .synced
+                )
 
                 if addedUuid == nil {
                     FileLog.shared.addMessage("SyncTask: Import Bookmark Failed: Could not add non existent bookmark. API data: \(apiBookmark.logDescription)")
@@ -459,7 +461,18 @@ extension SyncTask {
             return
         }
 
-        await bookmarkManager.update(bookmark: existingBookmark, title: title, time: time, created: created, syncStatus: .synced).when(false) {
+        await bookmarkManager.update(
+            bookmark: existingBookmark,
+            title: title,
+            time: time,
+            created: created,
+            passage: apiBookmark.bookmarkPassage,
+            passageLocation: apiBookmark.bookmarkPassageLocation,
+            passageModified: apiBookmark.passageModifiedDate,
+            referenceTime: apiBookmark.bookmarkReferenceTime,
+            referenceTimeModified: apiBookmark.referenceTimeModifiedDate,
+            syncStatus: .synced
+        ).when(false) {
             FileLog.shared.addMessage("SyncTask: Update Bookmark Failed. API Data: \(apiBookmark.logDescription)")
         }
     }
@@ -489,30 +502,34 @@ private extension Api_SyncUserBookmark {
         hasCreatedAt ? createdAt.date : nil
     }
 
+    // The server only emits the passage and reference time groups when their modified timestamp
+    // is set, using "" / 0 as placeholders for a null value within an emitted group. Each group
+    // is gated on its modified date below, so an absent group leaves the local values untouched.
+
+    var bookmarkPassage: String? {
+        guard hasPassage, !passage.value.isEmpty else { return nil }
+        return passage.value
+    }
+
+    var bookmarkPassageLocation: Int? {
+        // A location without a passage is meaningless, and 0 stands in for null on the server
+        guard bookmarkPassage != nil, hasPassageLocation else { return nil }
+        return Int(passageLocation.value)
+    }
+
+    var passageModifiedDate: Date? {
+        hasPassageModified ? Date(timeIntervalSince1970: TimeInterval(passageModified.value) / 1000) : nil
+    }
+
+    var bookmarkReferenceTime: TimeInterval? {
+        hasReferenceTime ? TimeInterval(referenceTime.value) : nil
+    }
+
+    var referenceTimeModifiedDate: Date? {
+        hasReferenceTimeModified ? Date(timeIntervalSince1970: TimeInterval(referenceTimeModified.value) / 1000) : nil
+    }
+
     var logDescription: String {
         (try? jsonString()) ?? "invalid api bookmark"
-    }
-}
-
-extension Podcast {
-    func processSettings(_ settings: Api_PodcastSettings) {
-        let oldSettings = self.settings
-        self.settings.$customEffects.update(setting: settings.playbackEffects)
-        self.settings.$autoStartFrom.update(setting: settings.autoStartFrom)
-        self.settings.$autoSkipLast.update(setting: settings.autoSkipLast)
-        self.settings.$trimSilence.update(setting: settings.trimSilence)
-        self.settings.$playbackSpeed.update(setting: settings.playbackSpeed)
-        self.settings.$boostVolume.update(setting: settings.volumeBoost)
-        self.settings.$notification.update(setting: settings.notification)
-        self.settings.$addToUpNext.update(setting: settings.addToUpNext)
-        self.settings.$addToUpNextPosition.update(setting: settings.addToUpNextPosition)
-        self.settings.$episodesSortOrder.update(setting: settings.episodesSortOrder)
-        self.settings.$episodeGrouping.update(setting: settings.episodeGrouping)
-        self.settings.$showArchived.update(setting: settings.showArchived)
-        self.settings.$autoArchive.update(setting: settings.autoArchive)
-        self.settings.$autoArchivePlayed.update(setting: settings.autoArchivePlayed)
-        self.settings.$autoArchiveInactive.update(setting: settings.autoArchiveInactive)
-        self.settings.$autoArchiveEpisodeLimit.update(setting: settings.autoArchiveEpisodeLimit)
-        oldSettings.printDiff(from: self.settings, withIdentifier: self.uuid)
     }
 }

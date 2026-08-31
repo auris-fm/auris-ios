@@ -12,7 +12,7 @@ struct EpisodePlayerButton: View {
             EpisodeRow(model: model, isActive: false)
         }
         .buttonStyle(EpisodeRowButtonStyle())
-        .episodeContextMenu(model: model)
+        .episodeContextMenu(model: model, context: .other(showGoToPodcast: true))
         .fullScreenCover(isPresented: $isPlaying) {
             NowPlayingView()
                 .ignoresSafeArea()
@@ -21,5 +21,5 @@ struct EpisodePlayerButton: View {
 }
 
 #Preview {
-    EpisodePlayerButton(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!))
+    EpisodePlayerButton(model: EpisodeRowViewModel(episode: MockData.makeStubEpisodes().first!, podcast: MockData.makeStubPodcasts().first!, source: .unknown))
 }

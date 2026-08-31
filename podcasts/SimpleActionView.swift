@@ -21,6 +21,10 @@ class SimpleActionView: UIView {
         self.themeOverride = themeOverride
         self.iconTintStyle = iconTintStyle
         super.init(frame: frame)
+
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: SimpleActionView, _) in
+            view.updateSize()
+        }
     }
 
     @available(*, unavailable)
@@ -39,6 +43,7 @@ class SimpleActionView: UIView {
         addSubview(label)
         label.setContentHuggingPriority(.defaultLow, for: .vertical)
         label.setContentCompressionResistancePriority(.required, for: .vertical)
+        label.setContentCompressionResistancePriority(.init(rawValue: 751), for: .horizontal)
         let iconTintColor = action.destructive ? AppTheme.destructiveTextColor(for: themeOverride) : AppTheme.colorForStyle(iconTintStyle, themeOverride: themeOverride)
 
         var image = action.icon.flatMap { UIImage(named: $0) }
@@ -83,15 +88,14 @@ class SimpleActionView: UIView {
             secondaryLabel.textAlignment = .right
             secondaryLabel.textColor = ThemeColor.primaryText02(for: themeOverride)
             secondaryLabel.translatesAutoresizingMaskIntoConstraints = false
+            secondaryLabel.setContentCompressionResistancePriority(.init(rawValue: 749), for: .horizontal)
             addSubview(secondaryLabel)
 
             secondaryLabelVerticalConstraints = [
                 secondaryLabel.topAnchor.constraint(equalTo: layoutMarginsGuide.topAnchor),
                 secondaryLabel.bottomAnchor.constraint(equalTo: layoutMarginsGuide.bottomAnchor)
             ]
-            NSLayoutConstraint.activate(secondaryLabelVerticalConstraints + [
-                label.widthAnchor.constraint(greaterThanOrEqualTo: secondaryLabel.widthAnchor, multiplier: 1)
-            ])
+            NSLayoutConstraint.activate(secondaryLabelVerticalConstraints)
             self.secondaryLabel = secondaryLabel
             previousView = secondaryLabel
         }
@@ -125,7 +129,7 @@ class SimpleActionView: UIView {
             previousView = imageView
         }
         if previousView != label {
-            label.trailingAnchor.constraint(equalTo: previousView.leadingAnchor, constant: -10).isActive = true
+            label.trailingAnchor.constraint(equalTo: previousView.leadingAnchor, constant: -24).isActive = true
         }
         trailingAnchor.constraint(equalTo: previousView.trailingAnchor, constant: 20).isActive = true
 
@@ -220,12 +224,5 @@ class SimpleActionView: UIView {
         if let selectedView {
             selectedView.updateSizeConstraints(to: imageSize)
         }
-    }
-
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        guard traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory else { return }
-        updateSize()
     }
 }

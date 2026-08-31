@@ -45,8 +45,10 @@ struct PodcastsView<ViewModel: PodcastsViewModelProtocol>: View {
         ProgressView()
     }
 
+    @State private var path = NavigationPath()
+
     var podcastsView: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 40) {
                     Text(L10n.tvTabPodcasts)
@@ -56,15 +58,17 @@ struct PodcastsView<ViewModel: PodcastsViewModelProtocol>: View {
                 }
             }
         }
+        .syncNavigationDetail(path: path, tabRouter: tabRouter)
     }
 
     var emptyView: some View {
         ContentUnavailableView {
-            Text(L10n.tvPodcastsEmptyTitle)
+            Text(L10n.tvPodcastsEmptyTitleNew)
         } description: {
             Text(L10n.tvPodcastsEmptySubtitle)
         } actions: {
             Button(L10n.tvPodcastsEmptyActionTitle) {
+                Analytics.track(.podcastsListDiscoverButtonTapped)
                 tabRouter.selectedTab = .home
             }
         }
@@ -83,6 +87,7 @@ struct PodcastsView<ViewModel: PodcastsViewModelProtocol>: View {
                             .focusedCardDepth(cornerRadius: 12, style: .surface)
                     }
                     .buttonStyle(.card)
+                    .accessibilityLabel(podcast.title ?? "")
                     .simultaneousGesture(TapGesture().onEnded {
                         Analytics.track(.podcastsListPodcastTapped)
                     })
