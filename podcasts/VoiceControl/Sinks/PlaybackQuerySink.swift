@@ -8,7 +8,7 @@ class PlaybackQuerySink: VoicePlaybackQuerySink {
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
     func whatsPlaying() -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() else {
+        guard let episode = playbackManager.currentEpisode else {
             return .spoken(templates.resolve("playback.nothing_playing"))
         }
         return .spoken(templates.resolve("playback.playing", episode.displayableTitle()))
@@ -34,7 +34,7 @@ class PlaybackQuerySink: VoicePlaybackQuerySink {
     }
 
     func publishDate() -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() as? Episode,
+        guard let episode = playbackManager.currentEpisode as? Episode,
               let date = episode.publishedDate else {
             return .spoken(templates.resolve("general.unknown_publish_date"))
         }
@@ -48,7 +48,7 @@ class PlaybackQuerySink: VoicePlaybackQuerySink {
     }
 
     func downloadStatus() -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() else {
+        guard let episode = playbackManager.currentEpisode else {
             return .spoken(templates.resolve("playback.nothing_playing"))
         }
         let downloaded = episode.downloaded(pathFinder: DownloadManager.shared)
@@ -56,7 +56,7 @@ class PlaybackQuerySink: VoicePlaybackQuerySink {
     }
 
     func episodeTitle() -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() else {
+        guard let episode = playbackManager.currentEpisode else {
             return .spoken(templates.resolve("playback.nothing_playing"))
         }
         return .spoken(episode.displayableTitle())

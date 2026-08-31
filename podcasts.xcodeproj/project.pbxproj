@@ -3013,7 +3013,6 @@
 			);
 			target = FF4B83AD2F981D8E001B8C56 /* Pocket Casts TV App */;
 		};
-		FFE437E72FBCB03800716EAA /* Exceptions for "New Search" folder in "Pocket Casts TV App" target */ = {
 		FF94119530125CD2001837B8 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (

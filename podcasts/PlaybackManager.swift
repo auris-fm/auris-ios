@@ -747,14 +747,14 @@ class PlaybackManager: ServerPlaybackDelegate {
         if upNextIndex >= queue.upNextCount() { return }
 
         if let episodeToPlay = queue.episodeAt(index: upNextIndex) {
-            switchTo(episodeToPlay: episodeToPlay, moveExistingToUpNext: true, autoPlay: true)
+            switchTo(episodeToPlay: episodeToPlay, autoPlay: true)
         }
     }
 
     func skipToNextUpNextEpisode() -> String? {
         let nextTitle = queue.episodeAt(index: 0)?.displayableTitle()
         if queue.upNextCount() > 0 {
-            playNextEpisode(autoPlay: playing())
+            playNextEpisode(autoPlay: isPlaying)
         }
         return nextTitle
     }
