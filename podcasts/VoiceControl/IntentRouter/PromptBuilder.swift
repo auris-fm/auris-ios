@@ -1,12 +1,8 @@
 import Foundation
 
-/// One bounded prior turn rendered inside the request suffix for pending dialogs.
-struct DialogPromptTurn: Equatable {
-    let role: String
-    let content: String
-}
-
 /// Renders the FunctionGemma prompt contract from the recognition-pipeline spec.
+///
+/// Kept temporarily for the FunctionGemma product path until LFM Task 4 removes it.
 ///
 /// The canonical sequence is:
 /// `<bos><start_of_turn>developer\n<message>\n<declarations><end_of_turn>\n`
