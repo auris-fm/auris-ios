@@ -3,24 +3,35 @@ import XCTest
 
 final class AsrBackendSelectorTests: XCTestCase {
 
-    func test_select_default_returnsWhisperCpp() {
+    func test_select_english_returnsSenseVoice() {
         let selector = AsrBackendSelector()
-        let backend = selector.select(locale: Locale(identifier: "en_US"), hasNPU: false, senseVoiceShipped: false)
-        XCTAssertTrue(backend is WhisperCppBackend)
+        let backend = selector.select(locale: Locale(identifier: "en_US"))
+        XCTAssertTrue(backend is SenseVoiceBackend)
     }
 
-    func test_select_withNPU_returnsWhisperCpp() {
+    func test_select_cjkLocales_returnSenseVoice() {
         let selector = AsrBackendSelector()
-        let backend = selector.select(locale: Locale(identifier: "en_US"), hasNPU: true, senseVoiceShipped: true)
-        XCTAssertTrue(backend is WhisperCppBackend)
+        for localeCode in ["zh", "ja", "ko", "zh_CN"] {
+            let backend = selector.select(locale: Locale(identifier: localeCode))
+            XCTAssertTrue(backend is SenseVoiceBackend, "Locale \(localeCode) should route to SenseVoice")
+        }
     }
 
-    func test_select_senseVoiceLocale_returnsWhisperCpp() {
+    func test_select_deEsFr_returnCanaryFlash() {
         let selector = AsrBackendSelector()
-        // All supported locales initially route to WhisperCpp until SenseVoice is shipped
-        for localeCode in ["zh", "en", "ja", "ko"] {
-            let backend = selector.select(locale: Locale(identifier: localeCode), hasNPU: false, senseVoiceShipped: true)
-            XCTAssertTrue(backend is WhisperCppBackend, "Locale \(localeCode) should fall back to WhisperCpp")
+        for localeCode in ["de", "es", "fr"] {
+            let backend = selector.select(locale: Locale(identifier: localeCode))
+            XCTAssertTrue(backend is CanaryFlashBackend, "Locale \(localeCode) should route to CanaryFlash")
+            let canary = backend as? CanaryFlashBackend
+            XCTAssertEqual(canary?.srcLang, localeCode, "Canary srcLang should be the locale")
+        }
+    }
+
+    func test_select_unsupportedLocale_returnsWhisper() {
+        let selector = AsrBackendSelector()
+        for localeCode in ["ar", "ru", "pt"] {
+            let backend = selector.select(locale: Locale(identifier: localeCode))
+            XCTAssertTrue(backend is WhisperCppBackend, "Locale \(localeCode) should fall back to Whisper")
         }
     }
 }

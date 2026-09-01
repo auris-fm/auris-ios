@@ -10,6 +10,7 @@ class VoiceAsrEngine {
     private let gracePeriodSignal: GracePeriodSignal
     private let stageTimer: RecognitionStageTimer
     private let wakeThreshold: Float
+    private let translationStage: TranslationStage?
 
     private var isExposedSpeakerRoute = false
     private var playbackBuffer: [Float] = []
@@ -34,7 +35,8 @@ class VoiceAsrEngine {
         wakeWordDetector: WakeWordDetectorProtocol,
         gracePeriodSignal: GracePeriodSignal,
         clock: MonotonicClock = SystemMonotonicClock(),
-        wakeThreshold: Float = 0.8
+        wakeThreshold: Float = 0.8,
+        translationStage: TranslationStage? = nil
     ) {
         self.capture = capture
         self.segmenter = segmenter
@@ -44,6 +46,7 @@ class VoiceAsrEngine {
         self.gracePeriodSignal = gracePeriodSignal
         self.stageTimer = RecognitionStageTimer(clock: clock)
         self.wakeThreshold = wakeThreshold
+        self.translationStage = translationStage
     }
 
     private var backendReadyTask: Task<Result<Void, Error>, Never>?
@@ -138,21 +141,27 @@ class VoiceAsrEngine {
 
         let isWakePositive = detectedConfidence != nil
         let durationMs = utterance.count * 1000 / 16000
-        let transcript = WakeTranscriptTrimmer.commandText(
+        let trimmedText = WakeTranscriptTrimmer.commandText(
             result: asrResult,
             wakePositive: isWakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
             utteranceDurationMs: durationMs
         )
-        if transcript.isEmpty {
+        if trimmedText.isEmpty {
             if isWakePositive {
                 FileLog.shared.addMessage("[VoiceControl/ASR] Wake-only utterance — no command remainder")
                 onWakeOnly?()
             }
             return
         }
-        onTranscript?(transcript)
+
+        // Translate to English when the ASR backend did not already translate and the
+        // detected language is not English (the SenseVoice CJK path). Trim first so we
+        // only translate the command remainder (matches Android).
+        let trimmedResult = AsrResult(text: trimmedText, detectedLanguage: asrResult.detectedLanguage)
+        let finalized = await maybeTranslate(trimmedResult, backend: backend)
+        onTranscript?(finalized.text)
     }
 
     private func confidence(of result: WakeWordResult) -> Float? {
@@ -163,6 +172,29 @@ class VoiceAsrEngine {
     private func completionSample(of result: WakeWordResult) -> Int {
         if case .detected(_, let completionSample) = result { return completionSample }
         return 0
+    }
+
+    /// Translates a non-English, non-self-translating ASR result to English before
+    /// intent routing. Falls back to the native transcript if the translation stage
+    /// is unavailable or fails (best-effort, per the spec).
+    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> AsrResult {
+        guard let detected = result.detectedLanguage?.lowercased(), detected != "en" else {
+            return result
+        }
+        if backend.capabilities.canTranslateToEnglish { return result }
+        guard let translationStage else { return result }
+
+        if case .failure = await translationStage.ensureReady(sourceLanguage: detected) {
+            FileLog.shared.addMessage("[VoiceControl/ASR] Translation stage not ready for \(detected), using native transcript")
+            return result
+        }
+        let translated = await translationStage.translate(text: result.text, sourceLanguage: detected)
+        guard !translated.isEmpty else {
+            FileLog.shared.addMessage("[VoiceControl/ASR] Translation returned blank for \(detected), using native transcript")
+            return result
+        }
+        FileLog.shared.addMessage("[VoiceControl/ASR] Translated \(detected) -> en")
+        return AsrResult(text: translated, detectedLanguage: "en")
     }
 
     /// Computes and emits the per-utterance stage timings. `detectedConfidence`

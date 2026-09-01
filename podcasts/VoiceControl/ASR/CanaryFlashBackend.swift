@@ -8,7 +8,7 @@ import PocketCastsUtils
 final class CanaryFlashBackend: AsrBackend {
 
     private let modelDir: String
-    private let srcLang: String
+    let srcLang: String
     private var recognizer: SherpaOnnxOfflineRecognizer?
 
     let capabilities = AsrCapabilities(
@@ -41,6 +41,12 @@ final class CanaryFlashBackend: AsrBackend {
         // invalid config to the runtime.
         guard Self.supportedLangs.contains(srcLang) else {
             return .failure(BackendError.unsupportedSource(srcLang))
+        }
+
+        do {
+            try await downloadModels()
+        } catch {
+            return .failure(error)
         }
 
         let encoderPath = (modelDir as NSString).appendingPathComponent(Self.encoderFilename)
@@ -95,6 +101,22 @@ final class CanaryFlashBackend: AsrBackend {
     func release() {
         recognizer = nil
         FileLog.shared.addMessage("[CanaryFlash] released")
+    }
+
+    /// Downloads each ModelFile into the model dir if not already present.
+    private func downloadModels() async throws {
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        for file in requiredModel.files {
+            let dest = (modelDir as NSString).appendingPathComponent(file.filename)
+            if FileManager.default.fileExists(atPath: dest) { continue }
+            FileLog.shared.addMessage("[CanaryFlash] downloading \(file.filename)")
+            let (tmpURL, _) = try await URLSession.shared.download(for: URLRequest(url: file.url))
+            let destURL = URL(fileURLWithPath: dest)
+            if FileManager.default.fileExists(atPath: dest) {
+                try? FileManager.default.removeItem(at: destURL)
+            }
+            try FileManager.default.moveItem(at: tmpURL, to: destURL)
+        }
     }
 
     private static let supportedLangs: Set<String> = ["en", "de", "es", "fr"]

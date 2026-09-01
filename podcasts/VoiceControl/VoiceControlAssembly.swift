@@ -14,11 +14,7 @@ class VoiceControlAssembly {
         let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
 
-        let asrBackend = AsrBackendSelector().select(
-            locale: .current,
-            hasNPU: hasNeuralEngine(),
-            senseVoiceShipped: false
-        )
+        let asrBackend = AsrBackendSelector().select(locale: .current)
 
         // Deployment threshold comes from the eval manifest (recognition-pipeline.md
         // "Threshold"). A missing manifest or hash mismatch disables voice control.
@@ -47,7 +43,8 @@ class VoiceControlAssembly {
             wakeWordDetector: wakeWordDetector,
             gracePeriodSignal: gracePeriodSignal,
             clock: SystemMonotonicClock(),
-            wakeThreshold: threshold
+            wakeThreshold: threshold,
+            translationStage: AppleTranslationTranslator()
         )
 
         let intentRouter = LfmIntentRouter()

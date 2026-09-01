@@ -43,6 +43,12 @@ final class SenseVoiceBackend: AsrBackend {
         // Rebuild the recognizer if not present (e.g. first call, or after model dir change).
         if recognizer != nil { return .success(()) }
 
+        do {
+            try await downloadModels()
+        } catch {
+            return .failure(error)
+        }
+
         let encoderPath = (modelDir as NSString).appendingPathComponent(Self.modelFilename)
         let tokensPath = (modelDir as NSString).appendingPathComponent(Self.tokensFilename)
         guard FileManager.default.fileExists(atPath: encoderPath),
@@ -90,6 +96,23 @@ final class SenseVoiceBackend: AsrBackend {
     func release() {
         recognizer = nil
         FileLog.shared.addMessage("[SenseVoice] released")
+    }
+
+    /// Downloads each ModelFile into the model dir if not already present (resumable-ish:
+    /// simple download + atomic move for now; SHA-256 verification can be added later).
+    private func downloadModels() async throws {
+        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+        for file in requiredModel.files {
+            let dest = (modelDir as NSString).appendingPathComponent(file.filename)
+            if FileManager.default.fileExists(atPath: dest) { continue }
+            FileLog.shared.addMessage("[SenseVoice] downloading \(file.filename)")
+            let (tmpURL, _) = try await URLSession.shared.download(for: URLRequest(url: file.url))
+            let destURL = URL(fileURLWithPath: dest)
+            if FileManager.default.fileExists(atPath: dest) {
+                try? FileManager.default.removeItem(at: destURL)
+            }
+            try FileManager.default.moveItem(at: tmpURL, to: destURL)
+        }
     }
 
     static let langPattern = try! NSRegularExpression(pattern: "^<\\|(\\w+)\\|>")
