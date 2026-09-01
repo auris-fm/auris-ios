@@ -8,3 +8,4 @@
 #include "VoiceBoostN.h"
 #include "VoiceControl/WakeWord/WakeWordDetector.h"
 #import "VoiceControl/IntentRouter/Native/LlmBridge.h"
+@import SherpaOnnxC;  // sherpa-onnx C API (SenseVoice + Canary Flash backends)
