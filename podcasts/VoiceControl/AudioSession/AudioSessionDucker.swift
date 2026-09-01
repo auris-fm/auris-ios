@@ -25,33 +25,44 @@ class AudioSessionDucker: AudioSessionDucking {
 
     /// Reduce playback volume to make TTS/earcon more audible.
     func duck() {
-        guard !isDucked else { return }
-        let currentVolume = AVAudioSession.sharedInstance().outputVolume
-        guard currentVolume > 0.01 else { return } // Already effectively silent
-        originalVolume = currentVolume
-        let duckedVolume = currentVolume * duckFraction
-        setSystemVolume(duckedVolume)
-        isDucked = true
-        FileLog.shared.addMessage("[VoiceControl/Ducker] Duck: \(String(format: "%.2f", currentVolume)) → \(String(format: "%.2f", duckedVolume))")
+        onMain {
+            guard !self.isDucked else { return }
+            let currentVolume = AVAudioSession.sharedInstance().outputVolume
+            guard currentVolume > 0.01 else { return } // Already effectively silent
+            self.originalVolume = currentVolume
+            let duckedVolume = currentVolume * self.duckFraction
+            self.setSystemVolume(duckedVolume)
+            self.isDucked = true
+            FileLog.shared.addMessage("[VoiceControl/Ducker] Duck: \(String(format: "%.2f", currentVolume)) → \(String(format: "%.2f", duckedVolume))")
+        }
     }
 
     /// Restore playback volume to its pre-duck level.
     func unduck() {
-        guard isDucked, let original = originalVolume else { return }
-        setSystemVolume(original)
-        isDucked = false
-        originalVolume = nil
-        FileLog.shared.addMessage("[VoiceControl/Ducker] Unduck: restored to \(String(format: "%.2f", original))")
+        onMain {
+            guard self.isDucked, let original = self.originalVolume else { return }
+            self.setSystemVolume(original)
+            self.isDucked = false
+            self.originalVolume = nil
+            FileLog.shared.addMessage("[VoiceControl/Ducker] Unduck: restored to \(String(format: "%.2f", original))")
+        }
     }
 
+    /// MPVolumeView must be created and touched on the main thread.
     private func setSystemVolume(_ volume: Float) {
         guard let slider = volumeView.subviews.first(where: { $0 is UISlider }) as? UISlider else {
             FileLog.shared.addMessage("[VoiceControl/Ducker] Volume slider not found")
             return
         }
-        DispatchQueue.main.async {
-            slider.value = volume
-            slider.sendActions(for: .touchUpInside)
+        slider.value = volume
+        slider.sendActions(for: .touchUpInside)
+    }
+
+    private func onMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.sync(execute: block)
         }
     }
 }
