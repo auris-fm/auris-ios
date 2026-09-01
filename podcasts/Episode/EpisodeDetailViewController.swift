@@ -24,6 +24,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     @IBOutlet var episodeName: ThemeableLabel! {
         didSet {
             episodeName.font = UIFont.font(ofSize: 22, weight: .bold, scalingWith: .title2)
+            episodeName.adjustsFontForContentSizeCategory = true
         }
     }
 
@@ -33,6 +34,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
             podcastName.addGestureRecognizer(tapGesture)
             podcastName.isUserInteractionEnabled = true
             podcastName.font = UIFont.font(ofSize: 16, weight: .medium, scalingWith: .callout)
+            podcastName.adjustsFontForContentSizeCategory = true
         }
     }
 
@@ -127,6 +129,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         didSet {
             messageTitle.style = .primaryText01
             messageTitle.font = UIFont.font(ofSize: 16, weight: .medium, scalingWith: .callout)
+            messageTitle.adjustsFontForContentSizeCategory = true
         }
     }
 
@@ -134,12 +137,14 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         didSet {
             messageDetails.style = .primaryText02
             messageDetails.font = UIFont.font(ofSize: 14, weight: .medium, scalingWith: .subheadline)
+            messageDetails.adjustsFontForContentSizeCategory = true
         }
     }
 
     @IBOutlet var failedToLoadLabel: ThemeableLabel! {
         didSet {
             failedToLoadLabel.font = UIFont.font(ofSize: 16, weight: .regular, scalingWith: .callout)
+            failedToLoadLabel.adjustsFontForContentSizeCategory = true
         }
     }
 
@@ -152,6 +157,9 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     private var docController: UIDocumentInteractionController?
     private var starButton: UIButton?
+
+    private var episodeArtworkURL: URL?
+    private var didResolveEpisodeArtwork = false
 
     var rawShowNotes: String?
     var lastThemeRenderedNotesIn: Theme.ThemeType?
@@ -214,6 +222,10 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: EpisodeDetailViewController, _) in
+            controller.updateSize()
+        }
+
         addBookmarksTabIfNeeded()
 
         closeTapped = { [weak self] in
@@ -249,12 +261,13 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
         updateDisplayedData()
         updateColors()
+
+        loadShowNotes()
+        loadEpisodeArtwork()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-
-        loadShowNotes()
 
         bookmarksController.view.isHidden = false
 
@@ -407,9 +420,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
         episodeName.text = episode.displayableTitle()
         podcastName.text = podcast.title
-        if let uuid = episode.parentPodcast()?.uuid {
-            podcastImage.setPodcast(uuid: uuid, size: .page)
-        }
+        updateArtwork()
 
         episodeInfo.text = DateFormatHelper.sharedHelper.longLocalizedFormat(episode.publishedDate) + " · " + episode.displayableTimeLeft()
 
@@ -419,6 +430,32 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         updateProgress()
         updateMessageView()
         updateColors()
+    }
+
+    private func updateArtwork() {
+        // While episode artwork is enabled but not yet resolved, show a placeholder. Once resolved,
+        // show the episode's own artwork, falling back to the podcast artwork when there is none.
+        if Settings.loadEmbeddedImages, !didResolveEpisodeArtwork {
+            podcastImage.setPlaceholder(size: .page)
+        } else if let episodeArtworkURL {
+            podcastImage.setEpisodeArtwork(url: episodeArtworkURL, size: .page)
+        } else if let uuid = episode.parentPodcast()?.uuid {
+            podcastImage.setPodcast(uuid: uuid, size: .page)
+        }
+    }
+
+    private func loadEpisodeArtwork() {
+        guard Settings.loadEmbeddedImages, !didResolveEpisodeArtwork else { return }
+
+        let podcastUuid = episode.parentIdentifier()
+        let episodeUuid = episode.uuid
+        Task { @MainActor [weak self] in
+            let url = try? await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(podcastUuid: podcastUuid, episodeUuid: episodeUuid)
+            guard let self, self.episode.uuid == episodeUuid else { return }
+            self.episodeArtworkURL = url
+            self.didResolveEpisodeArtwork = true
+            self.updateArtwork()
+        }
     }
 
     @objc private func playbackProgressDidChange() {
@@ -749,6 +786,7 @@ private extension EpisodeDetailViewController {
 }
 
 enum EpisodeDetailViewSource: String, AnalyticsDescribable {
+    case bookmarks
     case discover
     case downloads
     case listeningHistory = "listening_history"
@@ -776,11 +814,5 @@ extension EpisodeDetailViewController {
         let iconSize = max(24, metric.scaledValue(for: 24))
         messageIcon.updateSizeConstraints(to: iconSize)
         downloadIndicator.updateSizeConstraints(to: iconSize)
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        guard traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory else { return }
-        updateSize()
     }
 }

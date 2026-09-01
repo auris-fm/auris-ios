@@ -49,7 +49,7 @@ class EpisodeManager: NSObject {
         var episodesMinusCurrent = episodes
         var currentEpisodeToMarkAsPlayed: BaseEpisode?
 
-        if let currentEpisode = PlaybackManager.shared.currentEpisode(), let index = episodes.firstIndex(where: { $0.uuid == currentEpisode.uuid }) {
+        if let currentEpisode = PlaybackManager.shared.currentEpisode, let index = episodes.firstIndex(where: { $0.uuid == currentEpisode.uuid }) {
             episodesMinusCurrent.remove(at: index)
             currentEpisodeToMarkAsPlayed = currentEpisode
         }
@@ -215,7 +215,7 @@ class EpisodeManager: NSObject {
 
         // if this podcast has an episode limit, flag this episode as being manually excluded from that limit
         if let parentPodcast = episode.parentPodcast() {
-            if parentPodcast.autoArchivePlayedAfterTime > 0 {
+            if parentPodcast.autoArchivePlayedAfter > 0 {
                 DataManager.sharedManager.saveEpisode(excludeFromEpisodeLimit: true, episode: episode)
             }
         }
@@ -270,7 +270,7 @@ class EpisodeManager: NSObject {
 
         // special case if the starred status of the now playing episode is changed, tell the player to update it
         // we do this before sending notifications so that other parts of the app that grab the now playing episode get the one with the right star status
-        if PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid) {
+        if PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid) {
             PlaybackManager.shared.nowPlayingStarredChanged()
         }
 
@@ -289,7 +289,7 @@ class EpisodeManager: NSObject {
 
     class func bulkSetStarred(_ starred: Bool, episodes: [Episode], updateSyncStatus: Bool) {
         DataManager.sharedManager.bulkSetStarred(starred: starred, episodes: episodes, updateSyncStatus: updateSyncStatus)
-        if let currentEpisode = PlaybackManager.shared.currentEpisode() as? Episode, episodes.contains(currentEpisode) {
+        if let currentEpisode = PlaybackManager.shared.currentEpisode as? Episode, episodes.contains(currentEpisode) {
             PlaybackManager.shared.nowPlayingStarredChanged()
         }
         if updateSyncStatus {
@@ -367,14 +367,14 @@ class EpisodeManager: NSObject {
             }
 
             // we don't want a huge number of these so if we're over 5, blow the oldest ones away
-            if index >= 5, !PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid) {
+            if index >= 5, !PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid) {
                 deleteDownloadedFiles(episode: episode)
 
                 continue
             }
 
             // delete episodes older than a week that we're not currently playing
-            if fabs(lastPlaybackDate.timeIntervalSinceNow) > 1.week, !PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid) {
+            if fabs(lastPlaybackDate.timeIntervalSinceNow) > 1.week, !PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid) {
                 deleteDownloadedFiles(episode: episode)
             }
         }
@@ -402,7 +402,6 @@ class EpisodeManager: NSObject {
             let fileSize = attributes[.size] as? UInt64 ?? 0
             let fullFilePath = (folderPath as NSString).appendingPathComponent(tmpFile)
             FileLog.shared.addMessage("Episode Manager: Removing the following orphan file \(tmpFile)")
-            StorageManager.removeItem(at: URL(fileURLWithPath: fullFilePath))
             if StorageManager.removeItem(at: URL(fileURLWithPath: fullFilePath)) {
                 totalFilesSize += fileSize
             } else {
@@ -421,8 +420,44 @@ class EpisodeManager: NSObject {
         return totalFilesSize
     }
 
+    /// Whether the episode has a usable HLS stream given the current feature-flag state — i.e. the HLS
+    /// feature is enabled and the episode advertises a parseable HLS URL. This is a capability check, not
+    /// a resolved-source check: a downloaded episode can still return `true` here even though it will play
+    /// its local file (use `willPlayViaHLS` for the "what will actually play" question). Requires a
+    /// parseable url so this stays consistent with `urlForEpisode`, which falls back to the progressive
+    /// url when the HLS string can't be turned into a `URL`.
+    class func hasHLSStream(_ episode: BaseEpisode) -> Bool {
+        guard FeatureFlag.hls.enabled, let episode = episode as? Episode, let hlsUrl = episode.hlsUrl, !hlsUrl.isEmpty else {
+            return false
+        }
+        return URL(string: hlsUrl) != nil
+    }
+
+    /// Whether the episode should be presented as video in the UI: either a native video podcast or an
+    /// episode that will actually play its HLS stream. Downloaded episodes play their local (audio-only)
+    /// file, so advertising a video icon for them would promise video the user won't get — hence
+    /// `willPlayViaHLS` rather than `hasHLSStream`.
+    class func isVideo(_ episode: BaseEpisode) -> Bool {
+        episode.videoPodcast() || willPlayViaHLS(episode)
+    }
+
+    /// Whether the episode will actually play via HLS right now. Downloaded copies take precedence over
+    /// the HLS stream in `urlForEpisode`, so a downloaded episode plays its local (progressive) file and
+    /// is not treated as HLS — this distinguishes that case from `hasHLSStream`.
+    class func willPlayViaHLS(_ episode: BaseEpisode) -> Bool {
+        guard hasHLSStream(episode) else { return false }
+        // The user can choose to watch a downloaded episode's video, which streams the HLS source instead
+        // of its local (audio-only) file, so this takes precedence over the downloaded-copy checks below.
+        if PlaybackManager.shared.shouldStreamVideoDespiteDownload(episode) { return true }
+        if episode.downloaded(pathFinder: DownloadManager.shared) { return false }
+        if let episode = episode as? Episode, episode.streamDownloaded(pathFinder: DownloadManager.shared) { return false }
+        return true
+    }
+
     class func urlForEpisode(_ episode: BaseEpisode, streamingOnly: Bool = false) -> URL? {
-        if !streamingOnly {
+        // Streaming the HLS video of a downloaded episode ignores the local (audio-only) file.
+        let preferStreaming = streamingOnly || PlaybackManager.shared.shouldStreamVideoDespiteDownload(episode)
+        if !preferStreaming {
             // For local playback, prefer downloaded files
             if episode.downloaded(pathFinder: DownloadManager.shared) {
                 return URL(fileURLWithPath: episode.pathToDownloadedFile(pathFinder: DownloadManager.shared))
@@ -432,8 +467,15 @@ class EpisodeManager: NSObject {
         }
 
         // For streaming or when no local files, return remote URL
-        if let episode = episode as? Episode, let url = episode.downloadUrl {
-            return URL(string: url)
+        if let episode = episode as? Episode {
+            // When available, default to the HLS stream over the progressive file.
+            // If the HLS url is malformed, fall through to the progressive url rather than failing.
+            if hasHLSStream(episode), let hlsUrl = episode.hlsUrl, let url = URL(string: hlsUrl) {
+                return url
+            }
+            if let url = episode.downloadUrl {
+                return URL(string: url)
+            }
         } else if let episode = episode as? UserEpisode {
             if let token = ServerSettings.syncingV2Token, episode.uploadStatus != UploadStatus.missing.rawValue {
                 return URL(string: "\(ServerConstants.Urls.api())files/url/\(episode.uuid)?token=\(token)")
@@ -446,8 +488,8 @@ class EpisodeManager: NSObject {
     class func shouldArchiveOnCompletion(episode: BaseEpisode) -> Bool {
         #if !APPCLIP
         if let episode = episode as? Episode {
-            if let podcast = episode.parentPodcast(), podcast.isAutoArchiveOverridden {
-                return podcast.autoArchivePlayedAfterTime == 0 && (Settings.archiveStarredEpisodes() || !episode.keepEpisode)
+            if let podcast = episode.parentPodcast(), podcast.overrideGlobalArchive {
+                return podcast.autoArchivePlayedAfter == 0 && (Settings.archiveStarredEpisodes() || !episode.keepEpisode)
             }
 
             return Settings.autoArchivePlayedAfter() == 0 && (Settings.archiveStarredEpisodes() || !episode.keepEpisode)
@@ -528,7 +570,7 @@ class EpisodeManager: NSObject {
 
     class func removeDownloadForEpisodes(_ episodes: [BaseEpisode]) {
         var episodesToRemoveFromQueue = episodes
-        if let currentEpisode = PlaybackManager.shared.currentEpisode(), let index = episodes.firstIndex(where: { $0.uuid == currentEpisode.uuid }) {
+        if let currentEpisode = PlaybackManager.shared.currentEpisode, let index = episodes.firstIndex(where: { $0.uuid == currentEpisode.uuid }) {
             PlaybackManager.shared.removeIfPlayingOrQueued(episode: currentEpisode, fireNotification: true, saveCurrentEpisode: true)
             episodesToRemoveFromQueue.remove(at: index)
         }

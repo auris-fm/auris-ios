@@ -337,10 +337,26 @@
     <string>确定删除这些书签？书签一经删除不可恢复！</string>
     <key>bookmark_delete_warning_title</key>
     <string>删除书签？</string>
+    <key>bookmark_details_title</key>
+    <string>书签</string>
+    <key>bookmark_edit_transcript_subtitle</key>
+    <string>为此书签选择文字转录稿段落</string>
+    <key>bookmark_edit_transcript_title</key>
+    <string>编辑文字转录稿</string>
     <key>bookmark_search_no_results_message</key>
     <string>我们搜索不到任何书签。</string>
     <key>bookmark_search_no_results_title</key>
     <string>未找到书签</string>
+    <key>bookmark_suggested_title</key>
+    <string>建议标题：%1$@</string>
+    <key>bookmark_suggestion_prefix</key>
+    <string>建议： </string>
+    <key>bookmark_title_label</key>
+    <string>标题</string>
+    <key>bookmark_transcript_adding</key>
+    <string>正在添加文字转录稿…</string>
+    <key>bookmark_transcript_captured</key>
+    <string>已捕获文字转录稿</string>
     <key>bookmark_updated_notification</key>
     <string>已更新书签“%1$@”</string>
     <key>bookmarks</key>
@@ -491,6 +507,8 @@ Pocket Casts Plus</string>
     <string>必须至少为 6 个字符</string>
     <key>chapters</key>
     <string>章节</string>
+    <key>chapters_generated_warning_message</key>
+    <string>这些章节是自动生成的，可能并不完全准确。</string>
     <key>check_internet_connection</key>
     <string>请检查您的互联网连接</string>
     <key>chosen_podcasts_plural_format</key>
@@ -635,6 +653,29 @@ Pocket Casts Plus</string>
     <string>取消选择以上所有内容</string>
     <key>deselect_all_below</key>
     <string>取消选择以下所有内容</string>
+    <key>device_approve_code_placeholder</key>
+    <string>插入代码</string>
+    <key>device_approve_connect_button</key>
+    <string>连接</string>
+    <key>device_approve_description</key>
+    <string>您的收听进度将自动同步。
+您可以随时在“设置”中断开连接。</string>
+    <key>device_approve_expired_alert_message</key>
+    <string>请返回您的 TV 生成一个新的二维码。</string>
+    <key>device_approve_expired_alert_title</key>
+    <string>您的二维码已过期</string>
+    <key>device_approve_generic_error_alert_title</key>
+    <string>设备审批失败</string>
+    <key>device_approve_login_required</key>
+    <string>要连接您的设备，您需要有一个账户。 请登录或创建一个账户，然后重试。</string>
+    <key>device_approve_signing_in_as</key>
+    <string>正在以…身份登录…</string>
+    <key>device_approve_success_alert_message</key>
+    <string>您的 Apple TV 现已连接到您的账户。</string>
+    <key>device_approve_success_alert_title</key>
+    <string>Apple TV 已连接</string>
+    <key>device_approve_title</key>
+    <string>连接到 Apple TV</string>
     <key>device_shake_sleep_timer</key>
     <string>摇晃设备会使睡眠计时器重新启动</string>
     <key>discover</key>
@@ -922,6 +963,8 @@ Pocket Casts。</string>
     <string>我们注意到您尚未登录</string>
     <key>edit</key>
     <string>编辑</string>
+    <key>edit_bookmark</key>
+    <string>编辑书签</string>
     <key>edit_clip</key>
     <string>编辑片段</string>
     <key>enable_it_now</key>
@@ -1562,6 +1605,8 @@ Pocket Casts。</string>
     <string>未找到剧集</string>
     <key>loading</key>
     <string>正在加载...</string>
+    <key>login_landing_sign_up_with_email</key>
+    <string>使用电子邮件地址注册</string>
     <key>login_landing_subtitle</key>
     <string>您的播客，始终保持同步。 保护您的媒体库安全，并在网页和桌面端畅享 Pocket Casts。</string>
     <key>login_landing_title</key>
@@ -1586,6 +1631,8 @@ Pocket Casts。</string>
     <string>标记为已播放</string>
     <key>mark_played_short</key>
     <string>标记为已播放</string>
+    <key>mark_unplayed</key>
+    <string>标记为未播放</string>
     <key>mark_unplayed_short</key>
     <string>标记为未播放</string>
     <key>maybe_later</key>
@@ -2084,6 +2131,10 @@ Pocket Casts。</string>
     <string>%1$@x</string>
     <key>player_accessibility_sleep_timer_on</key>
     <string>睡眠计时器开启</string>
+    <key>player_action_hide_video</key>
+    <string>隐藏视频</string>
+    <key>player_action_show_video</key>
+    <string>显示视频</string>
     <key>player_action_subtitle_delete</key>
     <string>对自定义剧集显示为删除</string>
     <key>player_action_subtitle_hidden</key>
@@ -2747,8 +2798,12 @@ Pocket Casts。</string>
     <string>正在播放。%1$@</string>
     <key>queue_time_remaining</key>
     <string>剩余 %1$@</string>
-    <key>queue_total_time_remaining</key>
-    <string>总剩余时间为 %1$@</string>
+    <key>queue_up_next_header_one_episode</key>
+    <string>1 集 · 剩余 %1$@</string>
+    <key>queue_up_next_header_plural</key>
+    <string>%1$@ 集 · 剩余 %2$@</string>
+    <key>queue_up_next_header_time_left</key>
+    <string>剩余 %1$@</string>
     <key>rate</key>
     <string>评分</string>
     <key>rate_pocket_casts</key>
@@ -3158,6 +3213,10 @@ Pocket Casts。</string>
     <string>已存档的剧集</string>
     <key>settings_general_archived_episodes_prompt_format</key>
     <string>是否要将所有现有播客更改为%1$@已存档的剧集？</string>
+    <key>settings_general_audio_only</key>
+    <string>仅限音频</string>
+    <key>settings_general_audio_only_subtitle</key>
+    <string>如果此选项开启，视频剧集将仅以音频形式播放。</string>
     <key>settings_general_auto_open_player</key>
     <string>自动打开播放器</string>
     <key>settings_general_autoplay</key>
@@ -3168,6 +3227,10 @@ Pocket Casts。</string>
     <string>默认值</string>
     <key>settings_general_episode_groups</key>
     <string>播客剧集分组</string>
+    <key>settings_general_generated_chapters</key>
+    <string>生成的章节</string>
+    <key>settings_general_generated_chapters_subtitle</key>
+    <string>如有自动生成的章节，则显示。</string>
     <key>settings_general_hide</key>
     <string>隐藏</string>
     <key>settings_general_keep_screen_awake</key>
@@ -3530,6 +3593,10 @@ Pocket Casts。</string>
     <string>将睡眠计时器设置为 %1$@</string>
     <key>siri_shortcut_extend_sleep_timer_five_min</key>
     <string>将睡眠计时器延长 5 分钟</string>
+    <key>siri_shortcut_mark_as_played_phrase</key>
+    <string>标记为已播放</string>
+    <key>siri_shortcut_mark_as_played_title</key>
+    <string>将当前剧集标记为已播放</string>
     <key>siri_shortcut_next_chapter</key>
     <string>下一章</string>
     <key>siri_shortcut_open_filter_phrase</key>
@@ -3832,14 +3899,49 @@ Pocket Casts。</string>
     <string>试用完成</string>
     <key>trim_silence</key>
     <string>剪裁静音</string>
+    <key>troubleshooting_orphaned_episodes_checking</key>
+    <string>正在检查孤立剧集…</string>
+    <key>troubleshooting_orphaned_episodes_description</key>
+    <string>一种罕见的同步问题可能会导致出现重复的剧集条目，这些条目已不再链接到相应的播客。 这些条目可能会导致某剧集的下载或播放状态在应用程序的某些部分中显示错误。</string>
+    <key>troubleshooting_orphaned_episodes_found_plural_format</key>
+    <string>%1$@ 个孤立剧集</string>
+    <key>troubleshooting_orphaned_episodes_found_singular</key>
+    <string>1 个孤立剧集</string>
+    <key>troubleshooting_orphaned_episodes_header</key>
+    <string>孤立剧集</string>
+    <key>troubleshooting_orphaned_episodes_none_found</key>
+    <string>未找到任何孤立剧集</string>
+    <key>troubleshooting_orphaned_episodes_removing</key>
+    <string>正在删除孤立剧集…</string>
+    <key>troubleshooting_remove_orphaned_episodes</key>
+    <string>删除孤立剧集</string>
+    <key>troubleshooting_remove_orphaned_episodes_confirm_message</key>
+    <string>此操作将删除该设备上找到的重复剧集条目。 此操作无法撤销，但 Pocket Casts 会尽力保留您的播放进度、下载状态和其他剧集详细信息，然后再将其删除。</string>
+    <key>troubleshooting_remove_orphaned_episodes_confirm_title</key>
+    <string>删除孤立剧集？</string>
+    <key>troubleshooting_remove_orphaned_episodes_result_none</key>
+    <string>未删除任何孤立剧集</string>
+    <key>troubleshooting_remove_orphaned_episodes_result_plural_format</key>
+    <string>已删除 %1$@ 个孤立剧集</string>
+    <key>troubleshooting_remove_orphaned_episodes_result_singular</key>
+    <string>已删除 1 个孤立剧集</string>
+    <key>troubleshooting_title</key>
+    <string>问题排查</string>
+    <key>troubleshooting_view_orphaned_episodes</key>
+    <string>查看孤立剧集</string>
     <key>try_again</key>
     <string>重试</string>
     <key>try_it_now</key>
     <string>立即试用</string>
+    <key>tv_account_signed_out_alert_message</key>
+    <string>出了点问题，您已退出登录。
+请点击下方按钮再次登录您的 Pocket Casts 账户。</string>
+    <key>tv_account_signed_out_alert_title</key>
+    <string>您已退出登录。</string>
     <key>tv_banner_create_account_action_title</key>
     <string>创建一个免费账户</string>
     <key>tv_banner_create_account_subtitle</key>
-    <string>您的关注、您的进度…一切都保持原样。</string>
+    <string>您的关注和进度都保持原样</string>
     <key>tv_banner_create_account_title</key>
     <string>一个账户。 适配所有屏幕</string>
     <key>tv_banner_discover_more_action_title</key>
@@ -3850,20 +3952,74 @@ Pocket Casts。</string>
     <string>这还只是冰山一角。</string>
     <key>tv_create_account_come_back</key>
     <string>创建账户后，请返回并登录</string>
+    <key>tv_create_account_modal_step_create</key>
+    <string>创建您的账户</string>
+    <key>tv_create_account_modal_step_log_in</key>
+    <string>TV 会自动为您登录</string>
+    <key>tv_create_account_modal_step_scan</key>
+    <string>扫描二维码</string>
+    <key>tv_create_account_modal_subtitle</key>
+    <string>创建一个免费账户以关注播客，创建您的“接下来播放”列表，并在任何设备上从您离开的位置继续播放。</string>
+    <key>tv_create_account_modal_title</key>
+    <string>您的播客值得一个归宿</string>
+    <key>tv_create_account_qr_instruction</key>
+    <string>打开摄像头，对准此二维码。</string>
+    <key>tv_create_account_step_confirm_code</key>
+    <string>如果系统询问，请确认下方的代码</string>
+    <key>tv_create_account_step_create</key>
+    <string>创建您的账户或登录</string>
+    <key>tv_create_account_step_login</key>
+    <string>登录您的账户</string>
+    <key>tv_create_account_step_scan</key>
+    <string>扫描二维码或转到 %1$@</string>
     <key>tv_create_account_subtitle</key>
     <string>扫描此二维码即可在手机上开始使用，整个过程只需一分钟。</string>
     <key>tv_create_account_title</key>
     <string>创建您的免费账户</string>
+    <key>tv_discover_failed_to_load_subtitle</key>
+    <string>请确保您已连接至互联网并重试。</string>
+    <key>tv_discover_failed_to_load_title</key>
+    <string>“发现”加载失败。</string>
     <key>tv_discover_featured_go_to_podcast</key>
     <string>转至播客</string>
     <key>tv_discover_featured_play_latest_episode</key>
     <string>播放最新剧集</string>
     <key>tv_discover_play_episode</key>
     <string>播放剧集</string>
+    <key>tv_discover_row_failed_to_load_title</key>
+    <string>加载失败</string>
+    <key>tv_episode_archived</key>
+    <string>已存档</string>
     <key>tv_episode_info</key>
     <string>剧集信息</string>
+    <key>tv_episode_marked_as_played</key>
+    <string>已标记为已播放</string>
+    <key>tv_episode_marked_as_unplayed</key>
+    <string>已标记为未播放</string>
+    <key>tv_episode_removed_from_up_next</key>
+    <string>已从“接下来播放”中移除</string>
+    <key>tv_episode_show_notes_action</key>
+    <string>ⓘ  剧集详情</string>
+    <key>tv_episode_show_notes_loading</key>
+    <string>正在加载剧集详情…</string>
+    <key>tv_episode_show_notes_title</key>
+    <string>剧集详情</string>
+    <key>tv_episode_unarchived</key>
+    <string>已取消存档</string>
+    <key>tv_episode_will_play_last</key>
+    <string>将最后播放</string>
+    <key>tv_episode_will_play_next</key>
+    <string>将接下来播放</string>
+    <key>tv_folder_empty_message</key>
+    <string>在移动应用程序中编辑您的文件夹，待您操作完成后，相关文件便会保存在此处。</string>
+    <key>tv_history_empty_subtitle</key>
+    <string>您播放的剧集将显示在此处</string>
+    <key>tv_history_empty_title</key>
+    <string>无收听历史记录</string>
     <key>tv_home_browse_categories_section_title</key>
     <string>浏览分类</string>
+    <key>tv_home_failed_to_load_title</key>
+    <string>主页加载失败</string>
     <key>tv_home_featured_section_title</key>
     <string>Pocket Casts 精选</string>
     <key>tv_home_keep_listening_title</key>
@@ -3880,6 +4036,8 @@ Pocket Casts。</string>
     <string>本周热门</string>
     <key>tv_home_video_section_title</key>
     <string>专为电视制作</string>
+    <key>tv_log_in_qr_code_error_title</key>
+    <string>无法获取您的登录代码</string>
     <key>tv_player_playback_effects</key>
     <string>播放效果</string>
     <key>tv_player_playback_speed</key>
@@ -3908,6 +4066,26 @@ Pocket Casts。</string>
     <string>%1$@ 集</string>
     <key>tv_playlist_detail_play_all</key>
     <string>播放所有剧集</string>
+    <key>tv_playlist_download_rules_unsupported</key>
+    <string>此播放列表可按已下载的剧集进行筛选。 电视的存储空间有限，因此不支持下载功能。</string>
+    <key>tv_playlist_empty_subtitle</key>
+    <string>您已完成此列表，但还可以在移动应用程序中编辑规则以获取更多内容。</string>
+    <key>tv_playlist_empty_title</key>
+    <string>无剧集</string>
+    <key>tv_playlist_manual_archived_episodes_placeholder</key>
+    <string>此播放列表的所有 %1$@ 个剧集均已存档。</string>
+    <key>tv_playlist_play_all_clear_up_next_message</key>
+    <string>我们可以将您当前的“接下来播放”保存为播放列表</string>
+    <key>tv_playlist_play_all_clear_up_next_title</key>
+    <string>这将清除您的“接下来播放”</string>
+    <key>tv_playlist_play_all_play_without_saving</key>
+    <string>播放但不保存</string>
+    <key>tv_playlist_play_all_save_and_play</key>
+    <string>保存并播放</string>
+    <key>tv_playlists_download_subtitle</key>
+    <string>待您操作完成后，相关文件便会保存在此处。 扫描以获取应用程序</string>
+    <key>tv_playlists_download_title</key>
+    <string>在您的手机上创建播放列表</string>
     <key>tv_playlists_empty_action_title</key>
     <string>创建播放列表</string>
     <key>tv_playlists_empty_subtitle</key>
@@ -3918,30 +4096,44 @@ Pocket Casts。</string>
     <string>关于</string>
     <key>tv_podcast_detail_all_episodes</key>
     <string>所有剧集</string>
+    <key>tv_podcast_detail_archived_filter</key>
+    <string>已存档的剧集</string>
     <key>tv_podcast_detail_follow_title</key>
     <string>关注此播客</string>
     <key>tv_podcast_detail_following_title</key>
     <string>已关注</string>
+    <key>tv_podcast_detail_hide_archived</key>
+    <string>隐藏已存档</string>
     <key>tv_podcast_detail_more_info_title</key>
     <string>更多信息</string>
     <key>tv_podcast_detail_network</key>
     <string>网络</string>
     <key>tv_podcast_detail_next_episode</key>
     <string>下一集</string>
+    <key>tv_podcast_detail_no_episodes_subtitle</key>
+    <string>此播客中的剧集将显示在此处。</string>
+    <key>tv_podcast_detail_no_episodes_title</key>
+    <string>无剧集</string>
     <key>tv_podcast_detail_schedule</key>
     <string>计划</string>
+    <key>tv_podcast_detail_show_archived</key>
+    <string>显示已存档</string>
     <key>tv_podcast_detail_start_here</key>
     <string>入门首选</string>
     <key>tv_podcast_detail_start_here_subtitle</key>
     <string>入坑之作</string>
     <key>tv_podcast_detail_website</key>
     <string>网站</string>
+    <key>tv_podcast_error_message</key>
+    <string>请检查您的网络连接，然后重试。</string>
+    <key>tv_podcast_error_title</key>
+    <string>无法加载播客详细信息</string>
     <key>tv_podcasts_empty_action_title</key>
     <string>发现播客</string>
     <key>tv_podcasts_empty_subtitle</key>
     <string>已关注的播客将显示在此处，随时可以播放。</string>
-    <key>tv_podcasts_empty_title</key>
-    <string>是时候将这里填满了。</string>
+    <key>tv_podcasts_empty_title_new</key>
+    <string>是时候将这里填满了</string>
     <key>tv_profile_button_accessibility_hint</key>
     <string>打开个人资料和账户选项</string>
     <key>tv_profile_button_accessibility_label</key>
@@ -3952,8 +4144,14 @@ Pocket Casts。</string>
     <string>登录</string>
     <key>tv_profile_menu_log_out</key>
     <string>注销</string>
+    <key>tv_profile_menu_log_out_confirmation_message_version_2</key>
+    <string>此操作将从这台 Apple TV 上删除所有已下载的播客和数据。 您可以重新登录以恢复这些内容。</string>
+    <key>tv_profile_menu_log_out_confirmation_title</key>
+    <string>退出登录？</string>
     <key>tv_profile_menu_starred_episodes</key>
     <string>星标剧集</string>
+    <key>tv_resync_fetching_episodes</key>
+    <string>获取最新剧集</string>
     <key>tv_search_failed</key>
     <string>搜索失败：%1$@</string>
     <key>tv_search_prompt</key>
@@ -3962,24 +4160,48 @@ Pocket Casts。</string>
     <string>正在搜索...</string>
     <key>tv_search_type_something</key>
     <string>输入内容…</string>
+    <key>tv_settings_privacy_policy_qr_message</key>
+    <string>扫描下方的二维码，或在手机上打开该 URL，即可查看隐私政策。</string>
+    <key>tv_settings_subscription_lifetime</key>
+    <string>使用期限</string>
+    <key>tv_settings_subscription_next_renewal</key>
+    <string>下次续订时间</string>
+    <key>tv_settings_subscription_other_platform</key>
+    <string>此订阅是在另一个平台上进行的。 请使用该平台管理订阅。</string>
+    <key>tv_settings_subscription_plan</key>
+    <string>套餐</string>
+    <key>tv_settings_subscription_price</key>
+    <string>价格</string>
+    <key>tv_settings_subscription_price_unavailable</key>
+    <string>不可用</string>
+    <key>tv_settings_subscription_title</key>
+    <string>订阅</string>
+    <key>tv_settings_terms_of_use_qr_message</key>
+    <string>扫描下方的二维码，或在手机上打开该 URL，即可查看使用条款。</string>
     <key>tv_sign_in_enter_code</key>
     <string>或输入以下代码</string>
     <key>tv_sign_in_enter_code_go_url</key>
     <string>前往 [%1$@](%2$@)</string>
     <key>tv_sign_in_enter_code_in_url</key>
     <string>或在 [%1$@](%2$@) 中输入此代码</string>
-    <key>tv_sign_in_qr_code_error_title</key>
-    <string>无法获取您的登录代码</string>
     <key>tv_sign_in_subtitle</key>
     <string>打开您的摄像头，对准此二维码</string>
     <key>tv_sign_in_title</key>
     <string>登录 Pocket Casts</string>
     <key>tv_signing_in_subtitle</key>
     <string>正在加载您的播客。</string>
-    <key>tv_signing_in_title</key>
-    <string>很高兴见到您。</string>
+    <key>tv_signing_in_title_new</key>
+    <string>很高兴见到您</string>
+    <key>tv_sponsored_podcast_section_title</key>
+    <string>Pocket Casts 推荐</string>
+    <key>tv_starred_empty_subtitle</key>
+    <string>为剧集加星标以便随时查看，星标剧集将显示在此处</string>
+    <key>tv_starred_empty_title</key>
+    <string>无星标剧集</string>
     <key>tv_tab_home</key>
     <string>主页</string>
+    <key>tv_tab_now_playing</key>
+    <string>正在播放</string>
     <key>tv_tab_playlists</key>
     <string>播放列表</string>
     <key>tv_tab_podcasts</key>
@@ -4000,11 +4222,15 @@ Pocket Casts。</string>
     <string>用户/通行证</string>
     <key>tv_user_sign_in_option_qr</key>
     <string>二维码</string>
+    <key>tv_user_sign_in_signing_in</key>
+    <string>正在登录…</string>
+    <key>tv_user_sign_in_username_placeholder</key>
+    <string>用户名</string>
     <key>tv_welcome_browse_without_account</key>
     <string>无需账户即可浏览</string>
     <key>tv_welcome_create_free_account</key>
     <string>创建免费账户</string>
-    <key>tv_welcome_sign_in</key>
+    <key>tv_welcome_log_in</key>
     <string>登录</string>
     <key>tv_welcome_subtitle</key>
     <string>您的播客。 大屏呈现。 显而易见。</string>
@@ -4040,6 +4266,20 @@ Pocket Casts。</string>
     <string>推出随机播放功能</string>
     <key>up_next_shuffle_toast_message</key>
     <string>随机播放功能已启用。 剧集将按随机顺序播放。</string>
+    <key>up_next_sort_duration_tooltip_body</key>
+    <string>从最短到最长，或者反过来 — 根据您实际拥有的时间来安排剧集。</string>
+    <key>up_next_sort_duration_tooltip_title</key>
+    <string>按时长排序</string>
+    <key>up_next_sort_longest_to_shortest</key>
+    <string>最长到最短</string>
+    <key>up_next_sort_newest_to_oldest</key>
+    <string>最新到最旧</string>
+    <key>up_next_sort_oldest_to_newest</key>
+    <string>最旧到最新</string>
+    <key>up_next_sort_shortest_to_longest</key>
+    <string>最短到最长</string>
+    <key>up_next_sort_title</key>
+    <string>对“接下来播放”列表进行排序</string>
     <key>upgrade_account</key>
     <string>升级账户</string>
     <key>upgrade_account_info</key>

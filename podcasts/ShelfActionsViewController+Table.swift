@@ -30,7 +30,7 @@ extension ShelfActionsViewController: UITableViewDelegate, UITableViewDataSource
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: ShelfActionsViewController.shelfCellId, for: indexPath) as! ShelfCell
 
-        guard let playingEpisode = PlaybackManager.shared.currentEpisode() else { return cell }
+        guard let playingEpisode = PlaybackManager.shared.currentEpisode else { return cell }
 
         let action = actionAt(indexPath: indexPath, isEditing: tableView.isEditing)
         cell.actionIcon.tintColor = ThemeColor.playerContrast01()
@@ -56,8 +56,8 @@ extension ShelfActionsViewController: UITableViewDelegate, UITableViewDataSource
             // Disable transcript if not available
             let isTranscriptsAndIsDisable = action == .transcript && !isTranscriptEnabled
             if isTranscriptsAndIsDisable {
-                cell.actionIcon.tintColor = ThemeColor.playerContrast06()
-                cell.actionName.textColor = ThemeColor.playerContrast06()
+                cell.actionIcon.tintColor = ThemeColor.playerContrast04()
+                cell.actionName.textColor = ThemeColor.playerContrast04()
             }
         } else {
             cell.actionName.text = action.title(episode: nil)
@@ -71,6 +71,8 @@ extension ShelfActionsViewController: UITableViewDelegate, UITableViewDataSource
 
         cell.actionSubtitle.text = (tableView.isEditing && playingEpisode is UserEpisode) ? action.subtitle() : nil
         cell.actionSubtitle.isHidden = (cell.actionSubtitle.text == nil)
+
+        cell.showsNewBadge = !tableView.isEditing && action == .addBookmark && SmartBookmarksPromo.isActive
 
         return cell
     }
@@ -120,6 +122,8 @@ extension ShelfActionsViewController: UITableViewDelegate, UITableViewDataSource
                 self.playerActionsDelegate?.downloadTapped()
             case .addToPlaylist:
                 self.playerActionsDelegate?.presentManualPlaylistsChooser()
+            case .videoToggle:
+                self.playerActionsDelegate?.videoToggleTapped()
             }
         }
     }

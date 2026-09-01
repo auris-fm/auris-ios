@@ -7,13 +7,14 @@ class BookmarkSink: VoiceBookmarkSink {
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
     func add(title: String?) -> VoiceResponse {
-        guard let episode = playbackManager.currentEpisode() else {
+        guard let episode = playbackManager.currentEpisode else {
             return .spoken(templates.resolve("playback.nothing_playing"))
         }
         playbackManager.bookmarkManager.add(
             to: episode,
             at: playbackManager.currentTime(),
-            title: title ?? L10n.bookmarkDefaultTitle
+            title: title ?? L10n.bookmarkDefaultTitle,
+            source: .voiceCommands
         )
         return .earcon(.success)
     }
@@ -23,7 +24,10 @@ class BookmarkSink: VoiceBookmarkSink {
             return .spoken(templates.resolve("bookmark.not_found"))
         }
         Task {
-            await playbackManager.bookmarkManager.update(title: title, for: bookmark)
+            _ = await playbackManager.bookmarkManager.update(
+                BookmarkUpdateParameters(title: title, passage: nil, referenceTime: nil),
+                for: bookmark
+            )
         }
         return .earcon(.success)
     }
@@ -32,7 +36,9 @@ class BookmarkSink: VoiceBookmarkSink {
         guard let bookmark = playbackManager.bookmarkManager.bookmark(for: ref) else {
             return .spoken(templates.resolve("bookmark.not_found"))
         }
-        playbackManager.playBookmark(bookmark, source: .voiceCommands)
+        Task {
+            try? await playbackManager.playBookmark(bookmark, source: .voiceCommands)
+        }
         return .earcon(.success)
     }
 

@@ -137,7 +137,7 @@ struct SourceInterfaceNavigationView: View {
                 refreshAccountSection
             }.onAppear {
                 model.willActivate()
-            }.onChange(of: activeSource) { newValue in
+            }.onChange(of: activeSource) { _, newValue in
                 guard let newValue, let newSource = Source(rawValue: newValue) else {
                     return
                 }
@@ -154,7 +154,7 @@ struct SourceInterfaceNavigationView: View {
     }
 
     private func nowPlayingEpisodesMatchOnBothSources() -> Bool {
-        let watchCurrentEpisode = PlaybackManager.shared.currentEpisode()
+        let watchCurrentEpisode = PlaybackManager.shared.currentEpisode
         let phoneCurrentEpisode = WatchDataManager.playingEpisode()
         if watchCurrentEpisode?.uuid == phoneCurrentEpisode?.uuid {
             if watchCurrentEpisode?.playedUpTo == phoneCurrentEpisode?.playedUpTo {

@@ -18,6 +18,7 @@ class WatchSyncManager {
         NotificationCenter.default.addObserver(self, selector: #selector(checkSubscriptionStatus), name: WatchConstants.Notifications.loginStatusUpdated, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(subscriptionStatusUpdated), name: Notification.Name(rawValue: ServerNotifications.subscriptionStatusChanged.rawValue), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(handleContextUpdate), name: WatchConstants.Notifications.dataUpdated, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(playbackPaused), name: Constants.Notifications.playbackPaused, object: nil)
     }
 
     deinit {
@@ -104,7 +105,7 @@ class WatchSyncManager {
                 isFirstSyncInProgress: SyncManager.isFirstSyncInProgress()
             ) {
                let subscribedPodcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false)
-               BackgroundSyncManager.shared.performBackgroundRefresh(subscribedPodcasts: subscribedPodcasts)
+               BackgroundSyncManager.shared.performBackgroundRefreshSafely(subscribedPodcasts: subscribedPodcasts)
             } else {
                 loginAndRefreshIfRequired()
             }
@@ -253,11 +254,11 @@ class WatchSyncManager {
             guard let podcastUuid = podcastSetting[WatchConstants.Keys.podcastUuid] as? String, let podcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid) else { continue }
 
             if let overrideGlobalArchive = podcastSetting[WatchConstants.Keys.podcastOverrideGlobalArchive] as? Bool {
-                podcast.isAutoArchiveOverridden = overrideGlobalArchive
+                podcast.overrideGlobalArchive = overrideGlobalArchive
             }
 
             if let autoArchivePlayedAfter = podcastSetting[WatchConstants.Keys.podcastAutoArchivePlayedAfter] as? TimeInterval {
-                podcast.autoArchivePlayedAfterTime = autoArchivePlayedAfter
+                podcast.autoArchivePlayedAfter = autoArchivePlayedAfter
             }
             DataManager.sharedManager.save(podcast: podcast)
         }
@@ -292,6 +293,21 @@ class WatchSyncManager {
         syncThenNotifyPhone(significantChange: false, syncRequired: true)
     }
 
+    /// When the watch pauses, push the new playback position straight to the phone so it updates
+    /// without a manual refresh. This is a cheap WatchConnectivity message — no extra server work:
+    /// `recordPlaybackPosition` already uploaded the position via `ApiServerHandler.saveUpTo`, and the
+    /// phone re-marks the episode dirty when it applies this, so other devices still converge normally.
+    @objc private func playbackPaused() {
+        guard FeatureFlag.watchPlaybackProgressLocalSync.enabled,
+              SyncManager.isUserLoggedIn(),
+              let episode = PlaybackManager.shared.currentEpisode else { return }
+
+        FileLog.shared.addMessage("WatchSync: pushing playback progress \(episode.playedUpTo) to phone for \(episode.uuid)")
+        SessionManager.shared.sendPlaybackProgress(episodeUuid: episode.uuid,
+                                                   playedUpTo: episode.playedUpTo,
+                                                   modifiedAt: episode.playedUpToModified)
+    }
+
     @objc private func syncCompleted() {
         checkForUpNextAutoDownloads()
         sendPendingChangeMessage()
@@ -321,5 +337,22 @@ class WatchSyncManager {
 
     func isPlusUser() -> Bool {
         SyncManager.isUserLoggedIn() && SubscriptionHelper.hasActiveSubscription()
+    }
+}
+
+extension BackgroundSyncManager {
+    /// Runs `performBackgroundRefresh` while guarding against the Objective-C `NSGenericException`
+    /// ("Task created in a session that has been invalidated") that `URLSession.downloadTask(with:)`
+    /// can raise when the system has invalidated a freshly created background session — typically
+    /// because the watch app is being suspended as the refresh starts. That exception originates in
+    /// Foundation and can't be caught with Swift's `do/catch`, so without this guard it crashes the app.
+    func performBackgroundRefreshSafely(subscribedPodcasts: [Podcast]) {
+        do {
+            try SJCommonUtils.catchException {
+                self.performBackgroundRefresh(subscribedPodcasts: subscribedPodcasts)
+            }
+        } catch {
+            FileLog.shared.addMessage("Skipped background refresh, URLSession was invalidated: \(error.localizedDescription)")
+        }
     }
 }

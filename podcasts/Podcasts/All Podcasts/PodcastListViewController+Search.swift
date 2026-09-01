@@ -8,6 +8,10 @@ extension PodcastListViewController: UIScrollViewDelegate, PCSearchBarDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // The tab bar collapses/expands as the grid scrolls, so keep the fade's overshoot in
+        // step with it. Cheap: only mutates the constraint when the collapsed state flips.
+        updateBottomFadeOvershoot()
+
         guard searchControllerView?.superview == nil else { return } // don't send scroll events while the search results are up
 
         searchController.parentScrollViewDidScroll(scrollView)
@@ -29,13 +33,7 @@ extension PodcastListViewController: UIScrollViewDelegate, PCSearchBarDelegate {
     func makeSortOrderOptionsPicker() -> OptionsPicker {
         let options = OptionsPicker(title: L10n.sortBy.localizedUppercase)
 
-        let sortOption: LibrarySort
-        if !FeatureFlag.podcastsSortChanges.enabled, Settings.homeFolderSortOrder() == .recentlyPlayed {
-            Settings.setHomeFolderSortOrder(order: .dateAddedNewestToOldest)
-            sortOption = .dateAddedNewestToOldest
-        } else {
-            sortOption = Settings.homeFolderSortOrder()
-        }
+        let sortOption = Settings.homeFolderSortOrder()
 
         let podcastNameAction = OptionAction(label: LibrarySort.titleAtoZ.description, selected: sortOption == .titleAtoZ) { [weak self] in
             guard let strongSelf = self else { return }
@@ -77,18 +75,11 @@ extension PodcastListViewController: UIScrollViewDelegate, PCSearchBarDelegate {
             Analytics.track(.podcastsListSortOrderChanged, properties: ["sort_by": LibrarySort.recentlyPlayed])
         }
 
-        if FeatureFlag.podcastsSortChanges.enabled {
-            options.addAction(action: subscribedOrder)
-            options.addAction(action: releaseDateAction)
-            options.addAction(action: recentlyPlayedOrder)
-            options.addAction(action: podcastNameAction)
-            options.addAction(action: dragAndDropAction)
-        } else {
-            options.addAction(action: podcastNameAction)
-            options.addAction(action: releaseDateAction)
-            options.addAction(action: subscribedOrder)
-            options.addAction(action: dragAndDropAction)
-        }
+        options.addAction(action: subscribedOrder)
+        options.addAction(action: releaseDateAction)
+        options.addAction(action: recentlyPlayedOrder)
+        options.addAction(action: podcastNameAction)
+        options.addAction(action: dragAndDropAction)
 
         return options
     }

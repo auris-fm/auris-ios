@@ -83,9 +83,8 @@ class DownloadManager: NSObject, FilePathProtocol {
     #endif
 
     #if !os(watchOS)
-         private lazy var episodeArtwork: EpisodeArtwork = {
-             EpisodeArtwork()
-         }()
+    @MainActor
+    private lazy var episodeArtwork = EpisodeArtwork()
     #endif
 
     /// Eagerly initializes all URLSessions to avoid race conditions.
@@ -285,7 +284,11 @@ class DownloadManager: NSObject, FilePathProtocol {
 
         // try and cache the episode embedded artwork
         #if !os(watchOS)
-        episodeArtwork.loadEmbeddedImage(asset: nil, podcastUuid: episode.parentIdentifier(), episodeUuid: episode.uuid)
+        let artworkPodcastUuid = episode.parentIdentifier()
+        let artworkEpisodeUuid = episode.uuid
+        Task { @MainActor in
+            episodeArtwork.loadEmbeddedImage(asset: nil, podcastUuid: artworkPodcastUuid, episodeUuid: artworkEpisodeUuid)
+        }
         #endif
 
         // download requested for something we already have buferred, just move it
@@ -375,6 +378,7 @@ class DownloadManager: NSObject, FilePathProtocol {
         }
 
         guard FeatureFlag.streamAndCachePlayingEpisode.enabled,
+              !EpisodeManager.hasHLSStream(episode), // HLS is streamed directly, never cached
               !episode.videoPodcast(),
               !episode.isUserEpisode,
               let urlAsset = playbackItem.asset as? AVURLAsset,
@@ -508,7 +512,7 @@ class DownloadManager: NSObject, FilePathProtocol {
             episode.lastArchiveInteractionDate = Date()
 
             // if this podcast has an episode limit, flag this episode as being manually excluded from that limit
-            if let parentPodcast = episode.parentPodcast(), parentPodcast.autoArchiveEpisodeLimitCount > 0 {
+            if let parentPodcast = episode.parentPodcast(), parentPodcast.autoArchiveEpisodeLimit > 0 {
                 episode.excludeFromEpisodeLimit = true
             }
 

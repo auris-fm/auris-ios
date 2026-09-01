@@ -5,8 +5,11 @@ struct DiscoverAllView: View {
 
     @State private var model: DiscoverAllViewModel
 
-    init(model: DiscoverAllViewModel) {
+    private let source: String
+
+    init(model: DiscoverAllViewModel, source: String) {
         _model = State(wrappedValue: model)
+        self.source = source
     }
 
     var body: some View {
@@ -18,10 +21,16 @@ struct DiscoverAllView: View {
                 discoverList
             case .empty:
                 ContentUnavailableView {
-                    Text(L10n.tvDiscoverFailedToLoadTitle)
+                    if model.type == .signedIn || model.type == .signedOut {
+                        Text(L10n.tvHomeFailedToLoadTitle)
+                    } else {
+                        Text(L10n.tvDiscoverFailedToLoadTitle)
+                    }
                 } description: {
                     Text(L10n.tvDiscoverFailedToLoadSubtitle)
                 }
+            case .failed:
+                DiscoverRetryView(style: .fullScreen) { await model.retry() }
             }
         }
         .task {
@@ -31,46 +40,10 @@ struct DiscoverAllView: View {
 
     var discoverList: some View {
         ScrollView {
-            LazyVStack(spacing: HomeSectionLayout.sectionSpacing) {
+            VStack(alignment: .leading, spacing: RowSectionLayout.sectionSpacing) {
                 ForEach(Array(model.sections.enumerated()), id: \.offset) { _, item in
-                    DiscoverRowSection(item: item, source: DiscoverAnalytics.searchSource)
+                    DiscoverRowSection(item: item, source: source)
                 }
-            }
-        }
-        .navigationDestination(for: DiscoverPodcast.self) { podcast in
-            if let uuid = podcast.uuid {
-                PodcastDetailView(model: PodcastDetailViewModel(podcastUuid: uuid))
-            }
-        }
-        .navigationDestination(for: DiscoverCategory.self) { discoverCategory in
-            DiscoverPodcastsListView(category: discoverCategory)
-        }
-    }
-}
-
-struct DiscoverRowSection: View {
-
-    var item: DiscoverItem
-    let source: String
-
-    init(item: DiscoverItem, source: String) {
-        self.item = item
-        self.source = source
-    }
-
-    var body: some View {
-        ZStack {
-            switch item.rowType {
-            case .categories:
-                DiscoverCategoriesRow(popularOnly: false, source: source)
-            case .featured:
-                DiscoverFeaturedPodcastsRow(item: item, source: source)
-            case .listVideoEpisode:
-                DiscoverVideoEpisodesRow(item: item, source: source)
-            case .singlePodcast:
-                DiscoverSinglePodcastRow(item: item, source: source)
-            default:
-                DiscoverPodcastRow(item: item, source: source)
             }
         }
     }

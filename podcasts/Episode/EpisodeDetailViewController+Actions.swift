@@ -8,7 +8,7 @@ extension EpisodeDetailViewController {
     @IBAction func addTapped(_ sender: UIButton) {
         let addPicker = OptionsPicker(title: nil)
 
-        let isInUpNext = PlaybackManager.shared.inUpNext(episode: episode) || PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid)
+        let isInUpNext = PlaybackManager.shared.inUpNext(episode: episode) || PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid)
 
         if isInUpNext {
             let removeFromUpNextAction = OptionAction(label: L10n.removeFromUpNext, icon: "episode-removenext") { [weak self] in
@@ -61,10 +61,10 @@ extension EpisodeDetailViewController {
     }
 
     @IBAction func playPauseTapped(_ sender: UIButton) {
-        let isNowPlaying = PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid)
+        let isNowPlaying = PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid)
         if isNowPlaying {
             // dismiss the dialog if the user hit play
-            if !PlaybackManager.shared.playing() {
+            if !PlaybackManager.shared.isPlaying {
                 dismiss(animated: true, completion: nil)
             }
         } else {
@@ -164,7 +164,7 @@ extension EpisodeDetailViewController {
 
     func updateProgress() {
         var progress: CGFloat = 0
-        if PlaybackManager.shared.isNowPlayingEpisode(episodeUuid: episode.uuid) {
+        if PlaybackManager.shared.isCurrentEpisode(uuid: episode.uuid) {
             let currentTime = PlaybackManager.shared.currentTime()
             let duration = PlaybackManager.shared.duration()
             if currentTime > 0, duration > 0 {
@@ -193,9 +193,9 @@ extension EpisodeDetailViewController {
             setMessage(title: L10n.downloadFailed, details: episode.downloadErrorDetails ?? L10n.podcastDetailsDownloadError, imageName: "option-alert")
         } else if episode.waitingForWifi() {
             setMessage(title: L10n.waitForWifi, details: L10n.podcastDetailsDownloadWifiQueue, imageName: "waiting-wifi")
-        } else if !episode.archived, episode.excludeFromEpisodeLimit, podcast.autoArchiveEpisodeLimitCount > 0 {
+        } else if !episode.archived, episode.excludeFromEpisodeLimit, podcast.autoArchiveEpisodeLimit > 0 {
             setMessage(title: L10n.podcastDetailsManualUnarchiveTitle,
-                       details: L10n.podcastDetailsManualUnarchiveMsg(podcast.autoArchiveEpisodeLimitCount.localized()),
+                       details: L10n.podcastDetailsManualUnarchiveMsg(podcast.autoArchiveEpisodeLimit.localized()),
                        imageName: "episode-archive")
         } else {
             messageContainerView.isHidden = true

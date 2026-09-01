@@ -22,11 +22,17 @@ class NowPlayingViewModel: Identifiable {
     var episode: BaseEpisode?
     var podcast: Podcast?
 
+    @MainActor
+    private var artworkManager = EpisodeArtwork()
+
     /// True while the player is still preparing its item (initial load or
     /// mid-stream buffering). Drives the branded loading UI in
     /// `MediaOverlayView` and lets `NowPlayingView` suppress AVKit's system
     /// spinner by toggling `showsPlaybackControls`.
     var isLoading: Bool = true
+    var isFirstLoad: Bool = false
+    var isFailed: Bool = false
+    var isPlaying: Bool = false
 
     @ObservationIgnored private var timeControlStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
@@ -42,16 +48,26 @@ class NowPlayingViewModel: Identifiable {
         timeControlStatusObservation?.invalidate()
         itemStatusObservation?.invalidate()
         currentItemObservation?.invalidate()
+        timeControlStatusObservation = nil
+        itemStatusObservation = nil
+        currentItemObservation = nil
     }
 
+    private var seekAfterLoad = false
+
     func load() {
-        let newEpisode = playbackManager.currentEpisode()
+        let newEpisode = playbackManager.currentEpisode
         guard newEpisode?.uuid != episode?.uuid else {
             return
         }
         episode = newEpisode
+        isFirstLoad = true
         podcast = playbackManager.currentPodcast
         player = playbackManager.avPlayer
+        if !playbackManager.isPlaying, !playbackManager.isReadyToPlay {
+            playbackManager.loadCurrentEpisode()
+            seekAfterLoad = true
+        }
         loadEpisodeArtwork()
     }
 
@@ -65,6 +81,7 @@ class NowPlayingViewModel: Identifiable {
             return
         }
 
+        PlayerStatusObserver.shared.observe(player: player)
         timeControlStatusObservation = player.observe(\.timeControlStatus, options: [.new, .initial]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 self?.updateLoadingState()
@@ -94,11 +111,28 @@ class NowPlayingViewModel: Identifiable {
     private func updateLoadingState() {
         guard let player else {
             isLoading = true
+            isFailed = false
             return
         }
         let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-        let itemNotReady = (player.currentItem?.status ?? .unknown) != .readyToPlay
+        let status = player.currentItem?.status ?? .unknown
+        let itemNotReady = status == .unknown
         isLoading = waiting || itemNotReady
+        isFailed = status == .failed
+        isPlaying = player.timeControlStatus == .playing
+        if !isLoading {
+            isFirstLoad = false
+        }
+        if !isLoading, seekAfterLoad {
+            seekAfterLoad = false
+            // The delay is needed only for videos episodes.
+            // For some reason the AVPlayerViewController does not accept seeks immediately after loading, and resets the position to zero
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now().advanced(by: .seconds(1))) { [weak self] in
+                guard let self else { return }
+                PlayerStatusObserver.shared.skipNextEvents(2)
+                playbackManager.seekToStartingPosition()
+            }
+        }
     }
 
     func loadEpisodeArtwork() {
@@ -114,7 +148,10 @@ class NowPlayingViewModel: Identifiable {
     }
 
     var isVideo: Bool {
-        return episode?.videoPodcast() ?? false
+        guard let episode else {
+            return false
+        }
+        return EpisodeManager.isVideo(episode)
     }
 
     var displayTitle: String {
@@ -176,15 +213,16 @@ class NowPlayingViewModel: Identifiable {
             return nil
         }
 
+        if Settings.loadEmbeddedImages, let podcastEpisode = episode as? Episode,
+           let image = await artworkManager.artworkFromShowNotes(podcastUuid: podcastEpisode.podcastUuid, episodeUuid: podcastEpisode.uuid) {
+            return image
+        }
+
         return await imageManager.imageForEpisode(episode, size: .page)
     }
 
     var podcastUuid: String? {
-        if let episode = episode as? Episode {
-            return episode.podcastUuid
-        } else {
-            return nil
-        }
+        return podcast?.uuid ?? (episode as? Episode)?.podcastUuid
     }
 
     var isPlayed: Bool {
@@ -217,6 +255,29 @@ class NowPlayingViewModel: Identifiable {
     func unarchive() {
         guard let episode = episode as? Episode else { return }
         EpisodeManager.unarchiveEpisode(episode: episode, fireNotification: true)
+    }
+
+    var errorMessage: String {
+        return playbackManager.activeError?.shortUserMessage ?? L10n.playerErrorShortPlaybackError
+    }
+
+    var isTrimSilenceAvailable: Bool {
+        return playbackManager.silenceRemovalAvailable()
+    }
+
+    var isVolumeBoostAvailable: Bool {
+        return playbackManager.volumeBoostAvailable()
+    }
+
+    var maxPlaybackSpeed: Double {
+        var maxSpeed = SharedConstants.PlaybackEffects.maximumPlaybackSpeed
+        guard let episode else {
+            return maxSpeed
+        }
+        if EpisodeManager.hasHLSStream(episode) {
+            maxSpeed = SharedConstants.PlaybackEffects.maximumHlsPlaybackSpeed
+        }
+        return maxSpeed
     }
 
     fileprivate func observeUpNextChanges() {

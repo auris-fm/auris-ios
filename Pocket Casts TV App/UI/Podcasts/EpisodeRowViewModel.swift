@@ -15,16 +15,21 @@ class EpisodeRowViewModel: Identifiable {
     var podcast: Podcast?
     var progress: Double
     var id: String { episode.uuid }
+    var isDiscover: Bool
+    var source: AnalyticsSource
 
     private var cancellables: Set<AnyCancellable> = []
     private let playbackManager: PlaybackManager
 
-    init(episode: BaseEpisode, podcast: Podcast?, playbackManager: PlaybackManager = PlaybackManager.shared) {
+    init(episode: BaseEpisode, podcast: Podcast?, isDiscover: Bool = false, source: AnalyticsSource, playbackManager: PlaybackManager = PlaybackManager.shared) {
         self.episode = episode
         self.podcast = podcast
+        self.source = source
         self.playbackManager = playbackManager
-        self.progress = episode.playedUpTo / episode.duration
+        self.progress = 0
+        self.isDiscover = isDiscover
         setupObservers()
+        self.progress = calculateSafeProgress(from: episode)
     }
 
     var duration: Double {
@@ -77,9 +82,14 @@ class EpisodeRowViewModel: Identifiable {
         }
     }
 
+    @MainActor
     func play() {
         guard !playbackManager.isActivelyPlaying(episodeUuid: episode.uuid) else { return }
+        AnalyticsPlaybackHelper.shared.currentSource = source
         PlaybackActionHelper.play(episode: episode, podcastUuid: podcastUuid)
+        if isDiscover, let podcastUuid {
+            DiscoverAnalytics.discoverPodcastPlayed(podcastUuid: podcastUuid)
+        }
     }
 
     func playNext() {
@@ -95,6 +105,15 @@ class EpisodeRowViewModel: Identifiable {
         ToastManager.shared.show(L10n.tvEpisodeMarkedAsPlayed)
     }
 
+    func markAsUnplayed() {
+        EpisodeManager.markAsUnplayed(episode: episode, fireNotification: true)
+        ToastManager.shared.show(L10n.tvEpisodeMarkedAsUnplayed)
+    }
+
+    var isPlayed: Bool {
+        episode.played()
+    }
+
     var canArchive: Bool {
         episode is Episode
     }
@@ -104,7 +123,7 @@ class EpisodeRowViewModel: Identifiable {
     }
 
     var isVideo: Bool {
-        episode.videoPodcast()
+        return EpisodeManager.isVideo(episode)
     }
 
     func archive() {
@@ -145,15 +164,39 @@ class EpisodeRowViewModel: Identifiable {
             }
         }
         .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: Constants.Notifications.episodePlayStatusChanged)
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] notification in
+            guard let self else {
+                return
+            }
+            if let uuid = notification.object as? String, uuid == episode.uuid {
+                if let newEpisode = DataManager.sharedManager.findBaseEpisode(uuid: uuid) {
+                    episode = newEpisode
+                }
+            }
+        }
+        .store(in: &cancellables)
     }
 
     private func updateProgress() {
-        guard let currentEpisode = playbackManager.currentEpisode(), episode.uuid == currentEpisode.uuid else {
+        guard let currentEpisode = playbackManager.currentEpisode, episode.uuid == currentEpisode.uuid else {
             return
         }
         episode.playedUpTo = currentEpisode.playedUpTo
         episode.duration = currentEpisode.duration
-        progress = currentEpisode.playedUpTo / currentEpisode.duration
+        progress = calculateSafeProgress(from: currentEpisode)
+    }
+
+    private func calculateSafeProgress(from episode: BaseEpisode) -> Double {
+        guard episode.duration > 0 else {
+            return 0
+        }
+        if episode.played() {
+            return 1
+        }
+        return min(1, episode.playedUpTo / episode.duration)
     }
 }
 
@@ -163,6 +206,7 @@ enum EpisodeUpNextActions {
     static func playNext(_ episode: BaseEpisode, playbackManager: PlaybackManager = .shared) {
         if playbackManager.inUpNext(episode: episode) {
             playbackManager.queue.move(episode: episode, to: 0)
+            Analytics.track(.upNextQueueReordered, properties: ["direction": "up", "is_next": true])
         } else {
             playbackManager.addToUpNext(episode: episode, ignoringQueueLimit: true, toTop: true, userInitiated: true)
         }
@@ -173,6 +217,7 @@ enum EpisodeUpNextActions {
         if playbackManager.inUpNext(episode: episode) {
             let queueCount = playbackManager.queue.upNextCount()
             playbackManager.queue.move(episode: episode, to: max(queueCount - 1, 0))
+            Analytics.track(.upNextQueueReordered, properties: ["direction": "down", "is_next": queueCount == 1])
         } else {
             playbackManager.addToUpNext(episode: episode, ignoringQueueLimit: true, toTop: false, userInitiated: true)
         }

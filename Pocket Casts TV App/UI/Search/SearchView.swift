@@ -2,26 +2,35 @@ import SwiftUI
 
 struct SearchView<ViewModel: SearchableViewModel>: View {
 
+    @Environment(MainTabViewModel.self) var tabRouter: MainTabViewModel
+
     @Bindable var model: ViewModel
     @State private var searchText = ""
-    @State private var didTrackShown = false
+
+    @State private var path = StackPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path.navigationPath) {
             VStack {
                 SearchResultsView(model: model)
             }
             .searchable(text: $searchText, prompt: L10n.tvSearchPrompt)
             .searchSuggestions {
                 if model.isInSearchMode {
-                    if searchText.isEmpty {
-                        ForEach(model.searchHistory, id: \.self) { search in
-                            Text(search).searchCompletion(search)
-                        }
-                    } else {
-                        ForEach(model.autoCompleteSuggestions, id: \.self) { suggestion in
+                    ForEach(model.autoCompleteSuggestions, id: \.self) { suggestion in
+                        Button {
+                            Analytics.track(.searchPredictiveTermTapped, properties: ["term": suggestion, "source": "search"])
+                        } label: {
                             Text(suggestion)
                                 .searchCompletion(suggestion)
+                        }
+                    }
+                } else {
+                    ForEach(model.searchHistory, id: \.self) { search in
+                        Button {
+                            Analytics.track(.searchHistoryItemTapped, properties: ["type": "search_term", "source": "search"])
+                        } label: {
+                            Text(search).searchCompletion(search)
                         }
                     }
                 }
@@ -29,7 +38,7 @@ struct SearchView<ViewModel: SearchableViewModel>: View {
             .searchScopes($model.scope) {
                 if model.isInSearchMode {
                     ForEach(SearchScope.allCases, id: \.self) { scope in
-                        Text(scope.localizedName)
+                        Text(" \(scope.localizedName) ")
                             .tag(scope)
                     }
                 }
@@ -44,14 +53,15 @@ struct SearchView<ViewModel: SearchableViewModel>: View {
                 Analytics.track(.searchFilterTapped, properties: ["source": "search", "filter": newValue.analyticsDescription])
             }
             .onAppear {
-                guard !didTrackShown else { return }
-                didTrackShown = true
                 Analytics.track(.searchShown, properties: ["source": "search"])
             }
         }
+        .syncNavigationDetail(path: path.navigationPath, tabRouter: tabRouter)
+        .environment(path)
     }
 }
 
 #Preview {
     SearchView(model: SearchViewModel())
+        .environment(MainTabViewModel())
 }

@@ -87,7 +87,7 @@ enum SharingModal {
         let optionPicker = OptionsPicker(title: L10n.share.uppercased(), themeOverride: .dark, colors: colors)
 
         let timeInterval: Double
-        if PlaybackManager.shared.currentEpisode()?.uuid == episode?.uuid {
+        if PlaybackManager.shared.currentEpisode?.uuid == episode?.uuid {
             timeInterval = PlaybackManager.shared.currentTime()
         } else {
             timeInterval = episode?.playedUpTo ?? 0
@@ -197,11 +197,10 @@ extension SharingModal.Option {
 
     func loadEpisodeArtworkUrl() async -> URL? {
         guard Settings.loadEmbeddedImages, let episode else { return nil }
-        guard let urlString = try? await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(
+        return try? await ShowInfoCoordinator.shared.loadEpisodeArtworkUrl(
             podcastUuid: episode.podcastUuid,
             episodeUuid: episode.uuid
-        ) else { return nil }
-        return URL(string: urlString)
+        )
     }
 
     @MainActor

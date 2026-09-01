@@ -1,5 +1,5 @@
 {
-  "originHash" : "989be0e9999af4832e8b39908e60b78b217e6db3dac048346387876e4656db30",
+  "originHash" : "7772afb3d35af053a0a051f3c283ca6769d72cd737802755c9d567b6d50ad9d9",
   "pins" : [
     {
       "identity" : "abseil-cpp-binary",
@@ -231,7 +231,7 @@
       "location" : "https://github.com/Automattic/pocket-casts-ios-fingerprint",
       "state" : {
         "branch" : "trunk",
-        "revision" : "b696bd9a4a495604532b1b7a484ab140c144eccc"
+        "revision" : "88abde829e54002e8d3a9428c7f0acce8fd72304"
       }
     },
     {

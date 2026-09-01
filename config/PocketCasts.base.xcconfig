@@ -15,3 +15,8 @@ DEVELOPMENT_TEAM = 6LL2R2A55F
 // ONNX Runtime for wake word detection
 FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord
 HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord/onnxruntime_headers
+
+SECRETS_DIR = $(HOME)/.configure/pocketcasts-ios/secrets
+FIREBASE_SECRETS_PATH = $(SECRETS_DIR)/GoogleService-Info.plist
+CREDENTIALS_JSON_PATH = $(SECRETS_DIR)/pocket_casts_credentials.json
+GOOGLE_SIGN_IN_SECRETS_PATH = $(SECRETS_DIR)/GoogleSignIn.txt

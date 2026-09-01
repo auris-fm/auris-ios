@@ -2,12 +2,33 @@ import Foundation
 import AVFoundation
 import Combine
 import PocketCastsDataModel
+import PocketCastsServer
 import PocketCastsUtils
 
+/// The fields changed when saving a bookmark.
+struct BookmarkUpdateParameters {
+    var title: String
+
+    /// The captured transcript passage to store, or `nil` to leave the existing one unchanged.
+    var passage: Passage?
+
+    /// The bookmark's position on the transcript's reference timeline, or `nil` to leave the
+    /// existing one unchanged — re-selecting a passage doesn't move the bookmark itself.
+    var referenceTime: TimeInterval?
+
+    /// A transcript passage together with where it starts, kept so a re-selection can be
+    /// matched back to the same spot.
+    struct Passage {
+        var text: String
+        var location: Int?
+    }
+}
+
 class BookmarkManager {
-    private let dataManager: BookmarkDataManager
+    let dataManager: BookmarkDataManager
     private let generalManager: DataManager
     private let playbackManager: PlaybackManager
+    private let cacheServerHandler: CacheServerHandler
 
     /// Called when a bookmark is created
     let onBookmarkCreated = PassthroughSubject<Event.Created, Never>()
@@ -20,10 +41,12 @@ class BookmarkManager {
 
     init(dataManager: BookmarkDataManager = DataManager.sharedManager.bookmarks,
          generalManager: DataManager = .sharedManager,
-         playbackManager: PlaybackManager = .shared) {
+         playbackManager: PlaybackManager = .shared,
+         cacheServerHandler: CacheServerHandler = .shared) {
         self.dataManager = dataManager
         self.generalManager = generalManager
         self.playbackManager = playbackManager
+        self.cacheServerHandler = cacheServerHandler
     }
 
     /// Plays the "bookmark created" tone
@@ -47,21 +70,43 @@ class BookmarkManager {
     }()
 
     /// Adds a new bookmark for an episode at the given time
+    ///
+    /// - Parameters:
+    ///   - passage: The transcript passage to store with the bookmark, for a bookmark made
+    ///     from one the user picked out. Left nil, the passage is captured afterwards from
+    ///     the transcript around `time`.
+    ///   - referenceTime: `time` on the transcript's reference timeline, when it's already known.
     @discardableResult
-    func add(to episode: BaseEpisode, at time: TimeInterval, title: String = L10n.bookmarkDefaultTitle) -> Bookmark? {
+    func add(to episode: BaseEpisode,
+             at time: TimeInterval,
+             title: String = L10n.bookmarkDefaultTitle,
+             passage: BookmarkUpdateParameters.Passage? = nil,
+             referenceTime: TimeInterval? = nil,
+             source: BookmarkAnalyticsSource = .unknown) -> Bookmark? {
         // If the episode has a podcast attached, also save that
         let podcastUuid: String? = (episode as? Episode)?.podcastUuid
 
         if let existing = dataManager.existingBookmark(forEpisode: episode.uuid, time: time) {
-            onBookmarkCreated.send(.init(uuid: existing.uuid, episode: episode.uuid, podcast: podcastUuid, isDuplicate: true))
+            onBookmarkCreated.send(.init(uuid: existing.uuid, episode: episode.uuid, podcast: podcastUuid, source: source, isDuplicate: true))
             return existing
         }
 
-        return dataManager.add(episodeUuid: episode.uuid, podcastUuid: podcastUuid, title: title, time: time).flatMap {
+        let now = Date()
+
+        return dataManager.add(episodeUuid: episode.uuid,
+                               podcastUuid: podcastUuid,
+                               title: title,
+                               time: time,
+                               dateCreated: now,
+                               passage: passage?.text,
+                               passageLocation: passage?.location,
+                               passageModified: passage != nil ? now : nil,
+                               referenceTime: referenceTime,
+                               referenceTimeModified: referenceTime != nil ? now : nil).flatMap {
             FileLog.shared.addMessage("[Bookmarks] Added bookmark for \(episode.displayableTitle()) at \(time)")
 
             // Inform the subscribers a bookmark was added
-            onBookmarkCreated.send(.init(uuid: $0, episode: episode.uuid, podcast: podcastUuid))
+            onBookmarkCreated.send(.init(uuid: $0, episode: episode.uuid, podcast: podcastUuid, source: source))
 
             return dataManager.bookmark(for: $0)
         }
@@ -96,17 +141,92 @@ class BookmarkManager {
         }
     }
 
-    /// Updates the bookmark with the given title, emits `onBookmarkChanged` on success
+    /// Updates the bookmark with the given parameters, emits `onBookmarkChanged` on success
     @discardableResult
-    func update(title: String, for bookmark: Bookmark) async -> Bool {
-        await dataManager.update(bookmark: bookmark, title: title).when(true) {
-            onBookmarkChanged.send(.init(uuid: bookmark.uuid, change: .title(title)))
+    func update(_ parameters: BookmarkUpdateParameters, for bookmark: Bookmark) async -> Bool {
+        let now = Date()
+
+        return await dataManager.update(bookmark: bookmark,
+                                        title: parameters.title,
+                                        modified: now,
+                                        passage: parameters.passage?.text,
+                                        passageLocation: parameters.passage?.location,
+                                        passageModified: parameters.passage != nil ? now : nil,
+                                        referenceTime: parameters.referenceTime,
+                                        referenceTimeModified: parameters.referenceTime != nil ? now : nil).when(true) {
+            onBookmarkChanged.send(.init(uuid: bookmark.uuid, change: .title(parameters.title)))
         }
     }
 
     /// Gets the `BaseEpisode` for the given bookmark
     func episode(for bookmark: Bookmark) -> BaseEpisode? {
         generalManager.findBaseEpisode(uuid: bookmark.episodeUuid)
+    }
+
+    // MARK: - Title Generation
+
+#if os(iOS)
+    /// Stored as `Any` because stored properties can't be marked potentially unavailable.
+    private lazy var foundationModelEnricher: Any? = {
+        if #available(iOS 26.0, *) {
+            return BookmarkFoundationModelEnricher()
+        }
+        return nil
+    }()
+#endif
+
+    /// Preloads on-device model resources so an upcoming `generateTitle` call responds faster.
+    func prewarmTitleGeneration() {
+#if os(iOS)
+        if #available(iOS 26.0, *) {
+            (foundationModelEnricher as? BookmarkFoundationModelEnricher)?.prewarm()
+        }
+#endif
+    }
+
+    func generateTitle(transcriptSnippet: String, podcastTitle: String? = nil, episodeTitle: String? = nil) async throws -> TitleGeneration {
+#if os(iOS)
+        if #available(iOS 26.0, *), BookmarkFoundationModelEnricher.isAvailable,
+           let enricher = foundationModelEnricher as? BookmarkFoundationModelEnricher {
+            do {
+                let title = try await enricher.generateTitle(transcriptSnippet: transcriptSnippet, podcastTitle: podcastTitle, episodeTitle: episodeTitle)
+                return TitleGeneration(title: title, generator: "on_device")
+            } catch is CancellationError {
+                throw TitleGenerationError(reason: "cancelled", generator: "on_device")
+            } catch {
+                FileLog.shared.addMessage("[Bookmarks] On-device title generation failed, falling back to the server: \(error)")
+            }
+        }
+#endif
+
+        let response: CacheServerHandler.BookmarkEnrichResponse
+        do {
+            response = try await cacheServerHandler.enrichBookmark(transcriptSnippet: transcriptSnippet)
+        } catch is CancellationError {
+            throw TitleGenerationError(reason: "cancelled", generator: "server")
+        } catch {
+            throw TitleGenerationError(reason: "server_error", generator: "server")
+        }
+
+        guard let title = response.title, !title.isEmpty else {
+            FileLog.shared.addMessage("[Bookmarks] Server title generation returned no title\(response.error.map { ": \($0)" } ?? "")")
+            throw TitleGenerationError(reason: "server_empty_title", generator: "server")
+        }
+        return TitleGeneration(title: title, generator: "server")
+    }
+
+    /// A generated title, and which model wrote it.
+    struct TitleGeneration {
+        let title: String
+
+        /// `on_device` or `server`, as reported to analytics
+        let generator: String
+    }
+
+    /// Carries enough about a failure to describe it in analytics.
+    struct TitleGenerationError: Error {
+        let reason: String
+        let generator: String
     }
 
     // MARK: - Named Events
@@ -121,6 +241,10 @@ class BookmarkManager {
 
             /// The uuid of the podcast the bookmark was added to, if available
             let podcast: String?
+
+            /// Where the bookmark was created from, carried so the work that happens after
+            /// creation — the toast, generating a title — can attribute itself to it
+            var source: BookmarkAnalyticsSource = .unknown
 
             /// Whether the bookmark that is being created already existed for the current time
             var isDuplicate: Bool = false

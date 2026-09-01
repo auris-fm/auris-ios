@@ -93,6 +93,14 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitHorizontalSizeClass.self]) { (controller: MainTabBarController, _) in
+            if let scene = controller.view.window?.windowScene {
+                Theme.systemIsDark = (scene.traitCollection.userInterfaceStyle == .dark)
+            }
+            controller.fixTarBarTraitCollectionOnIpadForiOS18()
+            controller.fireSystemThemeMayHaveChanged()
+        }
+
         fixTarBarTraitCollectionOnIpadForiOS18()
 
         pcTabs = [.podcasts, .filter, .discover, .upNext, .profile]
@@ -148,6 +156,7 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 
         observersForEndOfYearStats()
         addBookmarkCreatedToastHandler()
+        addBookmarkEnrichmentHandler()
         if FeatureFlag.displayErrorsOnPlayer.enabled {
             setupErrorBanner()
             setupErrorObservers()
@@ -261,15 +270,6 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
                 }
             }
         }
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        if let scene = view.window?.windowScene {
-            Theme.systemIsDark = (scene.traitCollection.userInterfaceStyle == .dark)
-        }
-        fixTarBarTraitCollectionOnIpadForiOS18()
-        fireSystemThemeMayHaveChanged()
     }
 
     @objc func themeDidChange() {
@@ -739,14 +739,18 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
     }
 
     func showOnboardingFlow(flow: OnboardingFlow.Flow?) {
-        let controller = OnboardingFlow.shared.begin(flow: flow ?? .initialOnboarding, source: .onboarding)
-        guard let presentedViewController else {
-            present(controller, animated: true)
-            return
-        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
 
-        presentedViewController.dismiss(animated: true) {
-            self.present(controller, animated: true)
+            let controller = OnboardingFlow.shared.begin(flow: flow ?? .initialOnboarding, source: .onboarding)
+            guard let presentedViewController = self.presentedViewController else {
+                self.present(controller, animated: true)
+                return
+            }
+
+            presentedViewController.dismiss(animated: true) {
+                self.present(controller, animated: true)
+            }
         }
     }
 
@@ -955,40 +959,72 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 // MARK: - Bookmarks
 
 private extension MainTabBarController {
+    /// The edit sheet, where a bookmark is normally titled, only opens over the full screen player
+    /// with the app in the foreground — see `BookmarksPlayerTabController`. A bookmark made from a
+    /// transcript selection is the exception: the transcript opens the sheet itself, wherever it's
+    /// shown from, so those are filtered out below rather than covered here.
+    static var showsBookmarkEditSheet: Bool {
+        UIApplication.shared.applicationState == .active
+        && !CarPlayHelper.isConnectedToCarPlay
+        && NavigationManager.sharedManager.miniPlayer?.playerOpenState != .closed
+    }
+
+    /// Generates the title and passage for the bookmarks that are never shown the edit sheet:
+    /// the ones made with a headphone button, in CarPlay, or while the app is in the background
+    func addBookmarkEnrichmentHandler() {
+        let bookmarkManager = PlaybackManager.shared.bookmarkManager
+
+        bookmarkManager.onBookmarkCreated
+            .receive(on: RunLoop.main)
+            .filter { !$0.isDuplicate && $0.source != .transcript && !Self.showsBookmarkEditSheet }
+            .compactMap { event in
+                bookmarkManager.bookmark(for: event.uuid).map { ($0, event.source) }
+            }
+            .sink { bookmark, source in
+                Task {
+                    await bookmarkManager.enrich(bookmark, source: source)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
     // Shows a toast notification when a bookmark is created and we're not in the full screen player
     func addBookmarkCreatedToastHandler() {
         let bookmarkManager = PlaybackManager.shared.bookmarkManager
 
         bookmarkManager.onBookmarkCreated
             .receive(on: RunLoop.main)
-            .filter { _ in
-                UIApplication.shared.applicationState == .active
+            .filter { event in
+                event.source != .transcript
+                && UIApplication.shared.applicationState == .active
                 && !CarPlayHelper.isConnectedToCarPlay
                 && NavigationManager.sharedManager.miniPlayer?.playerOpenState == .closed
             }
             .compactMap { event in
-                bookmarkManager.bookmark(for: event.uuid)
+                bookmarkManager.bookmark(for: event.uuid).map { ($0, event.source) }
             }
-            .sink { [weak self] bookmark in
-                self?.showToast(for: bookmark)
+            .sink { [weak self] bookmark, source in
+                self?.showToast(for: bookmark, source: source)
             }
             .store(in: &cancellables)
     }
 
-    func showToast(for bookmark: Bookmark) {
+    func showToast(for bookmark: Bookmark, source: BookmarkAnalyticsSource) {
         let bookmarkManager = PlaybackManager.shared.bookmarkManager
 
         let title = bookmark.title
         let message = title == L10n.bookmarkDefaultTitle ? L10n.bookmarkAdded : L10n.bookmarkAddedNotification(title)
 
         let action = Toast.Action(title: L10n.changeBookmarkTitle) { [weak self] in
-            let controller = BookmarkEditTitleViewController(manager: bookmarkManager, bookmark: bookmark, state: .updating, onDismiss: { [weak self] updatedTitle, _ in
-                guard title != updatedTitle else { return }
+            // Re-read: a generated title may have been saved since the toast was shown
+            let bookmark = bookmarkManager.bookmark(for: bookmark.uuid) ?? bookmark
+            let title = bookmark.title
+
+            let controller = BookmarkEditTitleViewController(manager: bookmarkManager, bookmark: bookmark, state: .updating, style: .themed, source: source, onDismiss: { [weak self] outcome in
+                guard case .saved(let updatedTitle) = outcome, title != updatedTitle else { return }
 
                 self?.handleBookmarkTitleUpdated(updatedTitle: updatedTitle)
             })
-
-            controller.source = .headphones
 
             self?.presentFromRootController(controller)
         }

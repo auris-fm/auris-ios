@@ -19,8 +19,12 @@ struct DiscoverSinglePodcastRow: View {
                 ProgressView()
             case .empty:
                 EmptyView()
+            case .failed:
+                RowSection(title: (model.item?.isSponsored ?? false) ? L10n.tvSponsoredPodcastSectionTitle : model.title, focusSection: model.focusStoreID) {
+                    DiscoverRetryView(style: .row) { await model.retry() }
+                }
             case .ready:
-                HomeSection(title: (model.item?.isSponsored ?? false) ? L10n.tvSponsoredPodcastSectionTitle : model.title, focusSection: model.focusStoreID) {
+                RowSection(title: (model.item?.isSponsored ?? false) ? L10n.tvSponsoredPodcastSectionTitle : model.title, focusSection: model.focusStoreID) {
                     podcastList
                 }
             }
