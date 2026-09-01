@@ -2,22 +2,16 @@ import Foundation
 
 class AsrBackendSelector {
 
-    /// Gates the SenseVoice/Canary locale matrix. Per the agreed safety posture, the
-    /// primary backends stay off until their ASR is validated on-device; while this is
-    /// false (default) every locale routes to the Whisper fallback. Flip it on once the
-    /// on-device ASR pass for SenseVoice + Canary is confirmed.
-    var useSenseVoiceCanary = false
-
-    /// Selects the ASR backend by the device's OS locale, per the spec's matrix:
+    /// Selects the ASR backend by the device's OS locale, per the spec's matrix
+    /// (matches Android's `AsrBackendSelector` — no enable gate; the matrix is always live):
     /// zh/ja/ko/yue + en -> SenseVoice (native text, translated downstream);
     /// de/es/fr -> Canary Flash (native translate to English);
     /// otherwise -> Whisper fallback (translate to English).
-    /// When [useSenseVoiceCanary] is false, always returns WhisperCppBackend.
+    ///
+    /// On-device validation of SenseVoice/Canary happens on this branch before it is merged
+    /// (per @merlinran); there is no separate activation flag because the branch is held
+    /// unmerged until that pass is done.
     func select(locale: Locale) -> AsrBackend {
-        guard useSenseVoiceCanary else {
-            return WhisperCppBackend(modelPath: whisperModelPath)
-        }
-
         let lang = locale.language.languageCode?.identifier ?? "en"
         let modelsRoot = modelsRootURL.path
         switch lang {
