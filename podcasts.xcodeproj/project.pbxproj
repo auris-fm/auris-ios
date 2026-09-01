@@ -24,7 +24,6 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
-		0530825020B7FB81A6414CAA /* SherpaOnnx.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6199AE52266892884F76CB39 /* SherpaOnnx.swift */; };
 		0C364CA72FAB8BAA00B46BDA /* MiniPlayerLongPressPreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C364CA62FAB8BAA00B46BDA /* MiniPlayerLongPressPreviewViewController.swift */; };
 		0C52E9EA2FFD8D9B00C2B9D1 /* TroubleshootingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C52E9E92FFD8D9B00C2B9D1 /* TroubleshootingViewModel.swift */; };
 		0C52E9EC2FFD8DAD00C2B9D1 /* TroubleshootingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C52E9EB2FFD8DAD00C2B9D1 /* TroubleshootingView.swift */; };
@@ -54,7 +53,6 @@
 		10A4F7672C540DC00084D783 /* KidsProfileSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A4F7662C540DC00084D783 /* KidsProfileSheet.swift */; };
 		10A4F7692C540EBE0084D783 /* KidsProfileSheetViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A4F7682C540EBE0084D783 /* KidsProfileSheetViewModel.swift */; };
 		10DFE9312C5A889700957D0A /* CategoryPodcastsTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10DFE9302C5A889700957D0A /* CategoryPodcastsTable.swift */; };
-		277F9452A879D1A7B984F685 /* SenseVoiceBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8E383688E61147A131F7A03 /* SenseVoiceBackend.swift */; };
 		3615C1EFFE4DC817ACE5721C /* sherpa-onnx.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 4ABE52B1D5E3D6F7DAEC41BD /* sherpa-onnx.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		3FC668C02F7CD3440072EBA8 /* XcodeTarget_podcasts in Frameworks */ = {isa = PBXBuildFile; productRef = 3FC668BF2F7CD3440072EBA8 /* XcodeTarget_podcasts */; };
 		3FC668C22F7CD4A60072EBA8 /* XcodeTarget_NotificationExtension in Frameworks */ = {isa = PBXBuildFile; productRef = 3FC668C12F7CD4A60072EBA8 /* XcodeTarget_NotificationExtension */; };
@@ -1079,7 +1077,6 @@
 		C7FF7715291D45B50082A464 /* SingleSignOn.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C7FF7714291D45B50082A464 /* SingleSignOn.xcassets */; };
 		D154061D6430303F58BCE31F /* sherpa-onnx.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4ABE52B1D5E3D6F7DAEC41BD /* sherpa-onnx.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		DC78A07ABF8335E251AEB862 /* wakeword in Resources */ = {isa = PBXBuildFile; fileRef = D99A81818908CF52FD1AB6B3 /* wakeword */; };
-		DEAEB548768047C317976E78 /* CanaryFlashBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = E009424046B3494626A6F3F6 /* CanaryFlashBackend.swift */; };
 		E3F37446291F0DD1005916ED /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F37445291F0DD1005916ED /* Chapters.swift */; };
 		E3F37447291F0DD1005916ED /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F37445291F0DD1005916ED /* Chapters.swift */; };
 		E5A9E099D92DAA8B082904B9 /* BuildFile in Embed Frameworks */ = {isa = PBXBuildFile; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -8145,9 +8142,6 @@
 				8B1B782B2BC7104000DC3373 /* SleepTimerManager.swift in Sources */,
 				FF54BCA92C5A2F3900A342E5 /* TranscriptFormat.swift in Sources */,
 				9E2A72C35884B71C45856DFA /* VoiceBoostN.c in Sources */,
-				0530825020B7FB81A6414CAA /* SherpaOnnx.swift in Sources */,
-				277F9452A879D1A7B984F685 /* SenseVoiceBackend.swift in Sources */,
-				DEAEB548768047C317976E78 /* CanaryFlashBackend.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

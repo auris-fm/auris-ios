@@ -103,19 +103,15 @@ final class CanaryFlashBackend: AsrBackend {
         FileLog.shared.addMessage("[CanaryFlash] released")
     }
 
-    /// Downloads each ModelFile into the model dir if not already present.
+    /// Downloads each ModelFile into the model dir if not already present. Routed through
+    /// `ModelDownloader` so the spec's download contract applies (resumable + atomic rename,
+    /// SHA-256 verification when a hash is pinned). TODO(ASR-debt): pin SHA-256 for the
+    /// Canary Flash assets (currently unset) so integrity is enforced on download.
     private func downloadModels() async throws {
-        try FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
-        for file in requiredModel.files {
-            let dest = (modelDir as NSString).appendingPathComponent(file.filename)
-            if FileManager.default.fileExists(atPath: dest) { continue }
-            FileLog.shared.addMessage("[CanaryFlash] downloading \(file.filename)")
-            let (tmpURL, _) = try await URLSession.shared.download(for: URLRequest(url: file.url))
-            let destURL = URL(fileURLWithPath: dest)
-            if FileManager.default.fileExists(atPath: dest) {
-                try? FileManager.default.removeItem(at: destURL)
-            }
-            try FileManager.default.moveItem(at: tmpURL, to: destURL)
+        // `download(files:to:)` short-circuits on first failure and creates the directory.
+        let result = await ModelDownloader().download(files: requiredModel.files, to: URL(fileURLWithPath: modelDir))
+        if case .failure(let error) = result {
+            throw error
         }
     }
 

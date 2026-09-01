@@ -179,8 +179,7 @@ class ModelManager: ObservableObject {
                 let result = await downloader.download(
                     url: url,
                     sha256: asset.sha256,
-                    to: lfmDir,
-                    expectedBytes: asset.bytes
+                    to: lfmDir
                 )
                 if case .failure(let error) = result {
                     return .failure(error)
@@ -219,13 +218,8 @@ class ModelManager: ObservableObject {
 
     private func downloadModel(spec: ModelSpec) async -> Result<Void, Error> {
         let targetDir = storageDir.appendingPathComponent(spec.targetDir)
-        try? FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-
-        for file in spec.files {
-            let sha = file.sha256 ?? ""
-            let result = await downloader.download(url: file.url, sha256: sha, to: targetDir)
-            if case .failure = result { return result }
-        }
-        return .success(())
+        // download(files:to:) creates the directory and applies the per-file contract
+        // (resumable + SHA-verify-when-pinned + atomic rename) for each asset in the spec.
+        return await downloader.download(files: spec.files, to: targetDir)
     }
 }

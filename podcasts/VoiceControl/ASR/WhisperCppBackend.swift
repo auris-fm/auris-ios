@@ -154,15 +154,16 @@ class WhisperCppBackend: AsrBackend {
     // MARK: - Model download
 
     private func downloadModel(to url: URL) async throws {
-        let modelURL = requiredModel.files[0].url
         let parentDir = url.deletingLastPathComponent()
 
-        // Create directory if needed
-        try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-
-        FileLog.shared.addMessage("[WhisperCpp] Downloading model from \(modelURL)...")
-        let (tmpURL, _) = try await URLSession.shared.download(from: modelURL)
-        try FileManager.default.moveItem(at: tmpURL, to: url)
+        // Routed through `ModelDownloader` so the spec's download contract applies (resumable
+        // + atomic rename, SHA-256 verification when a hash is pinned). TODO(ASR-debt): pin
+        // SHA-256 for the Whisper asset (currently unset) so integrity is enforced on download.
+        let result = await ModelDownloader().download(files: requiredModel.files, to: parentDir)
+        if case .failure(let error) = result {
+            FileLog.shared.addMessage("[WhisperCpp] Model download failed: \(error.localizedDescription)")
+            throw error
+        }
         FileLog.shared.addMessage("[WhisperCpp] Model downloaded to \(url.path)")
     }
 
