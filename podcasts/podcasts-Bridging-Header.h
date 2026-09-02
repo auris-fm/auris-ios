@@ -7,3 +7,4 @@
 #import "MNAVChapterReader.h"
 #include "VoiceBoostN.h"
 #include "VoiceControl/WakeWord/WakeWordDetector.h"
+#import "VoiceControl/IntentRouter/Native/LlmBridge.h"

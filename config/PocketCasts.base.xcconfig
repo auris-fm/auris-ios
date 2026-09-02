@@ -14,7 +14,13 @@ DEVELOPMENT_TEAM = 6LL2R2A55F
 
 // ONNX Runtime for wake word detection
 FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord
-HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord/onnxruntime_headers
+HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord/onnxruntime_headers $(SRCROOT)/podcasts/VoiceControl/IntentRouter/Native $(SRCROOT)/ThirdParty/llama.cpp/include $(SRCROOT)/ThirdParty/llama.cpp/ggml/include
+
+// CPU-only llama.cpp pin 0eadefebd3f8f92a86d634a0e5b8fffc9dc792c0 (Metal off; whisper stays separate).
+LLAMA_SLICE = ios-device
+LLAMA_SLICE[sdk=iphonesimulator*] = ios-sim
+LIBRARY_SEARCH_PATHS = $(inherited) $(SRCROOT)/ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/src $(SRCROOT)/ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/ggml/src $(SRCROOT)/ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/ggml/src/ggml-blas
+OTHER_LDFLAGS = $(inherited) -lllama -lggml -lggml-cpu -lggml-base -lggml-blas -framework Accelerate
 
 SECRETS_DIR = $(HOME)/.configure/pocketcasts-ios/secrets
 FIREBASE_SECRETS_PATH = $(SECRETS_DIR)/GoogleService-Info.plist

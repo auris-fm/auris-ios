@@ -67,7 +67,7 @@ build_staging: ## Builds using the StagingDebug configuration
        -destination 'generic/platform=iOS Simulator' \
        build
 
-test_staging: ## Build and run Unit Tests using the StagingDebug configuration
+test_staging: ensure_llama_ios ## Build and run Unit Tests using the StagingDebug configuration
 	xcodebuild test -project podcasts.xcodeproj \
 	    -scheme "Pocket Casts Staging" \
         -only-testing:$(ONLY_TESTING) \
@@ -107,3 +107,6 @@ external_contributor: ## Generates an empty ApiCredentials.swift so the app buil
 	@cp podcasts/Credentials/ApiCredentials.tpl podcasts/Credentials/LocalApiCredentials.swift
 	@sed -i '' 's/%{.*}//' "podcasts/Credentials/LocalApiCredentials.swift"
 	$(info You're ready to build the app, go ahead! 🎙)
+
+ensure_llama_ios: ## Build CPU-only llama.cpp static libs for simulator/device
+	./scripts/build-llama-ios.sh

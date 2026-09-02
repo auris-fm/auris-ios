@@ -50,3 +50,7 @@ artifacts/*
 .claude/settings.local.json
 .claude/worktrees
 build/
+
+# CPU llama.cpp pin (built by scripts/build-llama-ios.sh; Metal off)
+ThirdParty/llama.cpp
+ThirdParty/llama-cpp-build/
