@@ -1,13 +1,13 @@
 import Foundation
 
-/// Active FunctionGemma tool schema.
+/// Active voice tool schema for the LFM intent router.
 ///
 /// Mirrors `training/function-call/data/tools.json` exactly (12 tools, ordered
 /// parameters, per-parameter descriptions). Parameter order matters: the prompt
 /// contract renders declarations in schema order, so this order is part of the
 /// trained prompt bytes. `required` defaults to `["action"]` per voice-intents.md
 /// ("The `action` field is always required") and `return` is `OBJECT` for every
-/// tool, matching the FunctionGemma declaration format in the recognition spec.
+/// tool, matching the tool schema in the recognition spec.
 enum ToolSchema {
     static func tools() -> [[String: Any]] {
         [

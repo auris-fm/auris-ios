@@ -4,18 +4,38 @@ import CryptoKit
 class ModelDownloader {
     private let session: URLSession
 
-    init() {
-        let config = URLSessionConfiguration.background(withIdentifier: "com.auris.model-download")
-        config.isDiscretionary = false
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+            return
+        }
+        let config = URLSessionConfiguration.ephemeral
         config.allowsCellularAccess = true
-        session = URLSession(configuration: config)
+        self.session = URLSession(configuration: config)
     }
 
-    func download(url: URL, sha256: String, to directory: URL) async -> Result<Void, Error> {
+    func download(
+        url: URL,
+        sha256: String,
+        to directory: URL,
+        expectedBytes: Int64? = nil
+    ) async -> Result<Void, Error> {
         let tmpURL = directory.appendingPathComponent(url.lastPathComponent + ".tmp")
         let finalURL = directory.appendingPathComponent(url.lastPathComponent)
 
-        // Resumable download with Range header if tmp exists
+        // Already present and matching size/hash — skip.
+        if FileManager.default.fileExists(atPath: finalURL.path),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+           let size = attrs[.size] as? NSNumber,
+           expectedBytes == nil || size.int64Value == expectedBytes {
+            if sha256.isEmpty {
+                return .success(())
+            }
+            if let data = try? Data(contentsOf: finalURL), sha256Hex(data) == sha256 {
+                return .success(())
+            }
+        }
+
         var request = URLRequest(url: url)
         if FileManager.default.fileExists(atPath: tmpURL.path) {
             let existingSize = (try? tmpURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -26,18 +46,24 @@ class ModelDownloader {
 
         do {
             let (downloadedURL, _) = try await session.download(for: request)
+            if FileManager.default.fileExists(atPath: tmpURL.path) {
+                try FileManager.default.removeItem(at: tmpURL)
+            }
             try FileManager.default.moveItem(at: downloadedURL, to: tmpURL)
 
-            // SHA-256 verify
             let data = try Data(contentsOf: tmpURL)
-            let digest = SHA256.hash(data: data)
-            let computedHash = digest.compactMap { String(format: "%02x", $0) }.joined()
-            guard computedHash == sha256 else {
+            if let expectedBytes, Int64(data.count) != expectedBytes {
                 try FileManager.default.removeItem(at: tmpURL)
-                throw ModelError.hashMismatch
+                throw ModelError.downloadFailed
+            }
+            if !sha256.isEmpty {
+                let computedHash = sha256Hex(data)
+                guard computedHash == sha256 else {
+                    try FileManager.default.removeItem(at: tmpURL)
+                    throw ModelError.hashMismatch
+                }
             }
 
-            // Atomic rename
             if FileManager.default.fileExists(atPath: finalURL.path) {
                 try FileManager.default.removeItem(at: finalURL)
             }
@@ -46,6 +72,10 @@ class ModelDownloader {
         } catch {
             return .failure(error)
         }
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
     }
 }
 

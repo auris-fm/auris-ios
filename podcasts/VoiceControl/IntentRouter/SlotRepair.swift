@@ -62,7 +62,11 @@ enum SlotRepair {
             "add": ["title"],
         ],
         "dialog_control": [
+            "begin": ["target_tool", "target_action"],
             "provide_slot": ["target_tool", "target_action", "slot", "value"],
+            "confirm": [],
+            "deny": [],
+            "cancel": [],
             "new_command": ["value"],
         ],
         "no_match": [
