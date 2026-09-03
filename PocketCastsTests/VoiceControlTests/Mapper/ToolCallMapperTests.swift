@@ -113,29 +113,29 @@ final class ToolCallMapperTests: XCTestCase {
         XCTAssertEqual(statsIntent, .listeningTime(period: "week"))
     }
 
-    func test_parser_validFunctionCall_returnsToolCall() {
-        let output = "<start_function_call>call:playback{action:pause}<end_function_call>"
-        let toolCall = FunctionGemmaParser.parse(output)
+    func test_parser_validToolCall_returnsToolCall() {
+        let output = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        let toolCall = LfmToolCallParser.parse(output)
         XCTAssertNotNil(toolCall)
         XCTAssertEqual(toolCall?.name, "playback")
         XCTAssertEqual(toolCall?.arguments["action"] as? String, "pause")
     }
 
-    func test_parser_noFunctionCall_returnsNil() {
+    func test_parser_noToolCall_returnsNil() {
         let output = "just some random text"
-        let toolCall = FunctionGemmaParser.parse(output)
+        let toolCall = LfmToolCallParser.parse(output)
         XCTAssertNil(toolCall)
     }
 
     func test_parser_integerArgument_parsedAsInt() {
-        let output = "<start_function_call>call:sleep{action:set,minutes:30}<end_function_call>"
-        let toolCall = FunctionGemmaParser.parse(output)
+        let output = "<|tool_call_start|>[sleep(action='set', minutes=30)]<|tool_call_end|>"
+        let toolCall = LfmToolCallParser.parse(output)
         XCTAssertEqual(toolCall?.arguments["minutes"] as? Int, 30)
     }
 
     func test_parser_floatArgument_parsedAsDouble() {
-        let output = "<start_function_call>call:effects{action:set_speed,speed:1.5}<end_function_call>"
-        let toolCall = FunctionGemmaParser.parse(output)
+        let output = "<|tool_call_start|>[effects(action='set_speed', speed=1.5)]<|tool_call_end|>"
+        let toolCall = LfmToolCallParser.parse(output)
         XCTAssertEqual(toolCall?.arguments["speed"] as? Double, 1.5)
     }
 }

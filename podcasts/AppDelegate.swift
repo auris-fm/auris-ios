@@ -306,12 +306,37 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     private func configureFirebase() {
+        // TEMPORARY DEV-GUARD: Only initialize Firebase when a real GoogleService-Info
+        // bundle is present. Local/dev builds use an empty stub plist (all keys blank);
+        // FirebaseApp.configure() throws on missing options and crashes launch. Skip
+        // Firebase (and remote config) entirely when the plist is a stub. Remove once
+        // real Firebase secrets ship to dev environments.
+        guard Self.bundledGoogleAppIDIsValid else {
+            FileLog.shared.addMessage("[Firebase] GoogleService-Info is a stub; Firebase disabled for this launch.")
+            return
+        }
+
         FirebaseApp.configure()
 
         FirebaseManager.refreshRemoteConfig() { [weak self] _ in
             self?.updateEndOfYearRemoteValue()
             self?.updateRemoteFeatureFlags()
         }
+    }
+
+    private static var bundledGoogleAppIDIsValid: Bool {
+        guard let appID = Self.bundledPlist()["GOOGLE_APP_ID"] as? String else { return false }
+        let trimmed = appID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != "000000000000"
+    }
+
+    private static func bundledPlist() -> [String: Any] {
+        guard let path = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist"),
+              let plist = NSDictionary(contentsOfFile: path) as? [String: Any]
+        else {
+            return [:]
+        }
+        return plist
     }
 
     func updateRemoteFeatureFlags(forceReload: Bool = false) {

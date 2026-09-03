@@ -1457,51 +1457,68 @@ class Settings: NSObject {
 
     #if !os(watchOS)
         class func minTimeBetweenProgressSaves() -> TimeInterval {
-            remoteMsToTime(key: Constants.RemoteParams.periodicSaveTimeMs)
+            remoteMsToTime(key: Constants.RemoteParams.periodicSaveTimeMs,
+                           fallback: Constants.RemoteParams.periodicSaveTimeMsDefault)
         }
 
         class func podcastSearchDebounceTime() -> TimeInterval {
             if FeatureFlag.searchPredictive.enabled {
                 return 0.2
             } else {
-                return remoteMsToTime(key: Constants.RemoteParams.podcastSearchDebounceMs)
+                return remoteMsToTime(key: Constants.RemoteParams.podcastSearchDebounceMs,
+                                      fallback: Constants.RemoteParams.podcastSearchDebounceMsDefault)
             }
         }
 
         class func episodeSearchDebounceTime() -> TimeInterval {
-            remoteMsToTime(key: Constants.RemoteParams.episodeSearchDebounceMs)
+            remoteMsToTime(key: Constants.RemoteParams.episodeSearchDebounceMs,
+                           fallback: Constants.RemoteParams.episodeSearchDebounceMsDefault)
         }
 
         static var endOfYearRequireAccount: Bool {
-            let remote = RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.endOfYearRequireAccount)
-            return remote.boolValue
+            remoteConfigValue(Constants.RemoteParams.endOfYearRequireAccount)?.boolValue
+                ?? Constants.RemoteParams.endOfYearRequireAccountDefault
         }
 
         static var addMissingEpisodes: Bool {
-            let remote = RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.addMissingEpisodes)
-            return remote.boolValue
+            remoteConfigValue(Constants.RemoteParams.addMissingEpisodes)?.boolValue
+                ?? Constants.RemoteParams.addMissingEpisodesDefault
         }
 
         static var plusCloudStorageLimit: Int {
-            RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.customStorageLimitGB).numberValue.intValue
+            remoteConfigValue(Constants.RemoteParams.customStorageLimitGB)?.numberValue.intValue
+                ?? Constants.RemoteParams.customStorageLimitGBDefault
         }
 
         static var patronCloudStorageLimit: Int {
-            RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.patronCloudStorageGB).numberValue.intValue
+            remoteConfigValue(Constants.RemoteParams.patronCloudStorageGB)?.numberValue.intValue
+                ?? Constants.RemoteParams.patronCloudStorageGBDefault
         }
 
         static var errorLogoutHandling: Bool {
-            return RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.errorLogoutHandling).boolValue
+            remoteConfigValue(Constants.RemoteParams.errorLogoutHandling)?.boolValue
+                ?? Constants.RemoteParams.errorLogoutHandlingDefault
         }
 
-    static var slumberPromoCode: String? {
-        RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.slumberStudiosPromoCode).stringValue
-    }
+        static var slumberPromoCode: String? {
+            remoteConfigValue(Constants.RemoteParams.slumberStudiosPromoCode)?.stringValue
+                ?? Constants.RemoteParams.slumberStudiosPromoCodeDefault
+        }
 
-        private class func remoteMsToTime(key: String) -> TimeInterval {
-            let remoteMs = RemoteConfig.remoteConfig().configValue(forKey: key)
+        // TEMPORARY DEV-GUARD: return nil when Firebase isn't configured (stub build) so
+        // the computed properties above fall back to their local defaults instead of
+        // throwing on RemoteConfig.remoteConfig() during lazy init.
+        private static func remoteConfigValue(_ key: String) -> RemoteConfigValue? {
+            guard FirebaseApp.app() != nil else { return nil }
+            return RemoteConfig.remoteConfig().configValue(forKey: key)
+        }
 
-            return TimeInterval(remoteMs.numberValue.doubleValue / 1000)
+        private class func remoteMsToTime(key: String, fallback: Double) -> TimeInterval {
+            guard FirebaseApp.app() != nil,
+                  let number = RemoteConfig.remoteConfig().configValue(forKey: key).numberValue as? NSNumber else {
+                return fallback
+            }
+            return TimeInterval(number.doubleValue / 1000)
         }
     #endif
 }

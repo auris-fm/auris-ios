@@ -49,8 +49,9 @@ class WakeWordDetector: WakeWordDetectorProtocol {
         // windows, max score. A new native error means the segment could not be
         // scored; report it instead of interpreting a zero score as a miss.
         let errorBefore = wakeword_last_error()
+        var completionSample: Int32 = -1
         let maxScore = samples.withUnsafeBufferPointer { ptr in
-            wakeword_detect_segment(handle, ptr.baseAddress, Int32(samples.count), Int32(sampleRate))
+            wakeword_detect_segment(handle, ptr.baseAddress, Int32(samples.count), Int32(sampleRate), &completionSample)
         }
 
         if wakeword_last_error() != errorBefore {
@@ -63,7 +64,9 @@ class WakeWordDetector: WakeWordDetectorProtocol {
             "[VoiceControl/WakeWord] maxScore=\(String(format: "%.4f", maxScore)) threshold=\(String(format: "%.2f", threshold)) samples=\(samples.count)"
         )
 
-        return maxScore >= threshold ? .detected(confidence: maxScore) : .notDetected(confidence: maxScore)
+        return maxScore >= threshold
+            ? .detected(confidence: maxScore, completionSample: max(0, Int(completionSample)))
+            : .notDetected(confidence: maxScore)
     }
 
     func release() {
@@ -111,7 +114,8 @@ private func wakeword_detect_segment(
     _ handle: UnsafeMutableRawPointer,
     _ samples: UnsafePointer<Float>?,
     _ sampleCount: Int32,
-    _ sampleRate: Int32
+    _ sampleRate: Int32,
+    _ outCompletionSample: UnsafeMutablePointer<Int32>?
 ) -> Float
 
 /// Releases all ONNX Runtime resources.

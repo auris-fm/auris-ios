@@ -101,7 +101,6 @@ extension DiscoverItem {
             return .largeListWithPodcast
         default:
             FileLog.shared.addMessage("Unknown Discover Item: \(type ?? "unknown") \(summaryStyle ?? "unknown")")
-            assertionFailure("Unknown Discover Item: \(type ?? "unknown") \(summaryStyle ?? "unknown")")
             return nil
         }
     }

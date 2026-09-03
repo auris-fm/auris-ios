@@ -50,7 +50,7 @@ class VoiceControlAssembly {
             wakeThreshold: threshold
         )
 
-        let intentRouter = FunctionGemmaIntentRouter()
+        let intentRouter = LfmIntentRouter()
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)

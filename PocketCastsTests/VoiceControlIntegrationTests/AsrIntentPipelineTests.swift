@@ -41,8 +41,8 @@ final class AsrIntentPipelineTests: XCTestCase {
     }
 
     func test_parser_integration() {
-        let output = "<start_function_call>call:playback{action:pause}<end_function_call>"
-        let toolCall = FunctionGemmaParser.parse(output)
+        let output = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        let toolCall = LfmToolCallParser.parse(output)
         XCTAssertNotNil(toolCall)
         let intent = ToolCallMapper().map(toolCall!)
         XCTAssertNotNil(intent)

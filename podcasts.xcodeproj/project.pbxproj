@@ -2755,6 +2755,17 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A2LFMEXC2F4FC23E0007119B /* Exceptions for "VoiceControl" folder in "podcasts" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"IntentRouter/Native/ClassifierHead.cpp",
+				"IntentRouter/Native/ClassifierHead.h",
+				"IntentRouter/Native/LfmRuntime.cpp",
+				"IntentRouter/Native/LfmRuntime.h",
+				"IntentRouter/Native/LfmRuntimeC.cpp",
+			);
+			target = BDBD53EB17019B2A0048C8C5 /* podcasts */;
+		};
 		3F26BBBE2F4FC23E0007119B /* Exceptions for "PocketCastsTests" folder in "PocketCastsTests" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -3582,6 +3593,7 @@
 		A1F8767439C1AD83A362A39B /* VoiceControl */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				A2LFMEXC2F4FC23E0007119B /* Exceptions for "VoiceControl" folder in "podcasts" target */,
 			);
 			explicitFileTypes = {
 			};
@@ -6526,7 +6538,6 @@
 			name = podcasts;
 			packageProductDependencies = (
 				3FC668BF2F7CD3440072EBA8 /* XcodeTarget_podcasts */,
-				92C9B64454DD916DEAC81E43 /* LiteRTLM */,
 			);
 			productName = podcasts;
 			productReference = BDBD53EC17019B2A0048C8C5 /* podcasts.app */;
@@ -6741,7 +6752,6 @@
 			);
 			mainGroup = BDBD53E317019B290048C8C5;
 			packageReferences = (
-				8081D1CC3AC8AF1D87F9D163 /* XCRemoteSwiftPackageReference "LiteRT-LM" */,
 			);
 			preferredProjectObjectVersion = 51;
 			productRefGroup = BDBD53ED17019B2A0048C8C5 /* Products */;
@@ -10953,14 +10963,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		8081D1CC3AC8AF1D87F9D163 /* XCRemoteSwiftPackageReference "LiteRT-LM" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/google-ai-edge/LiteRT-LM";
-			requirement = {
-				kind = revision;
-				revision = a0afb5a56acd106b23a2b2385b8469834dc268c0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -10991,11 +10993,6 @@
 		3FC668CB2F7CD5A20072EBA8 /* XcodeTarget_Pocket Casts App Clip */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = "XcodeTarget_Pocket Casts App Clip";
-		};
-		92C9B64454DD916DEAC81E43 /* LiteRTLM */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8081D1CC3AC8AF1D87F9D163 /* XCRemoteSwiftPackageReference "LiteRT-LM" */;
-			productName = LiteRTLM;
 		};
 		FF49232C2F9BCC9500E68E0C /* XcodeTarget_Pocket Casts TV App */ = {
 			isa = XCSwiftPackageProductDependency;

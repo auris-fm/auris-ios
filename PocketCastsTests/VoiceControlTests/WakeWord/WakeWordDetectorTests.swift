@@ -43,6 +43,9 @@ final class WakeWordDetectorTests: XCTestCase {
     }
 
     func test_detected_carriesConfidence() {
-        XCTAssertEqual(WakeWordResult.detected(confidence: 0.9), .detected(confidence: 0.9))
+        XCTAssertEqual(
+            WakeWordResult.detected(confidence: 0.9, completionSample: 4000),
+            .detected(confidence: 0.9, completionSample: 4000)
+        )
     }
 }

@@ -22,7 +22,7 @@ class VoiceControlService: ObservableObject {
     private let interruptionHandler: AudioSessionInterruptionHandler
     private let asrEngine: VoiceAsrEngine
     private let wakeWordDetector: WakeWordDetectorProtocol
-    private let intentRouter: FunctionGemmaIntentRouter
+    private let intentRouter: LfmIntentRouter
     private let executor: VoiceIntentExecutor
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
@@ -55,7 +55,7 @@ class VoiceControlService: ObservableObject {
         interruptionHandler: AudioSessionInterruptionHandler,
         asrEngine: VoiceAsrEngine,
         wakeWordDetector: WakeWordDetectorProtocol,
-        intentRouter: FunctionGemmaIntentRouter,
+        intentRouter: LfmIntentRouter,
         executor: VoiceIntentExecutor,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,

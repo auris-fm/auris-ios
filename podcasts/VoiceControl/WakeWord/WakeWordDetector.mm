@@ -255,7 +255,9 @@ float wakeword_detect(WakeWordPipeline* handle,
 float wakeword_detect_segment(WakeWordPipeline* handle,
                               const float* samples,
                               int sampleCount,
-                              int sampleRate) {
+                              int sampleRate,
+                              int* out_completion_sample) {
+    if (out_completion_sample) *out_completion_sample = -1;
     if (!handle) return 0.0f;
     if (!samples || sampleCount <= 0) return 0.0f;
 
@@ -376,6 +378,7 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
 
         int64_t clsInShape[] = {1, kMaxEmbeddings, kEmbeddingDim};
         float maxScore = 0.0f;
+        int bestWindow = -1;
 
         for (int w = 0; w < numWindows; w++) {
             std::vector<float> clsInput(kMaxEmbeddings * kEmbeddingDim);
@@ -399,7 +402,20 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
             float score = clsOutputs.front().GetTensorMutableData<float>()[0];
             if (score < 0.0f) score = 0.0f;
             if (score > 1.0f) score = 1.0f;
-            if (score > maxScore) maxScore = score;
+            if (score > maxScore) {
+                maxScore = score;
+                bestWindow = w;
+            }
+        }
+
+        if (out_completion_sample && bestWindow >= 0) {
+            int lastEmb = bestWindow + kMaxEmbeddings - 1;
+            int endpointRelOnset =
+                kEmbeddingEndpointOffsetSamples +
+                lastEmb * kEmbeddingStrideSamples -
+                kVirtualContextSamples;
+            if (endpointRelOnset < 0) endpointRelOnset = 0;
+            *out_completion_sample = endpointRelOnset;
         }
 
         NSLog(@"[WakeWord] detect_segment score=%.4f nMel=%lld nEmb=%d nWin=%d/%d samples=%d",

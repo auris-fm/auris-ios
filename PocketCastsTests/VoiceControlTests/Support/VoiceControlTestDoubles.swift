@@ -1,47 +1,6 @@
 import Foundation
 @testable import podcasts
 
-/// Recording double for `InferenceSession` used by router and session-pool tests.
-final class RecordingSession: InferenceSession {
-    let output: String
-    private(set) var prefilled: [String] = []
-    private(set) var generated: [String] = []
-
-    init(output: String = "") {
-        self.output = output
-    }
-
-    func prefill(_ prompt: String) async throws -> Int? {
-        prefilled.append(prompt)
-        return nil
-    }
-
-    func generate(_ prompt: String) throws -> String {
-        generated.append(prompt)
-        return output
-    }
-
-    func close() {}
-}
-
-/// Recording factory for `InferenceSession` creation.
-final class RecordingSessionFactory: FunctionGemmaSessionFactory {
-    let output: String
-    private(set) var sessions: [RecordingSession] = []
-    var makeError: Error?
-
-    init(output: String = "") {
-        self.output = output
-    }
-
-    func makeSession() async throws -> MadeSession {
-        if let makeError { throw makeError }
-        let session = RecordingSession(output: output)
-        sessions.append(session)
-        return MadeSession(session: session, backend: .litert)
-    }
-}
-
 /// Controllable monotonic clock for timing tests.
 final class FakeMonotonicClock: MonotonicClock {
     private var nowValue: CFTimeInterval = 0
@@ -53,4 +12,50 @@ final class FakeMonotonicClock: MonotonicClock {
     func now() -> CFTimeInterval {
         nowValue
     }
+}
+
+/// Fake LFM inference used by `LfmIntentRouterTests`.
+final class FakeLfmInference: LfmInference {
+    var loadResult = true
+    var lastErrorMessage = ""
+    var classifyLabel: String? = "playback:pause"
+    var generateResult: String? = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+    var tokenizeThrows: Error?
+    var classifyCount = 0
+    var resetCount = 0
+
+    var lastError: String { lastErrorMessage }
+
+    func load(modelPath: String, classifierPath: String, labelMapPath: String, nCtx: Int) -> Bool {
+        loadResult
+    }
+
+    func tokenize(_ text: String, addBos: Bool) throws -> [Int] {
+        if let tokenizeThrows { throw tokenizeThrows }
+        if text == "pause" {
+            return [10]
+        }
+        return [1, 10, 2]
+    }
+
+    func classify(promptTokenIds: [Int], poolStart: Int, poolEnd: Int) throws -> String {
+        classifyCount += 1
+        guard let classifyLabel else {
+            throw LfmInferenceError.notReady
+        }
+        return classifyLabel
+    }
+
+    func generate(prefill: String, nPredict: Int) throws -> String {
+        guard let generateResult else {
+            throw LfmInferenceError.notReady
+        }
+        return generateResult
+    }
+
+    func reset() {
+        resetCount += 1
+    }
+
+    func release() {}
 }

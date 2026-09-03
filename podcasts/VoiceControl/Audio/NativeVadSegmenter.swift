@@ -11,8 +11,6 @@ class NativeVadSegmenter {
     private var speechActive = false
     private var silenceStart: Date?
     private var speechFrameCount = 0
-    private var frameCount: UInt = 0
-    private var energyLogged = false
 
     var onUtterance: (([Float]) -> Void)?
 
@@ -30,20 +28,6 @@ class NativeVadSegmenter {
 
     func process(_ samples: [Float]) {
         let energy = rms(samples)
-        frameCount += 1
-
-        // Periodic energy logging every ~100 frames (~1.6s at 1024-sample buffers)
-        if frameCount % 100 == 1 {
-            let msg = "[VoiceControl/VAD] Frame #\(frameCount) RMS=\(String(format: "%.6f", energy)) threshold=\(String(format: "%.4f", threshold)) speechActive=\(speechActive)"
-            FileLog.shared.addMessage(msg)
-        }
-        // Log first frame to confirm VAD is receiving samples
-        if !energyLogged {
-            energyLogged = true
-            let msg = "[VoiceControl/VAD] First frame RMS=\(String(format: "%.6f", energy)) (threshold=\(String(format: "%.4f", threshold)))"
-            FileLog.shared.addMessage(msg)
-            FileLog.shared.forceFlush()
-        }
 
         if energy >= threshold {
             buffer.append(contentsOf: samples)

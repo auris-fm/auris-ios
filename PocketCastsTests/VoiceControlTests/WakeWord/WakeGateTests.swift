@@ -35,11 +35,11 @@ final class WakeGateTests: XCTestCase {
 
     func test_detected_forwardsInBothModes() {
         XCTAssertEqual(
-            WakeGate.decide(result: .detected(confidence: 0.9), listeningMode: .wakeWord, graceActive: false),
+            WakeGate.decide(result: .detected(confidence: 0.9, completionSample: 4000), listeningMode: .wakeWord, graceActive: false),
             .forward(detected: true)
         )
         XCTAssertEqual(
-            WakeGate.decide(result: .detected(confidence: 0.9), listeningMode: .continuous, graceActive: true),
+            WakeGate.decide(result: .detected(confidence: 0.9, completionSample: 4000), listeningMode: .continuous, graceActive: true),
             .forward(detected: true)
         )
     }
