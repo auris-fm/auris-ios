@@ -4,7 +4,7 @@ import Foundation
 /// neither a detection decision nor a confidence value, so callers cannot branch
 /// on a default boolean. `Detected` iff the maximum score >= deployment threshold.
 enum WakeWordResult: Equatable {
-    case detected(confidence: Float)
+    case detected(confidence: Float, completionSample: Int)
     case notDetected(confidence: Float)
     case error(code: String)
 }

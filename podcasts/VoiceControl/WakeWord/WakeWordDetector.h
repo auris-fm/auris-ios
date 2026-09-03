@@ -34,7 +34,8 @@ float wakeword_detect(WakeWordPipeline* handle,
 float wakeword_detect_segment(WakeWordPipeline* handle,
                               const float* samples,
                               int sampleCount,
-                              int sampleRate);
+                              int sampleRate,
+                              int* out_completion_sample);
 
 /// Release all ONNX Runtime resources.
 void wakeword_release(WakeWordPipeline* handle);

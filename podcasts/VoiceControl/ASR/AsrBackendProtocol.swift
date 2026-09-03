@@ -8,9 +8,22 @@ protocol AsrBackend {
     func release()
 }
 
+struct AsrToken {
+    let text: String
+    let startMs: Int
+    let endMs: Int
+}
+
 struct AsrResult {
     let text: String
     let detectedLanguage: String?
+    let tokens: [AsrToken]?
+
+    init(text: String, detectedLanguage: String?, tokens: [AsrToken]? = nil) {
+        self.text = text
+        self.detectedLanguage = detectedLanguage
+        self.tokens = tokens
+    }
 }
 
 struct AsrCapabilities: Equatable {

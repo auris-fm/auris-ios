@@ -46,6 +46,8 @@ class VoiceAsrEngine {
         self.wakeThreshold = wakeThreshold
     }
 
+    private var backendReadyTask: Task<Result<Void, Error>, Never>?
+
     func start() {
         FileLog.shared.addMessage("[VoiceControl/ASR] Engine starting")
         segmenter.onUtterance = { [weak self] utterance in
@@ -55,8 +57,7 @@ class VoiceAsrEngine {
             self?.segmenter.process(samples)
         }
 
-        // Load ASR model asynchronously — capture can start in parallel
-        Task {
+        backendReadyTask = Task {
             let result = await backend.ensureReady()
             switch result {
             case .success:
@@ -64,6 +65,7 @@ class VoiceAsrEngine {
             case .failure(let error):
                 FileLog.shared.addMessage("[VoiceControl/ASR] Whisper model FAILED: \(error)")
             }
+            return result
         }
 
         do {
@@ -92,6 +94,7 @@ class VoiceAsrEngine {
         stageTimer.mark() // wake result
 
         let detectedConfidence: Float?
+        let completionSample: Int
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoiceControl/ASR] Wake detector error \(errorCode) — segment discarded")
@@ -103,13 +106,25 @@ class VoiceAsrEngine {
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)
+                completionSample = self.completionSample(of: result)
                 FileLog.shared.addMessage("[VoiceControl/ASR] Wake word detected (confidence: \(detectedConfidence ?? 0)), sending full segment to ASR")
             } else {
                 detectedConfidence = nil
+                completionSample = 0
             }
         }
 
         guard !utterance.isEmpty else { return }
+        let ready: Result<Void, Error>
+        if let backendReadyTask {
+            ready = await backendReadyTask.value
+        } else {
+            ready = await backend.ensureReady()
+        }
+        if case .failure(let error) = ready {
+            FileLog.shared.addMessage("[VoiceControl/ASR] Skipping transcription; Whisper not ready: \(error)")
+            return
+        }
         stageTimer.mark() // ASR start
         let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000)
         stageTimer.mark() // ASR result
@@ -122,10 +137,15 @@ class VoiceAsrEngine {
         }
 
         let isWakePositive = detectedConfidence != nil
-        let transcript = isWakePositive ? WakePhraseNormalizer.normalize(asrResult.text) : asrResult.text
+        let durationMs = utterance.count * 1000 / 16000
+        let transcript = WakeTranscriptTrimmer.commandText(
+            result: asrResult,
+            wakePositive: isWakePositive,
+            completionSample: completionSample,
+            sampleRateHz: 16000,
+            utteranceDurationMs: durationMs
+        )
         if transcript.isEmpty {
-            // Wake-only: after ASR and supported-prefix removal there is no
-            // command. Play ERROR once and skip intent routing.
             if isWakePositive {
                 FileLog.shared.addMessage("[VoiceControl/ASR] Wake-only utterance — no command remainder")
                 onWakeOnly?()
@@ -136,8 +156,13 @@ class VoiceAsrEngine {
     }
 
     private func confidence(of result: WakeWordResult) -> Float? {
-        if case .detected(let confidence) = result { return confidence }
+        if case .detected(let confidence, _) = result { return confidence }
         return nil
+    }
+
+    private func completionSample(of result: WakeWordResult) -> Int {
+        if case .detected(_, let completionSample) = result { return completionSample }
+        return 0
     }
 
     /// Computes and emits the per-utterance stage timings. `detectedConfidence`

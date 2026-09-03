@@ -75,9 +75,11 @@ class WhisperCppBackend: AsrBackend {
         return await withCheckedContinuation { continuation in
             transcribeQueue.async { [weak self] in
                 guard let self, let ctx = self.whisperContext else {
+                    FileLog.shared.addMessage("[WhisperCpp] transcribe skipped: context not loaded")
                     continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
                     return
                 }
+                let started = CFAbsoluteTimeGetCurrent()
                 let result = samples.withUnsafeBufferPointer { ptr -> AsrResult in
                     var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
                     params.print_progress = false
@@ -87,30 +89,49 @@ class WhisperCppBackend: AsrBackend {
                     params.language = nil
                     params.n_threads = Int32(min(4, ProcessInfo.processInfo.activeProcessorCount))
                     params.suppress_non_speech_tokens = true
-                    params.no_timestamps = true
+                    params.no_timestamps = false
                     params.single_segment = true
                     params.audio_ctx = 0
 
                     let ret = whisper_full(ctx, params, ptr.baseAddress, Int32(samples.count))
                     guard ret == 0 else {
+                        FileLog.shared.addMessage("[WhisperCpp] whisper_full failed ret=\(ret)")
                         return AsrResult(text: "", detectedLanguage: nil)
                     }
 
                     let nSegments = whisper_full_n_segments(ctx)
                     var text = ""
+                    var tokens: [AsrToken] = []
+                    let eot = whisper_token_eot(ctx)
                     for i in 0..<nSegments {
                         if let cStr = whisper_full_get_segment_text(ctx, i) {
                             text += String(cString: cStr)
+                        }
+                        let nTok = whisper_full_n_tokens(ctx, i)
+                        for t in 0..<nTok {
+                            let data = whisper_full_get_token_data(ctx, i, t)
+                            if data.id >= eot { continue }
+                            guard let cTok = whisper_full_get_token_text(ctx, i, t) else { continue }
+                            let tok = String(cString: cTok)
+                            if tok.isEmpty || tok.hasPrefix("[") { continue }
+                            tokens.append(AsrToken(text: tok, startMs: Int(data.t0) * 10, endMs: Int(data.t1) * 10))
                         }
                     }
 
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if isAnnotationOnly(trimmed) {
+                        FileLog.shared.addMessage("[WhisperCpp] annotation-only transcript: \(trimmed)")
                         return AsrResult(text: "", detectedLanguage: nil)
                     }
 
-                    return AsrResult(text: trimmed, detectedLanguage: nil)
+                    return AsrResult(
+                        text: trimmed,
+                        detectedLanguage: nil,
+                        tokens: tokens.isEmpty ? nil : tokens
+                    )
                 }
+                let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - started) * 1000)
+                FileLog.shared.addMessage("[WhisperCpp] \(elapsedMs)ms, \(samples.count) samples, text=\"\(result.text)\"")
                 continuation.resume(returning: result)
             }
         }
