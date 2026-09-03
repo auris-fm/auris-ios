@@ -59,4 +59,16 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.name, "playback")
         XCTAssertEqual(repaired?.arguments["action"] as? String, "seek_relative")
     }
+
+    func test_repair_volumeKeepsVolumeSlot() {
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[volume(action='set_volume', volume=50)]<|tool_call_end|>",
+            utterance: "set volume to 50",
+            tool: "volume",
+            action: "set_volume"
+        )
+        XCTAssertEqual(repaired?.name, "volume")
+        XCTAssertEqual(repaired?.arguments["volume"] as? Int, 50)
+        XCTAssertEqual(repaired?.arguments["action"] as? String, "set_volume")
+    }
 }

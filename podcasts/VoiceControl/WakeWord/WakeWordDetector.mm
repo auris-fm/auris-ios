@@ -40,8 +40,9 @@ struct WakeWordPipeline {
     std::string clsOutputName;
 };
 
-// Thread-safe last-error storage
-static std::string g_lastError;
+// Per-thread last-error storage so concurrent detect_segment calls cannot
+// cross-contaminate Swift's error check, and so each call starts clean.
+static thread_local std::string g_lastError;
 
 const char* wakeword_last_error(void) {
     return g_lastError.empty() ? nullptr : g_lastError.c_str();
@@ -53,6 +54,7 @@ WakeWordPipeline* wakeword_init(const char* melModelPath,
                                  const char* embedModelPath,
                                  const char* clsModelPath,
                                  float threshold) {
+    g_lastError.clear();
     auto* p = new (std::nothrow) WakeWordPipeline();
     if (!p) return nullptr;
 
@@ -104,6 +106,7 @@ WakeWordPipeline* wakeword_init(const char* melModelPath,
 }
 
 void wakeword_release(WakeWordPipeline* handle) {
+    g_lastError.clear();
     delete handle;
 }
 
@@ -111,6 +114,7 @@ float wakeword_detect(WakeWordPipeline* handle,
                        const float* samples,
                        int sampleCount,
                        int sampleRate) {
+    g_lastError.clear();
     if (!handle) return 0.0f;
     if (!samples || sampleCount <= 0) return 0.0f;
 
@@ -257,6 +261,7 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
                               int sampleCount,
                               int sampleRate,
                               int* out_completion_sample) {
+    g_lastError.clear();
     if (out_completion_sample) *out_completion_sample = -1;
     if (!handle) return 0.0f;
     if (!samples || sampleCount <= 0) return 0.0f;

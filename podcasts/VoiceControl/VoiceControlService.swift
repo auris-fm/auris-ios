@@ -37,6 +37,9 @@ class VoiceControlService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
     private let maxConsecutiveNulls = 3
+    /// Serializes classify+generate so concurrent transcripts cannot pile up
+    /// native inference (each call holds the router lock for the full sequence).
+    private var transcriptSerialTask: Task<Void, Never>?
 
     // Command debounce: skip intents of the same type within 2 seconds
     private var lastIntentType: String?
@@ -137,7 +140,12 @@ class VoiceControlService: ObservableObject {
         .store(in: &cancellables)
 
         asrEngine.onTranscript = { [weak self] transcript in
-            Task { await self?.handleTranscript(transcript) }
+            guard let self else { return }
+            let previous = self.transcriptSerialTask
+            self.transcriptSerialTask = Task { [weak self] in
+                await previous?.value
+                await self?.handleTranscript(transcript)
+            }
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in

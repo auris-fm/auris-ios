@@ -39,7 +39,7 @@ lint: ## Lint the codebase
 lint_lenient:
 	$(call run_in_buildtools,$(SWIFTLINT_FROM_BUILDTOOLS) --lenient)
 
-build: ## Builds the Debug configuration using Xcode
+build: ensure_llama_ios ## Builds the Debug configuration using Xcode
 	xcodebuild -project podcasts.xcodeproj \
        -scheme pocketcasts \
        -configuration Debug \
@@ -54,13 +54,13 @@ clean: ## Cleans the build artifacts
 
 ONLY_TESTING ?= PocketCastsTests
 
-test: ## Build and run the PocketCastsTests target with Unit Tests using Xcode
+test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
 	xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
 
-build_staging: ## Builds using the StagingDebug configuration
+build_staging: ensure_llama_ios ## Builds using the StagingDebug configuration
 	xcodebuild -project podcasts.xcodeproj \
        -scheme "Pocket Casts Staging" \
        -configuration StagingDebug \
@@ -73,7 +73,7 @@ test_staging: ensure_llama_ios ## Build and run Unit Tests using the StagingDebu
         -only-testing:$(ONLY_TESTING) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
 
-build_mac: ## Builds for iOS Simulator (use for log stream on Mac)
+build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
 	xcodebuild -project podcasts.xcodeproj \
 	       -scheme pocketcasts \
 	       -configuration Debug \

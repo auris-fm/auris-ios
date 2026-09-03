@@ -39,8 +39,12 @@ enum LfmTokenSpan {
                 }
             }
         }
-        guard start >= 0 else { throw LfmInferenceError.userSpanNotFound }
-        return (start, start + userCount - 1)
+        if start >= 0 {
+            return (start, start + userCount - 1)
+        }
+        // BPE can merge across the user/transcript boundary so isolated
+        // tokenization may not appear contiguously; pool the full prompt.
+        return (0, promptTokenIds.count - 1)
     }
 }
 

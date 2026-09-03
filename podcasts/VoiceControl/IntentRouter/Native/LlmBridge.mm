@@ -22,6 +22,16 @@ NSError *MakeError(NSInteger code, const char *message) {
     NSString *_lastError;
 }
 
+- (void)captureNativeError:(NSInteger)code error:(NSError *_Nullable *_Nullable)error {
+    // Read lfm_last_error once; the C API is thread_local and the pointer is only
+    // valid until the next lfm_* call on this thread.
+    const char *native = lfm_last_error();
+    _lastError = native == nullptr ? @"" : @(native);
+    if (error != nil) {
+        *error = MakeError(code, native);
+    }
+}
+
 - (NSString *)lastError {
     if (_lastError != nil) {
         return _lastError;
@@ -42,10 +52,7 @@ NSError *MakeError(NSInteger code, const char *message) {
         labelMapPath.UTF8String,
         static_cast<int>(nCtx));
     if (!ok) {
-        _lastError = @(lfm_last_error());
-        if (error != nil) {
-            *error = MakeError(1, lfm_last_error());
-        }
+        [self captureNativeError:1 error:error];
         return NO;
     }
     return YES;
@@ -58,10 +65,7 @@ NSError *MakeError(NSInteger code, const char *message) {
     int count = 0;
     int *tokens = lfm_tokenize(text.UTF8String, addBos ? true : false, &count);
     if (tokens == nullptr) {
-        _lastError = @(lfm_last_error());
-        if (error != nil) {
-            *error = MakeError(2, lfm_last_error());
-        }
+        [self captureNativeError:2 error:error];
         return nil;
     }
     NSMutableArray<NSNumber *> *out = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
@@ -88,10 +92,7 @@ NSError *MakeError(NSInteger code, const char *message) {
         static_cast<int>(poolStart),
         static_cast<int>(poolEnd));
     if (label == nullptr) {
-        _lastError = @(lfm_last_error());
-        if (error != nil) {
-            *error = MakeError(3, lfm_last_error());
-        }
+        [self captureNativeError:3 error:error];
         return nil;
     }
     NSString *result = @(label);
@@ -105,10 +106,7 @@ NSError *MakeError(NSInteger code, const char *message) {
     _lastError = @"";
     char *generated = lfm_generate(prefill.UTF8String, static_cast<int>(nPredict));
     if (generated == nullptr) {
-        _lastError = @(lfm_last_error());
-        if (error != nil) {
-            *error = MakeError(4, lfm_last_error());
-        }
+        [self captureNativeError:4 error:error];
         return nil;
     }
     NSString *result = @(generated);

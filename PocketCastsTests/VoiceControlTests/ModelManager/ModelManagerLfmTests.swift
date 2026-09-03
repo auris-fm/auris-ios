@@ -83,27 +83,43 @@ final class ModelManagerLfmTests: XCTestCase {
     }
 
     func test_lfmIsReadyWhenRequiredDownloadedAssetsMatchManifest() {
+        let labelMap = #"{"labels":["playback:pause"]}"#
         seed(
             gguf: "gguf",
-            classifier: "cls",
-            labelMap: "label",
+            classifier: "LFMC",
+            labelMap: labelMap,
             ggufBytes: 4,
-            classifierBytes: 3,
-            labelMapBytes: 5
+            classifierBytes: 4,
+            labelMapBytes: labelMap.utf8.count
         )
         let manager = ModelManager(storageDir: tempDir)
         XCTAssertTrue(manager.isLfmModelReady())
         XCTAssertTrue(manager.lfmDir.path.hasSuffix("/function-call"))
     }
 
-    func test_lfmReleaseVersionIsReadFromInstalledManifest() {
+    func test_lfmIsNotReadyWhenClassifierMagicIsWrong() {
+        let labelMap = #"{"labels":["playback:pause"]}"#
         seed(
             gguf: "gguf",
-            classifier: "cls",
-            labelMap: "label",
+            classifier: "XXXX",
+            labelMap: labelMap,
             ggufBytes: 4,
-            classifierBytes: 3,
-            labelMapBytes: 5
+            classifierBytes: 4,
+            labelMapBytes: labelMap.utf8.count
+        )
+        let manager = ModelManager(storageDir: tempDir)
+        XCTAssertFalse(manager.isLfmModelReady())
+    }
+
+    func test_lfmReleaseVersionIsReadFromInstalledManifest() {
+        let labelMap = #"{"labels":["playback:pause"]}"#
+        seed(
+            gguf: "gguf",
+            classifier: "LFMC",
+            labelMap: labelMap,
+            ggufBytes: 4,
+            classifierBytes: 4,
+            labelMapBytes: labelMap.utf8.count
         )
         let manager = ModelManager(storageDir: tempDir)
         XCTAssertEqual(manager.lfmReleaseVersion(), "2026-06-21-143005")

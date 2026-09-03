@@ -44,18 +44,15 @@ class WakeWordDetector: WakeWordDetectorProtocol {
             return .error(code: "no_samples")
         }
 
-        // The native bridge implements the spec detection-window policy: 2s of
-        // virtual zero context, one mel/embedding pass, stride-1 classifier
-        // windows, max score. A new native error means the segment could not be
-        // scored; report it instead of interpreting a zero score as a miss.
-        let errorBefore = wakeword_last_error()
+        // Native entry points clear the thread-local last-error, so a non-null
+        // pointer after the call means this segment failed to score.
         var completionSample: Int32 = -1
         let maxScore = samples.withUnsafeBufferPointer { ptr in
             wakeword_detect_segment(handle, ptr.baseAddress, Int32(samples.count), Int32(sampleRate), &completionSample)
         }
 
-        if wakeword_last_error() != errorBefore {
-            let errorDetail = wakeword_last_error().map { String(cString: $0) } ?? "unknown"
+        if let errorPtr = wakeword_last_error() {
+            let errorDetail = String(cString: errorPtr)
             FileLog.shared.addMessage("[VoiceControl/WakeWord] Scoring failed: \(errorDetail)")
             return .error(code: "detect_failed")
         }

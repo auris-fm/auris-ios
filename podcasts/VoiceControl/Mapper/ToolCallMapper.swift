@@ -56,7 +56,7 @@ class ToolCallMapper {
         guard let action = args["action"] as? String else { return nil }
         switch action {
         case "set_volume":
-            guard let level = args["level"] as? Int else { return nil }
+            guard let level = args["volume"] as? Int else { return nil }
             return .setVolume(level)
         case "adjust_volume":
             let delta = args["delta"] as? Int ?? 10
