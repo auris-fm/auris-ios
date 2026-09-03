@@ -88,5 +88,14 @@ final class SlotRepairTests: XCTestCase {
             action: "seek_relative"
         )
         XCTAssertEqual(backward?.arguments["delta_seconds"] as? Int, -30)
+
+        // `\bback\b` does not match inside "backwards" — must still fill -30.
+        let backwards = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip backwards",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(backwards?.arguments["delta_seconds"] as? Int, -30)
     }
 }

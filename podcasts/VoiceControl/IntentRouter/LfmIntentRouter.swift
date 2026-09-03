@@ -67,7 +67,10 @@ final class LfmIntentRouter {
 
     private func looksLikeCorruptModelError(_ message: String) -> Bool {
         let lower = message.lowercased()
-        let markers = ["magic", "corrupt", "invalid", "mismatch", "gguf", "parse", "classifier", "label"]
+        // Omit bare "gguf" — OOM/tensor-allocation messages often mention the GGUF
+        // layer and must not trigger wipe+redownload. Header corruption already
+        // surfaces via magic/invalid/mismatch/parse-style markers.
+        let markers = ["magic", "corrupt", "invalid", "mismatch", "parse", "classifier", "label"]
         return markers.contains { lower.contains($0) }
     }
 

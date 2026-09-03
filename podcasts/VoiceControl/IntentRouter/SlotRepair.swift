@@ -548,7 +548,8 @@ enum SlotRepair {
         options: [.caseInsensitive]
     )
     private static let aMinuteRegex = try! NSRegularExpression(pattern: #"\ba\s+minute\b"#)
-    private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|rewind|behind)\b"#)
+    // Include backward/backwards — `\bback\b` does not match inside those words.
+    private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|backward|backwards|rewind|behind)\b"#)
     private static let defaultSkipSeconds = 30
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
