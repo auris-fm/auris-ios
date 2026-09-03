@@ -39,8 +39,14 @@ enum LfmTokenSpan {
                 }
             }
         }
-        guard start >= 0 else { throw LfmInferenceError.userSpanNotFound }
-        return (start, start + userCount - 1)
+        if start >= 0 {
+            return (start, start + userCount - 1)
+        }
+        // BPE can merge across the user/transcript boundary. Prefer a trailing
+        // window sized to the utterance so dialog history does not dominate.
+        let window = max(userCount, 32)
+        let fallbackStart = max(0, promptTokenIds.count - window)
+        return (fallbackStart, promptTokenIds.count - 1)
     }
 }
 

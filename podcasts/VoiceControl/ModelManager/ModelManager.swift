@@ -70,7 +70,6 @@ class ModelManager: ObservableObject {
     private static let lfmManifestFilename = "manifest.json"
     private static let lfmLatestURL = URL(string: "https://download.auris.fm/function-call/latest.json")!
 
-    @Published var downloadProgress: Double = 0
     @Published var isReady = false
 
     private let downloader: ModelDownloader
@@ -129,12 +128,29 @@ class ModelManager: ObservableObject {
         return release.requiredAssets.allSatisfy { asset in
             let file = lfmDir.appendingPathComponent(asset.name)
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
-                  let size = attrs[.size] as? NSNumber
+                  let size = attrs[.size] as? NSNumber,
+                  size.int64Value == asset.bytes
             else {
                 return false
             }
-            return size.int64Value == asset.bytes
+            return lfmAssetLooksIntact(name: asset.name, file: file)
         }
+    }
+
+    /// Deletes on-disk LFM assets so the next `ensureLfmModel` re-downloads.
+    /// Used when size-ok files still fail native load (corrupt-but-same-size).
+    func invalidateLfmModel() {
+        let names = [
+            Self.lfmModelFilename,
+            Self.lfmClassifierFilename,
+            Self.lfmLabelMapFilename,
+            Self.lfmManifestFilename,
+        ]
+        for name in names {
+            let url = lfmDir.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: url)
+        }
+        isReady = false
     }
 
     func lfmReleaseVersion() -> String? {
@@ -176,6 +192,28 @@ class ModelManager: ObservableObject {
         } catch {
             FileLog.shared.addMessage("[VoiceControl/LFM] Download failed: \(error)")
             return .failure(error)
+        }
+    }
+
+    /// Cheap integrity beyond byte-size: classifier magic + parseable label map.
+    /// GGUF relies on native load failure → `invalidateLfmModel` re-download.
+    private func lfmAssetLooksIntact(name: String, file: URL) -> Bool {
+        switch name {
+        case Self.lfmClassifierFilename:
+            guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
+            defer { try? handle.close() }
+            let magic = handle.readData(ofLength: 4)
+            return magic == Data("LFMC".utf8)
+        case Self.lfmLabelMapFilename:
+            guard let data = try? Data(contentsOf: file),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["labels"] as? [Any] != nil
+            else {
+                return false
+            }
+            return true
+        default:
+            return true
         }
     }
 

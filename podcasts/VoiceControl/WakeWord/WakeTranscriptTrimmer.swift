@@ -11,6 +11,8 @@ enum WakeTranscriptTrimmer {
         utteranceDurationMs: Int
     ) -> String {
         if !wakePositive { return result.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        // Backends without per-token timestamps keep the raw transcript so
+        // wake+command still reaches the classifier; time-band trim needs tokens.
         guard let tokens = result.tokens else {
             return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         }

@@ -56,7 +56,7 @@ class ToolCallMapper {
         guard let action = args["action"] as? String else { return nil }
         switch action {
         case "set_volume":
-            guard let level = args["level"] as? Int else { return nil }
+            guard let level = args["volume"] as? Int else { return nil }
             return .setVolume(level)
         case "adjust_volume":
             let delta = args["delta"] as? Int ?? 10
@@ -92,8 +92,9 @@ class ToolCallMapper {
             guard let index = args["index"] as? Int else { return nil }
             return .byIndex(index)
         case "by_title":
-            guard let title = args["title"] as? String else { return nil }
-            return .byTitle(title)
+            // Schema/parser use `query`; accept legacy `title` as a fallback.
+            guard let query = (args["query"] as? String) ?? (args["title"] as? String) else { return nil }
+            return .byTitle(query)
         case "open_link":
             let index = args["index"] as? Int
             let query = args["query"] as? String

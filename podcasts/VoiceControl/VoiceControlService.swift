@@ -37,6 +37,13 @@ class VoiceControlService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
     private let maxConsecutiveNulls = 3
+    /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
+    /// race the task-chain pointer. Bumped on `stop()` so earlier chained tasks
+    /// (which cancellation does not reach through `await previous?.value`) bail
+    /// before `handleTranscript`.
+    private let transcriptLock = NSLock()
+    private var transcriptSerialTask: Task<Void, Never>?
+    private var transcriptEpoch: UInt64 = 0
 
     // Command debounce: skip intents of the same type within 2 seconds
     private var lastIntentType: String?
@@ -137,7 +144,27 @@ class VoiceControlService: ObservableObject {
         .store(in: &cancellables)
 
         asrEngine.onTranscript = { [weak self] transcript in
-            Task { await self?.handleTranscript(transcript) }
+            guard let self else { return }
+            self.transcriptLock.lock()
+            // Drop late ASR callbacks that arrive after (or during) stop().
+            guard self.isListening else {
+                self.transcriptLock.unlock()
+                return
+            }
+            let epoch = self.transcriptEpoch
+            let previous = self.transcriptSerialTask
+            let task = Task { [weak self] in
+                await previous?.value
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.transcriptLock.lock()
+                let stillCurrent = self.isListening && self.transcriptEpoch == epoch
+                self.transcriptLock.unlock()
+                guard stillCurrent else { return }
+                await self.handleTranscript(transcript)
+            }
+            self.transcriptSerialTask = task
+            self.transcriptLock.unlock()
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in
@@ -196,9 +223,17 @@ class VoiceControlService: ObservableObject {
         asrEngine.stop()
         isListening = false
         audioRenderer.release()
+        transcriptLock.lock()
+        transcriptEpoch &+= 1
+        transcriptSerialTask?.cancel()
+        transcriptSerialTask = nil
+        transcriptLock.unlock()
     }
 
     func handleTranscript(_ transcript: String) async {
+        // Belt-and-suspenders with the epoch check in the serial chain: an
+        // in-flight classify must not execute after capture has stopped.
+        guard isListening else { return }
         let dialogContext = dialogManager.pendingDialog
         let result = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext)
         recordPipelineLatency(transcript: transcript)
@@ -218,6 +253,7 @@ class VoiceControlService: ObservableObject {
             }
 
             FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
+            guard isListening else { return }
             let response = await executor.execute(intent)
             gracePeriodSignal.onCommandRecognized()
             lastIntentType = intentType

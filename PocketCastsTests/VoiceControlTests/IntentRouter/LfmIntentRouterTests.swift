@@ -89,7 +89,18 @@ final class LfmIntentRouterTests: XCTestCase {
         let inference = FakeLfmInference()
         inference.loadResult = false
         inference.lastErrorMessage = "invalid classifier.bin magic"
-        let router = createRouter(inference: inference)
+        // Fail-fast session for both manifest fetch and asset downloads.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 0.1
+        config.timeoutIntervalForResource = 0.1
+        let session = URLSession(configuration: config)
+        let manager = ModelManager(
+            storageDir: tempDir,
+            downloader: ModelDownloader(session: session),
+            session: session
+        )
+        seedLfmAssets(manager)
+        let router = LfmIntentRouter(modelManager: manager, inference: inference)
 
         let result = await router.ensureReady()
         XCTAssertTrue(result.isFailure)
@@ -144,7 +155,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let modelDir = manager.lfmDir
         try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
         try? "gguf".write(to: manager.lfmModelFile, atomically: true, encoding: .utf8)
-        try? "cls".write(to: manager.lfmClassifierFile, atomically: true, encoding: .utf8)
+        try? "LFMC".write(to: manager.lfmClassifierFile, atomically: true, encoding: .utf8)
         let labelMap = #"{"labels":["playback:pause"]}"#
         try? labelMap.write(to: manager.lfmLabelMapFile, atomically: true, encoding: .utf8)
         let manifest = """
@@ -157,8 +168,8 @@ final class LfmIntentRouterTests: XCTestCase {
               "url": "https://example.test/model.gguf"
             },
             "classifier.bin": {
-              "bytes": 3,
-              "sha256": "\(sha256("cls"))",
+              "bytes": 4,
+              "sha256": "\(sha256("LFMC"))",
               "url": "https://example.test/classifier.bin"
             },
             "label_map.json": {

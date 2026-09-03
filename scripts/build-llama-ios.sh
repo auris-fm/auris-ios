@@ -144,11 +144,9 @@ build_lfm_runtime() {
     fi
   done
   if ((${#commons[@]} > 0)); then
-    local list="${work_dir}/privatize.txt"
-    printf '%s\n' "${commons[@]}" > "${list}"
-    # Common symbols are not always editable via nmedit; hide by re-merging with
-    # an alias object compiled -fno-common after a forced rebuild when needed.
-    echo "[llama-ios] warning: still-global commons: ${commons[*]} (rebuild llama with -fno-common if link collides)"
+    echo "[llama-ios] error: still-global commons after -fno-common merge: ${commons[*]}" >&2
+    echo "[llama-ios] these collide with whisper.spm's ggml; rebuild failed closed." >&2
+    exit 1
   fi
 
   xcrun libtool -static -o "${out_lib}" "${merged}"
@@ -159,9 +157,10 @@ build_lfm_runtime() {
   nm -gU "${out_lib}" | sed 's/^/[llama-ios]   /'
 }
 
+# arm64 only (min iOS 17); no x86_64 simulator slice.
 build_slice ios-sim "$(xcrun --sdk iphonesimulator --show-sdk-path)" arm64
 build_slice ios-device "$(xcrun --sdk iphoneos --show-sdk-path)" arm64
 
-echo "[llama-ios] done"
+echo "[llama-ios] done (arm64 simulator + device)"
 echo "[llama-ios] headers: ${LINK_PATH}/include"
 echo "[llama-ios] lfm:     ${BUILD_ROOT}/{ios-sim,ios-device}/lfm/liblfm_runtime.a"

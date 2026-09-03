@@ -23,7 +23,7 @@ final class LfmIntentRouter {
     private let modelManager: ModelManager
     private let inference: LfmInference
     private let mapper = ToolCallMapper()
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
     private var loadedRelease: String?
     private var promptHistory: [DialogPromptTurn] = []
 
@@ -45,30 +45,58 @@ final class LfmIntentRouter {
         if case .failure(let error) = download {
             return .failure(error)
         }
-        return lock.withLock {
-            guard modelManager.isLfmModelReady() else {
-                return .failure(RouterError.modelNotReady)
+        let firstAttempt = lock.withLock { loadLocked() }
+        if case .success = firstAttempt {
+            return firstAttempt
+        }
+        // Only wipe+redownload for parse/corruption-style load failures. Resource
+        // exhaustion (OOM) must not delete good assets and force a CDN round-trip.
+        if case .failure(let error) = firstAttempt,
+           let routerError = error as? RouterError,
+           case .loadFailed(let message) = routerError,
+           looksLikeCorruptModelError(message) {
+            modelManager.invalidateLfmModel()
+            let redownload = await modelManager.ensureLfmModel()
+            if case .failure(let redownloadError) = redownload {
+                return .failure(redownloadError)
             }
-            guard let release = modelManager.lfmReleaseVersion() else {
-                return .failure(RouterError.modelNotReady)
-            }
-            if loadedRelease == release {
-                return .success(())
-            }
-            inference.release()
-            let loaded = inference.load(
-                modelPath: modelManager.lfmModelFile.path,
-                classifierPath: modelManager.lfmClassifierFile.path,
-                labelMapPath: modelManager.lfmLabelMapFile.path,
-                nCtx: 2048
-            )
-            guard loaded else {
-                let message = inference.lastError.isEmpty ? "LFM native load failed" : inference.lastError
-                return .failure(RouterError.loadFailed(message))
-            }
-            loadedRelease = release
+            return lock.withLock { loadLocked() }
+        }
+        return firstAttempt
+    }
+
+    private func looksLikeCorruptModelError(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        // Omit bare "gguf" — OOM/tensor-allocation messages often mention the GGUF
+        // layer and must not trigger wipe+redownload. Header corruption already
+        // surfaces via magic/invalid/mismatch/parse-style markers.
+        let markers = ["magic", "corrupt", "invalid", "mismatch", "parse", "classifier", "label"]
+        return markers.contains { lower.contains($0) }
+    }
+
+    private func loadLocked() -> Result<Void, Error> {
+        guard modelManager.isLfmModelReady() else {
+            return .failure(RouterError.modelNotReady)
+        }
+        guard let release = modelManager.lfmReleaseVersion() else {
+            return .failure(RouterError.modelNotReady)
+        }
+        if loadedRelease == release {
             return .success(())
         }
+        inference.release()
+        let loaded = inference.load(
+            modelPath: modelManager.lfmModelFile.path,
+            classifierPath: modelManager.lfmClassifierFile.path,
+            labelMapPath: modelManager.lfmLabelMapFile.path,
+            nCtx: 2048
+        )
+        guard loaded else {
+            let message = inference.lastError.isEmpty ? "LFM native load failed" : inference.lastError
+            return .failure(RouterError.loadFailed(message))
+        }
+        loadedRelease = release
+        return .success(())
     }
 
     func classify(transcript: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
@@ -86,15 +114,20 @@ final class LfmIntentRouter {
         if pendingDialog == nil {
             promptHistory = []
         }
-        lock.unlock()
 
         guard release != nil else {
+            lock.unlock()
             FileLog.shared.addMessage("[VoiceControl/Intent] LFM router not ready for: \"\(trimmed)\"")
             reportMetrics(start: start, outcome: "router_not_ready")
             return .none
         }
 
-        defer { inference.reset() }
+        // Hold the lock across tokenize→classify→generate so KV-cache continuity
+        // cannot be poisoned by a concurrent ensureReady/classify caller.
+        defer {
+            inference.reset()
+            lock.unlock()
+        }
 
         do {
             let prompt = LfmPrompt.render(transcript: trimmed, history: history)
@@ -237,7 +270,7 @@ final class LfmIntentRouter {
     }
 }
 
-private extension NSLock {
+private extension NSRecursiveLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }

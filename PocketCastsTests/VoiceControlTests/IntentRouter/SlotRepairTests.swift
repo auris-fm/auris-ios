@@ -59,4 +59,43 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.name, "playback")
         XCTAssertEqual(repaired?.arguments["action"] as? String, "seek_relative")
     }
+
+    func test_repair_volumeKeepsVolumeSlot() {
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[volume(action='set_volume', volume=50)]<|tool_call_end|>",
+            utterance: "set volume to 50",
+            tool: "volume",
+            action: "set_volume"
+        )
+        XCTAssertEqual(repaired?.name, "volume")
+        XCTAssertEqual(repaired?.arguments["volume"] as? Int, 50)
+        XCTAssertEqual(repaired?.arguments["action"] as? String, "set_volume")
+    }
+
+    func test_repair_seekRelativeWithoutDelta_fillsSignedDefaultFromWording() {
+        let forward = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip ahead",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(forward?.arguments["delta_seconds"] as? Int, 30)
+
+        let backward = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(backward?.arguments["delta_seconds"] as? Int, -30)
+
+        // `\bback\b` does not match inside "backwards" — must still fill -30.
+        let backwards = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip backwards",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(backwards?.arguments["delta_seconds"] as? Int, -30)
+    }
 }

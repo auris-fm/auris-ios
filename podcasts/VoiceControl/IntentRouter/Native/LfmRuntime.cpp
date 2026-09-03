@@ -229,6 +229,10 @@ std::string LfmRuntime::generate(const std::string& prefill, int nPredict) {
     }
 
     const auto prefillTokens = toLlamaTokens(tokenize(prefill, false));
+    // Empty prefill leaves no decoded logits; sampling at -1 would be undefined.
+    if (prefillTokens.empty()) {
+        throw LfmError("empty prefill");
+    }
     if (!decodeTokens(*this, prefillTokens, false)) {
         throw LfmError("prefill decode failed");
     }
@@ -312,6 +316,9 @@ std::string LfmRuntimeHolder::classifyEmbedding(const std::vector<float>& embedd
         throw LfmError("classifier not loaded");
     }
     const int labelIndex = classifierOnly_->argmax(embedding);
+    if (labelIndex < 0 || labelIndex >= static_cast<int>(classifierOnlyLabels_.size())) {
+        throw LfmError("label index out of range");
+    }
     return classifierOnlyLabels_[static_cast<std::size_t>(labelIndex)];
 }
 

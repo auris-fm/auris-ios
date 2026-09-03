@@ -21,6 +21,7 @@ enum SlotRepair {
         params = repairStringParams(tool: tool, action: action, params: params, utterance: utterance)
         params = sanitizeParams(tool: tool, action: action, params: params)
         params = dropNoneLike(params)
+        params = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance)
 
         var arguments = params
         if !action.isEmpty {
@@ -47,8 +48,11 @@ enum SlotRepair {
     private static let stringKeys: Set<String> = [
         "episode", "podcast", "title", "ref", "query", "request", "value",
         "timeframe", "tier", "sort_order", "mode", "slot", "target_tool", "target_action",
+        "period",
     ]
 
+    // Must cover every (tool, action) ToolCallMapper / ToolSchema can dispatch so
+    // sanitizeParams does not strip legitimate generated slots.
     private static let actionParams: [String: [String: Set<String>]] = [
         "playback": [
             "pause": [],
@@ -57,9 +61,86 @@ enum SlotRepair {
             "seek_to": ["position_seconds"],
             "next_episode": [],
         ],
+        "effects": [
+            "set_speed": ["speed"],
+            "adjust_speed": ["delta"],
+            "set_trim_mode": ["mode"],
+            "set_volume_boost": ["enabled"],
+            "query": [],
+        ],
+        "volume": [
+            "set_volume": ["volume"],
+            "adjust_volume": ["delta"],
+            "query": [],
+        ],
+        "sleep": [
+            "set": ["minutes"],
+            "end_of_episode": [],
+            "end_of_chapter": [],
+            "add_time": ["minutes"],
+            "cancel": [],
+            "query": [],
+        ],
+        "chapter": [
+            "next": [],
+            "previous": [],
+            "by_index": ["index"],
+            "by_title": ["query"],
+            "open_link": ["index", "query"],
+            "query_list": [],
+            "query_current": [],
+            "query_count": [],
+            "query_next": [],
+        ],
         "bookmark": [
-            "rename": ["ref", "title"],
             "add": ["title"],
+            "rename": ["ref", "title"],
+            "play": ["ref"],
+            "delete": ["ref"],
+            "delete_all": [],
+            "query_list": [],
+            "query_count": [],
+            "query_nearby": [],
+        ],
+        "queue": [
+            "add_top": ["episode"],
+            "add_bottom": ["episode"],
+            "remove": ["episode"],
+            "move_to_top": ["episode"],
+            "move_to_bottom": ["episode"],
+            "clear": [],
+            "remove_by_podcast": ["podcast"],
+            "sort": ["sort_order"],
+            "query_contents": [],
+            "query_next": [],
+            "query_length": [],
+            "query_is_queued": ["episode"],
+        ],
+        "playback_query": [
+            "whats_playing": [],
+            "position": [],
+            "time_remaining": [],
+            "current_podcast": [],
+            "episode_duration": [],
+            "publish_date": [],
+            "episode_description": [],
+            "download_status": [],
+            "episode_title": [],
+        ],
+        "stats_query": [
+            "listening_time": ["period"],
+            "top_podcasts": ["period"],
+            "episodes_finished": ["period"],
+            "listening_streak": [],
+            "subscription_count": [],
+            "unplayed_total": [],
+            "download_stats": [],
+            "queue_total": [],
+            "new_episodes": ["timeframe"],
+            "time_since_last_listen": [],
+        ],
+        "cloud_route": [
+            "route": ["request", "tier"],
         ],
         "dialog_control": [
             "begin": ["target_tool", "target_action"],
@@ -123,6 +204,22 @@ enum SlotRepair {
         if allowed.contains("delta_seconds"), let delta = extractDeltaSeconds(utterance) {
             out["delta_seconds"] = delta
         }
+        return out
+    }
+
+    /// When the model omits delta_seconds, fill a signed ±30s default from wording.
+    private static func fillSeekRelativeDefault(
+        tool: String,
+        action: String,
+        params: [String: Any],
+        utterance: String
+    ) -> [String: Any] {
+        guard tool == "playback", action == "seek_relative" else { return params }
+        if params["delta_seconds"] != nil { return params }
+        var out = params
+        let lower = utterance.lowercased()
+        let isBack = backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil
+        out["delta_seconds"] = isBack ? -defaultSkipSeconds : defaultSkipSeconds
         return out
     }
 
@@ -451,7 +548,9 @@ enum SlotRepair {
         options: [.caseInsensitive]
     )
     private static let aMinuteRegex = try! NSRegularExpression(pattern: #"\ba\s+minute\b"#)
-    private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|rewind|behind)\b"#)
+    // Include backward/backwards — `\bback\b` does not match inside those words.
+    private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|backward|backwards|rewind|behind)\b"#)
+    private static let defaultSkipSeconds = 30
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
         options: [.caseInsensitive]

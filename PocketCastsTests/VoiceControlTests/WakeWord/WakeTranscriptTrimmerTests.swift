@@ -67,4 +67,25 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             ""
         )
     }
+
+    func test_zeroGapCommandWordStartingInsidePad_isDropped() {
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(
+                    text: "Auris skip forward",
+                    detectedLanguage: "en",
+                    tokens: [
+                        AsrToken(text: "Auris", startMs: 0, endMs: 250),
+                        AsrToken(text: " skip", startMs: 300, endMs: 500),
+                        AsrToken(text: " forward", startMs: 500, endMs: 900),
+                    ]
+                ),
+                wakePositive: true,
+                completionSample: 4000,
+                sampleRateHz: 16000,
+                utteranceDurationMs: 2000
+            ),
+            "forward"
+        )
+    }
 }
