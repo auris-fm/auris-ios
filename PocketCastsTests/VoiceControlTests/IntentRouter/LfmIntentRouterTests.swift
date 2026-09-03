@@ -89,11 +89,16 @@ final class LfmIntentRouterTests: XCTestCase {
         let inference = FakeLfmInference()
         inference.loadResult = false
         inference.lastErrorMessage = "invalid classifier.bin magic"
-        // Fail-fast session so invalidate→redownload does not hit the real CDN.
+        // Fail-fast session for both manifest fetch and asset downloads.
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 0.1
         config.timeoutIntervalForResource = 0.1
-        let manager = ModelManager(storageDir: tempDir, session: URLSession(configuration: config))
+        let session = URLSession(configuration: config)
+        let manager = ModelManager(
+            storageDir: tempDir,
+            downloader: ModelDownloader(session: session),
+            session: session
+        )
         seedLfmAssets(manager)
         let router = LfmIntentRouter(modelManager: manager, inference: inference)
 

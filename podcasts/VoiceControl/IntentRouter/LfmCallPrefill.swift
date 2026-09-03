@@ -42,9 +42,11 @@ enum LfmTokenSpan {
         if start >= 0 {
             return (start, start + userCount - 1)
         }
-        // BPE can merge across the user/transcript boundary so isolated
-        // tokenization may not appear contiguously; pool the full prompt.
-        return (0, promptTokenIds.count - 1)
+        // BPE can merge across the user/transcript boundary. Prefer a trailing
+        // window sized to the utterance so dialog history does not dominate.
+        let window = max(userCount, 32)
+        let fallbackStart = max(0, promptTokenIds.count - window)
+        return (fallbackStart, promptTokenIds.count - 1)
     }
 }
 

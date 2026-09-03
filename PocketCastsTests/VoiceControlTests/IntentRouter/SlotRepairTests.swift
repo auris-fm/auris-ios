@@ -71,4 +71,22 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.arguments["volume"] as? Int, 50)
         XCTAssertEqual(repaired?.arguments["action"] as? String, "set_volume")
     }
+
+    func test_repair_seekRelativeWithoutDelta_fillsSignedDefaultFromWording() {
+        let forward = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip ahead",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(forward?.arguments["delta_seconds"] as? Int, 30)
+
+        let backward = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(backward?.arguments["delta_seconds"] as? Int, -30)
+    }
 }

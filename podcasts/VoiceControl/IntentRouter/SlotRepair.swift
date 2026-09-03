@@ -21,6 +21,7 @@ enum SlotRepair {
         params = repairStringParams(tool: tool, action: action, params: params, utterance: utterance)
         params = sanitizeParams(tool: tool, action: action, params: params)
         params = dropNoneLike(params)
+        params = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance)
 
         var arguments = params
         if !action.isEmpty {
@@ -203,6 +204,22 @@ enum SlotRepair {
         if allowed.contains("delta_seconds"), let delta = extractDeltaSeconds(utterance) {
             out["delta_seconds"] = delta
         }
+        return out
+    }
+
+    /// When the model omits delta_seconds, fill a signed ±30s default from wording.
+    private static func fillSeekRelativeDefault(
+        tool: String,
+        action: String,
+        params: [String: Any],
+        utterance: String
+    ) -> [String: Any] {
+        guard tool == "playback", action == "seek_relative" else { return params }
+        if params["delta_seconds"] != nil { return params }
+        var out = params
+        let lower = utterance.lowercased()
+        let isBack = backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil
+        out["delta_seconds"] = isBack ? -defaultSkipSeconds : defaultSkipSeconds
         return out
     }
 
@@ -532,6 +549,7 @@ enum SlotRepair {
     )
     private static let aMinuteRegex = try! NSRegularExpression(pattern: #"\ba\s+minute\b"#)
     private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|rewind|behind)\b"#)
+    private static let defaultSkipSeconds = 30
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
         options: [.caseInsensitive]

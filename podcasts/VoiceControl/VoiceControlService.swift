@@ -37,8 +37,9 @@ class VoiceControlService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
     private let maxConsecutiveNulls = 3
-    /// Serializes classify+generate so concurrent transcripts cannot pile up
-    /// native inference (each call holds the router lock for the full sequence).
+    /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
+    /// race the task-chain pointer, and cancelled on `stop()`.
+    private let transcriptLock = NSLock()
     private var transcriptSerialTask: Task<Void, Never>?
 
     // Command debounce: skip intents of the same type within 2 seconds
@@ -141,11 +142,15 @@ class VoiceControlService: ObservableObject {
 
         asrEngine.onTranscript = { [weak self] transcript in
             guard let self else { return }
+            self.transcriptLock.lock()
             let previous = self.transcriptSerialTask
-            self.transcriptSerialTask = Task { [weak self] in
+            let task = Task { [weak self] in
                 await previous?.value
+                guard !Task.isCancelled else { return }
                 await self?.handleTranscript(transcript)
             }
+            self.transcriptSerialTask = task
+            self.transcriptLock.unlock()
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in
@@ -204,6 +209,10 @@ class VoiceControlService: ObservableObject {
         asrEngine.stop()
         isListening = false
         audioRenderer.release()
+        transcriptLock.lock()
+        transcriptSerialTask?.cancel()
+        transcriptSerialTask = nil
+        transcriptLock.unlock()
     }
 
     func handleTranscript(_ transcript: String) async {

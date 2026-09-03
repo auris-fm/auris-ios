@@ -49,21 +49,26 @@ final class LfmIntentRouter {
         if case .success = firstAttempt {
             return firstAttempt
         }
-        // Size-ok but corrupt assets (especially GGUF) fail native load. Wipe so the
-        // next ensureReady/ensureLfmModel re-downloads, and retry once here.
+        // Only wipe+redownload for parse/corruption-style load failures. Resource
+        // exhaustion (OOM) must not delete good assets and force a CDN round-trip.
         if case .failure(let error) = firstAttempt,
            let routerError = error as? RouterError,
-           case .loadFailed(let message) = routerError {
+           case .loadFailed(let message) = routerError,
+           looksLikeCorruptModelError(message) {
             modelManager.invalidateLfmModel()
             let redownload = await modelManager.ensureLfmModel()
-            if case .failure = redownload {
-                // Prefer the original native load error when re-download also fails
-                // (offline / test without network).
-                return .failure(RouterError.loadFailed(message))
+            if case .failure(let redownloadError) = redownload {
+                return .failure(redownloadError)
             }
             return lock.withLock { loadLocked() }
         }
         return firstAttempt
+    }
+
+    private func looksLikeCorruptModelError(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        let markers = ["magic", "corrupt", "invalid", "mismatch", "gguf", "parse", "classifier", "label"]
+        return markers.contains { lower.contains($0) }
     }
 
     private func loadLocked() -> Result<Void, Error> {

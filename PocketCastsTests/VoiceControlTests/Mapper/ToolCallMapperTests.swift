@@ -85,6 +85,13 @@ final class ToolCallMapperTests: XCTestCase {
         XCTAssertEqual(chapterIntent, .byIndex(3))
     }
 
+    func test_map_chapterByTitle_readsQueryKey() {
+        let call = ToolCall(name: "chapter", arguments: ["action": "by_title", "query": "interview"])
+        let intent = ToolCallMapper().map(call)
+        guard let chapterIntent = intent as? ChapterIntent else { XCTFail(); return }
+        XCTAssertEqual(chapterIntent, .byTitle("interview"))
+    }
+
     func test_map_bookmarkAdd_returnsAddIntent() {
         let call = ToolCall(name: "bookmark", arguments: ["action": "add", "title": "Great quote"])
         let intent = ToolCallMapper().map(call)

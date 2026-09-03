@@ -38,7 +38,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         )
     }
 
-    func test_missingTokens_areWakeOnly() {
+    func test_missingTokens_leaveUnstripped() {
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
                 result: AsrResult(text: "Auris skip forward", detectedLanguage: "en"),
@@ -47,7 +47,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 sampleRateHz: 16000,
                 utteranceDurationMs: 2000
             ),
-            ""
+            "Auris skip forward"
         )
     }
 
