@@ -46,14 +46,11 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
-        // Start SenseVoice/Canary download+init immediately so first wake isn't
-        // blocked behind a multi-minute silent await after listening starts.
-        // (Single shared task — start() reuses it via preloadBackend()'s nil guard.)
-        asrEngine.preloadBackend()
+        // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
+        // not here — assembly must not download/init models before the service
+        // arms (cellular + memory cost when voice is off).
 
         let intentRouter = LfmIntentRouter()
-        // LFM readiness stays solely in VoiceControlService.startIfAllowed() —
-        // a second ensureReady() here raced ModelDownloader on the same .tmp files.
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)

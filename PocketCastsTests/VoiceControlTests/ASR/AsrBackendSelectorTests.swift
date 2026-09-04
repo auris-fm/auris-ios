@@ -11,7 +11,7 @@ final class AsrBackendSelectorTests: XCTestCase {
 
     func test_select_cjkLocales_returnSenseVoice() {
         let selector = AsrBackendSelector()
-        for localeCode in ["zh", "ja", "ko", "zh_CN"] {
+        for localeCode in ["zh", "ja", "ko", "yue", "zh_CN"] {
             let backend = selector.select(locale: Locale(identifier: localeCode))
             XCTAssertTrue(backend is SenseVoiceBackend, "Locale \(localeCode) should route to SenseVoice")
         }

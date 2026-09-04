@@ -50,6 +50,12 @@ class VoiceControlService: ObservableObject {
     private var lastExecutionTime: Date?
     private let debounceInterval: TimeInterval = 2.0
 
+    /// `startIfAllowed` is invoked on every `applicationDidBecomeActive`. Arm
+    /// gate subscriptions + LFM/ASR preload exactly once so we don't stack
+    /// Combine sinks or race overlapping `ensureLfmModel` downloads.
+    private var didArmLifecycle = false
+    private var intentRouterReadyTask: Task<Void, Never>?
+
     // Last blocking reason set logged for a blocked-never-acquired posture.
     // nil when the last lifecycle event was not a non-acquiring posture, so
     // `mic_acquisition_skipped` is emitted once on entry and again only when
@@ -107,6 +113,15 @@ class VoiceControlService: ObservableObject {
     }
 
     func startIfAllowed() {
+        // Invoked on every `applicationDidBecomeActive` — arm once only.
+        guard !didArmLifecycle else { return }
+        didArmLifecycle = true
+
+        // Kick SenseVoice/Canary download+init here (not at assembly) so we only
+        // pay cellular/memory once voice control is actually being armed.
+        // start() reuses the same task via preloadBackend()'s nil guard.
+        asrEngine.preloadBackend()
+
         // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
         // 30s timer starts or expires (CombineLatest4 alone never saw that change).
         Publishers.CombineLatest(
@@ -190,18 +205,19 @@ class VoiceControlService: ObservableObject {
             self?.latestRouterMetrics = metrics
         }
 
-        // Preload the intent router model so it's ready when the first transcript arrives
-        Task {
-            let result = await intentRouter.ensureReady()
+        // Single-flight LFM load — one task even if startIfAllowed were re-entered.
+        intentRouterReadyTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.intentRouter.ensureReady()
             switch result {
             case .success:
                 FileLog.shared.addMessage("[VoicePipeline] Intent router ready")
-                conditionMonitor.updateModelsReady(.allowed)
+                self.conditionMonitor.updateModelsReady(.allowed)
             case .failure(let error):
                 FileLog.shared.addMessage("[VoicePipeline] Intent router FAILED: \(error)")
                 // A router that cannot engage must block capture rather than
                 // silently returning no intent for every transcript.
-                conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
+                self.conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
             }
         }
     }

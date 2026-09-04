@@ -111,6 +111,8 @@ final class SenseVoiceBackend: AsrBackend {
         FileLog.shared.addMessage("[SenseVoice] released")
     }
 
+    deinit { release() }
+
     /// Downloads each ModelFile into the model dir if not already present. Routed through
     /// `ModelDownloader` so the spec's download contract applies (resumable + atomic rename,
     /// SHA-256 verification when a hash is pinned). TODO(ASR-debt): pin SHA-256 for the
