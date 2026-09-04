@@ -96,7 +96,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let session = URLSession(configuration: config)
         let manager = ModelManager(
             storageDir: tempDir,
-            downloader: ModelDownloader(session: session),
+            downloader: ModelDownloader(),
             session: session
         )
         seedLfmAssets(manager)

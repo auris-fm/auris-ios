@@ -107,14 +107,20 @@ class VoiceControlService: ObservableObject {
     }
 
     func startIfAllowed() {
-        Publishers.CombineLatest4(
-            conditionMonitor.$setup,
-            conditionMonitor.$conflicts,
-            conditionMonitor.$context,
-            routeMonitor.$micExposure
+        // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
+        // 30s timer starts or expires (CombineLatest4 alone never saw that change).
+        Publishers.CombineLatest(
+            Publishers.CombineLatest4(
+                conditionMonitor.$setup,
+                conditionMonitor.$conflicts,
+                conditionMonitor.$context,
+                routeMonitor.$micExposure
+            ),
+            gracePeriodSignal.$isActive
         )
-        .map { [self] setup, conflicts, context, exposure in
-            VoiceControlGate(
+        .map { [self] tuple, _ in
+            let (setup, conflicts, context, exposure) = tuple
+            return VoiceControlGate(
                 setup: setup,
                 conflicts: conflicts,
                 context: context,
