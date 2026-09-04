@@ -48,13 +48,12 @@ class VoiceControlAssembly {
         )
         // Start SenseVoice/Canary download+init immediately so first wake isn't
         // blocked behind a multi-minute silent await after listening starts.
+        // (Single shared task — start() reuses it via preloadBackend()'s nil guard.)
         asrEngine.preloadBackend()
 
         let intentRouter = LfmIntentRouter()
-        // Same for LFM — don't wait until startIfAllowed to begin download/load.
-        Task {
-            _ = await intentRouter.ensureReady()
-        }
+        // LFM readiness stays solely in VoiceControlService.startIfAllowed() —
+        // a second ensureReady() here raced ModelDownloader on the same .tmp files.
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)
