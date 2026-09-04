@@ -45,6 +45,17 @@ final class AsrBackendSelectorTests: XCTestCase {
         }
     }
 
+    func test_select_noLanguageCode_returnsNil() {
+        let selector = AsrBackendSelector()
+        // Empty identifier has no language code — must not default to "en"/SenseVoice.
+        let locale = Locale(identifier: "")
+        XCTAssertNil(locale.language.languageCode, "precondition: empty Locale has no language code")
+        XCTAssertNil(
+            selector.select(locale: locale),
+            "Locale without language code must be unsupported, not SenseVoice"
+        )
+    }
+
     func test_assembly_resolveAsrBackend_unsupportedFailsClosed() {
         let assembly = VoiceControlAssembly()
         XCTAssertNil(assembly.resolveAsrBackend(locale: Locale(identifier: "ar")))

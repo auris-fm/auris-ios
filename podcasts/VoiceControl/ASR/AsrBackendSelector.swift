@@ -12,7 +12,9 @@ class AsrBackendSelector {
     /// (per @merlinran); there is no separate activation flag because the branch is held
     /// unmerged until that pass is done.
     func select(locale: Locale) -> AsrBackend? {
-        let lang = locale.language.languageCode?.identifier ?? "en"
+        guard let lang = locale.language.languageCode?.identifier else {
+            return nil
+        }
         let modelsRoot = modelsRootURL.path
         switch lang {
         case "zh", "ja", "ko", "yue":

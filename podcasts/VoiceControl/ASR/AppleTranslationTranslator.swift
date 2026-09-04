@@ -10,9 +10,8 @@ import Translation
 /// `TranslationSession` API from iOS 18, and the `TranslationSession(installedSource:target:)`
 /// convenience initializer from **iOS 26**. On iOS 17.4–25.x a `TranslationSession` is normally
 /// provided by a SwiftUI `translationTask` host, which is not yet wired here. Until a session
-/// can be obtained, the translator fails closed: `ensureReady` reports a failure and `translate`
-/// returns the input unchanged, so the pipeline degrades to the native transcript (per the
-/// spec's missing-model fallback contract) rather than crashing.
+/// can be obtained, `ensureReady` fails and `translate` returns the input unchanged; the ASR
+/// engine treats fail/blank/no-op notes as ERROR + drop (no native CJK forwarded to LFM).
 final class AppleTranslationTranslator: TranslationStage {
 
     func ensureReady(sourceLanguage: String) async -> Result<Void, Error> {
