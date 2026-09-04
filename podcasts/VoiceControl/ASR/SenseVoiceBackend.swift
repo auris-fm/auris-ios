@@ -9,6 +9,7 @@ final class SenseVoiceBackend: AsrBackend {
 
     private let modelDir: String
     private var recognizer: SherpaOnnxOfflineRecognizer?
+    private let transcribeQueue = DispatchQueue(label: "com.auris.sensevoice", qos: .userInitiated)
 
     let capabilities = AsrCapabilities(
         languages: ["zh", "en", "ja", "ko", "yue"],
@@ -75,21 +76,30 @@ final class SenseVoiceBackend: AsrBackend {
     }
 
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
-        let rec = recognizer
-        guard let rec else { return AsrResult(text: "", detectedLanguage: nil) }
-        do {
-            let result = rec.decode(samples: samples, sampleRate: sampleRateHz)
-            let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                return AsrResult(text: "", detectedLanguage: nil)
+        // Serialize sherpa-onnx offline decode — not thread-safe across concurrent Tasks.
+        return await withCheckedContinuation { continuation in
+            transcribeQueue.async { [weak self] in
+                guard let self, let rec = self.recognizer else {
+                    continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                    return
+                }
+                do {
+                    let result = rec.decode(samples: samples, sampleRate: sampleRateHz)
+                    let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty {
+                        continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                        return
+                    }
+                    // Prefer structured LID when present; fall back to "<|zh|>…" text tag.
+                    let structured = result.lang.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let lang = structured.isEmpty ? self.detectLanguage(trimmed) : structured
+                    let clean = self.stripLanguageTag(trimmed)
+                    continuation.resume(returning: AsrResult(text: clean, detectedLanguage: lang))
+                } catch {
+                    FileLog.shared.addMessage("[SenseVoice] transcription failed: \(error)")
+                    continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                }
             }
-            // SenseVoice auto-LID prefixes text like "<|zh|>..."; strip + detect.
-            let lang = detectLanguage(trimmed)
-            let clean = stripLanguageTag(trimmed)
-            return AsrResult(text: clean, detectedLanguage: lang)
-        } catch {
-            FileLog.shared.addMessage("[SenseVoice] transcription failed: \(error)")
-            return AsrResult(text: "", detectedLanguage: nil)
         }
     }
 

@@ -10,6 +10,7 @@ final class CanaryFlashBackend: AsrBackend {
     private let modelDir: String
     let srcLang: String
     private var recognizer: SherpaOnnxOfflineRecognizer?
+    private let transcribeQueue = DispatchQueue(label: "com.auris.canary", qos: .userInitiated)
 
     let capabilities = AsrCapabilities(
         languages: ["en", "de", "es", "fr"],
@@ -82,19 +83,27 @@ final class CanaryFlashBackend: AsrBackend {
     }
 
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
-        let rec = recognizer
-        guard let rec else { return AsrResult(text: "", detectedLanguage: nil) }
-        do {
-            let result = rec.decode(samples: samples, sampleRate: sampleRateHz)
-            let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                return AsrResult(text: "", detectedLanguage: srcLang)
+        // Serialize sherpa-onnx offline decode — not thread-safe across concurrent Tasks.
+        return await withCheckedContinuation { continuation in
+            transcribeQueue.async { [weak self] in
+                guard let self, let rec = self.recognizer else {
+                    continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                    return
+                }
+                do {
+                    let result = rec.decode(samples: samples, sampleRate: sampleRateHz)
+                    let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty {
+                        continuation.resume(returning: AsrResult(text: "", detectedLanguage: self.srcLang))
+                        return
+                    }
+                    // Canary translates to English natively, so the transcript is English.
+                    continuation.resume(returning: AsrResult(text: trimmed, detectedLanguage: "en"))
+                } catch {
+                    FileLog.shared.addMessage("[CanaryFlash] transcription failed: \(error)")
+                    continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                }
             }
-            // Canary translates to English natively, so the transcript is English.
-            return AsrResult(text: trimmed, detectedLanguage: "en")
-        } catch {
-            FileLog.shared.addMessage("[CanaryFlash] transcription failed: \(error)")
-            return AsrResult(text: "", detectedLanguage: nil)
         }
     }
 

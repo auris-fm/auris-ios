@@ -107,23 +107,6 @@ class VoiceControlAssembly {
         }
         return url
     }
-
-    private func hasNeuralEngine() -> Bool {
-        // A12+ (iPhone XS/XR and newer) have Apple Neural Engine
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        let modelCode = withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(validatingUTF8: $0)
-            }
-        }
-        // iPhone XS = iPhone11,x, XR = iPhone11,8 — all iPhone11+ have ANE
-        guard let model = modelCode, model.hasPrefix("iPhone") else { return true }
-        let components = model.components(separatedBy: ",")
-        guard let majorStr = components.first?.replacingOccurrences(of: "iPhone", with: ""),
-              let major = Int(majorStr) else { return true }
-        return major >= 11
-    }
 }
 
 // MARK: - Analytics Service Bridge

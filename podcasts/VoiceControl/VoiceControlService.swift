@@ -262,7 +262,7 @@ class VoiceControlService: ObservableObject {
 
         case .dialogControl(let action):
             consecutiveNulls = 0
-            FileLog.shared.addMessage("[VoiceControl] Dialog: \(action) — \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
