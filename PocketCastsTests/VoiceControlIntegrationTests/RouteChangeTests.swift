@@ -26,16 +26,13 @@ final class RouteChangeTests: XCTestCase {
     }
 
     func test_gate_modeResolution_matrix() {
-        let gracePeriodSignal = GracePeriodSignal()
-
         // Grace period active → continuous
-        gracePeriodSignal.onCommandRecognized()
         let graceGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .appInForeground,
             micExposure: .exposed,
-            gracePeriodSignal: gracePeriodSignal
+            gracePeriodActive: true
         )
         XCTAssertEqual(graceGate.state, .listening(mode: .continuous))
 
@@ -45,7 +42,7 @@ final class RouteChangeTests: XCTestCase {
             conflicts: .noneBlocked,
             context: .appInForeground,
             micExposure: .exposed,
-            gracePeriodSignal: GracePeriodSignal()
+            gracePeriodActive: false
         )
         XCTAssertEqual(foregroundExposedGate.state, .listening(mode: .wakeWord))
 
@@ -55,7 +52,7 @@ final class RouteChangeTests: XCTestCase {
             conflicts: .noneBlocked,
             context: .playbackActive,
             micExposure: .exposed,
-            gracePeriodSignal: GracePeriodSignal()
+            gracePeriodActive: false
         )
         XCTAssertEqual(backgroundExposedGate.state, .listening(mode: .wakeWord))
 
@@ -65,7 +62,7 @@ final class RouteChangeTests: XCTestCase {
             conflicts: .noneBlocked,
             context: .playbackActive,
             micExposure: .isolated,
-            gracePeriodSignal: GracePeriodSignal()
+            gracePeriodActive: false
         )
         XCTAssertEqual(backgroundIsolatedGate.state, .listening(mode: .wakeWord))
     }

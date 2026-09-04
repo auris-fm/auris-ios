@@ -11,6 +11,21 @@ make format
 make build_staging
 ```
 
+### Simulator install (voice / ASR testing)
+
+**Install-over only** for routine sim refreshes. Do **not** `simctl uninstall` before `simctl install`.
+
+Downloaded voice models (SenseVoice, LFM, …) live in Application Support (`Auris/Models`) inside the app container. Uninstall wipes that container and forces a full re-download (~minutes). Android keeps models because `adb install -r` replaces the APK without clearing data — mirror that habit on iOS.
+
+```bash
+# Preferred — keeps Application Support / downloaded models
+xcrun simctl terminate "$UDID" fm.auris || true
+xcrun simctl install "$UDID" "$APP"
+xcrun simctl launch "$UDID" fm.auris
+```
+
+Only uninstall when you intentionally want a clean slate.
+
 ## Cleaning Build Artifacts
 
 ```bash

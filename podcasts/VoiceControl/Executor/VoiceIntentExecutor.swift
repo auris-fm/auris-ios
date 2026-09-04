@@ -68,9 +68,9 @@ class VoiceIntentExecutor {
 
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {
-            FileLog.shared.addMessage("[VoiceControl/Executor] Command failed — no grace period")
+            FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
         } else {
-            FileLog.shared.addMessage("[VoiceControl/Executor] Command succeeded — grace period")
+            FileLog.shared.addMessage("[VoicePipeline] Command succeeded — grace period")
             gracePeriodSignal.onCommandRecognized()
         }
 

@@ -10,6 +10,7 @@ class VoiceAsrEngine {
     private let gracePeriodSignal: GracePeriodSignal
     private let stageTimer: RecognitionStageTimer
     private let wakeThreshold: Float
+    private let translationStage: TranslationStage?
 
     private var isExposedSpeakerRoute = false
     private var playbackBuffer: [Float] = []
@@ -34,7 +35,8 @@ class VoiceAsrEngine {
         wakeWordDetector: WakeWordDetectorProtocol,
         gracePeriodSignal: GracePeriodSignal,
         clock: MonotonicClock = SystemMonotonicClock(),
-        wakeThreshold: Float = 0.8
+        wakeThreshold: Float = 0.8,
+        translationStage: TranslationStage? = nil
     ) {
         self.capture = capture
         self.segmenter = segmenter
@@ -44,12 +46,29 @@ class VoiceAsrEngine {
         self.gracePeriodSignal = gracePeriodSignal
         self.stageTimer = RecognitionStageTimer(clock: clock)
         self.wakeThreshold = wakeThreshold
+        self.translationStage = translationStage
     }
 
     private var backendReadyTask: Task<Result<Void, Error>, Never>?
 
+    /// Kick off SenseVoice/Canary download+init before capture starts so the
+    /// first wake is not blocked behind a silent `await backendReadyTask`.
+    func preloadBackend() {
+        guard backendReadyTask == nil else { return }
+        backendReadyTask = Task {
+            let result = await backend.ensureReady()
+            switch result {
+            case .success:
+                FileLog.shared.addMessage("[VoicePipeline] backend ready \(backend.requiredModel.id)")
+            case .failure(let error):
+                FileLog.shared.addMessage("[VoicePipeline] backend FAILED \(backend.requiredModel.id): \(error)")
+            }
+            return result
+        }
+    }
+
     func start() {
-        FileLog.shared.addMessage("[VoiceControl/ASR] Engine starting")
+        FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         segmenter.onUtterance = { [weak self] utterance in
             Task { await self?.processUtterance(utterance) }
         }
@@ -57,35 +76,27 @@ class VoiceAsrEngine {
             self?.segmenter.process(samples)
         }
 
-        backendReadyTask = Task {
-            let result = await backend.ensureReady()
-            switch result {
-            case .success:
-                FileLog.shared.addMessage("[VoiceControl/ASR] Whisper model ready")
-            case .failure(let error):
-                FileLog.shared.addMessage("[VoiceControl/ASR] Whisper model FAILED: \(error)")
-            }
-            return result
-        }
+        preloadBackend()
 
         do {
             try capture.start()
-            FileLog.shared.addMessage("[VoiceControl/ASR] Engine started")
+            FileLog.shared.addMessage("[VoicePipeline] engine started mode=\(listeningMode)")
         } catch {
-            FileLog.shared.addMessage("[VoiceControl/ASR] Engine start failed: \(error)")
+            FileLog.shared.addMessage("[VoicePipeline] engine start failed: \(error)")
         }
     }
 
     func stop() {
-        FileLog.shared.addMessage("[VoiceControl/ASR] Engine stopping")
+        FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
     }
 
-    private func processUtterance(_ utterance: [Float]) async {
+    /// Exposed for focused translate-drop tests (`@testable`).
+    func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
 
         if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
-            FileLog.shared.addMessage("[VoiceControl/ASR] Utterance dropped (playback bleed)")
+            FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
         }
 
@@ -93,66 +104,115 @@ class VoiceAsrEngine {
         let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
         stageTimer.mark() // wake result
 
+        let score = wakeScore(of: result)
+        let wakeCmp: String = {
+            guard let score else { return "error" }
+            let op = score >= wakeThreshold ? ">=" : "<"
+            return "\(String(format: "%.3f", score)) \(op) \(String(format: "%.3f", wakeThreshold))"
+        }()
+
         let detectedConfidence: Float?
         let completionSample: Int
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
-            FileLog.shared.addMessage("[VoiceControl/ASR] Wake detector error \(errorCode) — segment discarded")
+            FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
             return
         case .dropUtterance:
-            FileLog.shared.addMessage("[VoiceControl/ASR] Utterance dropped (no wake word outside grace)")
+            FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
             return
         case .forward(let detected):
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)
                 completionSample = self.completionSample(of: result)
-                FileLog.shared.addMessage("[VoiceControl/ASR] Wake word detected (confidence: \(detectedConfidence ?? 0)), sending full segment to ASR")
+                FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → ASR (hit, mode=\(listeningMode))")
             } else {
                 detectedConfidence = nil
                 completionSample = 0
+                FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → ASR (grace/continuous)")
             }
         }
 
         guard !utterance.isEmpty else { return }
         let ready: Result<Void, Error>
         if let backendReadyTask {
+            let waitStarted = Date()
             ready = await backendReadyTask.value
+            let waitMs = Int(Date().timeIntervalSince(waitStarted) * 1000)
+            if waitMs > 50 {
+                FileLog.shared.addMessage("[VoicePipeline] asr waited \(waitMs)ms for backend")
+            }
         } else {
             ready = await backend.ensureReady()
         }
         if case .failure(let error) = ready {
-            FileLog.shared.addMessage("[VoiceControl/ASR] Skipping transcription; Whisper not ready: \(error)")
+            FileLog.shared.addMessage("[VoicePipeline] → drop (backend not ready: \(error))")
             return
         }
         stageTimer.mark() // ASR start
+        let asrStartedAt = Date()
         let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000)
+        let asrMs = Int(Date().timeIntervalSince(asrStartedAt) * 1000)
         stageTimer.mark() // ASR result
         emitStageTiming(detectedConfidence: detectedConfidence)
 
-        if !asrResult.text.isEmpty {
-            FileLog.shared.addMessage("[VoiceControl/ASR] Transcript: \"\(asrResult.text)\"")
-        } else {
-            FileLog.shared.addMessage("[VoiceControl/ASR] Transcription empty (audio: \(utterance.count)samp)")
-        }
-
         let isWakePositive = detectedConfidence != nil
         let durationMs = utterance.count * 1000 / 16000
-        let transcript = WakeTranscriptTrimmer.commandText(
+        let trimmedText = WakeTranscriptTrimmer.commandText(
             result: asrResult,
             wakePositive: isWakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
             utteranceDurationMs: durationMs
         )
-        if transcript.isEmpty {
+        let trimNote: String? = {
+            guard isWakePositive, asrResult.text != trimmedText else { return nil }
+            return "trim '\(asrResult.text)' → '\(trimmedText)'"
+        }()
+
+        if trimmedText.isEmpty {
+            let reason = isWakePositive ? "wake-only" : "empty"
+            FileLog.shared.addMessage(
+                "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(asrResult.detectedLanguage ?? "?") '\(asrResult.text)'\(trimNote.map { " \($0)" } ?? "") → drop (\(reason))"
+            )
             if isWakePositive {
-                FileLog.shared.addMessage("[VoiceControl/ASR] Wake-only utterance — no command remainder")
                 onWakeOnly?()
             }
             return
         }
-        onTranscript?(transcript)
+
+        // Translate to English when the ASR backend did not already translate and the
+        // detected language is not English (the SenseVoice CJK path). Trim first so we
+        // only translate the command remainder (matches Android).
+        let trimmedResult = AsrResult(text: trimmedText, detectedLanguage: asrResult.detectedLanguage)
+        let (finalized, translateNote) = await maybeTranslate(trimmedResult, backend: backend)
+        // Source-first: lang + first quote are ASR; translate note carries the English result.
+        FileLog.shared.addMessage(
+            "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
+        )
+        if Self.isNonEnglishTranslateFailure(translateNote) {
+            // Don't feed untranslated CJK into the English-only intent model.
+            FileLog.shared.addMessage("[VoicePipeline] → drop (\(translateNote ?? "translate"))")
+            onWakeOnly?() // service maps this to ERROR earcon
+            return
+        }
+        onTranscript?(finalized.text)
+    }
+
+    /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop notes drop the utterance.
+    static func isNonEnglishTranslateFailure(_ translateNote: String?) -> Bool {
+        guard let translateNote else { return false }
+        return translateNote.hasPrefix("translate=fail(")
+            || translateNote.hasPrefix("translate=blank(")
+            || translateNote.hasPrefix("translate=noop(")
+    }
+
+    private func wakeScore(of result: WakeWordResult) -> Float? {
+        switch result {
+        case .detected(let confidence, _): return confidence
+        case .notDetected(let confidence): return confidence
+        case .error: return nil
+        }
     }
 
     private func confidence(of result: WakeWordResult) -> Float? {
@@ -163,6 +223,39 @@ class VoiceAsrEngine {
     private func completionSample(of result: WakeWordResult) -> Int {
         if case .detected(_, let completionSample) = result { return completionSample }
         return 0
+    }
+
+    /// Translates a non-English, non-self-translating ASR result to English before
+    /// intent routing. Fail / blank / no-op notes are dropped by the caller (ERROR earcon).
+    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> (AsrResult, String?) {
+        guard let detected = result.detectedLanguage?.lowercased() else {
+            return (result, "translate=skip(no lang)")
+        }
+        if detected == "en" {
+            return (result, nil)
+        }
+        if backend.capabilities.canTranslateToEnglish {
+            return (result, "translate=skip(backend)")
+        }
+        guard let translationStage else {
+            return (result, "translate=skip(no stage)")
+        }
+
+        if case .failure = await translationStage.ensureReady(sourceLanguage: detected) {
+            return (result, "translate=fail(\(detected))")
+        }
+        let translated = await translationStage.translate(text: result.text, sourceLanguage: detected)
+        guard !translated.isEmpty else {
+            return (result, "translate=blank(\(detected))")
+        }
+        // Reject no-op "translations" that would mislabel CJK as English.
+        if translated == result.text {
+            return (result, "translate=noop(\(detected))")
+        }
+        return (
+            AsrResult(text: translated, detectedLanguage: "en"),
+            "translate=\(detected)→en '\(translated)'"
+        )
     }
 
     /// Computes and emits the per-utterance stage timings. `detectedConfidence`
@@ -192,7 +285,7 @@ class VoiceAsrEngine {
 
     func setExposedSpeakerRoute(_ exposed: Bool) {
         if isExposedSpeakerRoute != exposed {
-            FileLog.shared.addMessage("[VoiceControl/ASR] ExposedSpeakerRoute: \(exposed)")
+            FileLog.shared.addMessage("[VoicePipeline] exposedSpeaker=\(exposed)")
         }
         isExposedSpeakerRoute = exposed
     }

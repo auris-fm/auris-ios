@@ -32,7 +32,7 @@ class VoiceControlService: ObservableObject {
     private var latestStageTiming: PipelineStageTiming?
     private var latestRouterMetrics: RouterClassificationMetrics?
 
-    private let log = Logger(subsystem: "com.pocketcasts", category: "VoiceControl")
+    private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
 
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
@@ -49,6 +49,12 @@ class VoiceControlService: ObservableObject {
     private var lastIntentType: String?
     private var lastExecutionTime: Date?
     private let debounceInterval: TimeInterval = 2.0
+
+    /// `startIfAllowed` is invoked on every `applicationDidBecomeActive`. Arm
+    /// gate subscriptions + LFM/ASR preload exactly once so we don't stack
+    /// Combine sinks or race overlapping `ensureLfmModel` downloads.
+    private var didArmLifecycle = false
+    private var intentRouterReadyTask: Task<Void, Never>?
 
     // Last blocking reason set logged for a blocked-never-acquired posture.
     // nil when the last lifecycle event was not a non-acquiring posture, so
@@ -107,19 +113,36 @@ class VoiceControlService: ObservableObject {
     }
 
     func startIfAllowed() {
-        Publishers.CombineLatest4(
-            conditionMonitor.$setup,
-            conditionMonitor.$conflicts,
-            conditionMonitor.$context,
-            routeMonitor.$micExposure
+        // Invoked on every `applicationDidBecomeActive` — arm once only.
+        guard !didArmLifecycle else { return }
+        didArmLifecycle = true
+
+        // Kick SenseVoice/Canary download+init here (not at assembly) so we only
+        // pay cellular/memory once voice control is actually being armed.
+        // start() reuses the same task via preloadBackend()'s nil guard.
+        asrEngine.preloadBackend()
+
+        // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
+        // 30s timer starts or expires (CombineLatest4 alone never saw that change).
+        Publishers.CombineLatest(
+            Publishers.CombineLatest4(
+                conditionMonitor.$setup,
+                conditionMonitor.$conflicts,
+                conditionMonitor.$context,
+                routeMonitor.$micExposure
+            ),
+            gracePeriodSignal.$isActive
         )
-        .map { [self] setup, conflicts, context, exposure in
-            VoiceControlGate(
+        // Pass the published Bool through — do not re-read the signal inside the
+        // gate (that raced with log-before-assign and inverted wakeWord/continuous).
+        .map { tuple, graceActive in
+            let (setup, conflicts, context, exposure) = tuple
+            return VoiceControlGate(
                 setup: setup,
                 conflicts: conflicts,
                 context: context,
                 micExposure: exposure,
-                gracePeriodSignal: gracePeriodSignal
+                gracePeriodActive: graceActive
             )
         }
         .sink { [weak self] gate in
@@ -129,7 +152,7 @@ class VoiceControlService: ObservableObject {
             self.gatePosture = gate.posture
 
             if gateDescription(previous) != gateDescription(gate.state) {
-                FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+                FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
 
             let wasCapturing = self.isListening
@@ -182,18 +205,19 @@ class VoiceControlService: ObservableObject {
             self?.latestRouterMetrics = metrics
         }
 
-        // Preload the intent router model so it's ready when the first transcript arrives
-        Task {
-            let result = await intentRouter.ensureReady()
+        // Single-flight LFM load — one task even if startIfAllowed were re-entered.
+        intentRouterReadyTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.intentRouter.ensureReady()
             switch result {
             case .success:
-                FileLog.shared.addMessage("[VoiceControl] Intent router ready")
-                conditionMonitor.updateModelsReady(.allowed)
+                FileLog.shared.addMessage("[VoicePipeline] Intent router ready")
+                self.conditionMonitor.updateModelsReady(.allowed)
             case .failure(let error):
-                FileLog.shared.addMessage("[VoiceControl] Intent router FAILED: \(error)")
+                FileLog.shared.addMessage("[VoicePipeline] Intent router FAILED: \(error)")
                 // A router that cannot engage must block capture rather than
                 // silently returning no intent for every transcript.
-                conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
+                self.conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
             }
         }
     }
@@ -201,13 +225,13 @@ class VoiceControlService: ObservableObject {
     private func start(in mode: ListeningMode) {
         guard !isListening else {
             if listeningMode != mode {
-                FileLog.shared.addMessage("[VoiceControl] Mode switch: \(listeningMode) → \(mode)")
+                FileLog.shared.addMessage("[VoicePipeline] mode updated to \(mode)")
                 listeningMode = mode
                 asrEngine.listeningMode = mode
             }
             return
         }
-        FileLog.shared.addMessage("[VoiceControl] Start listening (\(mode))")
+        FileLog.shared.addMessage("[VoicePipeline] start listening (\(mode))")
         asrEngine.listeningMode = mode
         asrEngine.start()
         isListening = true
@@ -219,7 +243,7 @@ class VoiceControlService: ObservableObject {
 
     func stop() {
         guard isListening else { return }
-        FileLog.shared.addMessage("[VoiceControl] Stop listening")
+        FileLog.shared.addMessage("[VoicePipeline] stop listening")
         asrEngine.stop()
         isListening = false
         audioRenderer.release()
@@ -248,11 +272,11 @@ class VoiceControlService: ObservableObject {
                let lastTime = lastExecutionTime,
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
-                FileLog.shared.addMessage("[VoiceControl] Debounced \(intentType) — within \(debounceInterval)s window")
+                FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
                 return
             }
 
-            FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent)
             gracePeriodSignal.onCommandRecognized()
@@ -262,7 +286,7 @@ class VoiceControlService: ObservableObject {
 
         case .dialogControl(let action):
             consecutiveNulls = 0
-            FileLog.shared.addMessage("[VoiceControl] Dialog: \(action) — \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
@@ -278,9 +302,9 @@ class VoiceControlService: ObservableObject {
 
         case .none:
             consecutiveNulls += 1
-            FileLog.shared.addMessage("[VoiceControl] Unclassified transcript (\(consecutiveNulls)/\(maxConsecutiveNulls)): \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] intent none ← '\(transcript)' (\(consecutiveNulls)/\(maxConsecutiveNulls))")
             if consecutiveNulls >= maxConsecutiveNulls {
-                FileLog.shared.addMessage("[VoiceControl] Too many unclassified — error earcon")
+                FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
             }

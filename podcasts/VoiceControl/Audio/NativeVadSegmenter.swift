@@ -34,7 +34,6 @@ class NativeVadSegmenter {
             speechFrameCount += 1
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
-                FileLog.shared.addMessage("[VoiceControl/VAD] Speech started")
             }
             silenceStart = nil
             // Max duration: force utterance end when buffer exceeds limit
@@ -63,7 +62,7 @@ class NativeVadSegmenter {
     private func emitUtterance() {
         let utterance = buffer
         let durationMs = Int(Float(utterance.count) / 16.0)
-        FileLog.shared.addMessage("[VoiceControl/VAD] Utterance ended (\(durationMs)ms, \(utterance.count) samples)")
+        FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
         buffer.removeAll()
         speechActive = false
         silenceStart = nil

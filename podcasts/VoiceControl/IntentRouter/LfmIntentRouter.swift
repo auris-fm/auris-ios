@@ -117,7 +117,7 @@ final class LfmIntentRouter {
 
         guard release != nil else {
             lock.unlock()
-            FileLog.shared.addMessage("[VoiceControl/Intent] LFM router not ready for: \"\(trimmed)\"")
+            FileLog.shared.addMessage("[VoicePipeline] LFM router not ready for: \"\(trimmed)\"")
             reportMetrics(start: start, outcome: "router_not_ready")
             return .none
         }
@@ -168,7 +168,7 @@ final class LfmIntentRouter {
                 generated: generated
             )
 
-            FileLog.shared.addMessage("[VoiceControl/Intent] Classified: \(repaired.name)(\(repaired.arguments))")
+            FileLog.shared.addMessage("[VoicePipeline] Classified: \(repaired.name)(\(repaired.arguments))")
 
             if repaired.name == "dialog_control" {
                 if let dialogAction = mapDialogControl(repaired.arguments) {
@@ -186,7 +186,7 @@ final class LfmIntentRouter {
             reportMetrics(start: start, outcome: "parse_failure")
             return .none
         } catch {
-            FileLog.shared.addMessage("[VoiceControl/Intent] LFM inference failed: \(error)")
+            FileLog.shared.addMessage("[VoicePipeline] LFM inference failed: \(error)")
             reportMetrics(start: start, outcome: "parse_failure")
             return .none
         }

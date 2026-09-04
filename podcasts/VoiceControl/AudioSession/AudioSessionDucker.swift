@@ -33,7 +33,7 @@ class AudioSessionDucker: AudioSessionDucking {
             let duckedVolume = currentVolume * self.duckFraction
             self.setSystemVolume(duckedVolume)
             self.isDucked = true
-            FileLog.shared.addMessage("[VoiceControl/Ducker] Duck: \(String(format: "%.2f", currentVolume)) → \(String(format: "%.2f", duckedVolume))")
+            FileLog.shared.addMessage("[VoicePipeline] Duck: \(String(format: "%.2f", currentVolume)) → \(String(format: "%.2f", duckedVolume))")
         }
     }
 
@@ -44,14 +44,14 @@ class AudioSessionDucker: AudioSessionDucking {
             self.setSystemVolume(original)
             self.isDucked = false
             self.originalVolume = nil
-            FileLog.shared.addMessage("[VoiceControl/Ducker] Unduck: restored to \(String(format: "%.2f", original))")
+            FileLog.shared.addMessage("[VoicePipeline] Unduck: restored to \(String(format: "%.2f", original))")
         }
     }
 
     /// MPVolumeView must be created and touched on the main thread.
     private func setSystemVolume(_ volume: Float) {
         guard let slider = volumeView.subviews.first(where: { $0 is UISlider }) as? UISlider else {
-            FileLog.shared.addMessage("[VoiceControl/Ducker] Volume slider not found")
+            FileLog.shared.addMessage("[VoicePipeline] Volume slider not found")
             return
         }
         slider.value = volume

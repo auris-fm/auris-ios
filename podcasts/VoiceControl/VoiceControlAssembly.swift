@@ -14,11 +14,14 @@ class VoiceControlAssembly {
         let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
 
-        let asrBackend = AsrBackendSelector().select(
-            locale: .current,
-            hasNPU: hasNeuralEngine(),
-            senseVoiceShipped: false
-        )
+        let locale = Locale.current
+        guard let asrBackend = resolveAsrBackend(locale: locale) else {
+            let lang = locale.language.languageCode?.identifier ?? "?"
+            FileLog.shared.addMessage(
+                "[VoicePipeline] unsupported locale \(lang) — voice control disabled (no Whisper product route)"
+            )
+            return nil
+        }
 
         // Deployment threshold comes from the eval manifest (recognition-pipeline.md
         // "Threshold"). A missing manifest or hash mismatch disables voice control.
@@ -27,7 +30,7 @@ class VoiceControlAssembly {
         let thresholdResult = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: wakewordDir)
         guard case .success(let threshold) = thresholdResult else {
             if case .failure(let error) = thresholdResult {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
+                FileLog.shared.addMessage("[VoicePipeline] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
             }
             return nil
         }
@@ -47,8 +50,12 @@ class VoiceControlAssembly {
             wakeWordDetector: wakeWordDetector,
             gracePeriodSignal: gracePeriodSignal,
             clock: SystemMonotonicClock(),
-            wakeThreshold: threshold
+            wakeThreshold: threshold,
+            translationStage: AppleTranslationTranslator()
         )
+        // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
+        // not here — assembly must not download/init models before the service
+        // arms (cellular + memory cost when voice is off).
 
         let intentRouter = LfmIntentRouter()
 
@@ -95,6 +102,11 @@ class VoiceControlAssembly {
         )
     }
 
+    /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
+    func resolveAsrBackend(locale: Locale) -> AsrBackend? {
+        AsrBackendSelector().select(locale: locale)
+    }
+
     private func bundleURL(_ filename: String) -> URL {
         // Run Script "Copy Wakeword Models" copies models into bundle/wakeword/
         guard let url = Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "wakeword") else {
@@ -102,30 +114,13 @@ class VoiceControlAssembly {
             let bundlePath = Bundle.main.bundlePath
             let wakewordDir = (bundlePath as NSString).appendingPathComponent("wakeword")
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: wakewordDir) {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) in \(wakewordDir); contents: \(contents)")
+                FileLog.shared.addMessage("[VoicePipeline] Missing model \(filename) in \(wakewordDir); contents: \(contents)")
             } else {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) — wakeword dir not found at \(wakewordDir)")
+                FileLog.shared.addMessage("[VoicePipeline] Missing model \(filename) — wakeword dir not found at \(wakewordDir)")
             }
             fatalError("Missing wakeword model in bundle: wakeword/\(filename)")
         }
         return url
-    }
-
-    private func hasNeuralEngine() -> Bool {
-        // A12+ (iPhone XS/XR and newer) have Apple Neural Engine
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        let modelCode = withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(validatingUTF8: $0)
-            }
-        }
-        // iPhone XS = iPhone11,x, XR = iPhone11,8 — all iPhone11+ have ANE
-        guard let model = modelCode, model.hasPrefix("iPhone") else { return true }
-        let components = model.components(separatedBy: ",")
-        guard let majorStr = components.first?.replacingOccurrences(of: "iPhone", with: ""),
-              let major = Int(majorStr) else { return true }
-        return major >= 11
     }
 }
 
@@ -136,7 +131,7 @@ class VoiceControlAssembly {
 /// emitted as snake_case via `eventName`).
 private class DefaultAnalyticsService: AnalyticsService {
     func track(_ event: String, properties: [String: Any]) {
-        FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(properties)")
+        FileLog.shared.addMessage("[VoicePipeline] event=\(event) properties=\(properties)")
         let analyticsEvent: AnalyticsEvent?
         switch event {
         case "voice_command_executed": analyticsEvent = .voiceCommandExecuted

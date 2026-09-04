@@ -21,14 +21,14 @@ open class EarconPlayer {
 
     func play(_ id: EarconId) {
         guard let buffer = cachedEarcons[id] else {
-            FileLog.shared.addMessage("[VoiceControl/Earcon] Missing: \(id)")
+            FileLog.shared.addMessage("[VoicePipeline] Missing: \(id)")
             return
         }
         if !engine.isRunning {
             do {
                 try engine.start()
             } catch {
-                FileLog.shared.addMessage("[VoiceControl/Earcon] Failed to start audio engine: \(error)")
+                FileLog.shared.addMessage("[VoicePipeline] Failed to start audio engine: \(error)")
                 return
             }
         }
@@ -49,22 +49,22 @@ open class EarconPlayer {
     private func preloadAll() {
         for id in EarconId.allCases {
             guard let url = Bundle.main.url(forResource: id.rawValue, withExtension: "wav", subdirectory: "earcons") else {
-                FileLog.shared.addMessage("[VoiceControl/Earcon] Missing asset: \(id.rawValue).wav")
+                FileLog.shared.addMessage("[VoicePipeline] Missing asset: \(id.rawValue).wav")
                 continue
             }
             guard let file = try? AVAudioFile(forReading: url) else {
-                FileLog.shared.addMessage("[VoiceControl/Earcon] Failed to read: \(id.rawValue).wav")
+                FileLog.shared.addMessage("[VoicePipeline] Failed to read: \(id.rawValue).wav")
                 continue
             }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
-                FileLog.shared.addMessage("[VoiceControl/Earcon] Failed to create buffer: \(id.rawValue)")
+                FileLog.shared.addMessage("[VoicePipeline] Failed to create buffer: \(id.rawValue)")
                 continue
             }
             do {
                 try file.read(into: buffer)
                 cachedEarcons[id] = buffer
             } catch {
-                FileLog.shared.addMessage("[VoiceControl/Earcon] Read error for \(id.rawValue): \(error)")
+                FileLog.shared.addMessage("[VoicePipeline] Read error for \(id.rawValue): \(error)")
             }
         }
     }

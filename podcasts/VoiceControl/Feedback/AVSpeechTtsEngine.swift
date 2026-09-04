@@ -18,7 +18,7 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     }
 
     func speak(text: String, language: String) async {
-        FileLog.shared.addMessage("[VoiceControl/TTS] Speaking: \"\(text)\" (\(language))")
+        FileLog.shared.addMessage("[VoicePipeline] Speaking: \"\(text)\" (\(language))")
         // Cancel any in-progress utterance before starting the new one
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)

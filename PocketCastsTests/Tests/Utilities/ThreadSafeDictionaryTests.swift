@@ -17,4 +17,12 @@ final class ThreadSafeDictionaryTests: XCTestCase {
             }
         }
     }
+
+    func testRemoveValueReturnsPreviousValue() {
+        let dictionary = ThreadSafeDictionary<Int, String>()
+        dictionary[7] = "seven"
+        XCTAssertEqual(dictionary.removeValue(forKey: 7), "seven")
+        XCTAssertNil(dictionary.removeValue(forKey: 7))
+        XCTAssertNil(dictionary[7])
+    }
 }

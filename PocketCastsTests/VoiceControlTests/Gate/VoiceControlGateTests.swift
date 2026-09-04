@@ -12,16 +12,12 @@ final class VoiceControlGateTests: XCTestCase {
         micExposure: MicExposure = .isolated,
         gracePeriod: Bool = false
     ) -> VoiceControlGate {
-        let gracePeriodSignal = GracePeriodSignal()
-
-        if gracePeriod { gracePeriodSignal.onCommandRecognized() }
-
         return VoiceControlGate(
             setup: setup,
             conflicts: conflicts,
             context: context,
             micExposure: micExposure,
-            gracePeriodSignal: gracePeriodSignal
+            gracePeriodActive: gracePeriod
         )
     }
 

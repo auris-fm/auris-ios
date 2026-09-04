@@ -6,9 +6,13 @@ import PocketCastsUtils
 /// Keeps continuous listening alive so the user can issue follow-up commands
 /// without re-triggering the wake word.
 class GracePeriodSignal: ObservableObject {
-    @Published var isActive = false
-    private let timeout: TimeInterval = 30.0
+    @Published private(set) var isActive = false
+    private let timeout: TimeInterval
     private var timer: Timer?
+
+    init(timeout: TimeInterval = 30.0) {
+        self.timeout = timeout
+    }
 
     func onCommandRecognized() {
         startOrReset(trigger: "command recognized")
@@ -30,21 +34,50 @@ class GracePeriodSignal: ObservableObject {
     }
 
     private func startOrReset(trigger: String) {
-        if !isActive {
-            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: true (\(trigger))")
-        }
-        isActive = true
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
-            self?.isActive = false
+        // Wake/ASR callbacks arrive off the main thread. `Timer.scheduledTimer`
+        // binds to the *current* run loop — on a cooperative QoS queue that loop
+        // never spins, so the grace period never expires and listening stays
+        // continuous. Mirror Android (`Dispatchers.Main` + delay).
+        if Thread.isMainThread {
+            startOrResetOnMain(trigger: trigger)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.startOrResetOnMain(trigger: trigger)
+            }
         }
     }
 
-    private func deactivate(trigger: String) {
-        if isActive {
-            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: false (\(trigger))")
+    private func startOrResetOnMain(trigger: String) {
+        // Publish first, then log. Logging while `isActive` still held the old
+        // value let Combine condition refreshes resolve the wrong listening mode.
+        let becameActive = !isActive
+        isActive = true
+        if becameActive {
+            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
         timer?.invalidate()
-        isActive = false
+        let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
+            self?.deactivate(trigger: "timeout")
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func deactivate(trigger: String) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            let wasActive = self.isActive
+            self.timer?.invalidate()
+            self.timer = nil
+            self.isActive = false
+            if wasActive {
+                FileLog.shared.addMessage("[VoicePipeline] GracePeriod: false (\(trigger))")
+            }
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
     }
 }

@@ -76,7 +76,8 @@ class DownloadManager: NSObject, FilePathProtocol {
         }
     }
 
-    var downloadAttempts: [Int: DownloadAttempt] = [:]
+    /// Concurrent `addToQueue` / URLSession callbacks race on this map; keep it locked.
+    var downloadAttempts = ThreadSafeDictionary<Int, DownloadAttempt>()
 
     #if os(watchOS)
         var pendingWatchBackgroundTask: WKURLSessionRefreshBackgroundTask?
@@ -561,6 +562,10 @@ class DownloadManager: NSObject, FilePathProtocol {
 
         #if os(watchOS)
             let sessionToUse = await WKApplication.shared().applicationState == .background ? cellularBackgroundSession : cellularForegroundSession
+        #elseif targetEnvironment(simulator)
+            // Simulator background URLSession often fails to talk to nsurlsessiond, which
+            // then races/crashes in resumeDownload while queuing many onboarding downloads.
+            let sessionToUse = cellularForegroundSession
         #else
             let sessionToUse = useCellularSession ? cellularBackgroundSession : wifiOnlyBackgroundSession
         #endif

@@ -24,7 +24,7 @@ class AudioSessionInterruptionHandler: ObservableObject {
 
                 switch interruptionType {
                 case .began:
-                    FileLog.shared.addMessage("[VoiceControl/Interruption] Began — stopping capture, discarding segment")
+                    FileLog.shared.addMessage("[VoicePipeline] Began — stopping capture, discarding segment")
                     self.isInterrupted = true
                     self.onInterruptionBegan?()
 
@@ -34,7 +34,7 @@ class AudioSessionInterruptionHandler: ObservableObject {
                     self.isInterrupted = false
                     let options = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
-                    FileLog.shared.addMessage("[VoiceControl/Interruption] Ended (shouldResume: \(shouldResume))")
+                    FileLog.shared.addMessage("[VoicePipeline] Ended (shouldResume: \(shouldResume))")
                     if shouldResume {
                         self.onInterruptionEnded?()
                     }
