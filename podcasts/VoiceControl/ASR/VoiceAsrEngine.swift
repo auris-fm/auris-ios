@@ -91,7 +91,8 @@ class VoiceAsrEngine {
         capture.stop()
     }
 
-    private func processUtterance(_ utterance: [Float]) async {
+    /// Exposed for focused translate-drop tests (`@testable`).
+    func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
 
         if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
@@ -185,10 +186,25 @@ class VoiceAsrEngine {
         // only translate the command remainder (matches Android).
         let trimmedResult = AsrResult(text: trimmedText, detectedLanguage: asrResult.detectedLanguage)
         let (finalized, translateNote) = await maybeTranslate(trimmedResult, backend: backend)
+        // Source-first: lang + first quote are ASR; translate note carries the English result.
         FileLog.shared.addMessage(
-            "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(asrResult.detectedLanguage ?? "?") '\(finalized.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
+            "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
         )
+        if Self.isNonEnglishTranslateFailure(translateNote) {
+            // Don't feed untranslated CJK into the English-only intent model.
+            FileLog.shared.addMessage("[VoicePipeline] → drop (\(translateNote ?? "translate"))")
+            onWakeOnly?() // service maps this to ERROR earcon
+            return
+        }
         onTranscript?(finalized.text)
+    }
+
+    /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop notes drop the utterance.
+    static func isNonEnglishTranslateFailure(_ translateNote: String?) -> Bool {
+        guard let translateNote else { return false }
+        return translateNote.hasPrefix("translate=fail(")
+            || translateNote.hasPrefix("translate=blank(")
+            || translateNote.hasPrefix("translate=noop(")
     }
 
     private func wakeScore(of result: WakeWordResult) -> Float? {
@@ -210,8 +226,7 @@ class VoiceAsrEngine {
     }
 
     /// Translates a non-English, non-self-translating ASR result to English before
-    /// intent routing. Falls back to the native transcript if the translation stage
-    /// is unavailable or fails (best-effort, per the spec).
+    /// intent routing. Fail / blank / no-op notes are dropped by the caller (ERROR earcon).
     private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> (AsrResult, String?) {
         guard let detected = result.detectedLanguage?.lowercased() else {
             return (result, "translate=skip(no lang)")
@@ -233,9 +248,13 @@ class VoiceAsrEngine {
         guard !translated.isEmpty else {
             return (result, "translate=blank(\(detected))")
         }
+        // Reject no-op "translations" that would mislabel CJK as English.
+        if translated == result.text {
+            return (result, "translate=noop(\(detected))")
+        }
         return (
             AsrResult(text: translated, detectedLanguage: "en"),
-            "translate=\(detected)→en '\(result.text)'"
+            "translate=\(detected)→en '\(translated)'"
         )
     }
 
