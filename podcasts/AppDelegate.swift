@@ -183,7 +183,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 voiceControlService = service
                 VoiceControlService.shared = service
             } else {
-                FileLog.shared.addMessage("[VoicePipeline] Assembly could not build service (wake-word manifest/models not ready)")
+                FileLog.shared.addMessage("[VoicePipeline] Assembly could not build service (unsupported locale or wake-word manifest/models not ready)")
             }
         }
         voiceControlService?.startIfAllowed()

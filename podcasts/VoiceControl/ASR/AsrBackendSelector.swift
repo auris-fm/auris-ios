@@ -6,12 +6,12 @@ class AsrBackendSelector {
     /// (matches Android's `AsrBackendSelector` — no enable gate; the matrix is always live):
     /// zh/ja/ko/yue + en -> SenseVoice (native text, translated downstream);
     /// de/es/fr -> Canary Flash (native translate to English);
-    /// otherwise -> Whisper fallback (translate to English).
+    /// otherwise -> nil (unsupported locale; Whisper remains in-tree but unselected).
     ///
     /// On-device validation of SenseVoice/Canary happens on this branch before it is merged
     /// (per @merlinran); there is no separate activation flag because the branch is held
     /// unmerged until that pass is done.
-    func select(locale: Locale) -> AsrBackend {
+    func select(locale: Locale) -> AsrBackend? {
         let lang = locale.language.languageCode?.identifier ?? "en"
         let modelsRoot = modelsRootURL.path
         switch lang {
@@ -25,7 +25,7 @@ class AsrBackendSelector {
         case "en":
             return SenseVoiceBackend(modelDir: (modelsRoot as NSString).appendingPathComponent("sensevoice-model"))
         default:
-            return WhisperCppBackend(modelPath: whisperModelPath)
+            return nil
         }
     }
 
@@ -34,9 +34,5 @@ class AsrBackendSelector {
     private var modelsRootURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("Auris/Models", isDirectory: true)
-    }
-
-    private var whisperModelPath: String {
-        (modelsRootURL.path as NSString).appendingPathComponent("whisper-model/ggml-small-q5_1.bin")
     }
 }

@@ -14,7 +14,14 @@ class VoiceControlAssembly {
         let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
 
-        let asrBackend = AsrBackendSelector().select(locale: .current)
+        let locale = Locale.current
+        guard let asrBackend = resolveAsrBackend(locale: locale) else {
+            let lang = locale.language.languageCode?.identifier ?? "?"
+            FileLog.shared.addMessage(
+                "[VoicePipeline] unsupported locale \(lang) — voice control disabled (no Whisper product route)"
+            )
+            return nil
+        }
 
         // Deployment threshold comes from the eval manifest (recognition-pipeline.md
         // "Threshold"). A missing manifest or hash mismatch disables voice control.
@@ -93,6 +100,11 @@ class VoiceControlAssembly {
             gracePeriodSignal: gracePeriodSignal,
             analytics: voiceAnalytics
         )
+    }
+
+    /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
+    func resolveAsrBackend(locale: Locale) -> AsrBackend? {
+        AsrBackendSelector().select(locale: locale)
     }
 
     private func bundleURL(_ filename: String) -> URL {

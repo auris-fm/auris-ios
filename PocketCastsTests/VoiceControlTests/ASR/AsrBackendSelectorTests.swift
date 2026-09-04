@@ -27,11 +27,29 @@ final class AsrBackendSelectorTests: XCTestCase {
         }
     }
 
-    func test_select_unsupportedLocale_returnsWhisper() {
+    func test_select_unsupportedLocale_returnsNil() {
         let selector = AsrBackendSelector()
         for localeCode in ["ar", "ru", "pt"] {
             let backend = selector.select(locale: Locale(identifier: localeCode))
-            XCTAssertTrue(backend is WhisperCppBackend, "Locale \(localeCode) should fall back to Whisper")
+            XCTAssertNil(backend, "Locale \(localeCode) should surface unsupported (no Whisper product route)")
         }
+    }
+
+    func test_select_doesNotProductRouteToWhisper() {
+        let selector = AsrBackendSelector()
+        for localeCode in ["en_US", "zh_CN", "de", "ar", "ru"] {
+            let backend = selector.select(locale: Locale(identifier: localeCode))
+            if let backend {
+                XCTAssertFalse(backend is WhisperCppBackend, "Locale \(localeCode) must not select Whisper")
+            }
+        }
+    }
+
+    func test_assembly_resolveAsrBackend_unsupportedFailsClosed() {
+        let assembly = VoiceControlAssembly()
+        XCTAssertNil(assembly.resolveAsrBackend(locale: Locale(identifier: "ar")))
+        XCTAssertNil(assembly.resolveAsrBackend(locale: Locale(identifier: "ru")))
+        XCTAssertTrue(assembly.resolveAsrBackend(locale: Locale(identifier: "en_US")) is SenseVoiceBackend)
+        XCTAssertTrue(assembly.resolveAsrBackend(locale: Locale(identifier: "de")) is CanaryFlashBackend)
     }
 }
