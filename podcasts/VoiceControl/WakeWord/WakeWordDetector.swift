@@ -53,14 +53,11 @@ class WakeWordDetector: WakeWordDetectorProtocol {
 
         if let errorPtr = wakeword_last_error() {
             let errorDetail = String(cString: errorPtr)
-            FileLog.shared.addMessage("[VoiceControl/WakeWord] Scoring failed: \(errorDetail)")
+            FileLog.shared.addMessage("[VoicePipeline] wake scoring failed: \(errorDetail)")
             return .error(code: "detect_failed")
         }
 
-        FileLog.shared.addMessage(
-            "[VoiceControl/WakeWord] maxScore=\(String(format: "%.4f", maxScore)) threshold=\(String(format: "%.2f", threshold)) samples=\(samples.count)"
-        )
-
+        // Score + decision are logged once by VoiceAsrEngine as [VoicePipeline].
         return maxScore >= threshold
             ? .detected(confidence: maxScore, completionSample: max(0, Int(completionSample)))
             : .notDetected(confidence: maxScore)

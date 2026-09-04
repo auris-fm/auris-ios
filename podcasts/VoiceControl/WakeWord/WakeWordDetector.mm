@@ -241,17 +241,11 @@ float wakeword_detect(WakeWordPipeline* handle,
             if (score > maxScore) maxScore = score;
         }
 
-        static int detectCount = 0;
-        if (++detectCount % 10 == 1 || maxScore > 0.3f) {
-            NSLog(@"[WakeWord] detect #%d score=%.4f nMel=%lld nEmb=%d nWin=%d samples=%d",
-                  detectCount, maxScore, nMelFrames, nEmbeddings, numWindows, sampleCount);
-        }
-
         return maxScore;
 
     } catch (const std::exception& e) {
         g_lastError = std::string("detect: ") + e.what();
-        NSLog(@"[WakeWord] detect FAILED: %s", e.what());
+        NSLog(@"[VoicePipeline] wake detect FAILED: %s", e.what());
         return 0.0f;
     }
 }
@@ -423,14 +417,12 @@ float wakeword_detect_segment(WakeWordPipeline* handle,
             *out_completion_sample = endpointRelOnset;
         }
 
-        NSLog(@"[WakeWord] detect_segment score=%.4f nMel=%lld nEmb=%d nWin=%d/%d samples=%d",
-              maxScore, nMelFrames, nEmbeddings, numWindows, totalWindows, sampleCount);
-
+        // Per-utterance score is logged by VoiceAsrEngine as [VoicePipeline].
         return maxScore;
 
     } catch (const std::exception& e) {
         g_lastError = std::string("detect_segment: ") + e.what();
-        NSLog(@"[WakeWord] detect_segment FAILED: %s", e.what());
+        NSLog(@"[VoicePipeline] wake detect_segment FAILED: %s", e.what());
         return 0.0f;
     }
 }

@@ -201,13 +201,13 @@ class VoiceControlService: ObservableObject {
     private func start(in mode: ListeningMode) {
         guard !isListening else {
             if listeningMode != mode {
-                FileLog.shared.addMessage("[VoiceControl] Mode switch: \(listeningMode) → \(mode)")
+                FileLog.shared.addMessage("[VoicePipeline] mode updated to \(mode)")
                 listeningMode = mode
                 asrEngine.listeningMode = mode
             }
             return
         }
-        FileLog.shared.addMessage("[VoiceControl] Start listening (\(mode))")
+        FileLog.shared.addMessage("[VoicePipeline] start listening (\(mode))")
         asrEngine.listeningMode = mode
         asrEngine.start()
         isListening = true
@@ -219,7 +219,7 @@ class VoiceControlService: ObservableObject {
 
     func stop() {
         guard isListening else { return }
-        FileLog.shared.addMessage("[VoiceControl] Stop listening")
+        FileLog.shared.addMessage("[VoicePipeline] stop listening")
         asrEngine.stop()
         isListening = false
         audioRenderer.release()
@@ -248,11 +248,11 @@ class VoiceControlService: ObservableObject {
                let lastTime = lastExecutionTime,
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
-                FileLog.shared.addMessage("[VoiceControl] Debounced \(intentType) — within \(debounceInterval)s window")
+                FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
                 return
             }
 
-            FileLog.shared.addMessage("[VoiceControl] Intent: \(intentType) — \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent)
             gracePeriodSignal.onCommandRecognized()
@@ -278,9 +278,9 @@ class VoiceControlService: ObservableObject {
 
         case .none:
             consecutiveNulls += 1
-            FileLog.shared.addMessage("[VoiceControl] Unclassified transcript (\(consecutiveNulls)/\(maxConsecutiveNulls)): \"\(transcript)\"")
+            FileLog.shared.addMessage("[VoicePipeline] intent none ← '\(transcript)' (\(consecutiveNulls)/\(maxConsecutiveNulls))")
             if consecutiveNulls >= maxConsecutiveNulls {
-                FileLog.shared.addMessage("[VoiceControl] Too many unclassified — error earcon")
+                FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
             }
