@@ -73,11 +73,16 @@ final class AppleTranslationTranslator: TranslationStage {
     #if canImport(Translation)
     /// Maps an ISO-639-1 language code to a `Locale.Language`. Cantonese (`yue`) is not a
     /// distinct Apple Translation language, so it routes through Mandarin Chinese (`zh`).
+    /// Also accepts SenseVoice tags (`<|zh|>`) if a caller skipped normalize.
     private func makeLanguage(_ language: String) -> Locale.Language? {
-        let code: String
-        switch language.lowercased() {
-        case "yue": code = "zh"
-        default: code = language.lowercased()
+        var code = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if code.hasPrefix("<|"), code.hasSuffix("|>"), code.count > 4 {
+            let inner = String(code.dropFirst(2).dropLast(2))
+            code = inner.split(separator: "/").first.map(String.init) ?? code
+        }
+        if code == "yue" { code = "zh" }
+        guard code.range(of: #"^[a-z]{2,8}$"#, options: .regularExpression) != nil else {
+            return nil
         }
         return Locale.Language(identifier: code)
     }

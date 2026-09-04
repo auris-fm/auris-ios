@@ -90,9 +90,12 @@ final class SenseVoiceBackend: AsrBackend {
                         continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
                         return
                     }
-                    // Prefer structured LID when present; fall back to "<|zh|>…" text tag.
-                    let structured = result.lang.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let lang = structured.isEmpty ? self.detectLanguage(trimmed) : structured
+                    // Prefer structured LID; normalize <|zh|> → zh so Apple Translation
+                    // gets a real language code (raw tags cause translate=fail(<|zh|>)).
+                    let lang = Self.resolveDetectedLanguage(
+                        structuredLang: result.lang,
+                        text: trimmed
+                    )
                     let clean = self.stripLanguageTag(trimmed)
                     continuation.resume(returning: AsrResult(text: clean, detectedLanguage: lang))
                 } catch {
@@ -120,20 +123,51 @@ final class SenseVoiceBackend: AsrBackend {
         }
     }
 
-    static let langPattern = try! NSRegularExpression(pattern: "^<\\|(\\w+)\\|>")
+    /// Matches `<|zh|>` / `<|zh/en|>` at the start of a string (or the whole string).
+    static let langTagPattern = try! NSRegularExpression(
+        pattern: "^<\\|([a-zA-Z0-9]+)(?:/[a-zA-Z0-9]+)?\\|>"
+    )
+    private static let supportedLangs: Set<String> = ["zh", "en", "ja", "ko", "yue"]
 
-    private func detectLanguage(_ text: String) -> String? {
+    /// Prefer structured LID; fall back to a leading text tag. Always returns a bare
+    /// code (`zh`, `en`, …) — never the raw `<|zh|>` token sherpa puts in `result.lang`.
+    static func resolveDetectedLanguage(structuredLang: String?, text: String) -> String? {
+        if let normalized = normalizeLanguageCode(structuredLang) { return normalized }
+        return detectLanguage(from: text)
+    }
+
+    /// Maps `<|zh|>` / `<|zh/en|>` / `zh` → `zh`; unrecognized / unsupported → nil.
+    static func normalizeLanguageCode(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        let ns = trimmed as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        if let match = langTagPattern.firstMatch(in: trimmed, range: range),
+           match.range(at: 1).location != NSNotFound,
+           match.range == range {
+            let code = ns.substring(with: match.range(at: 1)).lowercased()
+            return supportedLangs.contains(code) ? code : nil
+        }
+        let lower = trimmed.lowercased()
+        guard lower.range(of: #"^[a-z]{2,8}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return supportedLangs.contains(lower) ? lower : nil
+    }
+
+    private static func detectLanguage(from text: String) -> String? {
         let ns = text as NSString
         let range = NSRange(location: 0, length: ns.length)
-        guard let match = SenseVoiceBackend.langPattern.firstMatch(in: text, range: range),
+        guard let match = langTagPattern.firstMatch(in: text, range: range),
               match.range(at: 1).location != NSNotFound else { return nil }
-        return ns.substring(with: match.range(at: 1))
+        let code = ns.substring(with: match.range(at: 1)).lowercased()
+        return supportedLangs.contains(code) ? code : nil
     }
 
     private func stripLanguageTag(_ text: String) -> String {
         let ns = text as NSString
         let range = NSRange(location: 0, length: ns.length)
-        return SenseVoiceBackend.langPattern.stringByReplacingMatches(in: text, range: range, withTemplate: "")
+        return Self.langTagPattern.stringByReplacingMatches(in: text, range: range, withTemplate: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
