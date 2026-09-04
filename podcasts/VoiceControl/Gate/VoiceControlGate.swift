@@ -3,15 +3,23 @@ class VoiceControlGate {
     private let conflicts: GateConflicts
     private let context: GateContext
     private let micExposure: MicExposure
-    private let gracePeriodSignal: GracePeriodSignal
+    /// Snapshot from the Combine pipeline — never re-read a live signal here.
+    /// Re-reading raced with log-before-assign in `GracePeriodSignal` and inverted
+    /// wakeWord ↔ continuous in production logs.
+    private let gracePeriodActive: Bool
 
-    init(setup: GateSetup, conflicts: GateConflicts, context: GateContext,
-         micExposure: MicExposure, gracePeriodSignal: GracePeriodSignal) {
+    init(
+        setup: GateSetup,
+        conflicts: GateConflicts,
+        context: GateContext,
+        micExposure: MicExposure,
+        gracePeriodActive: Bool
+    ) {
         self.setup = setup
         self.conflicts = conflicts
         self.context = context
         self.micExposure = micExposure
-        self.gracePeriodSignal = gracePeriodSignal
+        self.gracePeriodActive = gracePeriodActive
     }
 
     var state: GateState {
@@ -30,14 +38,14 @@ class VoiceControlGate {
             conflicts: conflicts,
             context: context,
             micExposure: micExposure,
-            gracePeriodActive: gracePeriodSignal.isActive,
+            gracePeriodActive: gracePeriodActive,
             offReason: state.offReason
         )
     }
 
     private var resolvedMode: ListeningMode {
         // Rule 1: Grace period overrides everything → continuous
-        if gracePeriodSignal.isActive { return .continuous }
+        if gracePeriodActive { return .continuous }
 
         // Rule 2: Everything else → wake word
         return .wakeWord

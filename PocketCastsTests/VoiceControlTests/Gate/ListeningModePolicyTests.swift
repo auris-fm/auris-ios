@@ -10,16 +10,12 @@ final class ListeningModePolicyTests: XCTestCase {
         exposure: MicExposure,
         gracePeriod: Bool = false
     ) -> VoiceControlGate {
-        let gracePeriodSignal = GracePeriodSignal()
-
-        if gracePeriod { gracePeriodSignal.onCommandRecognized() }
-
         return VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: context,
             micExposure: exposure,
-            gracePeriodSignal: gracePeriodSignal
+            gracePeriodActive: gracePeriod
         )
     }
 

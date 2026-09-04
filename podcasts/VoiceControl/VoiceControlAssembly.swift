@@ -46,8 +46,15 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // Start SenseVoice/Canary download+init immediately so first wake isn't
+        // blocked behind a multi-minute silent await after listening starts.
+        asrEngine.preloadBackend()
 
         let intentRouter = LfmIntentRouter()
+        // Same for LFM — don't wait until startIfAllowed to begin download/load.
+        Task {
+            _ = await intentRouter.ensureReady()
+        }
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)

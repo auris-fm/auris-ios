@@ -118,14 +118,16 @@ class VoiceControlService: ObservableObject {
             ),
             gracePeriodSignal.$isActive
         )
-        .map { [self] tuple, _ in
+        // Pass the published Bool through — do not re-read the signal inside the
+        // gate (that raced with log-before-assign and inverted wakeWord/continuous).
+        .map { tuple, graceActive in
             let (setup, conflicts, context, exposure) = tuple
             return VoiceControlGate(
                 setup: setup,
                 conflicts: conflicts,
                 context: context,
                 micExposure: exposure,
-                gracePeriodSignal: gracePeriodSignal
+                gracePeriodActive: graceActive
             )
         }
         .sink { [weak self] gate in

@@ -48,10 +48,13 @@ class GracePeriodSignal: ObservableObject {
     }
 
     private func startOrResetOnMain(trigger: String) {
-        if !isActive {
+        // Publish first, then log. Logging while `isActive` still held the old
+        // value let Combine condition refreshes resolve the wrong listening mode.
+        let becameActive = !isActive
+        isActive = true
+        if becameActive {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
-        isActive = true
         timer?.invalidate()
         let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
             self?.deactivate(trigger: "timeout")
@@ -63,12 +66,13 @@ class GracePeriodSignal: ObservableObject {
     private func deactivate(trigger: String) {
         let apply = { [weak self] in
             guard let self else { return }
-            if self.isActive {
-                FileLog.shared.addMessage("[VoicePipeline] GracePeriod: false (\(trigger))")
-            }
+            let wasActive = self.isActive
             self.timer?.invalidate()
             self.timer = nil
             self.isActive = false
+            if wasActive {
+                FileLog.shared.addMessage("[VoicePipeline] GracePeriod: false (\(trigger))")
+            }
         }
         if Thread.isMainThread {
             apply()

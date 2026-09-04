@@ -51,15 +51,10 @@ class VoiceAsrEngine {
 
     private var backendReadyTask: Task<Result<Void, Error>, Never>?
 
-    func start() {
-        FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        segmenter.onUtterance = { [weak self] utterance in
-            Task { await self?.processUtterance(utterance) }
-        }
-        capture.onSamples = { [weak self] samples in
-            self?.segmenter.process(samples)
-        }
-
+    /// Kick off SenseVoice/Canary download+init before capture starts so the
+    /// first wake is not blocked behind a silent `await backendReadyTask`.
+    func preloadBackend() {
+        guard backendReadyTask == nil else { return }
         backendReadyTask = Task {
             let result = await backend.ensureReady()
             switch result {
@@ -70,6 +65,18 @@ class VoiceAsrEngine {
             }
             return result
         }
+    }
+
+    func start() {
+        FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
+        segmenter.onUtterance = { [weak self] utterance in
+            Task { await self?.processUtterance(utterance) }
+        }
+        capture.onSamples = { [weak self] samples in
+            self?.segmenter.process(samples)
+        }
+
+        preloadBackend()
 
         do {
             try capture.start()
@@ -128,7 +135,12 @@ class VoiceAsrEngine {
         guard !utterance.isEmpty else { return }
         let ready: Result<Void, Error>
         if let backendReadyTask {
+            let waitStarted = Date()
             ready = await backendReadyTask.value
+            let waitMs = Int(Date().timeIntervalSince(waitStarted) * 1000)
+            if waitMs > 50 {
+                FileLog.shared.addMessage("[VoicePipeline] asr waited \(waitMs)ms for backend")
+            }
         } else {
             ready = await backend.ensureReady()
         }
