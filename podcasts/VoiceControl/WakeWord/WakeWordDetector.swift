@@ -27,9 +27,9 @@ class WakeWordDetector: WakeWordDetectorProtocol {
             } else {
                 errorDetail = ""
             }
-            FileLog.shared.addMessage("[VoiceControl/WakeWord] Failed to initialize ONNX pipeline\(errorDetail)")
+            FileLog.shared.addMessage("[VoicePipeline] Failed to initialize ONNX pipeline\(errorDetail)")
         } else {
-            FileLog.shared.addMessage("[VoiceControl/WakeWord] ONNX pipeline initialized OK")
+            FileLog.shared.addMessage("[VoicePipeline] ONNX pipeline initialized OK")
         }
         fflush(stderr)
     }

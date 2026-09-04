@@ -50,7 +50,7 @@ class NativeAudioCapture {
                 if !formatWarningLogged {
                     formatWarningLogged = true
                     processingQueue.async {
-                        FileLog.shared.addMessage("[VoiceControl/Capture] Input format is Int16 (not Float32) — converting. Format: \(formatDescription)")
+                        FileLog.shared.addMessage("[VoicePipeline] Input format is Int16 (not Float32) — converting. Format: \(formatDescription)")
                     }
                 }
             } else {
@@ -58,7 +58,7 @@ class NativeAudioCapture {
                 if !formatWarningLogged {
                     formatWarningLogged = true
                     processingQueue.async {
-                        FileLog.shared.addMessage("[VoiceControl/Capture] Unsupported audio format — dropping buffers. Format: \(formatDescription)")
+                        FileLog.shared.addMessage("[VoicePipeline] Unsupported audio format — dropping buffers. Format: \(formatDescription)")
                     }
                 }
                 return
@@ -77,7 +77,7 @@ class NativeAudioCapture {
                     self.energyLogged = true
                     let maxVal = converted.max() ?? 0
                     let minVal = converted.min() ?? 0
-                    FileLog.shared.addMessage("[VoiceControl/Capture] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
+                    FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
                 self.onSamples?(converted)
@@ -86,7 +86,7 @@ class NativeAudioCapture {
 
         engine.prepare()
         try engine.start()
-        FileLog.shared.addMessage("[VoiceControl/Capture] Audio engine started (input: \(formatDescription) → \(sampleRate)Hz)")
+        FileLog.shared.addMessage("[VoicePipeline] Audio engine started (input: \(formatDescription) → \(sampleRate)Hz)")
     }
 
     func stop() {

@@ -186,10 +186,10 @@ class ModelManager: ObservableObject {
                 }
             }
             try manifest.write(to: lfmManifestFile, atomically: true, encoding: .utf8)
-            FileLog.shared.addMessage("[VoiceControl/LFM] Release \(release.version) ready")
+            FileLog.shared.addMessage("[VoicePipeline] Release \(release.version) ready")
             return .success(())
         } catch {
-            FileLog.shared.addMessage("[VoiceControl/LFM] Download failed: \(error)")
+            FileLog.shared.addMessage("[VoicePipeline] Download failed: \(error)")
             return .failure(error)
         }
     }

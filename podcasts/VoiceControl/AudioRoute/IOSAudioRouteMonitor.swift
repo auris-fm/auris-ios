@@ -70,7 +70,7 @@ class IOSAudioRouteMonitor: ObservableObject {
         currentRoute = AudioRoute(output: output, input: input)
         micExposure = MicExposureClassifier.classify(currentRoute)
         if micExposure != previousExposure {
-            FileLog.shared.addMessage("[VoiceControl/Route] MicExposure: \(previousExposure) → \(micExposure) (output: \(output), input: \(input.map { "\($0)" } ?? "nil"))")
+            FileLog.shared.addMessage("[VoicePipeline] MicExposure: \(previousExposure) → \(micExposure) (output: \(output), input: \(input.map { "\($0)" } ?? "nil"))")
         }
     }
 

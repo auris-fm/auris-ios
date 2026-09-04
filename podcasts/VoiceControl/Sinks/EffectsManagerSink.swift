@@ -10,7 +10,7 @@ class EffectsManagerSink: VoiceEffectsSink {
 
     func setSpeed(_ speed: Double) -> VoiceResponse {
         let clamped = max(0.5, min(3.0, speed))
-        FileLog.shared.addMessage("[VoiceControl/Effects] SetSpeed: \(clamped)x")
+        FileLog.shared.addMessage("[VoicePipeline] SetSpeed: \(clamped)x")
         let effects = playbackManager.effects()
         effects.playbackSpeed = clamped
         playbackManager.changeEffects(effects)
@@ -20,7 +20,7 @@ class EffectsManagerSink: VoiceEffectsSink {
     func adjustSpeed(delta: Double) -> VoiceResponse {
         let effects = playbackManager.effects()
         let newSpeed = max(0.5, min(3.0, effects.playbackSpeed + delta))
-        FileLog.shared.addMessage("[VoiceControl/Effects] AdjustSpeed: \(delta >= 0 ? "+" : "")\(delta) → \(newSpeed)x")
+        FileLog.shared.addMessage("[VoicePipeline] AdjustSpeed: \(delta >= 0 ? "+" : "")\(delta) → \(newSpeed)x")
         effects.playbackSpeed = newSpeed
         playbackManager.changeEffects(effects)
         let key = delta > 0 ? "effects.speed_increased" : "effects.speed_decreased"

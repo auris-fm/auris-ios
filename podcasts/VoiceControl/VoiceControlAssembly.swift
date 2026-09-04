@@ -23,7 +23,7 @@ class VoiceControlAssembly {
         let thresholdResult = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: wakewordDir)
         guard case .success(let threshold) = thresholdResult else {
             if case .failure(let error) = thresholdResult {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
+                FileLog.shared.addMessage("[VoicePipeline] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
             }
             return nil
         }
@@ -99,9 +99,9 @@ class VoiceControlAssembly {
             let bundlePath = Bundle.main.bundlePath
             let wakewordDir = (bundlePath as NSString).appendingPathComponent("wakeword")
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: wakewordDir) {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) in \(wakewordDir); contents: \(contents)")
+                FileLog.shared.addMessage("[VoicePipeline] Missing model \(filename) in \(wakewordDir); contents: \(contents)")
             } else {
-                FileLog.shared.addMessage("[VoiceControl/Assembly] Missing model \(filename) — wakeword dir not found at \(wakewordDir)")
+                FileLog.shared.addMessage("[VoicePipeline] Missing model \(filename) — wakeword dir not found at \(wakewordDir)")
             }
             fatalError("Missing wakeword model in bundle: wakeword/\(filename)")
         }
@@ -116,7 +116,7 @@ class VoiceControlAssembly {
 /// emitted as snake_case via `eventName`).
 private class DefaultAnalyticsService: AnalyticsService {
     func track(_ event: String, properties: [String: Any]) {
-        FileLog.shared.addMessage("[VoiceControl/Analytics] event=\(event) properties=\(properties)")
+        FileLog.shared.addMessage("[VoicePipeline] event=\(event) properties=\(properties)")
         let analyticsEvent: AnalyticsEvent?
         switch event {
         case "voice_command_executed": analyticsEvent = .voiceCommandExecuted

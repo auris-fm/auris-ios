@@ -49,7 +49,7 @@ class GracePeriodSignal: ObservableObject {
 
     private func startOrResetOnMain(trigger: String) {
         if !isActive {
-            FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: true (\(trigger))")
+            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
         isActive = true
         timer?.invalidate()
@@ -64,7 +64,7 @@ class GracePeriodSignal: ObservableObject {
         let apply = { [weak self] in
             guard let self else { return }
             if self.isActive {
-                FileLog.shared.addMessage("[VoiceControl/Signal] GracePeriod: false (\(trigger))")
+                FileLog.shared.addMessage("[VoicePipeline] GracePeriod: false (\(trigger))")
             }
             self.timer?.invalidate()
             self.timer = nil

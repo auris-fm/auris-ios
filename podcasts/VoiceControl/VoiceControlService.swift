@@ -32,7 +32,7 @@ class VoiceControlService: ObservableObject {
     private var latestStageTiming: PipelineStageTiming?
     private var latestRouterMetrics: RouterClassificationMetrics?
 
-    private let log = Logger(subsystem: "com.pocketcasts", category: "VoiceControl")
+    private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
 
     private var cancellables = Set<AnyCancellable>()
     private var consecutiveNulls = 0
@@ -135,7 +135,7 @@ class VoiceControlService: ObservableObject {
             self.gatePosture = gate.posture
 
             if gateDescription(previous) != gateDescription(gate.state) {
-                FileLog.shared.addMessage("[VoiceControl] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+                FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
 
             let wasCapturing = self.isListening
@@ -193,10 +193,10 @@ class VoiceControlService: ObservableObject {
             let result = await intentRouter.ensureReady()
             switch result {
             case .success:
-                FileLog.shared.addMessage("[VoiceControl] Intent router ready")
+                FileLog.shared.addMessage("[VoicePipeline] Intent router ready")
                 conditionMonitor.updateModelsReady(.allowed)
             case .failure(let error):
-                FileLog.shared.addMessage("[VoiceControl] Intent router FAILED: \(error)")
+                FileLog.shared.addMessage("[VoicePipeline] Intent router FAILED: \(error)")
                 // A router that cannot engage must block capture rather than
                 // silently returning no intent for every transcript.
                 conditionMonitor.updateModelsReady(.blocked(reason: "router_not_ready"))
