@@ -97,8 +97,9 @@ final class CanaryFlashBackend: AsrBackend {
                         continuation.resume(returning: AsrResult(text: "", detectedLanguage: self.srcLang))
                         return
                     }
-                    // Canary translates to English natively, so the transcript is English.
-                    continuation.resume(returning: AsrResult(text: trimmed, detectedLanguage: "en"))
+                    // English text, but language evidence stays the configured source (de/es/fr/en).
+                    // IntentRoutingInput uses translationKind=.backend and omits sourceTranscript.
+                    continuation.resume(returning: AsrResult(text: trimmed, detectedLanguage: self.srcLang))
                 } catch {
                     FileLog.shared.addMessage("[CanaryFlash] transcription failed: \(error)")
                     continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))

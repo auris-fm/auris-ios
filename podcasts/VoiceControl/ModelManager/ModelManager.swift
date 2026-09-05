@@ -11,17 +11,22 @@ struct LfmAsset: Equatable {
 
 struct LfmRelease: Equatable {
     let version: String
+    let quant: String?
     let requiredAssets: [LfmAsset]
+    /// Manifest `router_input_format`. Missing → `.englishV1`; never inferred from version.
+    let routerInputFormat: RouterInputFormat
 }
 
 enum LfmManifestError: Error, LocalizedError, Equatable {
     case missingAsset(String)
     case invalidJSON
+    case unsupportedInputFormat(String)
 
     var errorDescription: String? {
         switch self {
         case .missingAsset(let name): return "LFM manifest must contain \(name)"
         case .invalidJSON: return "LFM manifest JSON is invalid"
+        case .unsupportedInputFormat(let format): return "Unsupported router_input_format: \(format)"
         }
     }
 }
@@ -60,7 +65,18 @@ func parseLfmManifest(_ json: String) throws -> LfmRelease {
         }
         return LfmAsset(name: name, url: url, bytes: bytes, sha256: sha256)
     }
-    return LfmRelease(version: version, requiredAssets: requiredAssets)
+    let format = RouterInputFormat.parse(root["router_input_format"] as? String)
+    let quantRaw = root["quant"] as? String
+    let quant = quantRaw.flatMap { value in
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+    return LfmRelease(
+        version: version,
+        quant: quant,
+        requiredAssets: requiredAssets,
+        routerInputFormat: format
+    )
 }
 
 class ModelManager: ObservableObject {
@@ -119,9 +135,8 @@ class ModelManager: ObservableObject {
     }
 
     func isLfmModelReady() -> Bool {
-        guard FileManager.default.fileExists(atPath: lfmManifestFile.path),
-              let json = try? String(contentsOf: lfmManifestFile, encoding: .utf8),
-              let release = try? parseLfmManifest(json)
+        guard let release = cachedLfmRelease(),
+              release.routerInputFormat.isReadyForInference
         else {
             return false
         }
@@ -135,6 +150,17 @@ class ModelManager: ObservableObject {
             }
             return lfmAssetLooksIntact(name: asset.name, file: file)
         }
+    }
+
+    /// Parsed on-disk release when the manifest is present and valid JSON; nil otherwise.
+    func cachedLfmRelease() -> LfmRelease? {
+        guard FileManager.default.fileExists(atPath: lfmManifestFile.path),
+              let json = try? String(contentsOf: lfmManifestFile, encoding: .utf8),
+              let release = try? parseLfmManifest(json)
+        else {
+            return nil
+        }
+        return release
     }
 
     /// Deletes on-disk LFM assets so the next `ensureLfmModel` re-downloads.
@@ -154,13 +180,15 @@ class ModelManager: ObservableObject {
     }
 
     func lfmReleaseVersion() -> String? {
-        guard FileManager.default.fileExists(atPath: lfmManifestFile.path),
-              let json = try? String(contentsOf: lfmManifestFile, encoding: .utf8),
-              let release = try? parseLfmManifest(json)
-        else {
-            return nil
-        }
-        return release.version
+        cachedLfmRelease()?.version
+    }
+
+    func lfmRouterInputFormat() -> RouterInputFormat? {
+        cachedLfmRelease()?.routerInputFormat
+    }
+
+    func lfmQuant() -> String? {
+        cachedLfmRelease()?.quant
     }
 
     func ensureLfmModel() async -> Result<Void, Error> {
@@ -172,6 +200,9 @@ class ModelManager: ObservableObject {
                 throw LfmManifestError.invalidJSON
             }
             let release = try parseLfmManifest(manifest)
+            if !release.routerInputFormat.isReadyForInference {
+                return .failure(LfmManifestError.unsupportedInputFormat(release.routerInputFormat.wireName))
+            }
             for asset in release.requiredAssets {
                 guard let url = URL(string: asset.url) else {
                     throw ModelError.downloadFailed

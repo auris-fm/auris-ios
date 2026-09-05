@@ -42,10 +42,98 @@ final class ModelManagerLfmTests: XCTestCase {
         """
         let release = try parseLfmManifest(manifest)
         XCTAssertEqual(release.version, "2026-06-21-143005")
+        XCTAssertEqual(release.routerInputFormat, .englishV1)
         XCTAssertEqual(
             release.requiredAssets.map(\.name),
             ["model.gguf", "classifier.bin", "label_map.json"]
         )
+    }
+
+    func test_parseLfmManifest_explicitEnglishV1() throws {
+        let manifest = """
+        {
+          "version": "2026-06-21-143005",
+          "router_input_format": "english_v1",
+          "assets": {
+            "model.gguf": {
+              "bytes": 5,
+              "sha256": "gguf-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/model.gguf"
+            },
+            "classifier.bin": {
+              "bytes": 5,
+              "sha256": "cls-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/classifier.bin"
+            },
+            "label_map.json": {
+              "bytes": 5,
+              "sha256": "map-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/label_map.json"
+            }
+          }
+        }
+        """
+        let release = try parseLfmManifest(manifest)
+        XCTAssertEqual(release.routerInputFormat, .englishV1)
+    }
+
+    func test_parseLfmManifest_unknownFormat_parsesButNotReady() throws {
+        let manifest = """
+        {
+          "version": "2026-06-21-143005",
+          "router_input_format": "future_v9",
+          "assets": {
+            "model.gguf": {
+              "bytes": 5,
+              "sha256": "gguf-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/model.gguf"
+            },
+            "classifier.bin": {
+              "bytes": 5,
+              "sha256": "cls-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/classifier.bin"
+            },
+            "label_map.json": {
+              "bytes": 5,
+              "sha256": "map-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/label_map.json"
+            }
+          }
+        }
+        """
+        let release = try parseLfmManifest(manifest)
+        XCTAssertEqual(release.routerInputFormat, .unknown("future_v9"))
+        XCTAssertFalse(release.routerInputFormat.isReadyForInference)
+    }
+
+    func test_parseLfmManifest_readsQuantWhenPresent() throws {
+        let manifest = """
+        {
+          "version": "2026-06-21-143005",
+          "quant": "Q8_0",
+          "router_input_format": "english_v1",
+          "assets": {
+            "model.gguf": {
+              "bytes": 5,
+              "sha256": "gguf-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/model.gguf"
+            },
+            "classifier.bin": {
+              "bytes": 5,
+              "sha256": "cls-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/classifier.bin"
+            },
+            "label_map.json": {
+              "bytes": 5,
+              "sha256": "map-sha",
+              "url": "https://download.auris.fm/function-call/2026-06-21-143005/label_map.json"
+            }
+          }
+        }
+        """
+        let release = try parseLfmManifest(manifest)
+        XCTAssertEqual(release.quant, "Q8_0")
+        XCTAssertEqual(release.routerInputFormat, .englishV1)
     }
 
     func test_parseLfmManifest_rejectsFunctionGemmaManifest() {
@@ -125,22 +213,41 @@ final class ModelManagerLfmTests: XCTestCase {
         XCTAssertEqual(manager.lfmReleaseVersion(), "2026-06-21-143005")
     }
 
+    func test_lfmIsNotReadyWhenRouterInputFormatUnknown() {
+        let labelMap = #"{"labels":["playback:pause"]}"#
+        seed(
+            gguf: "gguf",
+            classifier: "LFMC",
+            labelMap: labelMap,
+            ggufBytes: 4,
+            classifierBytes: 4,
+            labelMapBytes: labelMap.utf8.count,
+            routerInputFormat: "not_a_real_format"
+        )
+        let manager = ModelManager(storageDir: tempDir)
+        XCTAssertEqual(manager.lfmRouterInputFormat(), .unknown("not_a_real_format"))
+        XCTAssertFalse(manager.isLfmModelReady())
+    }
+
     private func seed(
         gguf: String,
         classifier: String,
         labelMap: String,
         ggufBytes: Int,
         classifierBytes: Int,
-        labelMapBytes: Int
+        labelMapBytes: Int,
+        routerInputFormat: String? = nil
     ) {
         let modelDir = tempDir.appendingPathComponent("function-call", isDirectory: true)
         try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
         try? gguf.write(to: modelDir.appendingPathComponent("model.gguf"), atomically: true, encoding: .utf8)
         try? classifier.write(to: modelDir.appendingPathComponent("classifier.bin"), atomically: true, encoding: .utf8)
         try? labelMap.write(to: modelDir.appendingPathComponent("label_map.json"), atomically: true, encoding: .utf8)
+        let formatLine = routerInputFormat.map { "\"router_input_format\": \"\($0)\"," } ?? ""
         let manifest = """
         {
           "version": "2026-06-21-143005",
+          \(formatLine)
           "assets": {
             "model.gguf": {
               "bytes": \(ggufBytes),

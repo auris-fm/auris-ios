@@ -16,7 +16,8 @@ class VoiceAsrEngine {
     private var playbackBuffer: [Float] = []
     var listeningMode: ListeningMode = .wakeWord
 
-    var onTranscript: ((String) -> Void)?
+    /// Forwards the immutable routing envelope (source + English router text).
+    var onRoutingInput: ((IntentRoutingInput) -> Void)?
     /// Called on every positive detection so the service can reset grace and
     /// play the `WAKE_WORD` earcon exactly once.
     var onWakeWordDetected: (() -> Void)?
@@ -196,7 +197,42 @@ class VoiceAsrEngine {
             onWakeOnly?() // service maps this to ERROR earcon
             return
         }
-        onTranscript?(finalized.text)
+        onRoutingInput?(Self.makeRoutingInput(
+            source: trimmedResult,
+            routerText: finalized.text,
+            translateNote: translateNote
+        ))
+    }
+
+    /// Builds the immutable envelope. Platform success keeps trimmed native source;
+    /// backend translate omits source (Canary exposes English only).
+    static func makeRoutingInput(
+        source: AsrResult,
+        routerText: String,
+        translateNote: String?
+    ) -> IntentRoutingInput {
+        if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
+            return IntentRoutingInput(
+                sourceTranscript: nil,
+                sourceLanguage: source.detectedLanguage,
+                routerTranscript: routerText,
+                translationKind: .backend
+            )
+        }
+        if let translateNote,
+           translateNote.contains("→en"),
+           translateNote.hasPrefix("translate=") {
+            return IntentRoutingInput(
+                sourceTranscript: source.text,
+                sourceLanguage: source.detectedLanguage,
+                routerTranscript: routerText,
+                translationKind: .platform
+            )
+        }
+        return IntentRoutingInput.english(
+            transcript: routerText,
+            language: source.detectedLanguage ?? "en"
+        )
     }
 
     /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop notes drop the utterance.

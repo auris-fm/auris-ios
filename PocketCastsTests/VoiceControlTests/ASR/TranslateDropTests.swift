@@ -63,7 +63,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var errors = 0
-        engine.onTranscript = { transcripts.append($0) }
+        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
         engine.onWakeOnly = { errors += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -94,7 +94,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var errors = 0
-        engine.onTranscript = { transcripts.append($0) }
+        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
         engine.onWakeOnly = { errors += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -130,7 +130,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var errors = 0
-        engine.onTranscript = { transcripts.append($0) }
+        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
         engine.onWakeOnly = { errors += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))

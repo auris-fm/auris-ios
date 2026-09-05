@@ -14,7 +14,7 @@ struct PerformanceMetrics {
 
     /// Wake/ASR stage timings from the recognition pipeline, when the detector ran.
     var pipeline: PipelineStageTiming?
-    /// Router engagement outcome: intent, dialog_control, no_match, parse_failure, router_not_ready.
+    /// Router engagement outcome: intent, dialog_control, no_intent (+ failedStage/reason).
     var classificationOutcome: String?
     var routerModelRelease: String?
     var transcriptTokenCount: Int?
