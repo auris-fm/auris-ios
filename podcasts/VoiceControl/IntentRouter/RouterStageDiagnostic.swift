@@ -1,5 +1,15 @@
 import Foundation
 
+/// Bounded per-stage durations for one routing request (milliseconds).
+/// Nil means that stage was not entered (or failed before timing started).
+struct RouterStageLatencies: Equatable {
+    var tokenizeMs: Double?
+    var classifyMs: Double?
+    var generateMs: Double?
+    var parseRepairMs: Double?
+    var mapperDialogMs: Double?
+}
+
 /// One bounded, privacy-safe diagnostic per routing request.
 /// Never includes transcripts, generated text, raw exception messages, or slot values.
 struct RouterStageDiagnostic: Equatable {
@@ -12,6 +22,7 @@ struct RouterStageDiagnostic: Equatable {
     let finalOutcome: String
     let failedStage: String?
     let reason: String?
+    let stageLatencies: RouterStageLatencies
     let totalLatencyMs: Double
 
     /// Compatibility alias used by pipeline latency analytics.

@@ -16,7 +16,8 @@ final class TranslateDropTests: XCTestCase {
         XCTAssertFalse(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=zh→en 'pause'"))
         XCTAssertFalse(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=skip(no lang)"))
         XCTAssertFalse(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=skip(backend)"))
-        XCTAssertFalse(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=skip(no stage)"))
+        // Missing translation stage is a hard failure (ERROR+drop), not a safe skip.
+        XCTAssertTrue(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=skip(no stage)"))
     }
 
     // MARK: - Engine: drop + ERROR earcon, no transcript forward
@@ -40,6 +41,35 @@ final class TranslateDropTests: XCTestCase {
             ensureReady: .success(()),
             translateResult: "你好"
         )
+    }
+
+    func test_missingTranslationStage_dropsNonEnglishWithoutRouting() async {
+        let backend = StubAsrBackend(
+            result: AsrResult(text: "你好", detectedLanguage: "zh"),
+            canTranslate: false
+        )
+        let grace = GracePeriodSignal()
+        grace.onCommandRecognized()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(),
+            backend: backend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: ContinuousWakeStub(),
+            gracePeriodSignal: grace,
+            translationStage: nil
+        )
+        engine.listeningMode = .continuous
+
+        var routed = 0
+        var errors = 0
+        engine.onRoutingInput = { _ in routed += 1 }
+        engine.onWakeOnly = { errors += 1 }
+
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
+
+        XCTAssertEqual(routed, 0, "must not forward native CJK when translation stage is missing")
+        XCTAssertEqual(errors, 1, "must play ERROR earcon via onWakeOnly")
     }
 
     func test_englishBypassesTranslation_forwardsTranscript() async {

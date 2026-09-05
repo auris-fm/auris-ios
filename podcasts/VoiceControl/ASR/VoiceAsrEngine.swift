@@ -235,12 +235,13 @@ class VoiceAsrEngine {
         )
     }
 
-    /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop notes drop the utterance.
+    /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop / no-stage notes drop.
     static func isNonEnglishTranslateFailure(_ translateNote: String?) -> Bool {
         guard let translateNote else { return false }
         return translateNote.hasPrefix("translate=fail(")
             || translateNote.hasPrefix("translate=blank(")
             || translateNote.hasPrefix("translate=noop(")
+            || translateNote.hasPrefix("translate=skip(no stage)")
     }
 
     private func wakeScore(of result: WakeWordResult) -> Float? {
@@ -274,6 +275,8 @@ class VoiceAsrEngine {
             return (result, "translate=skip(backend)")
         }
         guard let translationStage else {
+            // Missing platform translation is a hard failure for non-English SenseVoice text —
+            // never relabel native text as english_v1.
             return (result, "translate=skip(no stage)")
         }
 

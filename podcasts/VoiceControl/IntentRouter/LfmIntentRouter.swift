@@ -15,13 +15,18 @@ final class LfmIntentRouter {
     private let inference: LfmInference
     private let mapper = ToolCallMapper()
     private let lock = NSRecursiveLock()
+    private let now: () -> CFTimeInterval
     private var loadedRelease: String?
     private var loadedQuant: String?
-    private var loadedInputFormat: RouterInputFormat = .englishV1
+    /// Nil until a release is successfully loaded — never invent `english_v1`.
+    private var loadedInputFormat: RouterInputFormat?
     private var promptHistory: [DialogPromptTurn] = []
 
     /// Exactly-once local diagnostic sink. Must not throw; failures are isolated.
     var onMetrics: ((RouterStageDiagnostic) -> Void)?
+
+    /// Test seam: when set, thrown after successful tokenize/span to exercise the exception exit.
+    var testExceptionAfterTokenize: Error?
 
     var isReady: Bool {
         lock.lock()
@@ -29,9 +34,14 @@ final class LfmIntentRouter {
         return loadedRelease != nil
     }
 
-    init(modelManager: ModelManager = ModelManager(), inference: LfmInference = LfmNativeInference()) {
+    init(
+        modelManager: ModelManager = ModelManager(),
+        inference: LfmInference = LfmNativeInference(),
+        now: @escaping () -> CFTimeInterval = { CACurrentMediaTime() }
+    ) {
         self.modelManager = modelManager
         self.inference = inference
+        self.now = now
     }
 
     func ensureReady() async -> Result<Void, Error> {
@@ -43,8 +53,6 @@ final class LfmIntentRouter {
         if case .success = firstAttempt {
             return firstAttempt
         }
-        // Only wipe+redownload for parse/corruption-style load failures. Resource
-        // exhaustion (OOM) must not delete good assets and force a CDN round-trip.
         if case .failure(let error) = firstAttempt,
            let routerError = error as? RouterError,
            case .loadFailed(let message) = routerError,
@@ -61,9 +69,6 @@ final class LfmIntentRouter {
 
     private func looksLikeCorruptModelError(_ message: String) -> Bool {
         let lower = message.lowercased()
-        // Omit bare "gguf" — OOM/tensor-allocation messages often mention the GGUF
-        // layer and must not trigger wipe+redownload. Header corruption already
-        // surfaces via magic/invalid/mismatch/parse-style markers.
         let markers = ["magic", "corrupt", "invalid", "mismatch", "parse", "classifier", "label"]
         return markers.contains { lower.contains($0) }
     }
@@ -106,7 +111,8 @@ final class LfmIntentRouter {
     }
 
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
-        let start = CACurrentMediaTime()
+        let start = now()
+        var stages = RouterStageLatencies()
         let trimmed = input.routerTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = DiagnosticBase(
             sourceLanguage: input.sourceLanguage,
@@ -116,6 +122,7 @@ final class LfmIntentRouter {
             report(
                 start: start,
                 base: base,
+                stages: stages,
                 finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
                 failedStage: RouterStageDiagnostic.stageBlank,
                 reason: RouterStageDiagnostic.reasonBlankTranscript
@@ -124,7 +131,7 @@ final class LfmIntentRouter {
         }
 
         let release: String?
-        let inputFormat: RouterInputFormat
+        let inputFormat: RouterInputFormat?
         lock.lock()
         release = loadedRelease
         inputFormat = loadedInputFormat
@@ -133,7 +140,7 @@ final class LfmIntentRouter {
             promptHistory = []
         }
 
-        guard release != nil else {
+        guard let release, let inputFormat else {
             lock.unlock()
             FileLog.shared.addMessage("[VoicePipeline] LFM router not ready for: \"\(trimmed)\"")
             let cachedFormat = modelManager.lfmRouterInputFormat()
@@ -141,6 +148,7 @@ final class LfmIntentRouter {
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: modelManager.lfmReleaseVersion(),
                     inputFormat: cachedFormat.wireName,
                     finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -151,6 +159,7 @@ final class LfmIntentRouter {
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: modelManager.lfmReleaseVersion(),
                     inputFormat: cachedFormat?.wireName,
                     finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -161,28 +170,29 @@ final class LfmIntentRouter {
             return .none
         }
 
-        // Hold the lock across tokenize→classify→generate so KV-cache continuity
-        // cannot be poisoned by a concurrent ensureReady/classify caller.
         defer {
             inference.reset()
             lock.unlock()
         }
 
-        // english_v1 only — prompt/token span/slot repair use routerTranscript.
         precondition(inputFormat.isReadyForInference, "unsupported format must fail before load")
 
         do {
             let prompt = LfmPrompt.render(transcript: trimmed, history: history)
+
+            let tokenizeStart = now()
             let promptTokenIds: [Int]
             let userTokenIds: [Int]
             do {
                 promptTokenIds = try inference.tokenize(prompt, addBos: false)
                 userTokenIds = try inference.tokenize(trimmed, addBos: false)
             } catch {
+                stages.tokenizeMs = elapsedMs(since: tokenizeStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM tokenize failed")
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -199,10 +209,12 @@ final class LfmIntentRouter {
                     userTokenIds: userTokenIds
                 )
             } catch {
+                stages.tokenizeMs = elapsedMs(since: tokenizeStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM span failed")
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -211,7 +223,13 @@ final class LfmIntentRouter {
                 )
                 return .none
             }
+            stages.tokenizeMs = elapsedMs(since: tokenizeStart)
 
+            if let forced = testExceptionAfterTokenize {
+                throw forced
+            }
+
+            let classifyStart = now()
             let label: String
             do {
                 label = try inference.classify(
@@ -220,10 +238,12 @@ final class LfmIntentRouter {
                     poolEnd: span.end
                 )
             } catch {
+                stages.classifyMs = elapsedMs(since: classifyStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM classify failed")
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -237,10 +257,12 @@ final class LfmIntentRouter {
             do {
                 (tool, action) = try LfmLabel.parse(label)
             } catch {
+                stages.classifyMs = elapsedMs(since: classifyStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM label parse failed")
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -250,11 +272,13 @@ final class LfmIntentRouter {
                 )
                 return .none
             }
+            stages.classifyMs = elapsedMs(since: classifyStart)
 
             if tool == "no_match" {
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -265,15 +289,18 @@ final class LfmIntentRouter {
                 return .none
             }
 
-            let prefill = LfmCallPrefill.render(tool: tool, action: action)
+            let generateStart = now()
             let generated: String
             do {
+                let prefill = LfmCallPrefill.render(tool: tool, action: action)
                 generated = try inference.generate(prefill: prefill, nPredict: 64)
             } catch {
+                stages.generateMs = elapsedMs(since: generateStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM generate failed")
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -283,16 +310,20 @@ final class LfmIntentRouter {
                 )
                 return .none
             }
+            stages.generateMs = elapsedMs(since: generateStart)
 
+            let parseStart = now()
             guard let repaired = SlotRepair.repair(
                 raw: generated,
                 utterance: trimmed,
                 tool: tool,
                 action: action
             ) else {
+                stages.parseRepairMs = elapsedMs(since: parseStart)
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -302,6 +333,7 @@ final class LfmIntentRouter {
                 )
                 return .none
             }
+            stages.parseRepairMs = elapsedMs(since: parseStart)
 
             recordHistoryIfNeeded(
                 pendingDialog: pendingDialog,
@@ -313,11 +345,14 @@ final class LfmIntentRouter {
 
             FileLog.shared.addMessage("[VoicePipeline] Classified: \(repaired.name)(\(repaired.arguments))")
 
+            let mapStart = now()
             if repaired.name == "dialog_control" {
                 if let dialogAction = mapDialogControl(repaired.arguments) {
+                    stages.mapperDialogMs = elapsedMs(since: mapStart)
                     report(
                         start: start,
                         base: base,
+                        stages: stages,
                         modelRelease: release,
                         inputFormat: inputFormat.wireName,
                         classifierLabel: label,
@@ -325,9 +360,11 @@ final class LfmIntentRouter {
                     )
                     return .dialogControl(dialogAction)
                 }
+                stages.mapperDialogMs = elapsedMs(since: mapStart)
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -339,9 +376,11 @@ final class LfmIntentRouter {
             }
 
             if let intent = mapper.map(repaired) {
+                stages.mapperDialogMs = elapsedMs(since: mapStart)
                 report(
                     start: start,
                     base: base,
+                    stages: stages,
                     modelRelease: release,
                     inputFormat: inputFormat.wireName,
                     classifierLabel: label,
@@ -349,9 +388,11 @@ final class LfmIntentRouter {
                 )
                 return .intent(intent)
             }
+            stages.mapperDialogMs = elapsedMs(since: mapStart)
             report(
                 start: start,
                 base: base,
+                stages: stages,
                 modelRelease: release,
                 inputFormat: inputFormat.wireName,
                 classifierLabel: label,
@@ -365,6 +406,7 @@ final class LfmIntentRouter {
             report(
                 start: start,
                 base: base,
+                stages: stages,
                 modelRelease: release,
                 inputFormat: inputFormat.wireName,
                 finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
@@ -379,7 +421,7 @@ final class LfmIntentRouter {
         lock.lock()
         loadedRelease = nil
         loadedQuant = nil
-        loadedInputFormat = .englishV1
+        loadedInputFormat = nil
         promptHistory = []
         lock.unlock()
         inference.release()
@@ -418,9 +460,14 @@ final class LfmIntentRouter {
         let translationKind: String
     }
 
+    private func elapsedMs(since mark: CFTimeInterval) -> Double {
+        (now() - mark) * 1000
+    }
+
     private func report(
         start: CFTimeInterval,
         base: DiagnosticBase,
+        stages: RouterStageLatencies,
         modelRelease: String? = nil,
         quant: String? = nil,
         inputFormat: String? = nil,
@@ -429,12 +476,13 @@ final class LfmIntentRouter {
         failedStage: String? = nil,
         reason: String? = nil
     ) {
-        let totalMs = (CACurrentMediaTime() - start) * 1000
+        let totalMs = elapsedMs(since: start)
         let (release, cachedQuant, format): (String?, String?, String?) = lock.withLock {
             (
                 modelRelease ?? loadedRelease,
                 quant ?? loadedQuant ?? modelManager.lfmQuant(),
-                inputFormat ?? loadedInputFormat.wireName
+                // Prefer explicit arg; otherwise only the *loaded* format (nil if never loaded).
+                inputFormat ?? loadedInputFormat?.wireName
             )
         }
         let diagnostic = RouterStageDiagnostic(
@@ -447,10 +495,10 @@ final class LfmIntentRouter {
             finalOutcome: finalOutcome,
             failedStage: failedStage,
             reason: reason,
+            stageLatencies: stages,
             totalLatencyMs: totalMs
         )
-        // Emit before any reset side-effects; sink is non-throwing so classify always
-        // observes exactly one diagnostic per exit.
+        // Emit before any reset side-effects; exactly one diagnostic per exit.
         onMetrics?(diagnostic)
         FileLog.shared.addMessage(
             "[LfmRouter] stage=\(failedStage ?? "ok") outcome=\(finalOutcome) reason=\(reason ?? "-") label=\(classifierLabel ?? "-") format=\(format ?? "-") lang=\(base.sourceLanguage ?? "-") kind=\(base.translationKind) release=\(release ?? "-") quant=\(cachedQuant ?? "-") \(Int(totalMs))ms"

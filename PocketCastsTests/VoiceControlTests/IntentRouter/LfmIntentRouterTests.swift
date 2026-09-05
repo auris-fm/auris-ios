@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import QuartzCore
 @testable import podcasts
 
 final class LfmIntentRouterTests: XCTestCase {
@@ -149,6 +150,110 @@ final class LfmIntentRouterTests: XCTestCase {
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeNoIntent)
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageNotReady)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonModelNotLoaded)
+        XCTAssertNil(metrics?.inputFormat, "format must be nil until a release is loaded")
+    }
+
+    func test_blankBeforeLoad_reportsNilInputFormat() async {
+        let inference = FakeLfmInference()
+        let router = LfmIntentRouter(
+            modelManager: ModelManager(storageDir: tempDir),
+            inference: inference
+        )
+        var metrics: RouterStageDiagnostic?
+        router.onMetrics = { metrics = $0 }
+        _ = router.classify(transcript: "   ")
+        XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageBlank)
+        XCTAssertNil(metrics?.inputFormat)
+    }
+
+    func test_parseRepairFailure_emitsParseRepairStage() async {
+        let inference = FakeLfmInference()
+        // Empty tool → SlotRepair returns nil (only early-exit nil path).
+        inference.classifyLabel = ":"
+        inference.generateResult = "not-a-tool-call"
+        let router = createRouter(inference: inference)
+        _ = await router.ensureReady()
+        var metrics: RouterStageDiagnostic?
+        router.onMetrics = { metrics = $0 }
+        _ = router.classify(transcript: "pause")
+        XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageParseRepair)
+        XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonParseOrRepairFailed)
+        XCTAssertEqual(metrics?.classifierLabel, ":")
+        XCTAssertNotNil(metrics?.stageLatencies.tokenizeMs)
+        XCTAssertNotNil(metrics?.stageLatencies.classifyMs)
+        XCTAssertNotNil(metrics?.stageLatencies.generateMs)
+        XCTAssertNotNil(metrics?.stageLatencies.parseRepairMs)
+        XCTAssertNil(metrics?.stageLatencies.mapperDialogMs)
+    }
+
+    func test_mapperFailure_emitsMapperDialogStage() async {
+        let inference = FakeLfmInference()
+        // seek_to without position_seconds → SlotRepair cannot invent absolute position → mapper nil.
+        inference.classifyLabel = "playback:seek_to"
+        inference.generateResult =
+            "<|tool_call_start|>[playback(action='seek_to')]<|tool_call_end|>"
+        let router = createRouter(inference: inference)
+        _ = await router.ensureReady()
+        var metrics: RouterStageDiagnostic?
+        router.onMetrics = { metrics = $0 }
+        _ = router.classify(transcript: "pause")
+        XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageMapperDialog)
+        XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonMapperOrDialogFailed)
+        XCTAssertNotNil(metrics?.stageLatencies.mapperDialogMs)
+    }
+
+    func test_exception_emitsExceptionStage() async {
+        let inference = FakeLfmInference()
+        let router = createRouter(inference: inference)
+        _ = await router.ensureReady()
+        router.testExceptionAfterTokenize = LfmInferenceError.notReady
+        var metrics: RouterStageDiagnostic?
+        router.onMetrics = { metrics = $0 }
+        _ = router.classify(transcript: "pause")
+        XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageException)
+        XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonInferenceException)
+        XCTAssertNotNil(metrics?.stageLatencies.tokenizeMs)
+        XCTAssertNil(metrics?.stageLatencies.classifyMs)
+    }
+
+    func test_diagnosticEmittedExactlyOnce_beforeReset() async {
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "playback:pause"
+        inference.generateResult =
+            "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        let router = createRouter(inference: inference)
+        _ = await router.ensureReady()
+        var events: [String] = []
+        router.onMetrics = { _ in events.append("diagnostic") }
+        _ = router.classify(transcript: "pause")
+        events.append(contentsOf: inference.eventLog)
+        XCTAssertEqual(events, ["diagnostic", "reset"])
+        XCTAssertEqual(inference.resetCount, 1)
+    }
+
+    func test_success_includesPerStageLatencies() async {
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "playback:pause"
+        inference.generateResult =
+            "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        var tick: CFTimeInterval = 10.0
+        let router = createRouter(inference: inference, now: {
+            let value = tick
+            tick += 0.01
+            return value
+        })
+        _ = await router.ensureReady()
+        var stepped: RouterStageDiagnostic?
+        router.onMetrics = { stepped = $0 }
+        _ = router.classify(transcript: "pause")
+
+        XCTAssertEqual(stepped?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
+        XCTAssertNotNil(stepped?.stageLatencies.tokenizeMs)
+        XCTAssertNotNil(stepped?.stageLatencies.classifyMs)
+        XCTAssertNotNil(stepped?.stageLatencies.generateMs)
+        XCTAssertNotNil(stepped?.stageLatencies.parseRepairMs)
+        XCTAssertNotNil(stepped?.stageLatencies.mapperDialogMs)
+        XCTAssertGreaterThan(stepped?.totalLatencyMs ?? 0, 0)
     }
 
     func test_noMatch_emitsBoundedDiagnostic() async {
@@ -216,6 +321,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = router.classify(transcript: "   ")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageBlank)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonBlankTranscript)
+        XCTAssertEqual(metrics?.inputFormat, "english_v1")
     }
 
     func test_unknownInputFormat_bundleNotReady() {
@@ -242,10 +348,13 @@ final class LfmIntentRouterTests: XCTestCase {
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
     }
 
-    private func createRouter(inference: FakeLfmInference) -> LfmIntentRouter {
+    private func createRouter(
+        inference: FakeLfmInference,
+        now: @escaping () -> CFTimeInterval = { CACurrentMediaTime() }
+    ) -> LfmIntentRouter {
         let manager = ModelManager(storageDir: tempDir)
         seedLfmAssets(manager: manager)
-        return LfmIntentRouter(modelManager: manager, inference: inference)
+        return LfmIntentRouter(modelManager: manager, inference: inference, now: now)
     }
 
     private func seedLfmAssets(manager: ModelManager, format: String? = nil, labelMap: String? = nil) {
