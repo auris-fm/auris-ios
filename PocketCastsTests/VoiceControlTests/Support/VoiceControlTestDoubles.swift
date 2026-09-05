@@ -23,6 +23,8 @@ final class FakeLfmInference: LfmInference {
     var tokenizeThrows: Error?
     var classifyCount = 0
     var resetCount = 0
+    /// Ordered event log: "reset" entries; tests pair with diagnostic sink order.
+    private(set) var eventLog: [String] = []
 
     var lastError: String { lastErrorMessage }
 
@@ -55,6 +57,7 @@ final class FakeLfmInference: LfmInference {
 
     func reset() {
         resetCount += 1
+        eventLog.append("reset")
     }
 
     func release() {}

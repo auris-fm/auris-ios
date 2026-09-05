@@ -166,7 +166,7 @@ class VoiceControlService: ObservableObject {
         }
         .store(in: &cancellables)
 
-        asrEngine.onTranscript = { [weak self] transcript in
+        asrEngine.onRoutingInput = { [weak self] input in
             guard let self else { return }
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
@@ -184,7 +184,7 @@ class VoiceControlService: ObservableObject {
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
                 guard stillCurrent else { return }
-                await self.handleTranscript(transcript)
+                await self.handleRoutingInput(input)
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
@@ -254,12 +254,18 @@ class VoiceControlService: ObservableObject {
         transcriptLock.unlock()
     }
 
+    /// Compatibility wrapper for tests that still pass a bare English transcript.
     func handleTranscript(_ transcript: String) async {
+        await handleRoutingInput(.english(transcript: transcript))
+    }
+
+    func handleRoutingInput(_ input: IntentRoutingInput) async {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return }
         let dialogContext = dialogManager.pendingDialog
-        let result = intentRouter.classify(transcript: transcript, pendingDialog: dialogContext)
+        let transcript = input.routerTranscript
+        let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
         recordPipelineLatency(transcript: transcript)
 
         switch result {
@@ -302,7 +308,11 @@ class VoiceControlService: ObservableObject {
 
         case .none:
             consecutiveNulls += 1
-            FileLog.shared.addMessage("[VoicePipeline] intent none ← '\(transcript)' (\(consecutiveNulls)/\(maxConsecutiveNulls))")
+            let stage = latestRouterMetrics?.failedStage ?? "?"
+            let reason = latestRouterMetrics?.reason ?? "?"
+            FileLog.shared.addMessage(
+                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reason) (\(consecutiveNulls)/\(maxConsecutiveNulls))"
+            )
             if consecutiveNulls >= maxConsecutiveNulls {
                 FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
                 audioRenderer.playEarcon(.error)
