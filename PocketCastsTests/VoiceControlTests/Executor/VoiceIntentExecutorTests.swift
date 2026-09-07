@@ -320,7 +320,7 @@ private struct MockPlaybackState: PlaybackStateProviding {
     let episode: BaseEpisode?
     let currentTime: TimeInterval
 
-    func currentEpisode() -> BaseEpisode? {
+    var currentEpisode: BaseEpisode? {
         episode
     }
 

@@ -7,7 +7,7 @@ protocol PlaybackContextProvider {
 }
 
 protocol PlaybackStateProviding {
-    func currentEpisode() -> BaseEpisode?
+    var currentEpisode: BaseEpisode? { get }
     func currentTimeSeconds() -> TimeInterval
 }
 
@@ -56,7 +56,7 @@ struct DefaultPlaybackContextProvider: PlaybackContextProvider {
     let cloudPlaybackContextState: CloudPlaybackContextState
 
     func current() -> PlaybackContext? {
-        guard let episode = playbackState.currentEpisode() else { return nil }
+        guard let episode = playbackState.currentEpisode else { return nil }
 
         let currentTimeSeconds = playbackState.currentTimeSeconds()
         let clientPositionMs = Self.milliseconds(fromSeconds: currentTimeSeconds)

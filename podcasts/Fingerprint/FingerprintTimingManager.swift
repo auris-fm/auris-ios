@@ -1828,20 +1828,24 @@ final class FingerprintTimingManager: NSObject {
             )
 
             if best.score < FingerprintConstants.driftAnchorScoreThreshold {
-                recordRejection(candidate, reason: "cloud low score \(String(format: "%.2f", best.score))")
+                Self.recordRejection(
+                    candidate,
+                    reason: "cloud low score \(String(format: "%.2f", best.score))",
+                    into: &main
+                )
                 continue
             }
             let runnerUpScore = matches.dropFirst().first?.score ?? 0
             let dominance = best.score - runnerUpScore
             if dominance < FingerprintConstants.driftScoreDominanceGap {
-                recordRejection(candidate, reason: "cloud ambiguous top-1 vs top-2")
+                Self.recordRejection(candidate, reason: "cloud ambiguous top-1 vs top-2", into: &main)
                 continue
             }
 
-            _ = consider(candidate: candidate)
+            _ = Self.consider(candidate: candidate, into: &main)
         }
 
-        let coverage = playbackToReference.count
+        let coverage = main.playbackToReference.count
         if coverage >= FingerprintConstants.minimumCoverageForActive {
             updateState(.active(coverage: coverage))
             if !hasReachedActive {
