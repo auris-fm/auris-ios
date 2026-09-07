@@ -48,7 +48,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
-        // Pause so streamed speech can be heard; restore on error only.
+        // Pause for the turn; restore on done/error so TTS ducking runs over active playback.
         _ = playbackSink.pause()
         didAutoPause = true
 
@@ -64,8 +64,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                     inputTokens: inputTokens,
                     outputTokens: outputTokens
                 )
-                // Leave pause state for TTS ducking path; do not auto-resume here.
-                didAutoPause = false
+                restoreTransientAudioState()
                 if tokenBuffer.isEmpty {
                     return .silent
                 }

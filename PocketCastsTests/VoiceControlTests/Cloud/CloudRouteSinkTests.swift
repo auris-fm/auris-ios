@@ -56,12 +56,38 @@ final class CloudRouteSinkTests: XCTestCase {
 
         XCTAssertEqual(response, .spoken("She is arguing."))
         XCTAssertTrue(playback.calls.contains(.pause))
+        XCTAssertTrue(playback.calls.contains(.resume), "done must restore turn-owned auto-pause")
         XCTAssertEqual(playback.calls.filter { $0 == .seekTo(1200) }.count, 1)
         XCTAssertEqual(analytics.events.last?.0, "cloud_assistant_turn")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "done")
         let snap = contextState.snapshot()
         XCTAssertEqual(snap.recentReferencePositions.last, 1_130_000)
         XCTAssertEqual(snap.previousReferencePositionMs, 500_000)
+    }
+
+    func testDoneResumesTurnOwnedAutoPause() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: token
+            data: {"text":"Answer."}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+
+        let response = await makeSink().routeToCloud(
+            request: "summarize",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        XCTAssertEqual(response, .spoken("Answer."))
+        XCTAssertEqual(playback.calls.first, .pause)
+        XCTAssertEqual(playback.calls.last, .resume)
+        XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1)
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1)
     }
 
     func testPlayQuoteAndStopQuoteRestorePosition() async {
