@@ -125,6 +125,12 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
         _ = await executor.execute(PlaybackIntent.pause)
+        // GracePeriodSignal.startOrReset hops to the main queue (Timer must bind
+        // to the main run loop), so activation lands asynchronously. Drain the
+        // main queue before asserting, otherwise this test races the hop.
+        let mainQueueDrained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { mainQueueDrained.fulfill() }
+        await fulfillment(of: [mainQueueDrained], timeout: 2)
         XCTAssertTrue(gracePeriodSignal.isActive)
     }
 
