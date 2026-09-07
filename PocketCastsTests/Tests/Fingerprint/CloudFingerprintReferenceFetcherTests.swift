@@ -67,3 +67,45 @@ final class CloudIdentityTests: XCTestCase {
         XCTAssertTrue(first.userId.hasPrefix("user_"))
     }
 }
+
+final class CloudConfigTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "cloud_config_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testBaseUrlEmptyWhenCutoverInactive() {
+        let config = CloudConfig(defaults: defaults, buildDefaultGatewayURL: "")
+        XCTAssertEqual(config.baseUrl, "")
+    }
+
+    func testBaseUrlUsesGatewayWhenCutoverActive() {
+        defaults.set("https://gateway.staging.example.com/", forKey: CloudConfig.baseURLKey)
+        let config = CloudConfig(defaults: defaults, buildDefaultGatewayURL: "")
+        XCTAssertEqual(config.baseUrl, "https://gateway.staging.example.com")
+    }
+
+    func testKillSwitchClearsCloudBaseUrl() {
+        defaults.set("https://gateway.staging.example.com", forKey: CloudConfig.baseURLKey)
+        defaults.set(true, forKey: CloudConfig.directUpstreamKey)
+        let config = CloudConfig(defaults: defaults, buildDefaultGatewayURL: "")
+        XCTAssertEqual(config.baseUrl, "")
+    }
+
+    func testBuildDefaultUsedWhenNoOverrideKey() {
+        let config = CloudConfig(
+            defaults: defaults,
+            buildDefaultGatewayURL: "https://build.example.com"
+        )
+        XCTAssertEqual(config.baseUrl, "https://build.example.com")
+    }
+}

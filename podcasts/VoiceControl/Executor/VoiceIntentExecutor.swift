@@ -13,6 +13,8 @@ protocol PlaybackStateProviding {
 
 protocol FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval?
+    /// Reverse map: reference (transcript) time → playback time. Nil when unmapped.
+    func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval?
 }
 
 final class CloudPlaybackContextState {

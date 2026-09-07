@@ -4,15 +4,27 @@ import Foundation
 /// `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
 /// parses the `fingerprint-compact-v2` payload into a `CloudReferenceMatcher`.
 ///
-/// Returns nil on any failure (unconfigured, network, decode, no checkpoints)
-/// so callers degrade gracefully to the transcript-sync path.
+/// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
+/// client-side timeout) so callers degrade gracefully to the transcript-sync
+/// path / `client_position_ms`.
 final class CloudFingerprintReferenceFetcher {
     static let shared = CloudFingerprintReferenceFetcher()
 
-    private let session: URLSession
+    /// Server blocks up to 2 minutes; client budget sits slightly above that.
+    static let defaultTimeoutSeconds: TimeInterval = 150
 
-    init(session: URLSession = .shared) {
+    private let session: URLSession
+    private let identity: () -> String
+    private let timeoutSeconds: TimeInterval
+
+    init(
+        session: URLSession = .shared,
+        timeoutSeconds: TimeInterval = CloudFingerprintReferenceFetcher.defaultTimeoutSeconds,
+        identity: @escaping () -> String = { CloudIdentity.shared.userId }
+    ) {
         self.session = session
+        self.timeoutSeconds = timeoutSeconds
+        self.identity = identity
     }
 
     func fetchReference(baseUrl: String, episodeUuid: String) async -> CloudReferenceMatcher? {
@@ -21,12 +33,17 @@ final class CloudFingerprintReferenceFetcher {
             return nil
         }
         var request = URLRequest(url: url)
-        request.setValue("Bearer " + CloudIdentity.shared.userId, forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = timeoutSeconds
+        // Auris-owned route only — lightweight user_{uuid} Bearer (cloud-identity.md).
+        request.setValue("Bearer " + identity(), forHTTPHeaderField: "Authorization")
 
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return nil
+            let data: Data = try await withTimeout(seconds: timeoutSeconds) {
+                let (data, response) = try await self.session.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    throw URLError(.badServerResponse)
+                }
+                return data
             }
             return buildMatcher(from: data)
         } catch {
@@ -49,5 +66,21 @@ final class CloudFingerprintReferenceFetcher {
             )
         }
         return matcher
+    }
+
+    private func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 }

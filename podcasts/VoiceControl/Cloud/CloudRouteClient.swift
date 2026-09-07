@@ -1,0 +1,310 @@
+import Foundation
+
+/// SSE client for `POST /api/v1/cloud/route`.
+///
+/// Pre-stream HTTP failures (400/401) and mid-stream failures surface as a single
+/// `.error` event so callers can handle all outcomes uniformly. Cancellation cancels
+/// the underlying `URLSession` task and closes the byte stream.
+final class CloudRouteClient {
+    static let routePath = "/api/v1/cloud/route"
+    /// Must sit above the server's 5s first-event budget (cloud-assistant.md).
+    static let defaultTimeoutSeconds: TimeInterval = 15
+
+    private let baseURL: String
+    private let userId: String
+    private let session: URLSession
+    let requestTimeoutSeconds: TimeInterval
+
+    init(
+        baseURL: String,
+        userId: String,
+        session: URLSession? = nil,
+        requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds
+    ) {
+        self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        self.userId = userId
+        self.requestTimeoutSeconds = requestTimeoutSeconds
+        if let session {
+            self.session = session
+        } else {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = requestTimeoutSeconds
+            config.timeoutIntervalForResource = max(60, requestTimeoutSeconds * 4)
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
+            self.session = URLSession(configuration: config)
+        }
+    }
+
+    /// Streams route events until `done`/`error` or connection close.
+    func route(request: String, context: CloudRouteContext) -> AsyncStream<CloudRouteEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                await self.performRoute(request: request, context: context, continuation: continuation)
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    private func performRoute(
+        request: String,
+        context: CloudRouteContext,
+        continuation: AsyncStream<CloudRouteEvent>.Continuation
+    ) async {
+        guard let url = URL(string: baseURL + Self.routePath) else {
+            continuation.yield(.error(code: "invalid_request", message: "Invalid base URL"))
+            continuation.finish()
+            return
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("Bearer \(userId)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        urlRequest.timeoutInterval = requestTimeoutSeconds
+
+        do {
+            let body = try JSONEncoder().encode(CloudRouteRequestBody(request: request, context: context))
+            urlRequest.httpBody = body
+        } catch {
+            continuation.yield(.error(code: "invalid_request", message: "Failed to encode request"))
+            continuation.finish()
+            return
+        }
+
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            guard let http = response as? HTTPURLResponse else {
+                continuation.yield(.error(code: "connection_lost", message: "Invalid response"))
+                continuation.finish()
+                return
+            }
+
+            if !(200..<300).contains(http.statusCode) {
+                var errorBody = Data()
+                for try await byte in bytes {
+                    errorBody.append(byte)
+                    if errorBody.count > 4096 { break }
+                }
+                continuation.yield(Self.preStreamError(status: http.statusCode, body: errorBody))
+                continuation.finish()
+                return
+            }
+
+            var parser = CloudRouteSSEParser()
+            var sawTerminalEvent = false
+            do {
+                var residual = Data()
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    residual.append(byte)
+                    while let newline = residual.firstIndex(of: UInt8(ascii: "\n")) {
+                        let lineData = residual.subdata(in: residual.startIndex..<newline)
+                        residual.removeSubrange(residual.startIndex...newline)
+                        let line = String(data: lineData, encoding: .utf8) ?? ""
+                        for event in parser.consume(line: line) {
+                            if case .done = event { sawTerminalEvent = true }
+                            if case .error = event { sawTerminalEvent = true }
+                            continuation.yield(event)
+                        }
+                    }
+                }
+                if !residual.isEmpty {
+                    let line = String(data: residual, encoding: .utf8) ?? ""
+                    for event in parser.consume(line: line) {
+                        if case .done = event { sawTerminalEvent = true }
+                        if case .error = event { sawTerminalEvent = true }
+                        continuation.yield(event)
+                    }
+                }
+                for event in parser.finish() {
+                    if case .done = event { sawTerminalEvent = true }
+                    if case .error = event { sawTerminalEvent = true }
+                    continuation.yield(event)
+                }
+                if !sawTerminalEvent {
+                    continuation.yield(
+                        .error(code: "connection_lost", message: "Connection closed before done")
+                    )
+                }
+                continuation.finish()
+            } catch is CancellationError {
+                continuation.finish()
+            } catch {
+                if Task.isCancelled {
+                    continuation.finish()
+                    return
+                }
+                continuation.yield(
+                    .error(
+                        code: "connection_lost",
+                        message: (error as NSError).localizedDescription
+                    )
+                )
+                continuation.finish()
+            }
+        } catch is CancellationError {
+            continuation.finish()
+        } catch {
+            if Task.isCancelled {
+                continuation.finish()
+                return
+            }
+            continuation.yield(
+                .error(
+                    code: "connection_lost",
+                    message: (error as NSError).localizedDescription
+                )
+            )
+            continuation.finish()
+        }
+    }
+
+    static func preStreamError(status: Int, body: Data) -> CloudRouteEvent {
+        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let code = (parsed?["code"] as? String)
+            ?? (parsed?["error"] as? String)
+            ?? httpStatusCode(status)
+        let message = (parsed?["message"] as? String) ?? defaultMessage(for: status)
+        return .error(code: code, message: message)
+    }
+
+    private static func httpStatusCode(_ status: Int) -> String {
+        switch status {
+        case 400: return "invalid_request"
+        case 401: return "unauthorized"
+        default: return "http_\(status)"
+        }
+    }
+
+    private static func defaultMessage(for status: Int) -> String {
+        switch status {
+        case 400: return "Invalid request"
+        case 401: return "Unauthorized"
+        default: return "HTTP \(status)"
+        }
+    }
+}
+
+private struct CloudRouteRequestBody: Encodable {
+    let request: String
+    let context: CloudRouteContext
+}
+
+/// Incremental SSE frame parser (`event:` / multi-line `data:` / blank-line dispatch).
+struct CloudRouteSSEParser {
+    private var eventName: String?
+    private var dataLines: [String] = []
+
+    mutating func consume(line: String) -> [CloudRouteEvent] {
+        let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+        if trimmed.isEmpty {
+            let events = dispatch()
+            eventName = nil
+            dataLines.removeAll(keepingCapacity: true)
+            return events
+        }
+        if trimmed.hasPrefix(":") {
+            return []
+        }
+        if trimmed.hasPrefix("event:") {
+            eventName = trimmed.dropFirst("event:".count).trimmingCharacters(in: .whitespaces)
+            return []
+        }
+        if trimmed.hasPrefix("data:") {
+            var value = String(trimmed.dropFirst("data:".count))
+            if value.hasPrefix(" ") {
+                value = String(value.dropFirst())
+            }
+            dataLines.append(value)
+        }
+        return []
+    }
+
+    mutating func finish() -> [CloudRouteEvent] {
+        guard eventName != nil || !dataLines.isEmpty else { return [] }
+        let events = dispatch()
+        eventName = nil
+        dataLines.removeAll()
+        return events
+    }
+
+    private func dispatch() -> [CloudRouteEvent] {
+        let data = dataLines.joined(separator: "\n")
+        guard !data.isEmpty, let eventName else { return [] }
+        guard let event = Self.parse(eventName: eventName, data: data) else { return [] }
+        return [event]
+    }
+
+    static func parse(eventName: String, data: String) -> CloudRouteEvent? {
+        guard let raw = data.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        else {
+            return nil
+        }
+
+        switch eventName {
+        case "action":
+            guard let tool = json["tool"] as? String,
+                  let action = json["action"] as? String
+            else { return nil }
+            let params = (json["params"] as? [String: Any]).map(CloudRouteJSONValue.object(from:)) ?? [:]
+            return .action(tool: tool, action: action, params: params)
+        case "token":
+            guard let text = json["text"] as? String else { return nil }
+            return .token(text)
+        case "done":
+            let input = intValue(json["input_tokens"]) ?? 0
+            let output = intValue(json["output_tokens"]) ?? 0
+            return .done(inputTokens: input, outputTokens: output)
+        case "error":
+            guard let code = json["code"] as? String,
+                  let message = json["message"] as? String
+            else { return nil }
+            return .error(code: code, message: message)
+        default:
+            return nil
+        }
+    }
+
+    private static func intValue(_ any: Any?) -> Int? {
+        switch any {
+        case let i as Int: return i
+        case let n as NSNumber: return n.intValue
+        default: return nil
+        }
+    }
+}
+
+extension CloudRouteJSONValue {
+    static func from(_ any: Any?) -> CloudRouteJSONValue {
+        switch any {
+        case nil, is NSNull: return .null
+        case let s as String: return .string(s)
+        case let b as Bool: return .bool(b)
+        case let n as NSNumber:
+            // Distinguish Bool (NSNumber subclass) already handled; prefer Int64 when integral.
+            let d = n.doubleValue
+            if d.rounded() == d, d >= Double(Int64.min), d <= Double(Int64.max) {
+                return .int(n.int64Value)
+            }
+            return .double(d)
+        case let dict as [String: Any]:
+            return .object(object(from: dict))
+        case let arr as [Any]:
+            return .array(arr.map { from($0) })
+        default:
+            return .string(String(describing: any!))
+        }
+    }
+
+    static func object(from dict: [String: Any]) -> [String: CloudRouteJSONValue] {
+        var result: [String: CloudRouteJSONValue] = [:]
+        for (key, value) in dict {
+            result[key] = from(value)
+        }
+        return result
+    }
+}

@@ -337,8 +337,13 @@ private struct MockPlaybackState: PlaybackStateProviding {
 
 private struct MockFingerprintMapper: FingerprintMappingProviding {
     let referenceTime: TimeInterval?
+    var playbackTimeForReference: TimeInterval?
 
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? {
         referenceTime
+    }
+
+    func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
+        playbackTimeForReference ?? referenceTime
     }
 }

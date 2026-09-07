@@ -68,8 +68,9 @@ class VoiceControlAssembly {
             cloudPlaybackContextState: cloudPlaybackContextState
         )
 
+        let playbackSink = PlaybackManagerSink(playbackManager: playbackManager)
         let executor = VoiceIntentExecutor(
-            playbackSink: PlaybackManagerSink(playbackManager: playbackManager),
+            playbackSink: playbackSink,
             effectsSink: EffectsManagerSink(playbackManager: playbackManager),
             volumeSink: VolumeManagerSink(),
             sleepSink: SleepTimerSink(playbackManager: playbackManager),
@@ -78,7 +79,15 @@ class VoiceControlAssembly {
             queueSink: QueueSink(playbackManager: playbackManager, dataManager: .sharedManager),
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
-            cloudRouteSink: CloudRouteSink(),
+            cloudRouteSink: CloudRouteSink(
+                playbackSink: playbackSink,
+                fingerprintMapper: FingerprintTimingManager.shared,
+                playbackPositionMs: {
+                    Int64((playbackManager.currentTime() * 1000).rounded())
+                },
+                cloudPlaybackContextState: cloudPlaybackContextState,
+                analytics: voiceAnalytics
+            ),
             playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,
             analytics: voiceAnalytics
@@ -144,6 +153,7 @@ private class DefaultAnalyticsService: AnalyticsService {
         case "voice_command_executed": analyticsEvent = .voiceCommandExecuted
         case "voice_router_latency": analyticsEvent = .voiceRouterLatency
         case "voice_recognition_latency": analyticsEvent = .voiceRecognitionLatency
+        case "cloud_assistant_turn": analyticsEvent = .cloudAssistantTurn
         default: analyticsEvent = nil
         }
         guard let analyticsEvent else { return }

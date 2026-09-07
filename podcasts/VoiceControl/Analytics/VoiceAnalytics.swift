@@ -16,6 +16,17 @@ class VoiceAnalytics {
         ])
     }
 
+    /// Cloud assistant turn outcome — no transcript or generated text.
+    func recordCloudAssistantTurn(outcome: String, inputTokens: Int?, outputTokens: Int?) {
+        var properties: [String: Any] = [
+            "outcome": outcome,
+            "source": "voice_commands",
+        ]
+        if let inputTokens { properties["input_tokens"] = inputTokens }
+        if let outputTokens { properties["output_tokens"] = outputTokens }
+        analytics.track("cloud_assistant_turn", properties: properties)
+    }
+
     func recordLatency(metric: PerformanceMetrics) {
         analytics.track("voice_router_latency", properties: [
             "total_ms": metric.totalTranscriptToIntentMs,
