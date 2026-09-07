@@ -417,6 +417,7 @@ enum AnalyticsEvent: String {
     case podcastScreenNotificationsTapped
     case podcastScreenPodcastDetailsLinkTapped
     case podcastScreenCategoryTapped
+    case podcastScreenNetworkTapped
     case podcastScreenYouMightLikeTapped
     case podcastScreenYouMightLikeSubscribed
     case podcastScreenSeasonOptionsTapped
@@ -460,7 +461,6 @@ enum AnalyticsEvent: String {
     case discoverFeaturedPageChanged
     case discoverSmallListPageChanged
     case discoverLargeListPageChanged
-    case discoverNetworkListPageChanged
 
     case discoverRegionChanged
     case discoverCollectionLinkTapped
@@ -775,6 +775,7 @@ enum AnalyticsEvent: String {
     case settingsAboutWebsiteTapped
     case settingsAboutInstagramTapped
     case settingsAboutTwitterTapped
+    case settingsAboutBlueskyTapped
     case settingsAboutAutomatticFamilyTapped
     case settingsAboutLegalAndMoreTapped
     case settingsAboutWorkWithUsTapped

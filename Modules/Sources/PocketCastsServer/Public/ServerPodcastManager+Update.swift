@@ -43,6 +43,7 @@ extension ServerPodcastManager {
         if let author = podcastJson["author"] as? String {
             podcast.author = author
         }
+        podcast.networkListId = Podcast.networkListId(fromPodcastJson: podcastJson)
         if let url = podcastJson["url"] as? String {
             podcast.podcastUrl = url
         }

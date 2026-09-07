@@ -36,7 +36,7 @@ class ImageManager {
     private var userEpisodeCache = ImageCache(name: "userEpisodeImageCache")
 
     // Discover Cache
-    private var discoverCache = ImageCache(name: "discoverCache")
+    let discoverCache = ImageCache(name: "discoverCache")
 
     // cache for discover video thumbnails cache
     private var discoverVideoThumbnailCache: ImageCache = {
@@ -127,15 +127,6 @@ class ImageManager {
                     continuation.resume(returning: nil)
                 }
             }
-        }
-    }
-
-    // MARK: - Network Images
-
-    func loadNetworkImage(imageUrl: String, imageView: UIImageView, placeholderSize: PodcastThumbnailSize? = nil) {
-        if let url = URL(string: imageUrl) {
-            let image = (placeholderSize == nil) ? nil : placeHolderImage(placeholderSize!)
-            imageView.kf.setImage(with: url, placeholder: image, options: [.targetCache(networkImageCache), .transition(.fade(Constants.Animation.defaultAnimationTime))])
         }
     }
 
