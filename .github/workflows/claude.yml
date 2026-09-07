@@ -82,7 +82,7 @@ jobs:
       - name: Run Claude Code
         if: steps.pr-origin.outputs.is_internal == 'true'
         id: claude
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1.0.201
         env:
           # Anthropic-compatible gateway (Auris). Sourced from secrets for uniformity.
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}

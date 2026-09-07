@@ -39,6 +39,7 @@ protocol PodcastActionsDelegate: AnyObject {
     func folderTapped()
     func notificationTapped()
     func categoryTapped(_ category: String)
+    func networkTapped(listId: String)
     func subscribe()
     func unsubscribe()
     func refreshArtwork()
@@ -76,6 +77,13 @@ class PodcastViewController: PCViewController, PodcastActionsDelegate, SyncSigni
     }
 
     var recommendations: PodcastCollection?
+
+    /// Opens the network the podcast belongs to, tapped in the header.
+    private lazy var networkNavigator: NetworkNavigator = {
+        let navigator = NetworkNavigator(source: .podcastScreenNetwork)
+        navigator.presenter = self
+        return navigator
+    }()
 
     /// The bookmarks tab, created the first time it's displayed
     var bookmarkList: BookmarkListController?
@@ -741,19 +749,18 @@ class PodcastViewController: PCViewController, PodcastActionsDelegate, SyncSigni
             }
         }
 
-        let label = FeatureFlag.useFollowNaming.enabled ? L10n.unfollow : L10n.unsubscribe
         let title: String
         let message: String?
         if downloadedCount > 0 {
             title = L10n.downloadedFilesConf(downloadedCount)
-            message = FeatureFlag.useFollowNaming.enabled ? L10n.downloadedFilesConfMessageNew : L10n.downloadedFilesConfMessage
+            message = L10n.downloadedFilesConfMessageNew
         } else {
             title = L10n.areYouSure
             message = nil
         }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: L10n.cancel, style: .cancel))
-        alert.addAction(UIAlertAction(title: label, style: .destructive) { [weak self] _ in
+        alert.addAction(UIAlertAction(title: L10n.unfollow, style: .destructive) { [weak self] _ in
             self?.performUnsubscribe()
         })
         present(alert, animated: true)
@@ -941,6 +948,11 @@ class PodcastViewController: PCViewController, PodcastActionsDelegate, SyncSigni
     func categoryTapped(_ category: String) {
         NavigationManager.sharedManager.navigateTo(NavigationManager.discoverPageKey, data: [NavigationManager.discoverCategoryKey: category])
         Analytics.track(.podcastScreenCategoryTapped, properties: ["category": category])
+    }
+
+    func networkTapped(listId: String) {
+        Analytics.track(.podcastScreenNetworkTapped, properties: ["podcast_uuid": podcast?.uuid ?? "", "list_id": listId])
+        networkNavigator.show(listId: listId)
     }
 
     func searchEpisodes(query: String) {
