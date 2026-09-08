@@ -1,11 +1,16 @@
 import Foundation
 
-/// Resolves Pocket Casts-compatible API base URLs for Auris gateway cutover
+/// Resolves the Pocket Casts **API-family** base URL for Auris gateway cutover
 /// (cloud-catalog.md#mobile-client-cutover).
 ///
-/// When cutover is active, proxied Pocket Casts hosts collapse to the configured
-/// gateway base URL. When the gateway URL is empty or the local kill switch is
-/// on, upstream hosts are used unchanged.
+/// When cutover is active, [ServerConstants.Urls.api] collapses onto the configured
+/// gateway host. Other Pocket Casts hosts (static/CDN, search, refresh, lists,
+/// files, shownotes) stay on their original upstreams until the gateway supports
+/// multi-upstream host routing — collapsing them onto the single configured
+/// upstream (`api.pocketcasts.com`) turns public CDN/discover 200s into 401s.
+///
+/// Auris-owned routes (`/api/v1/cloud/...`) use [CloudConfig.baseUrl] (host only)
+/// plus their absolute path — not this resolver.
 public final class GatewayURLProvider {
     public static var shared = GatewayURLProvider()
 

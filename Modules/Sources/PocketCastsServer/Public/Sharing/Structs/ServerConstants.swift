@@ -2,12 +2,15 @@ import Foundation
 
 public enum ServerConstants {
     public enum Urls {
+        /// Sync/refresh host — stays on Pocket Casts until the gateway supports
+        /// multi-upstream host routing (Android `serverMainUrl` parity).
         public static func main() -> String {
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://refresh.pocketcasts.com/" : "https://refresh.pocketcasts.net/"
-            )
+            production() ? "https://refresh.pocketcasts.com/" : "https://refresh.pocketcasts.net/"
         }
 
+        /// API-family cutover only: collapses onto the Auris gateway when cutover
+        /// is active (Android `serverApiUrl` parity). Other Pocket Casts hosts stay
+        /// direct — the gateway has a single upstream (`api.pocketcasts.com`).
         public static func api() -> String {
             GatewayURLProvider.shared.resolve(
                 upstream: production() ? "https://api.pocketcasts.com/" : "https://api.pocketcasts.net/"
@@ -15,37 +18,23 @@ public enum ServerConstants {
         }
 
         public static func cache() -> String {
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://cache.pocketcasts.com/" : "https://podcast-api.pocketcasts.net/"
-            )
+            production() ? "https://cache.pocketcasts.com/" : "https://podcast-api.pocketcasts.net/"
         }
 
         public static func sharing() -> String {
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://sharing.pocketcasts.com/" : "https://sharing.pocketcasts.net/"
-            )
+            production() ? "https://sharing.pocketcasts.com/" : "https://sharing.pocketcasts.net/"
         }
 
         public static func discover() -> String {
-            // Discover is path-scoped under /discover/ on static hosts; when cutover
-            // is active the gateway serves the same path inventory on one host.
-            let upstream = production() ? "https://static.pocketcasts.com/discover/" : "https://static.pocketcasts.net/discover/"
-            guard GatewayURLProvider.shared.isCutoverActive() else { return upstream }
-            return GatewayURLProvider.shared.resolve(upstream: upstream) + "discover/"
+            production() ? "https://static.pocketcasts.com/discover/" : "https://static.pocketcasts.net/discover/"
         }
 
         public static func image() -> String {
-            // Artwork hosts stay on CDN when not cut over; under cutover they share
-            // the gateway host (transparent proxy preserves upstream behavior).
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://static.pocketcasts.com/" : "https://static.pocketcasts.net/"
-            )
+            production() ? "https://static.pocketcasts.com/" : "https://static.pocketcasts.net/"
         }
 
         public static func files() -> String {
-            let upstream = "https://files.pocketcasts.com/files/"
-            guard GatewayURLProvider.shared.isCutoverActive() else { return upstream }
-            return GatewayURLProvider.shared.resolve(upstream: upstream) + "files/"
+            "https://files.pocketcasts.com/files/"
         }
 
         public static func share() -> String {
@@ -53,23 +42,17 @@ public enum ServerConstants {
         }
 
         public static func lists() -> String {
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://lists.pocketcasts.com/" : "https://lists.pocketcasts.net/"
-            )
+            production() ? "https://lists.pocketcasts.com/" : "https://lists.pocketcasts.net/"
         }
 
         public static var search: String {
-            GatewayURLProvider.shared.resolve(
-                upstream: production() ? "https://search.pocketcasts.com/" : "https://search.pocketcasts.net/"
-            )
+            production() ? "https://search.pocketcasts.com/" : "https://search.pocketcasts.net/"
         }
 
         public static var generatedTranscripts: String {
-            let upstream = production()
+            production()
                 ? "https://shownotes.pocketcasts.com/generated_transcripts/"
                 : "https://shownotes.pocketcasts.net/generated_transcripts/"
-            guard GatewayURLProvider.shared.isCutoverActive() else { return upstream }
-            return GatewayURLProvider.shared.resolve(upstream: upstream) + "generated_transcripts/"
         }
 
         public static var tvPair: String {

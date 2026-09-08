@@ -9,8 +9,9 @@ import PocketCastsServer
 /// `auris_cloud_base_url` override (if key present), then build-time
 /// `AurisCloudBaseURL`. An empty effective URL disables cloud alignment — the
 /// client degrades to the transcript-sync mapping and `client_position_ms`.
-/// The same empty URL or the `auris_gateway_direct_upstream` kill switch
-/// restores direct Pocket Casts upstream hosts (see [GatewayURLProvider]).
+/// Pocket Casts API-family traffic uses the same gateway via
+/// [ServerConstants.Urls.api]; other Pocket Casts hosts stay direct. The kill
+/// switch `auris_gateway_direct_upstream` restores direct API upstream.
 final class CloudConfig {
     static let shared = CloudConfig()
 
