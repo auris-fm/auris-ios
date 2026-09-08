@@ -36,15 +36,46 @@ final class GatewayURLProviderTests: XCTestCase {
     func testUsesBuildTimeGatewayDefaultWhenCutoverActive() {
         let gateway = provider(buildDefault: "https://gateway.staging.example.com")
         XCTAssertTrue(gateway.isCutoverActive())
-        XCTAssertEqual(gateway.resolve(upstream: upstreamAPI), "https://gateway.staging.example.com/")
-        XCTAssertEqual(gateway.resolve(upstream: upstreamMain), "https://gateway.staging.example.com/")
+        // Gateway mounts Pocket Casts compat under /api/ (Android GatewayCompatPathInterceptor parity).
+        XCTAssertEqual(gateway.resolve(upstream: upstreamAPI), "https://gateway.staging.example.com/api/")
+        XCTAssertEqual(gateway.resolve(upstream: upstreamMain), "https://gateway.staging.example.com/api/")
     }
 
     func testUserDefaultsOverrideWinsOverBuildDefault() {
         defaults.set("https://override.example.com", forKey: GatewayURLProvider.baseURLKey)
         let gateway = provider(buildDefault: "https://gateway.staging.example.com")
         XCTAssertEqual(gateway.configuredGatewayURL(), "https://override.example.com")
-        XCTAssertEqual(gateway.resolve(upstream: upstreamAPI), "https://override.example.com/")
+        XCTAssertEqual(gateway.resolve(upstream: upstreamAPI), "https://override.example.com/api/")
+    }
+
+    func testResolveDoesNotDoublePrefixApi() {
+        defaults.set("https://gateway.example.com/api", forKey: GatewayURLProvider.baseURLKey)
+        let gateway = provider()
+        XCTAssertEqual(gateway.resolve(upstream: upstreamAPI), "https://gateway.example.com/api/")
+    }
+
+    func testRewriteCompatURLPrefixesHostRootedGatewayPaths() {
+        defaults.set("https://api.auris.fm", forKey: GatewayURLProvider.baseURLKey)
+        let gateway = provider()
+        let rewritten = gateway.rewriteCompatURL(URL(string: "https://api.auris.fm/import/opml")!)
+        XCTAssertEqual(rewritten.absoluteString, "https://api.auris.fm/api/import/opml")
+    }
+
+    func testRewriteCompatURLLeavesApiPrefixedAndNonGatewayHosts() {
+        defaults.set("https://api.auris.fm", forKey: GatewayURLProvider.baseURLKey)
+        let gateway = provider()
+        XCTAssertEqual(
+            gateway.rewriteCompatURL(URL(string: "https://api.auris.fm/api/user/login")!).absoluteString,
+            "https://api.auris.fm/api/user/login"
+        )
+        XCTAssertEqual(
+            gateway.rewriteCompatURL(URL(string: "https://api.auris.fm/api/v1/cloud/route")!).absoluteString,
+            "https://api.auris.fm/api/v1/cloud/route"
+        )
+        XCTAssertEqual(
+            gateway.rewriteCompatURL(URL(string: "https://api.pocketcasts.com/import/opml")!).absoluteString,
+            "https://api.pocketcasts.com/import/opml"
+        )
     }
 
     func testExplicitEmptyOverrideDisablesCutover() {

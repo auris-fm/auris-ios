@@ -145,7 +145,8 @@ class ApiBaseTask: Operation, @unchecked Sendable {
     }
 
     func createRequest(url: URL, method: String, token: String?) -> URLRequest {
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: syncTimeout)
+        let compatURL = GatewayURLProvider.shared.rewriteCompatURL(url)
+        var request = URLRequest(url: compatURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: syncTimeout)
         request.httpMethod = method
         request.addValue("application/octet-stream", forHTTPHeaderField: ServerConstants.HttpHeaders.accept)
         request.setValue("application/octet-stream", forHTTPHeaderField: ServerConstants.HttpHeaders.contentType)
