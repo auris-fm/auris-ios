@@ -2,7 +2,7 @@ import Foundation
 
 /// Bounded per-stage durations for one routing request (milliseconds).
 /// Nil means that stage was not entered (or failed before timing started).
-struct RouterStageLatencies: Equatable {
+struct RouterStageLatencies: Equatable, Codable {
     var tokenizeMs: Double?
     var classifyMs: Double?
     var generateMs: Double?
