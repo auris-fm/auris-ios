@@ -59,7 +59,7 @@ class DownloadManager: NSObject, FilePathProtocol {
         }
     }()
 
-    var taskFailure: [String: FailureReason] = [:]
+    let taskFailure = ThreadSafeDictionary<String, FailureReason>()
 
     // MARK: - Download Retry Tracking
     struct DownloadAttempt {
@@ -76,8 +76,7 @@ class DownloadManager: NSObject, FilePathProtocol {
         }
     }
 
-    /// Concurrent `addToQueue` / URLSession callbacks race on this map; keep it locked.
-    var downloadAttempts = ThreadSafeDictionary<Int, DownloadAttempt>()
+    let downloadAttempts = ThreadSafeDictionary<Int, DownloadAttempt>()
 
     #if os(watchOS)
         var pendingWatchBackgroundTask: WKURLSessionRefreshBackgroundTask?

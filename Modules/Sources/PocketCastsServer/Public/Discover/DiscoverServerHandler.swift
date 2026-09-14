@@ -2,8 +2,17 @@ import Combine
 import Foundation
 import PocketCastsUtils
 
+/// The Discover network calls, behind a protocol so callers can be handed canned data.
+///
+/// `DiscoverServerHandler.shared` is the production implementation; previews and tests inject
+/// their own. Every method mirrors one section type of the Discover page.
 public protocol DiscoverServerHandling {
+    func discoverPodcastList(source: String, authenticated: Bool?, completion: @escaping (PodcastList?) -> Void)
+    func discoverPodcastCollection(source: String, authenticated: Bool?, completion: @escaping (PodcastCollection?) -> Void)
+    func discoverCategories(source: String, authenticated: Bool?, completion: @escaping ([DiscoverCategory]?) -> Void)
     func discoverCategories(source: String, authenticated: Bool?) async -> [DiscoverCategory]
+    func discoverCategoryDetails(source: String, authenticated: Bool?, completion: @escaping (DiscoverCategoryDetails?) -> Void)
+    func discoverItem<T>(_ source: String?, authenticated: Bool, type: T.Type) -> AnyPublisher<T, Error> where T: Decodable
 }
 
 public class DiscoverServerHandler: DiscoverServerHandling {
@@ -52,16 +61,16 @@ public class DiscoverServerHandler: DiscoverServerHandling {
             switch self {
             case .discover:
                 if FeatureFlag.recommendations.enabled {
-                    contentPath.append("/content_v3.json")
+                    contentPath.append("/content_v4.json")
                 } else {
                     contentPath.append("/content_v2.json")
                 }
             case .search:
-                contentPath.append("/content_v3_search.json")
+                contentPath.append("/content_v4_search.json")
             case .signedIn:
-                contentPath.append("/content_v3_logged_in.json")
+                contentPath.append("/content_v4_logged_in.json")
             case .signedOut:
-                contentPath.append("/content_v3_logged_out.json")
+                contentPath.append("/content_v4_logged_out.json")
             }
 
             return contentPath
@@ -85,12 +94,6 @@ public class DiscoverServerHandler: DiscoverServerHandling {
         Task {
             let page = await discoverPage()
             completion(page.0, page.1)
-        }
-    }
-
-    public func discoverNetworkList(source: String, authenticated: Bool?, completion: @escaping ([PodcastNetwork]?) -> Void) {
-        discoverRequest(path: source, type: [PodcastNetwork].self, authenticated: authenticated) { networkList, _ in
-            completion(networkList)
         }
     }
 

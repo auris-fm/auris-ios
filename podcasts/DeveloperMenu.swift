@@ -289,9 +289,12 @@ struct DeveloperMenu: View {
             }
 
             Section {
-                Button("Reset Informational Modal Visibility") {
+                Button("Trigger Encourage Account Creation Modal") {
+                    // Backdate the anchor past the interval so the modal is due on the next launch.
+                    Settings.encourageAccountCreationReferenceDate = Date().addingTimeInterval(-Settings.encourageAccountCreationInterval)
+                }
+                Button("Reset Initial Onboarding Flow") {
                     Settings.shouldShowInitialOnboardingFlow = true
-                    Settings.hasShownInformationalViewModal = false
                 }
                 Button("Reset banners visibility") {
                     InformationalBannerType.allCases.forEach {
@@ -427,6 +430,13 @@ struct DeveloperMenu: View {
                 }
             } header: {
                 Text("Up Next")
+            }
+            Section {
+                Button("Reset Read State") {
+                    WhatsNewManager.shared.resetReadState()
+                }
+            } header: {
+                Text("What's New Feed")
             }
             Section {
                 Text(Bundle.main.identifier)

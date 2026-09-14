@@ -13,9 +13,12 @@ extension DownloadManager: URLSessionDelegate, URLSessionDownloadDelegate {
     // make sure to call the completion handler on the main queue, otherwise it will crash
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
 #if os(watchOS)
+        guard session.configuration.identifier == DownloadManager.cellBackgroundSessionId else { return }
+
         DispatchQueue.main.async { [weak self] in
             guard let self, let task = pendingWatchBackgroundTask else { return }
 
+            pendingWatchBackgroundTask = nil
             task.setTaskCompletedWithSnapshot(true)
         }
 #elseif APPCLIP || os(tvOS)
@@ -173,13 +176,9 @@ extension DownloadManager: URLSessionDelegate, URLSessionDownloadDelegate {
     }
 
     func processEpisode(_ episode: BaseEpisode, downloadedFile location: URL, reportedContentType: String?, copyFile: Bool) {
-        var contentType = reportedContentType
-
-        if FeatureFlag.useMimetypePackage.enabled {
-            contentType = MimetypeHelper.contetType(for: location)
-            if let contentType, contentType != episode.contentType {
-                DataManager.sharedManager.saveEpisode(contentType: contentType, episode: episode)
-            }
+        let contentType = MimetypeHelper.contetType(for: location)
+        if let contentType, contentType != episode.contentType {
+            DataManager.sharedManager.saveEpisode(contentType: contentType, episode: episode)
         }
 
         let fileSize = FileManager.default.fileSize(of: location) ?? 0

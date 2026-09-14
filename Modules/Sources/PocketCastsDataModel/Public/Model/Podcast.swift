@@ -60,6 +60,7 @@ public class Podcast: NSObject, Identifiable {
     @objc public var isPrivate = false
     @objc public var isExplicit = false
     @objc public var fundingURL: String?
+    @objc public var networkListId: String?
 
     @GRDBIgnore
     public var settings = PodcastSettings.defaults

@@ -168,7 +168,7 @@ struct Constants {
         static let hasSyncedEpisodesForPlaybackAsPlusUser = "hasSyncedEpisodesForPlayback%dAsPlusUser"
         static let top5PodcastsListLink = "top5PodcastsListLink2023_2"
         static let shouldShowInitialOnboardingFlow = "shouldShowInitialOnboardingFlow"
-        static let shouldShowEncourageAccountCreationModal = "shouldShowEncourageAccountCreationModal"
+        static let encourageAccountCreationReferenceDate = "encourageAccountCreationReferenceDate"
 
         static let autoplay = "autoplay"
 
@@ -257,10 +257,6 @@ struct Constants {
             static let triggerDates = "notifications.triggerDates"
         }
 
-        enum informationalModal {
-            static let hasShownViewModal = "hasShownViewModal"
-        }
-
         static let voiceBoostNEnabled = "VoiceBoostNEnabled"
     }
 
@@ -295,7 +291,6 @@ struct Constants {
     enum Limits {
         static let minTimeBetweenRemoteSkips: TimeInterval = 0.2
         static let maxDownloadConnectionsPerHost = 2
-        static let upNextClearWithoutWarning = 2
 
         static let minSleepTime = 5.minutes
         static let maxSleepTime = 5.hours
@@ -440,6 +435,7 @@ enum PlusUpgradeViewSource: String {
     case generatedTranscripts
     case onboarding
     case onboardingRecommendations = "onboarding_recommendations"
+    case encourageAccountCreation = "encourage_account_creation"
     case suggestedFolders = "suggested_folders"
     case bannerAd = "banner_ad"
     case login

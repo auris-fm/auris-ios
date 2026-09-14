@@ -27,25 +27,18 @@ class DiscoverCollectionHeader: UICollectionReusableView {
     @IBOutlet var avatarBorderView: ThemeableView! {
         didSet {
             avatarBorderView.layer.cornerRadius = 44
-        }
-    }
-
-    @IBOutlet var avatarShadowView: UIView! {
-        didSet {
-            avatarShadowView.layer.cornerRadius = 40
-            avatarShadowView.layer.shadowColor = UIColor.black.cgColor
-            avatarShadowView.layer.shadowOffset = CGSize(width: 0, height: 2)
-            avatarShadowView.layer.shadowOpacity = 0.15
-            avatarShadowView.layer.shadowRadius = 4
-            avatarShadowView.layer.shadowPath = UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 80, height: 80)).cgPath
+            avatarBorderView.layer.borderWidth = 1
+            setAvatarBorderColor()
         }
     }
 
     @IBOutlet var subtitleLabel: UILabel! {
         didSet {
+            subtitleLabel.font = .font(ofSize: 13, weight: .bold, scalingWith: .footnote)
             subtitleLabel.adjustsFontForContentSizeCategory = true
         }
     }
+
     @IBOutlet var headerView: ThemeableView! {
         didSet {
             headerView.style = .primaryUi02
@@ -143,13 +136,12 @@ class DiscoverCollectionHeader: UICollectionReusableView {
         setSubtitleColor()
     }
 
+    private func setAvatarBorderColor() {
+        avatarBorderView.layer.borderColor = AppTheme.colorForStyle(.primaryUi05).cgColor
+    }
+
     private func setSubtitleColor() {
-        if let colors = podcastCollection?.colors, let darkColor = colors.onDarkBackground, let lightColor = colors.onLightBackground {
-            let subtitleColor = Theme.isDarkTheme() ? darkColor : lightColor
-            subtitleLabel.textColor = UIColor(hex: subtitleColor)
-        } else {
-            subtitleLabel.textColor = AppTheme.colorForStyle(.support05)
-        }
+        subtitleLabel.textColor = podcastCollection?.colors?.activeThemeColor ?? AppTheme.colorForStyle(.support05)
     }
 
     private func setupCollageImage() {
@@ -181,12 +173,7 @@ class DiscoverCollectionHeader: UICollectionReusableView {
     }
 
     private func setImageTint() {
-        if let darkTintColor = podcastCollection?.colors?.onDarkBackground, let lightTintColor = podcastCollection?.colors?.onLightBackground {
-            let backgroundColor = Theme.isDarkTheme() ? darkTintColor : lightTintColor
-            collageTintView.backgroundColor = UIColor(hex: backgroundColor)
-        } else {
-            collageTintView.backgroundColor = AppTheme.colorForStyle(.support09)
-        }
+        collageTintView.backgroundColor = podcastCollection?.colors?.activeThemeColor ?? AppTheme.colorForStyle(.support09)
     }
 
     @objc private func linkTapped() {
@@ -196,5 +183,6 @@ class DiscoverCollectionHeader: UICollectionReusableView {
     @objc func themeDidChange() {
         setImageTint()
         setSubtitleColor()
+        setAvatarBorderColor()
     }
 }
