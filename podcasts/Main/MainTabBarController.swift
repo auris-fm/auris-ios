@@ -17,13 +17,24 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 
     lazy var endOfYear = EndOfYear()
 
-    private lazy var profileTabBarItem = UITabBarItem(title: L10n.profile, image: UIImage(named: "profile_tab"), tag: pcTabs.firstIndex(of: .profile) ?? -1)
+    /// Styles its badge as a plain red dot on the item itself, since Liquid Glass ignores the tab bar
+    /// appearance that does it for the older tab bar.
+    private lazy var profileTabBarItem: UITabBarItem = {
+        let item = UITabBarItem(title: L10n.profile, image: UIImage(named: "profile_tab"), tag: pcTabs.firstIndex(of: .profile) ?? -1)
+        item.badgeColor = .clear
+        item.setBadgeTextAttributes([.foregroundColor: UIColor.systemRed], for: .normal)
+        item.setBadgeTextAttributes([.foregroundColor: UIColor.systemRed], for: .selected)
+        return item
+    }()
 
     private lazy var upNextTabBarItem = UITabBarItem(title: L10n.upNext, image: UIImage(named: "upnext_tab"), tag: pcTabs.firstIndex(of: .upNext) ?? -1)
 
     /// The last Up Next count rendered into the tab, used to pulse the tab only
     /// when the queue actually changes (not on every refresh notification).
     private var previousUpNextCount: Int?
+
+    /// Keeps the account-creation modal off the same launch that just showed initial onboarding.
+    private var didPresentInitialOnboardingThisLaunch = false
 
     /// `true` while the Up Next "pulse" spring is in flight, so a burst of
     /// rapid adds doesn't stack overlapping transforms on the target (the tab
@@ -154,6 +165,8 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
         NotificationCenter.default.addObserver(self, selector: #selector(animateEpisodeAddedToUpNext(_:)), name: Constants.Notifications.upNextEpisodeAdded, object: nil)
         refreshUpNextTabBadge()
 
+        observeWhatsNewFeed()
+
         observersForEndOfYearStats()
         addBookmarkCreatedToastHandler()
         addBookmarkEnrichmentHandler()
@@ -172,30 +185,22 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 
         registerSceneAppearanceObserverIfNeeded()
         fireSystemThemeMayHaveChanged()
-        checkSubscriptionStatusChanged()
-        checkPromotionFinishedAcknowledged()
-        checkWhatsNewAcknowledged()
-
-        // Show any app launch announcements/prompts only once
-        if !viewDidAppearBefore {
-            showWhatsNewIfNeeded()
-            showEndOfYearPromptIfNeeded()
-
-            viewDidAppearBefore = true
-        }
 
         // if this key was never set lets default to Discovery or Podcast depending of podcasts followed
         if UserDefaults.standard.object(forKey: Constants.UserDefaults.lastTabOpened) == nil {
             selectedIndex = DataManager.sharedManager.podcastCount() > 0 ? Tab.podcasts.rawValue: Tab.discover.rawValue
         }
 
-        showInitialOnboardingIfNeeded()
-
         updateDatabaseIndexes()
         optimizeDatabaseIfNeeded()
 
-        if DataManager.loginAgain {
-            loginAgain()
+        let isFirstAppearance = !viewDidAppearBefore
+        viewDidAppearBefore = true
+
+        // This can run inside the deferred-commit flush of a modal dismissal, where
+        // presenting or dismissing runs into the transition that is still tearing down.
+        DispatchQueue.main.async { [weak self] in
+            self?.showLaunchPromptsIfNeeded(isFirstAppearance: isFirstAppearance)
         }
     }
 
@@ -239,19 +244,30 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
     }
 
     private func showInitialOnboardingIfNeeded() {
-        // Show if the user is not logged in and has never seen the prompt before
-        if SyncManager.isUserLoggedIn() || (Settings.shouldShowInitialOnboardingFlow == false && Settings.hasSeenInitialOnboardingBefore == true) {
+        if SyncManager.isUserLoggedIn() {
             return
         }
 
-        if FeatureFlag.encourageAccountCreation.enabled,
-           !Settings.hasShownInformationalViewModal,
-           Settings.hasSeenInitialOnboardingBefore,
-           (UIApplication.shared.delegate as? AppDelegate)?.appInstallState == .updated {
-            NavigationManager.sharedManager.navigateTo(NavigationManager.onboardingFlow, data: ["flow": OnboardingFlow.Flow.encourageAccountCreation])
-        } else {
-            NavigationManager.sharedManager.navigateTo(NavigationManager.onboardingFlow, data: ["flow": OnboardingFlow.Flow.initialOnboarding])
+        // Recurring account-creation modal targets logged-out users who completed initial onboarding:
+        // first eligible launch, then every 60 days.
+        let hasCompletedInitialOnboarding = Settings.shouldShowInitialOnboardingFlow == false && Settings.hasSeenInitialOnboardingBefore == true
+        if hasCompletedInitialOnboarding {
+            // Don't chain into the modal on the same launch we showed onboarding — it'd re-trigger
+            // here since `shouldShowInitialOnboardingFlow` flips false immediately. Shows next launch.
+            guard !didPresentInitialOnboardingThisLaunch else { return }
+
+            // Don't dismiss a presented modal (e.g. What's New) to show EAC — that would burn its
+            // announcement. Skips EAC for this launch; the next launch retries.
+            guard presentedViewController == nil else { return }
+
+            if Settings.shouldShowEncourageAccountCreationModal() {
+                NavigationManager.sharedManager.navigateTo(NavigationManager.onboardingFlow, data: ["flow": OnboardingFlow.Flow.encourageAccountCreation])
+            }
+            return
         }
+
+        didPresentInitialOnboardingThisLaunch = true
+        NavigationManager.sharedManager.navigateTo(NavigationManager.onboardingFlow, data: ["flow": OnboardingFlow.Flow.initialOnboarding])
 
         // Set the flag so the user won't see the on launch flow again
         Settings.shouldShowInitialOnboardingFlow = false
@@ -316,6 +332,10 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
             let tab = pcTabs[tabIndex]
             trackTabOpened(tab)
             AnalyticsHelper.tabSelected(tab: tab)
+        }
+
+        if item === profileTabBarItem, FeatureFlag.whatsNewFeed.enabled {
+            WhatsNewManager.shared.markFeedAsSeen()
         }
 
         UserDefaults.standard.set(tabIndex, forKey: Constants.UserDefaults.lastTabOpened)
@@ -782,8 +802,12 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 
     // MARK: - End of Year
 
+    /// Whether End of Year has a badge waiting on the Profile tab, which it shares with What's New.
+    private var showsEndOfYearBadge = false
+
     @objc private func profileSeen() {
-        profileTabBarItem.badgeValue = nil
+        showsEndOfYearBadge = false
+        updateProfileTabBadge()
         if let year = endOfYear.storyModelType?.year {
             Settings.setShowBadgeForEndOfYear(false, year: year)
         }
@@ -861,7 +885,8 @@ class MainTabBarController: UITabBarController, NavigationProtocol {
 
     private func displayEndOfYearBadgeIfNeeded() {
         if EndOfYear.isEligible, let year = endOfYear.storyModelType?.year, Settings.showBadgeForEndOfYear(year) {
-            profileTabBarItem.badgeValue = "●"
+            showsEndOfYearBadge = true
+            updateProfileTabBadge()
         }
     }
 
@@ -980,7 +1005,7 @@ private extension MainTabBarController {
             .compactMap { event in
                 bookmarkManager.bookmark(for: event.uuid).map { ($0, event.source) }
             }
-            .sink { bookmark, source in
+            .sink { (bookmark: Bookmark, source: BookmarkAnalyticsSource) in
                 Task {
                     await bookmarkManager.enrich(bookmark, source: source)
                 }
@@ -1078,6 +1103,24 @@ private extension MainTabBarController {
 // MARK: - App Launch Prompts
 
 private extension MainTabBarController {
+    func showLaunchPromptsIfNeeded(isFirstAppearance: Bool) {
+        checkSubscriptionStatusChanged()
+        checkPromotionFinishedAcknowledged()
+        checkWhatsNewAcknowledged()
+
+        // Show any app launch announcements/prompts only once
+        if isFirstAppearance {
+            showWhatsNewIfNeeded()
+            showEndOfYearPromptIfNeeded()
+        }
+
+        showInitialOnboardingIfNeeded()
+
+        if DataManager.loginAgain {
+            loginAgain()
+        }
+    }
+
     func showEndOfYearPromptIfNeeded() {
         // Only show the prompt if there isn't an active announcement flow
         guard !isShowingWhatsNew, AnnouncementFlow.current == .none else { return }
@@ -1100,6 +1143,9 @@ private extension MainTabBarController {
 extension MainTabBarController {
 
     func showNotificationsPermissions() {
+        // Present inline so it beats the `.onboardingFlowDidDismiss` EOY prompt; skip only when
+        // another flow is already presenting, since we can't stack on it.
+        guard presentedViewController == nil else { return }
         present(NotificationsPermissionsViewModel.makeController(), animated: true)
     }
 }
@@ -1298,5 +1344,33 @@ extension MainTabBarController {
     func resetUpNextTabImage() {
         upNextTabBarItem.image = UIImage(named: "upnext_tab")
         upNextTabBarItem.selectedImage = nil
+    }
+}
+
+// MARK: - What's New
+
+private extension MainTabBarController {
+    /// Keeps the dot on the Profile tab in step with the feed: it shows while the feed has an unread
+    /// message the tab hasn't pointed the user at, and tapping the tab takes it off.
+    func observeWhatsNewFeed() {
+        guard FeatureFlag.whatsNewFeed.enabled else { return }
+
+        let manager = WhatsNewManager.shared
+        Publishers.Merge3(
+            manager.$catalog.map { _ in },
+            manager.$readState.map { _ in },
+            NotificationCenter.default.publisher(for: ServerNotifications.subscriptionStatusChanged).map { _ in }
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.updateProfileTabBadge()
+        }
+        .store(in: &cancellables)
+    }
+
+    /// Shows the dot while End of Year or What's New has something waiting on Profile.
+    func updateProfileTabBadge() {
+        let showsWhatsNewBadge = FeatureFlag.whatsNewFeed.enabled && WhatsNewManager.shared.hasUnseenMessages()
+        profileTabBarItem.badgeValue = showsEndOfYearBadge || showsWhatsNewBadge ? "●" : nil
     }
 }
