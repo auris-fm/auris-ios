@@ -62,20 +62,29 @@ class VoiceAsrEngine {
     /// Only successes are cached: a failed preload clears the task so a later
     /// `start()` (gate restart) re-attempts `ensureReady()` instead of reusing
     /// the failure forever.
+    ///
+    /// Concurrency note: `preloadBackend()`'s check-then-set is not atomic — two
+    /// concurrent calls can both spawn `ensureReady()` (last writer wins the
+    /// cache; the identity guard still prevents stale clears). Backends must
+    /// therefore tolerate concurrent `ensureReady()` calls ( SenseVoice/Canary/
+    /// Whisper all do: the call is idempotent per instance).
     func preloadBackend() {
         backendReadyLock.lock()
         let existing = backendReadyBox.task
         backendReadyLock.unlock()
         guard existing == nil else { return }
         let box = BackendReadyTaskBox()
-        let task = Task { [backend, weak self] in
+        // Intentional box→task→box cycle: the strong capture keeps `box` alive
+        // until the task completes so the failure path can always clear the
+        // cache; the cycle frees itself when the task returns.
+        let task = Task { [backend, self] in
             let result = await backend.ensureReady()
             switch result {
             case .success:
                 FileLog.shared.addMessage("[VoicePipeline] backend ready \(backend.requiredModel.id)")
             case .failure(let error):
                 FileLog.shared.addMessage("[VoicePipeline] backend FAILED \(backend.requiredModel.id): \(error)")
-                self?.clearBackendReadyTask(box)
+                self.clearBackendReadyTask(box)
             }
             return result
         }
