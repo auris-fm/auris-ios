@@ -37,8 +37,42 @@ final class SenseVoiceLanguageDetectionTests: XCTestCase {
         )
     }
 
+    func testFallsBackToScriptWhenNoTagPresent() {
+        // Script-based final fallback (LID-null resilience): Han → zh,
+        // Hiragana/Katakana → ja, Hangul → ko. Latin/empty → nil.
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "这个嘉宾还在哪些节目上过"),
+            "zh"
+        )
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "こんにちは、このゲスト"),
+            "ja"
+        )
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "안녕하세요 이 게스트"),
+            "ko"
+        )
+        XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "hello there"))
+        XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: ""))
+    }
+
+    func testScriptFallbackDoesNotOverrideStructuredOrTag() {
+        // Structured LID still wins even when it disagrees with the script.
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: "yue", text: "這個嘉賓"),
+            "yue"
+        )
+        // Text tag still beats script.
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "<|yue|>這個嘉賓"),
+            "yue"
+        )
+    }
+
     func testReturnsNilWhenNeitherPresent() {
-        XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: "", text: "你好"))
+        // Updated per LID-null resilience spec: bare Han text now resolves via
+        // the script fallback (→ zh); latin text still yields nil.
+        XCTAssertEqual(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: "", text: "你好"), "zh")
         XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "hello"))
         XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: "<|NEUTRAL|>", text: "hello"))
     }
