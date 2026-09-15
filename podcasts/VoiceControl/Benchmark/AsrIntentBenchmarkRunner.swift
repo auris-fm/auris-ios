@@ -26,6 +26,11 @@ final class AsrIntentBenchmarkRunner {
         /// Post-run device state: the harness does not restore the production
         /// english_v1 model after installing the sideloaded dual_v1 release.
         let deviceStateAfterRun: String
+        /// iOS production translate (Apple Translation) cannot run on simulator;
+        /// iOS-native translate cost is measurable only on a physical iPhone.
+        /// This sim run measures router-stage cost with a Gemini-stand-in sidecar
+        /// (same engine as the host benchmark's OnDeviceTranslate).
+        let translateEngineNote: String
     }
 
     private let modelManager: ModelManager

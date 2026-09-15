@@ -112,7 +112,8 @@ enum AsrIntentBenchmarkHarness {
                 translationSource: translationsURL.map { "sidecar@\(runner.sha256(of: $0) ?? "unknown")" } ?? "native_fallback",
                 gate: "benchmark-export exception, authorized @spec 2026-09-15",
                 finishedAt: Date(),
-                deviceStateAfterRun: "live LFM dir holds sideloaded dual_v1; production english_v1 NOT restored (dedicated benchmark sim)"
+                deviceStateAfterRun: "live LFM dir holds sideloaded dual_v1; production english_v1 NOT restored (dedicated benchmark sim)",
+                translateEngineNote: "Apple Translation cannot run on simulator — iOS translate-stage cost is physical-iPhone-only; this run measures router cost with Gemini-stand-in sidecar (host OnDeviceTranslate engine parity)"
             )
 
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
