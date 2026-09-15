@@ -178,14 +178,27 @@ final class LfmIntentRouter {
         precondition(inputFormat.isReadyForInference, "unsupported format must fail before load")
 
         do {
-            let prompt = LfmPrompt.render(transcript: trimmed, history: history)
+            // Byte-pinned routing-input rendering; for english_v1 this is the
+            // trimmed transcript unchanged. Unknown formats can't reach here
+            // (unsupported formats fail before load), and a blank transcript
+            // is rejected earlier, so rendering cannot throw.
+            let routingInput = try RoutingInputRenderer.render(
+                format: inputFormat,
+                input: IntentRoutingInput(
+                    sourceTranscript: input.sourceTranscript,
+                    sourceLanguage: input.sourceLanguage,
+                    routerTranscript: trimmed,
+                    translationKind: input.translationKind
+                )
+            )
+            let prompt = LfmPrompt.render(transcript: routingInput, history: history)
 
             let tokenizeStart = now()
             let promptTokenIds: [Int]
             let userTokenIds: [Int]
             do {
                 promptTokenIds = try inference.tokenize(prompt, addBos: false)
-                userTokenIds = try inference.tokenize(trimmed, addBos: false)
+                userTokenIds = try inference.tokenize(routingInput, addBos: false)
             } catch {
                 stages.tokenizeMs = elapsedMs(since: tokenizeStart)
                 FileLog.shared.addMessage("[VoicePipeline] LFM tokenize failed")

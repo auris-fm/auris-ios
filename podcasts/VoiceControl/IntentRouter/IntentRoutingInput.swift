@@ -45,8 +45,14 @@ enum RouterInputFormat: Equatable {
         }
     }
 
+    /// Benchmark-only opt-in for the reviewed/debug harness path (Item 21).
+    /// Production code must never set this; the debug benchmark harness sets it
+    /// for the measured dual_v1 run and clears it afterwards.
+    nonisolated(unsafe) static var benchmarkGateOpen = false
+
     var isReadyForInference: Bool {
         if case .englishV1 = self { return true }
+        if case .dualV1 = self { return Self.benchmarkGateOpen }
         return false
     }
 

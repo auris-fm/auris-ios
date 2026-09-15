@@ -7,6 +7,21 @@ struct RepresentationBenchmarkCase: Equatable {
     let language: String
     let nativeText: String
     let englishText: String
+    var isRejection: Bool
+
+    init(
+        caseID: String,
+        language: String,
+        nativeText: String,
+        englishText: String,
+        isRejection: Bool = false
+    ) {
+        self.caseID = caseID
+        self.language = language
+        self.nativeText = nativeText
+        self.englishText = englishText
+        self.isRejection = isRejection
+    }
 }
 
 struct RepresentationBenchmarkConfig: Codable, Equatable {

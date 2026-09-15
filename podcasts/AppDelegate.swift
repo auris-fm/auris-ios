@@ -38,6 +38,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         configureFirebase()
         TraceManager.shared.setup(handler: traceHandler)
+        #if DEBUG
+        AsrIntentBenchmarkHarness.runIfRequested()
+        #endif
 
         setupSecrets()
         addAnalyticsObservers()
