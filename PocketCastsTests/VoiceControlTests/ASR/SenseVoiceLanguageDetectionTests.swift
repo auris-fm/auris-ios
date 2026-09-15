@@ -56,6 +56,19 @@ final class SenseVoiceLanguageDetectionTests: XCTestCase {
         XCTAssertNil(SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: ""))
     }
 
+    func testScriptFallbackPrefersKanaAndHangulOverLeadingHan() {
+        // Mixed-script Japanese leading with a Han kanji must resolve ja.
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "漢字のテスト"),
+            "ja"
+        )
+        // Han-leading Korean (hanja + hangul) must resolve ko.
+        XCTAssertEqual(
+            SenseVoiceBackend.resolveDetectedLanguage(structuredLang: nil, text: "漢字 한글"),
+            "ko"
+        )
+    }
+
     func testScriptFallbackDoesNotOverrideStructuredOrTag() {
         // Structured LID still wins even when it disagrees with the script.
         XCTAssertEqual(
