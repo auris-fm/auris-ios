@@ -26,7 +26,7 @@ final class AsrIntentBenchmarkRunner {
     }
 
     private let modelManager: ModelManager
-    let driver = RepresentationBenchmarkDriver()
+    var driver = RepresentationBenchmarkDriver()
 
     init(modelManager: ModelManager = ModelManager()) {
         self.modelManager = modelManager

@@ -46,6 +46,8 @@ struct RepresentationBenchmarkCaseReport: Codable {
         let totalLatencyMs: Double
         let stageLatencies: RouterStageLatencies
         let outcome: String
+        var failedStage: String?
+        var reason: String?
     }
 }
 
@@ -88,7 +90,9 @@ struct RepresentationBenchmarkDriver {
                     .init(
                         totalLatencyMs: diagnostic.totalLatencyMs,
                         stageLatencies: diagnostic.stageLatencies,
-                        outcome: diagnostic.finalOutcome
+                        outcome: diagnostic.finalOutcome,
+                        failedStage: diagnostic.failedStage,
+                        reason: diagnostic.reason
                     )
                 )
             }

@@ -112,3 +112,26 @@ final class RepresentationBenchmarkDriverTests: XCTestCase {
         XCTAssertEqual(paths?.count, 2, "both D and E reports present per case")
     }
 }
+
+extension RepresentationBenchmarkDriverTests {
+    func test_samplesCarryFailureDiagnostics() {
+        var d = diagnostic(totalMs: 10, tokenize: 5, classify: 2, generate: 1)
+        // Rebuild with failure fields via the memberwise init.
+        d = RouterStageDiagnostic(
+            modelRelease: "test", quant: "q4", inputFormat: "f", sourceLanguage: "zh",
+            translationKind: "none", classifierLabel: nil, finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
+            failedStage: RouterStageDiagnostic.stageTokenize, reason: RouterStageDiagnostic.reasonTokenizeFailed,
+            stageLatencies: RouterStageLatencies(tokenizeMs: 5, classifyMs: nil, generateMs: nil, parseRepairMs: nil, mapperDialogMs: nil),
+            totalLatencyMs: 10
+        )
+        let driver = RepresentationBenchmarkDriver(config: .init(warmupIterations: 0, measuredIterations: 1))
+        let report = driver.measureCase(
+            RepresentationBenchmarkCase(caseID: "c1", language: "zh", nativeText: "x", englishText: "y"),
+            inputFormat: "test_format",
+            makeInput: { .english(transcript: $0.englishText) },
+            pathRouter: { _ in d }
+        )
+        XCTAssertEqual(report.samples.first?.failedStage, "tokenize")
+        XCTAssertEqual(report.samples.first?.reason, "tokenize_failed")
+    }
+}
