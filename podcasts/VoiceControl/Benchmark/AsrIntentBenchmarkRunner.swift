@@ -23,6 +23,9 @@ final class AsrIntentBenchmarkRunner {
         let translationSource: String
         let gate: String
         let finishedAt: Date
+        /// Post-run device state: the harness does not restore the production
+        /// english_v1 model after installing the sideloaded dual_v1 release.
+        let deviceStateAfterRun: String
     }
 
     private let modelManager: ModelManager

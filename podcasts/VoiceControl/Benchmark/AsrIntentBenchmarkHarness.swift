@@ -48,7 +48,11 @@ enum AsrIntentBenchmarkHarness {
             let runner = AsrIntentBenchmarkRunner()
             runner.driver.config = config
             let translations = try translationsURL.map { try UtteranceSetLoader.loadTranslations(fileURL: $0) } ?? [:]
-            var cases = try UtteranceSetLoader.load(fileURL: utterancesURL, translations: translations)
+            var cases = try UtteranceSetLoader.load(
+                fileURL: utterancesURL,
+                translations: translations,
+                failClosedOnMissingTranslations: true
+            )
             if let maxCases, cases.count > maxCases {
                 cases = Array(cases.prefix(maxCases))
             }
@@ -105,9 +109,10 @@ enum AsrIntentBenchmarkHarness {
                 utteranceSha256: runner.sha256(of: utterancesURL) ?? "unknown",
                 sideloadRelease: sideloadRelease,
                 sideloadRouterInputFormat: sideloadFormat,
-                translationSource: translationsURL == nil ? "native_fallback" : "sidecar",
+                translationSource: translationsURL.map { "sidecar@\(runner.sha256(of: $0) ?? "unknown")" } ?? "native_fallback",
                 gate: "benchmark-export exception, authorized @spec 2026-09-15",
-                finishedAt: Date()
+                finishedAt: Date(),
+                deviceStateAfterRun: "live LFM dir holds sideloaded dual_v1; production english_v1 NOT restored (dedicated benchmark sim)"
             )
 
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

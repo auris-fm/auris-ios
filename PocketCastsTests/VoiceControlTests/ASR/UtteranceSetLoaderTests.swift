@@ -44,9 +44,28 @@ final class UtteranceSetLoaderTests: XCTestCase {
         XCTAssertEqual(cases[0].englishText, "pause playback")
     }
 
-    func test_missingTranslationFallsBackToNativeText() throws {
+    func test_missingTranslationFallsBackToNativeTextByDefault() throws {
         let cases = try UtteranceSetLoader.load(jsonl: line(id: "zh_x"), translations: [:])
         XCTAssertEqual(cases[0].englishText, "暂停")
+    }
+
+    func test_failClosedModeThrowsOnMissingNonEnglishTranslation() {
+        XCTAssertThrowsError(
+            try UtteranceSetLoader.load(
+                jsonl: line(id: "zh_x"),
+                translations: [:],
+                failClosedOnMissingTranslations: true
+            )
+        )
+    }
+
+    func test_failClosedModeAllowsEnglishCasesWithoutSidecar() throws {
+        let cases = try UtteranceSetLoader.load(
+            jsonl: line(id: "en_x", language: "en", text: "pause"),
+            translations: [:],
+            failClosedOnMissingTranslations: true
+        )
+        XCTAssertEqual(cases[0].englishText, "pause")
     }
 
     func test_rejectionFlagSurvives() throws {

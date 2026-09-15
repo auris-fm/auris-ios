@@ -14,7 +14,8 @@ enum UtteranceSetLoader {
 
     static func load(
         jsonl: String,
-        translations: [String: String] = [:]
+        translations: [String: String] = [:],
+        failClosedOnMissingTranslations: Bool = false
     ) throws -> [RepresentationBenchmarkCase] {
         var cases: [RepresentationBenchmarkCase] = []
         for (index, rawLine) in jsonl.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
@@ -28,12 +29,19 @@ enum UtteranceSetLoader {
             else {
                 throw LoaderError(line: index + 1, description: "missing required contract fields")
             }
+            let english = translations[caseID]
+            if failClosedOnMissingTranslations, language != "en", english == nil {
+                throw LoaderError(
+                    line: index + 1,
+                    description: "missing non-English sidecar translation for \(caseID) (fail-closed)"
+                )
+            }
             cases.append(
                 RepresentationBenchmarkCase(
                     caseID: caseID,
                     language: language,
                     nativeText: text,
-                    englishText: translations[caseID] ?? text,
+                    englishText: english ?? text,
                     isRejection: obj["is_rejection"] as? Bool ?? false
                 )
             )
@@ -41,8 +49,16 @@ enum UtteranceSetLoader {
         return cases
     }
 
-    static func load(fileURL: URL, translations: [String: String] = [:]) throws -> [RepresentationBenchmarkCase] {
-        try load(jsonl: String(contentsOf: fileURL, encoding: .utf8), translations: translations)
+    static func load(
+        fileURL: URL,
+        translations: [String: String] = [:],
+        failClosedOnMissingTranslations: Bool = false
+    ) throws -> [RepresentationBenchmarkCase] {
+        try load(
+            jsonl: String(contentsOf: fileURL, encoding: .utf8),
+            translations: translations,
+            failClosedOnMissingTranslations: failClosedOnMissingTranslations
+        )
     }
 
     /// Loads a `{ "case_id": "english", … }` JSON sidecar.
