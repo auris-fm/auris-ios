@@ -45,9 +45,15 @@ extension PodcastViewController {
         forceCollapsingHeaderIfNeeded()
 
         if SyncManager.isUserLoggedIn() {
-            guard let episodes = ApiServerHandler.shared.retrieveEpisodeTaskSynchronouusly(podcastUuid: uuid) else { return }
-
-            DataManager.sharedManager.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
+            if let episodes = ApiServerHandler.shared.retrieveEpisodeTaskSynchronouusly(podcastUuid: uuid) {
+                DataManager.sharedManager.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
+            } else {
+                // A failed/stalled episode sync must not hang the details page on the
+                // spinner (task #1: the sync leg previously returned early, leaving the
+                // loading state up forever). Degrade gracefully: log the failed leg and
+                // render whatever episodes are cached locally.
+                FileLog.shared.addMessage("[PodcastDetails] episode sync returned no data for \(uuid) — rendering local episodes (bounded failure)")
+            }
         }
         loadLocalEpisodes(podcast: podcast, animated: false)
 
