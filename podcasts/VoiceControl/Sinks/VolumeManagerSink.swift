@@ -3,7 +3,7 @@ import MediaPlayer
 
 class VolumeManagerSink: VoiceVolumeSink {
     /// Lazily create MPVolumeView to avoid side effects during VoiceControl init.
-    private lazy var volumeView: MPVolumeView = MPVolumeView()
+    private lazy var volumeView = MPVolumeView()
 
     func setVolume(_ volume: Int) -> VoiceResponse {
         let clamped = max(0, min(100, volume))

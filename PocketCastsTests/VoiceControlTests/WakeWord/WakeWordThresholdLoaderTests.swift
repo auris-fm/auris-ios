@@ -44,7 +44,8 @@ final class WakeWordThresholdLoaderTests: XCTestCase {
         ])
         let result = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: tempDir)
         guard case .success(let threshold) = result else {
-            return XCTFail("Expected success, got \(result)")
+            XCTFail("Expected success, got \(result)")
+            return
         }
         XCTAssertEqual(threshold, 0.8, accuracy: 0.0001)
     }

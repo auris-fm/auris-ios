@@ -12,7 +12,8 @@ final class WakeWordDetectorTests: XCTestCase {
         )
         let result = detector.detect(samples: [Float](repeating: 0, count: 32000), sampleRate: 16000)
         guard case .error(let code) = result else {
-            return XCTFail("Expected .error, got \(result)")
+            XCTFail("Expected .error, got \(result)")
+            return
         }
         XCTAssertFalse(code.isEmpty)
         detector.release()
@@ -27,7 +28,8 @@ final class WakeWordDetectorTests: XCTestCase {
         )
         let result = detector.detect(samples: [], sampleRate: 16000)
         guard case .error = result else {
-            return XCTFail("Expected .error, got \(result)")
+            XCTFail("Expected .error, got \(result)")
+            return
         }
         detector.release()
     }

@@ -2,12 +2,19 @@ import Foundation
 
 public enum ServerConstants {
     public enum Urls {
+        /// Sync/refresh host — stays on Pocket Casts until the gateway supports
+        /// multi-upstream host routing (Android `serverMainUrl` parity).
         public static func main() -> String {
             production() ? "https://refresh.pocketcasts.com/" : "https://refresh.pocketcasts.net/"
         }
 
+        /// API-family cutover only: collapses onto the Auris gateway when cutover
+        /// is active (Android `serverApiUrl` parity). Other Pocket Casts hosts stay
+        /// direct — the gateway has a single upstream (`api.pocketcasts.com`).
         public static func api() -> String {
-            production() ? "https://api.pocketcasts.com/" : "https://api.pocketcasts.net/"
+            GatewayURLProvider.shared.resolve(
+                upstream: production() ? "https://api.pocketcasts.com/" : "https://api.pocketcasts.net/"
+            )
         }
 
         public static func cache() -> String {
@@ -27,7 +34,7 @@ public enum ServerConstants {
         }
 
         public static func files() -> String {
-            production() ? "https://files.pocketcasts.com/files/" : "https://files.pocketcasts.com/files/"
+            "https://files.pocketcasts.com/files/"
         }
 
         public static func share() -> String {
@@ -43,7 +50,9 @@ public enum ServerConstants {
         }
 
         public static var generatedTranscripts: String {
-            production() ? "https://shownotes.pocketcasts.com/generated_transcripts/" : "https://shownotes.pocketcasts.net/generated_transcripts/"
+            production()
+                ? "https://shownotes.pocketcasts.com/generated_transcripts/"
+                : "https://shownotes.pocketcasts.net/generated_transcripts/"
         }
 
         public static var tvPair: String {

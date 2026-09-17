@@ -77,7 +77,6 @@ final class AudioFeedbackRendererTests: XCTestCase {
         }
         return condition()
     }
-
 }
 
 // MARK: - Mocks

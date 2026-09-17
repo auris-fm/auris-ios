@@ -50,22 +50,55 @@ class VoiceAsrEngine {
         self.translationStage = translationStage
     }
 
-    private var backendReadyTask: Task<Result<Void, Error>, Never>?
+    private final class BackendReadyTaskBox {
+        var task: Task<Result<Void, Error>, Never>?
+    }
+
+    private let backendReadyBox = BackendReadyTaskBox()
+    private let backendReadyLock = NSLock()
 
     /// Kick off SenseVoice/Canary download+init before capture starts so the
-    /// first wake is not blocked behind a silent `await backendReadyTask`.
+    /// first wake is not blocked behind a silent backend-ready wait.
+    /// Only successes are cached: a failed preload clears the task so a later
+    /// `start()` (gate restart) re-attempts `ensureReady()` instead of reusing
+    /// the failure forever.
+    ///
+    /// Concurrency note: `preloadBackend()`'s check-then-set is not atomic — two
+    /// concurrent calls can both spawn `ensureReady()` (last writer wins the
+    /// cache; the identity guard still prevents stale clears). Backends must
+    /// therefore tolerate concurrent `ensureReady()` calls ( SenseVoice/Canary/
+    /// Whisper all do: the call is idempotent per instance).
     func preloadBackend() {
-        guard backendReadyTask == nil else { return }
-        backendReadyTask = Task {
+        backendReadyLock.lock()
+        let existing = backendReadyBox.task
+        backendReadyLock.unlock()
+        guard existing == nil else { return }
+        let box = BackendReadyTaskBox()
+        // Intentional box→task→box cycle: the strong capture keeps `box` alive
+        // until the task completes so the failure path can always clear the
+        // cache; the cycle frees itself when the task returns.
+        let task = Task { [backend, self] in
             let result = await backend.ensureReady()
             switch result {
             case .success:
                 FileLog.shared.addMessage("[VoicePipeline] backend ready \(backend.requiredModel.id)")
             case .failure(let error):
                 FileLog.shared.addMessage("[VoicePipeline] backend FAILED \(backend.requiredModel.id): \(error)")
+                self.clearBackendReadyTask(box)
             }
             return result
         }
+        box.task = task
+        backendReadyLock.lock()
+        backendReadyBox.task = task
+        backendReadyLock.unlock()
+    }
+
+    private func clearBackendReadyTask(_ box: BackendReadyTaskBox) {
+        backendReadyLock.lock()
+        defer { backendReadyLock.unlock() }
+        guard let cached = backendReadyBox.task, box.task != nil, cached == box.task else { return }
+        backendReadyBox.task = nil
     }
 
     func start() {
@@ -136,9 +169,12 @@ class VoiceAsrEngine {
 
         guard !utterance.isEmpty else { return }
         let ready: Result<Void, Error>
-        if let backendReadyTask {
+        backendReadyLock.lock()
+        let cachedReadyTask = backendReadyBox.task
+        backendReadyLock.unlock()
+        if let cachedReadyTask {
             let waitStarted = Date()
-            ready = await backendReadyTask.value
+            ready = await cachedReadyTask.value
             let waitMs = Int(Date().timeIntervalSince(waitStarted) * 1000)
             if waitMs > 50 {
                 FileLog.shared.addMessage("[VoicePipeline] asr waited \(waitMs)ms for backend")

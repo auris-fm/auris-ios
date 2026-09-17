@@ -131,11 +131,15 @@ final class SenseVoiceBackend: AsrBackend {
     )
     private static let supportedLangs: Set<String> = ["zh", "en", "ja", "ko", "yue"]
 
-    /// Prefer structured LID; fall back to a leading text tag. Always returns a bare
-    /// code (`zh`, `en`, …) — never the raw `<|zh|>` token sherpa puts in `result.lang`.
+    /// Prefer structured LID; fall back to a leading text tag, then to script
+    /// detection (LID-null resilience: structured LID nulling on valid speech
+    /// must not silently disable the multilingual translate path). Always
+    /// returns a bare code (`zh`, `en`, …) — never the raw `<|zh|>` token sherpa
+    /// puts in `result.lang`.
     static func resolveDetectedLanguage(structuredLang: String?, text: String) -> String? {
         if let normalized = normalizeLanguageCode(structuredLang) { return normalized }
-        return detectLanguage(from: text)
+        if let tagged = detectLanguage(from: text) { return tagged }
+        return detectLanguageByScript(from: text)
     }
 
     /// Maps `<|zh|>` / `<|zh/en|>` / `zh` → `zh`; unrecognized / unsupported → nil.
@@ -164,6 +168,27 @@ final class SenseVoiceBackend: AsrBackend {
               match.range(at: 1).location != NSNotFound else { return nil }
         let code = ns.substring(with: match.range(at: 1)).lowercased()
         return supportedLangs.contains(code) ? code : nil
+    }
+
+    /// Deterministic script-range fallback used only when structured LID and the
+    /// text tag are both absent. Priority scan (not first-hit): any
+    /// Hiragana/Katakana → `ja`, else any Hangul → `ko`, else any Han → `zh`
+    /// (Han is shared with `yue`, which script alone cannot distinguish —
+    /// structured LID or the text tag remain the only `yue` sources). The
+    /// priority matters for mixed-script text: Japanese commonly leads with a
+    /// Han kanji, so first-hit order would mislabel it `zh`. Latin or empty
+    /// text → nil.
+    static func detectLanguageByScript(from text: String) -> String? {
+        var hasHan = false
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x309F, 0x30A0...0x30FF: return "ja" // Hiragana / Katakana anywhere → ja
+            case 0xAC00...0xD7AF, 0x1100...0x11FF: return "ko" // Hangul syllables / jamo anywhere → ko
+            case 0x4E00...0x9FFF, 0x3400...0x4DBF: hasHan = true // defer: check kana/hangul first
+            default: continue
+            }
+        }
+        return hasHan ? "zh" : nil
     }
 
     private func stripLanguageTag(_ text: String) -> String {

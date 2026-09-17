@@ -1,4 +1,5 @@
 import XCTest
+import PocketCastsDataModel
 @testable import podcasts
 
 final class VoiceIntentExecutorTests: XCTestCase {
@@ -14,6 +15,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     fileprivate var mockPlaybackQuerySink: MockPlaybackQuerySink!
     fileprivate var mockStatsQuerySink: MockStatsQuerySink!
     fileprivate var mockCloudRouteSink: MockCloudRouteSink!
+    fileprivate var mockPlaybackContextProvider: MockPlaybackContextProvider!
     var gracePeriodSignal: GracePeriodSignal!
 
     override func setUp() {
@@ -28,6 +30,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         mockPlaybackQuerySink = MockPlaybackQuerySink()
         mockStatsQuerySink = MockStatsQuerySink()
         mockCloudRouteSink = MockCloudRouteSink()
+        mockPlaybackContextProvider = MockPlaybackContextProvider()
         gracePeriodSignal = GracePeriodSignal()
         executor = VoiceIntentExecutor(
             playbackSink: mockPlaybackSink,
@@ -40,6 +43,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             playbackQuerySink: mockPlaybackQuerySink,
             statsQuerySink: mockStatsQuerySink,
             cloudRouteSink: mockCloudRouteSink,
+            playbackContextProvider: mockPlaybackContextProvider,
             gracePeriodSignal: gracePeriodSignal
         )
     }
@@ -102,17 +106,80 @@ final class VoiceIntentExecutorTests: XCTestCase {
     }
 
     func test_execute_cloudRoute_callsCloudSink() async {
-        let context = PlaybackContext(episodeId: "ep1", positionMs: 5000, recentTimestamps: [])
-        let intent = CloudRouteIntent(request: "find similar", tier: .premium, context: context)
+        let context = PlaybackContext(
+            episodeId: "ep1",
+            podcastId: "pod1",
+            referencePositionMs: 4_000,
+            clientPositionMs: 5_000,
+            recentReferencePositions: [1_000, 2_000],
+            previousReferencePositionMs: 3_000
+        )
+        mockPlaybackContextProvider.context = context
+        let intent = CloudRouteIntent(request: "find similar", tier: .premium)
         _ = await executor.execute(intent)
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")
+        XCTAssertEqual(mockCloudRouteSink.lastContext, context)
     }
 
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
         _ = await executor.execute(PlaybackIntent.pause)
+        // GracePeriodSignal.startOrReset hops to the main queue (Timer must bind
+        // to the main run loop), so activation lands asynchronously. Drain the
+        // main queue before asserting, otherwise this test races the hop.
+        let mainQueueDrained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { mainQueueDrained.fulfill() }
+        await fulfillment(of: [mainQueueDrained], timeout: 2)
         XCTAssertTrue(gracePeriodSignal.isActive)
+    }
+
+    func test_runtimePlaybackContextProvider_populatesPlaybackAndReferenceContext() {
+        let episode = Episode()
+        episode.uuid = "episode-1"
+        episode.podcastUuid = "podcast-1"
+
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: MockPlaybackState(episode: episode, currentTime: 123.456),
+            fingerprintMapper: MockFingerprintMapper(referenceTime: 111.222),
+            cloudPlaybackContextState: CloudPlaybackContextState(
+                recentReferencePositions: [11_000, 22_000],
+                previousReferencePositionMs: 33_000
+            )
+        )
+
+        guard let context = provider.current() else {
+            XCTFail("Expected playback context")
+            return
+        }
+
+        XCTAssertEqual(context.episodeId, "episode-1")
+        XCTAssertEqual(context.podcastId, "podcast-1")
+        XCTAssertEqual(context.clientPositionMs, 123_456)
+        XCTAssertEqual(context.referencePositionMs, 111_222)
+        XCTAssertEqual(context.recentReferencePositions, [11_000, 22_000])
+        XCTAssertEqual(context.previousReferencePositionMs, 33_000)
+    }
+
+    func test_runtimePlaybackContextProvider_nilReferencePositionWhenFingerprintMappingUnavailable() {
+        let episode = Episode()
+        episode.uuid = "episode-2"
+        episode.podcastUuid = "podcast-2"
+
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: MockPlaybackState(episode: episode, currentTime: 87.65),
+            fingerprintMapper: MockFingerprintMapper(referenceTime: nil),
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+
+        guard let context = provider.current() else {
+            XCTFail("Expected playback context")
+            return
+        }
+
+        XCTAssertEqual(context.episodeId, "episode-2")
+        XCTAssertEqual(context.clientPositionMs, 87_650)
+        XCTAssertNil(context.referencePositionMs)
     }
 }
 
@@ -237,10 +304,46 @@ private final class MockStatsQuerySink: VoiceStatsQuerySink {
 private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var routeToCloudCalled = false
     var lastRequest: String?
+    var lastContext: PlaybackContext?
 
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
         routeToCloudCalled = true
         lastRequest = request
+        lastContext = context
         return .spoken("Here's what I found")
+    }
+}
+
+private final class MockPlaybackContextProvider: PlaybackContextProvider {
+    var context: PlaybackContext?
+
+    func current() -> PlaybackContext? {
+        context
+    }
+}
+
+private struct MockPlaybackState: PlaybackStateProviding {
+    let episode: BaseEpisode?
+    let currentTime: TimeInterval
+
+    var currentEpisode: BaseEpisode? {
+        episode
+    }
+
+    func currentTimeSeconds() -> TimeInterval {
+        currentTime
+    }
+}
+
+private struct MockFingerprintMapper: FingerprintMappingProviding {
+    let referenceTime: TimeInterval?
+    var playbackTimeForReference: TimeInterval?
+
+    func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? {
+        referenceTime
+    }
+
+    func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
+        playbackTimeForReference ?? referenceTime
     }
 }

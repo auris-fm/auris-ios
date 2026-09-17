@@ -53,7 +53,6 @@ struct VoiceControlSettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
-
         }
         .navigationTitle("Voice Control")
     }

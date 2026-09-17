@@ -15,7 +15,7 @@ protocol AudioSessionDucking {
 /// When playback is not active, ducking is a no-op.
 class AudioSessionDucker: AudioSessionDucking {
     /// Lazily create MPVolumeView to avoid side effects during VoiceControl init.
-    private lazy var volumeView: MPVolumeView = MPVolumeView()
+    private lazy var volumeView = MPVolumeView()
     private var originalVolume: Float?
     private var isDucked = false
 

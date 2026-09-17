@@ -15,6 +15,7 @@ enum AnalyticsEvent: String {
     case voiceCommandExecuted
     case voiceRouterLatency
     case voiceRecognitionLatency
+    case cloudAssistantTurn
 
     // MARK: - User Lifecycle
 
