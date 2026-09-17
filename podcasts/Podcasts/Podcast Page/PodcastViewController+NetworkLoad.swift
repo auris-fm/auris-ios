@@ -52,7 +52,7 @@ extension PodcastViewController {
                 // spinner (task #1: the sync leg previously returned early, leaving the
                 // loading state up forever). Degrade gracefully: log the failed leg and
                 // render whatever episodes are cached locally.
-                FileLog.shared.addMessage("[PodcastDetails] episode sync returned no data for \(uuid) — rendering local episodes (bounded failure)")
+                FileLog.shared.addMessage("[PodcastViewController] episode sync returned no data for \(uuid) — rendering local episodes (bounded failure)")
             }
         }
         loadLocalEpisodes(podcast: podcast, animated: false)
