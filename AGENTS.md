@@ -153,3 +153,7 @@ Server objects use protobuf. To regenerate after API changes:
 brew install protobuf swift-protobuf  # One-time setup
 make update_proto API_PATH=/path/to/pocketcasts-api/api/modules/protobuf/src/main/proto
 ```
+
+## PR review discipline
+
+Before any PR merges, **every review comment on it must be addressed** — either fixed in code or explicitly resolved with a written justification. No comment is skipped silently. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's (@merlinran).
