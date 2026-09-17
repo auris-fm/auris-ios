@@ -14,6 +14,7 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
     private var requiredPlaybackRate: Double = 0
     private var shouldKeepPlaying = false
     private var volumeBoostEnabled = false
+    private var isHandlingRateChange = false
 
     private var lastBackgroundedDate: Date?
 
@@ -353,6 +354,12 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         // Give priority to player item error
         let playerError: Error? = (player.currentItem?.error ?? player.error)
         let playerNSError = playerError as? NSError
+        let logMessage = "AVPlayerItemStatusFailed on currentItem: \(playerErrorMessage) - \(playerItemErrorMessage)"
+
+        if let playerNSError, playerNSError.isOutOfStorage {
+            PlaybackManager.shared.playbackDidFail(error: .notEnoughStorage(logMessage: logMessage))
+            return true
+        }
 
         if let playerNSError, playerNSError.domain == NSURLErrorDomain, playerNSError.code != NSURLErrorNotConnectedToInternet,
            let episodeUuid {
@@ -360,7 +367,6 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
                 return false
             }
         }
-        let logMessage = "AVPlayerItemStatusFailed on currentItem: \(playerErrorMessage) - \(playerItemErrorMessage)"
         var error: PlaybackManager.PlaybackError = .playbackError(logMessage: logMessage, isLocalFile: isPlayingLocalFile)
         if let playerNSError,
            playerNSError.domain == NSURLErrorDomain {
@@ -428,15 +434,9 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
     }
 
     private static func unretainedDefaultPlayer(for pointer: UnsafeMutableRawPointer) -> DefaultPlayer? {
-        if FeatureFlag.useDefaultPlayerTapCookie.enabled {
-            let cookie = Unmanaged<AudioProcessingTapProxy>.fromOpaque(pointer).takeUnretainedValue()
-            guard let player = cookie.input else { return nil }
-            return player
-        } else if FeatureFlag.defaultPlayerFilterCallbackFix.enabled {
-            return Unmanaged<DefaultPlayer>.fromOpaque(pointer).takeUnretainedValue()
-        } else {
-            return unsafeBitCast(pointer, to: DefaultPlayer.self)
-        }
+        let cookie = Unmanaged<AudioProcessingTapProxy>.fromOpaque(pointer).takeUnretainedValue()
+        guard let player = cookie.input else { return nil }
+        return player
     }
 
         private func createAudioMix() {
@@ -445,11 +445,8 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
             let mutableMix = AVMutableAudioMix()
             let audioMixInputParameters = AVMutableAudioMixInputParameters(track: assetTrack)
 
-            var clientInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-            if FeatureFlag.useDefaultPlayerTapCookie.enabled {
-                let tapCookie = AudioProcessingTapProxy(input: self)
-                clientInfo = UnsafeMutableRawPointer(Unmanaged.passRetained(tapCookie).toOpaque())
-            }
+            let tapCookie = AudioProcessingTapProxy(input: self)
+            let clientInfo = UnsafeMutableRawPointer(Unmanaged.passRetained(tapCookie).toOpaque())
 
             var callbacks = MTAudioProcessingTapCallbacks(
                 version: kMTAudioProcessingTapCallbacksVersion_0,
@@ -495,10 +492,8 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         }
 
         let tapFinalize: MTAudioProcessingTapFinalizeCallback = { tap in
-            if FeatureFlag.useDefaultPlayerTapCookie.enabled {
-                FileLog.shared.console("[AudioProcessingTapProxy] Finalize tap: \(tap)\n")
-                Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
-            }
+            FileLog.shared.console("[AudioProcessingTapProxy] Finalize tap: \(tap)\n")
+            Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).release()
         }
 
         let tapPrepare: MTAudioProcessingTapPrepareCallback = { tap, maxFrames, processingFormat in
@@ -669,13 +664,8 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
             guard AudioUnitSetProperty(createdUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &format, UInt32(MemoryLayout<AudioStreamBasicDescription>.stride)) == noErr else { return nil }
 
             // Set audio unit render callback
-            var renderCallback: AURenderCallbackStruct
-            if FeatureFlag.useDefaultPlayerTapCookie.enabled {
-                let inputProcRefCon = Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap))
-                renderCallback = AURenderCallbackStruct(inputProc: referenceToSelf.peakLimiterRenderCallback, inputProcRefCon: inputProcRefCon.toOpaque())
-            } else {
-                renderCallback = AURenderCallbackStruct(inputProc: peakLimiterRenderCallback, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-            }
+            let inputProcRefCon = Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap))
+            var renderCallback = AURenderCallbackStruct(inputProc: referenceToSelf.peakLimiterRenderCallback, inputProcRefCon: inputProcRefCon.toOpaque())
 
             guard AudioUnitSetProperty(createdUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &renderCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.stride)) == noErr else { return nil }
 
@@ -731,13 +721,8 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
             guard AudioUnitSetProperty(createdUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &format, UInt32(MemoryLayout<AudioStreamBasicDescription>.stride)) == noErr else { return nil }
 
             // Set audio unit render callback
-            var renderCallback: AURenderCallbackStruct
-            if FeatureFlag.useDefaultPlayerTapCookie.enabled {
-                let inputProcRefCon = Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap))
-                renderCallback = AURenderCallbackStruct(inputProc: referenceToSelf.highPassFilterRenderCallback, inputProcRefCon: inputProcRefCon.toOpaque())
-            } else {
-                renderCallback = AURenderCallbackStruct(inputProc: highPassFilterRenderCallback, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-            }
+            let inputProcRefCon = Unmanaged<AudioProcessingTapProxy>.fromOpaque(MTAudioProcessingTapGetStorage(tap))
+            var renderCallback = AURenderCallbackStruct(inputProc: referenceToSelf.highPassFilterRenderCallback, inputProcRefCon: inputProcRefCon.toOpaque())
             guard AudioUnitSetProperty(createdUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &renderCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.stride)) == noErr else { return nil }
 
             // Set audio unit maximum frames per slice to max frames
@@ -891,7 +876,10 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         }
 
         rateObserver = player?.observe(\.rate) { [weak self] player, _ in
-            guard let self else { return }
+            guard let self, !self.isHandlingRateChange else { return }
+
+            self.isHandlingRateChange = true
+            defer { self.isHandlingRateChange = false }
 
             if player.rate == 1 {
                 // there's a bug where playback can be resumed from outside our app, and Apple sets the wrong playback rate, fix that here
@@ -973,7 +961,11 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
 
             let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             let errorMessage = error?.localizedDescription ?? "Unknown item did fail to finish error"
-            PlaybackManager.shared.playbackDidFail(error: .playbackError(logMessage: errorMessage, isLocalFile: isPlayingLocalFile))
+            if let nsError = error as? NSError, nsError.isOutOfStorage {
+                PlaybackManager.shared.playbackDidFail(error: .notEnoughStorage(logMessage: errorMessage))
+            } else {
+                PlaybackManager.shared.playbackDidFail(error: .playbackError(logMessage: errorMessage, isLocalFile: isPlayingLocalFile))
+            }
         }
 
         playStalledObserver = nc.addObserver(forName: NSNotification.Name.AVPlayerItemPlaybackStalled, object: nil, queue: nil) { [weak self] _ in
@@ -1046,5 +1038,25 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
 
     func setVolume(_ volume: Float) {
         player?.volume = volume
+    }
+}
+
+extension NSError {
+    /// Whether this error, or any error underlying it, reports that the device has run out of storage.
+    var isOutOfStorage: Bool {
+        var error: NSError? = self
+        var depth = 0
+        while let current = error, depth < 10 {
+            depth += 1
+            switch (current.domain, current.code) {
+            case (NSCocoaErrorDomain, NSFileWriteOutOfSpaceError),
+                 (NSPOSIXErrorDomain, Int(ENOSPC)),
+                 (AVFoundationErrorDomain, AVError.Code.diskFull.rawValue):
+                return true
+            default:
+                error = current.userInfo[NSUnderlyingErrorKey] as? NSError
+            }
+        }
+        return false
     }
 }

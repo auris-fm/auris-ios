@@ -418,6 +418,7 @@ enum AnalyticsEvent: String {
     case podcastScreenNotificationsTapped
     case podcastScreenPodcastDetailsLinkTapped
     case podcastScreenCategoryTapped
+    case podcastScreenNetworkTapped
     case podcastScreenYouMightLikeTapped
     case podcastScreenYouMightLikeSubscribed
     case podcastScreenSeasonOptionsTapped
@@ -461,7 +462,6 @@ enum AnalyticsEvent: String {
     case discoverFeaturedPageChanged
     case discoverSmallListPageChanged
     case discoverLargeListPageChanged
-    case discoverNetworkListPageChanged
 
     case discoverRegionChanged
     case discoverCollectionLinkTapped
@@ -776,6 +776,7 @@ enum AnalyticsEvent: String {
     case settingsAboutWebsiteTapped
     case settingsAboutInstagramTapped
     case settingsAboutTwitterTapped
+    case settingsAboutBlueskyTapped
     case settingsAboutAutomatticFamilyTapped
     case settingsAboutLegalAndMoreTapped
     case settingsAboutWorkWithUsTapped
@@ -902,6 +903,16 @@ enum AnalyticsEvent: String {
     case whatsnewShown
     case whatsnewDismissed
     case whatsnewConfirmButtonTapped
+
+    // MARK: - What's New Feed
+
+    case whatsNewFeedShown
+    case whatsNewMessageShown
+    case whatsNewActionTapped
+    case whatsNewReadAllTapped
+
+    /// The first answer an account gives a research poll, which is where its results are counted.
+    case whatsNewPollResponseSubmitted
 
     // MARK: - Bookmarks
     case bookmarkCreated

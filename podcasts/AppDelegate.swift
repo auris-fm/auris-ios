@@ -1,12 +1,13 @@
-import BackgroundTasks
+import AppIntents
 import AutomatticRemoteLogging
+import BackgroundTasks
+import Combine
 import Firebase
 import FirebasePerformance
 import Foundation
 import PocketCastsDataModel
 import PocketCastsServer
 import PocketCastsUtils
-import Combine
 import Sentry
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -54,9 +55,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         if let appInstallState {
             switch appInstallState {
             case .updated:
-                if FeatureFlag.encourageAccountCreation.enabled, !Settings.hasShownInformationalViewModal {
-                    Settings.shouldShowInitialOnboardingFlow = !SyncManager.isUserLoggedIn()
-                }
                 Settings.shouldShowNewFilterTip = false
                 Settings.shouldShowNewFilterTipInCreationView = false
             case .installed:
@@ -66,6 +64,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 Settings.shouldShowRecentlyPlayedSortingTip = false
                 Settings.shouldShowUpNextSortDurationTip = false
                 Settings.shouldShowPlaylistsOnboarding = false
+                // Anchor the EAC cadence on fresh install so the modal waits a full interval before
+                // its first show (existing users updating leave it nil and see it immediately).
+                Settings.encourageAccountCreationReferenceDate = Date()
             case .sameVersion:
                 break
             }
@@ -84,6 +85,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         GoogleCastManager.sharedManager.setup()
 
         setupRoutes()
+        PocketCastsAppShortcutsProvider.updateAppShortcutParameters()
 
         if Settings.shouldResultEndOfYearSyncStatus {
             Settings.setHasSyncedEpisodesForPlayback(false, year: 2025)
@@ -160,6 +162,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func handleBecomeActive() {
         setupSignOutListener()
         appLifecycleAnalytics.didBecomeActive()
+
+        if FeatureFlag.whatsNewFeed.enabled {
+            WhatsNewManager.shared.refreshIfNeeded()
+        }
 
         // give the network a few seconds to come up before refreshing, also only refresh if the last refresh was more than 5 minutes ago
         let lastUpdateTime = ServerSettings.lastRefreshEndTime()
