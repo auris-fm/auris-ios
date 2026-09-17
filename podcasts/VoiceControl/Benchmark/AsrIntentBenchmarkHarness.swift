@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import PocketCastsUtils
 
@@ -130,3 +131,5 @@ enum AsrIntentBenchmarkHarness {
         }
     }
 }
+
+#endif

@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// One benchmark utterance: `case_id`, `language`, native ASR text, and the
@@ -135,3 +136,5 @@ struct RepresentationBenchmarkDriver {
         )
     }
 }
+
+#endif

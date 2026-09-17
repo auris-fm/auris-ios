@@ -175,7 +175,23 @@ final class LfmIntentRouter {
             lock.unlock()
         }
 
-        precondition(inputFormat.isReadyForInference, "unsupported format must fail before load")
+        // The cached format is per-instance but the dual_v1 gate is a global
+        // (benchmark-only, DEBUG) flag: if the gate closes after this router
+        // loaded a dual_v1 model, fail gracefully like the unsupported-format
+        // paths above instead of trapping.
+        guard inputFormat.isReadyForInference else {
+            report(
+                start: start,
+                base: base,
+                stages: stages,
+                modelRelease: release,
+                inputFormat: inputFormat.wireName,
+                finalOutcome: RouterStageDiagnostic.outcomeNoIntent,
+                failedStage: RouterStageDiagnostic.stageUnsupportedFormat,
+                reason: RouterStageDiagnostic.reasonUnsupportedInputFormat
+            )
+            return .none
+        }
 
         do {
             // Byte-pinned routing-input rendering; for english_v1 this is the

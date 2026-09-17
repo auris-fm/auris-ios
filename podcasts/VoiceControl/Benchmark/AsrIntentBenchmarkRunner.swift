@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import CryptoKit
 
@@ -124,3 +125,5 @@ final class AsrIntentBenchmarkRunner {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
+
+#endif

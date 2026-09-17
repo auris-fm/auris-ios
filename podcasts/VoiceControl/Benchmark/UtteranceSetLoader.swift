@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// Loads the shared utterance-set JSONL (Item 21 text contract, frozen sha
@@ -67,3 +68,5 @@ enum UtteranceSetLoader {
         return try JSONDecoder().decode([String: String].self, from: data)
     }
 }
+
+#endif

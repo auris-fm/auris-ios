@@ -25,16 +25,16 @@ enum RoutingInputRenderer {
             return router
 
         case .sourceV1:
-            if hasSource {
-                return "<source lang=\"\(sourceLang)\">\(sourceText!)</source>"
+            if let sourceText, hasSource {
+                return "<source lang=\"\(sourceLang)\">\(sourceText)</source>"
             }
             // Missing native source: effective language is en, never the
             // backend's configured source language; pin the fallback marker.
             return "<source lang=\"en\" source_fallback=\"router_transcript\">\(router)</source>"
 
         case .dualV1:
-            if hasSource {
-                return "<source lang=\"\(sourceLang)\">\(sourceText!)</source><en>\(router)</en>"
+            if let sourceText, hasSource {
+                return "<source lang=\"\(sourceLang)\">\(sourceText)</source><en>\(router)</en>"
             }
             return "<source_missing=\"true\" lang=\"en\"><en>\(router)</en>"
 
