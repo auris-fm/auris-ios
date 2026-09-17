@@ -43,13 +43,20 @@ final class CloudFingerprinter {
     private let frameDurationS = 1024.0 / 16000.0
 
     // Input (downmixed, source rate) and resampled (16 kHz mono) buffers.
+    // Streaming memory model (PR #14 review): buffers hold only the unconsumed
+    // tail; `inputBase` / `resampledBase` / `frameBase` are the absolute stream
+    // indices of each buffer's element 0, so peak memory stays O(window) rather
+    // than O(episode).
     private var input: [Float] = []
     private var resampled: [Float] = []
     private var sourceRate = 16000
+    private var inputBase = 0
+    private var resampledBase = 0
 
     // STFT frames and their peaks, computed incrementally.
     private var framePeaks: [[Peak]] = []
-    private var frameStart = 0
+    private var frameStart = 0 // relative to resampled
+    private var frameBase = 0 // absolute index of framePeaks[0]
 
     private let hannWindow: [Double]
 
@@ -119,9 +126,9 @@ final class CloudFingerprinter {
     }
 
     private func drainResampled() {
-        guard !input.isEmpty else { return }
+        let totalInput = inputBase + input.count
         // Mirror the server's output length: floor(count × toRate / fromRate).
-        let targetOutLen = Int(Double(input.count) * Double(targetSampleRate) / Double(sourceRate))
+        let targetOutLenTotal = Int(Double(totalInput) * Double(targetSampleRate) / Double(sourceRate))
         let ratio = Double(sourceRate) / Double(targetSampleRate)
         let cutoff: Double
         if targetSampleRate < sourceRate {
@@ -129,17 +136,24 @@ final class CloudFingerprinter {
         } else {
             cutoff = 0.9
         }
-        while resampled.count < targetOutLen {
-            let pos = Double(resampled.count) * ratio
+        while resampledBase + resampled.count < targetOutLenTotal {
+            let pos = Double(resampledBase + resampled.count) * ratio
             let i0 = Int(pos)
             let frac = pos - Double(i0)
             var sum = 0.0
             for k in -resampleTaps...resampleTaps {
-                let idx = i0 + k
+                let idx = i0 + k - inputBase
                 if idx < 0 || idx >= input.count { continue }
                 sum += Double(input[idx]) * sincKernel(Double(k) - frac, cutoff: cutoff)
             }
             resampled.append(Float(sum))
+        }
+        // Keep only the interpolation tail the next push can still read.
+        let keep = 2 * resampleTaps + 4
+        if input.count > keep {
+            let drop = input.count - keep
+            input.removeFirst(drop)
+            inputBase += drop
         }
     }
 
@@ -170,6 +184,12 @@ final class CloudFingerprinter {
             framePeaks.append(pickPeaks(mag))
             frameStart += hopSize
         }
+        // Trim the consumed resampled prefix (frames only ever look forward).
+        if frameStart > 0 {
+            resampled.removeFirst(frameStart)
+            resampledBase += frameStart
+            frameStart = 0
+        }
     }
 
     private func pickPeaks(_ mag: [Double]) -> [Peak] {
@@ -194,7 +214,7 @@ final class CloudFingerprinter {
                 selected.append(b)
             }
         }
-        return selected.map { Peak(bin: $0, frame: framePeaks.count) }
+        return selected.map { Peak(bin: $0, frame: frameBase + framePeaks.count) }
     }
 
     private func emitWindows() {
@@ -203,11 +223,23 @@ final class CloudFingerprinter {
             emitWindow(nextWindowStartSec)
             nextWindowStartSec += windowIntervalMs / 1000
         }
+        trimFramesBeforeNextWindow()
+    }
+
+    /// Future windows only read frames at or after their own first frame, so the
+    /// earlier peaks can be released once no pending window needs them.
+    private func trimFramesBeforeNextWindow() {
+        let neededFirstFrame = Int(Double(nextWindowStartSec) / frameDurationS)
+        let drop = min(max(0, neededFirstFrame - frameBase), framePeaks.count)
+        if drop > 0 {
+            framePeaks.removeFirst(drop)
+            frameBase += drop
+        }
     }
 
     private func lastFullWindowStartSec() -> Int {
         let duration = windowDurationMs / 1000
-        let totalDuration = Int(Double(resampled.count) / Double(targetSampleRate))
+        let totalDuration = Int(Double(resampledBase + resampled.count) / Double(targetSampleRate))
         return max(0, totalDuration - duration)
     }
 
@@ -215,7 +247,7 @@ final class CloudFingerprinter {
     // within the computed frames: lastFrame(start) + targetZoneFrames < size.
     private func canEmit(_ startSec: Int) -> Bool {
         let lastFrame = Int(Double(startSec + windowDurationMs / 1000) / frameDurationS)
-        return lastFrame + targetZoneFrames < framePeaks.count
+        return lastFrame + targetZoneFrames < frameBase + framePeaks.count
     }
 
     private func emitWindow(_ startSec: Int) {
@@ -229,12 +261,13 @@ final class CloudFingerprinter {
         var seen = Set<UInt32>()
         var hashes: [UInt32] = []
         for fi in firstFrame...lastFrame {
-            guard fi < framePeaks.count else { break }
-            for anchor in framePeaks[fi] {
+            let localFi = fi - frameBase
+            guard localFi >= 0, localFi < framePeaks.count else { break }
+            for anchor in framePeaks[localFi] {
                 var targets = 0
                 var tf = fi + 1
-                while tf < framePeaks.count && tf <= fi + targetZoneFrames && targets < maxTargetsPerAnchor {
-                    for target in framePeaks[tf] {
+                while tf < frameBase + framePeaks.count && tf <= fi + targetZoneFrames && targets < maxTargetsPerAnchor {
+                    for target in framePeaks[tf - frameBase] {
                         if targets >= maxTargetsPerAnchor { break }
                         let h = pairHash(anchor.bin, target.bin, dt: tf - fi)
                         if seen.insert(h).inserted { hashes.append(h) }

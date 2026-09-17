@@ -17,13 +17,20 @@ final class CloudReferenceMatcher {
     private struct Checkpoint {
         let timestampSeconds: Float
         let hashes: [UInt32]
+        /// Precomputed so the per-window hot path never rebuilds a Set from the
+        /// full hash list (PR #14 review).
+        let hashSet: Set<UInt32>
     }
 
     private var checkpoints: [Checkpoint] = []
 
     /// Adds a reference checkpoint (timestamp in seconds, sorted hash set).
+    /// `durationSeconds` is the checkpoint spacing metadata from the server
+    /// reference; client matching derives its own windows, so it is not used
+    /// for scoring today — the parameter is accepted to keep the builder
+    /// contract mirroring the server's reference format.
     func add(timestampSeconds: Float, hashes: [UInt32], durationSeconds: Float) {
-        checkpoints.append(Checkpoint(timestampSeconds: timestampSeconds, hashes: hashes))
+        checkpoints.append(Checkpoint(timestampSeconds: timestampSeconds, hashes: hashes, hashSet: Set(hashes)))
     }
 
     func clear() {
@@ -35,8 +42,9 @@ final class CloudReferenceMatcher {
     /// Returns the top `maxResults` reference checkpoints by overlap score.
     func findTopMatches(queryHashes: [UInt32], maxResults: Int) -> [Match] {
         guard !queryHashes.isEmpty else { return [] }
+        let querySet = Set(queryHashes)
         return checkpoints
-            .map { Match(timestampSeconds: $0.timestampSeconds, score: Self.overlapScore(queryHashes, $0.hashes)) }
+            .map { Match(timestampSeconds: $0.timestampSeconds, score: Self.overlapScore(querySet, queryHashes, $0.hashSet)) }
             .sorted { $0.score > $1.score }
             .prefix(maxResults)
             .map { $0 }
@@ -44,14 +52,21 @@ final class CloudReferenceMatcher {
 
     /// Overlap score = |A ∩ B| / min(|A|, |B|) ∈ [0, 1].
     static func overlapScore(_ a: [UInt32], _ b: [UInt32]) -> Float {
-        guard !a.isEmpty, !b.isEmpty else { return 0 }
-        let small = a.count < b.count ? a : b
-        let large = a.count < b.count ? b : a
-        let set = Set(large)
+        overlapScore(Set(a), a, Set(b))
+    }
+
+    /// Set-form hot path: reuses precomputed hash sets so matching every
+    /// window against every checkpoint allocates nothing (PR #14 review).
+    /// Iterates the smaller set; membership is checked against the larger.
+    static func overlapScore(_ setA: Set<UInt32>, _ a: [UInt32], _ setB: Set<UInt32>) -> Float {
+        guard !a.isEmpty, !setB.isEmpty else { return 0 }
+        let iterateA = a.count <= setB.count
+        let (iterate, target) = iterateA ? (setA, setB) : (setB, setA)
+        let denominator = iterateA ? a.count : setB.count
         var intersection = 0
-        for h in small where set.contains(h) {
+        for h in iterate where target.contains(h) {
             intersection += 1
         }
-        return Float(intersection) / Float(small.count)
+        return Float(intersection) / Float(denominator)
     }
 }
