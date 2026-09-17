@@ -48,6 +48,11 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
+        // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
+        // in a turn that issued no `play_quote` would seek to a previous turn's
+        // captured position (task #12 PR review).
+        preQuotePositionMs = nil
+
         // Pause for the turn; restore on done/error so TTS ducking runs over active playback.
         _ = playbackSink.pause()
         didAutoPause = true

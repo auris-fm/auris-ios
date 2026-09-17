@@ -178,6 +178,44 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(200)))
     }
 
+    /// Per-turn state: a `stop_quote` in a turn that issued no `play_quote`
+    /// must NOT seek to a previous turn's captured pre-quote position.
+    func testStopQuoteWithoutPlayQuoteInLaterTurnDoesNotUseStalePosition() async {
+        // RecordingFingerprintMapper is a struct — configure it before the sink copies it.
+        mapper.playbackSecondsForReference = [500.0: 510.0]
+        playback.positionMs = 900_000
+        let sink = makeSink()
+
+        // Turn 1 captures a pre-quote position via play_quote.
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext())
+        XCTAssertTrue(playback.calls.contains(.seekTo(510)))
+
+        // Turn 2 (same sink): stop_quote without play_quote must be a no-op seek-wise.
+        playback.calls.removeAll()
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "stop", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
+    }
+
     // MARK: - Helpers
 
     private func makeSink() -> CloudRouteSink {
