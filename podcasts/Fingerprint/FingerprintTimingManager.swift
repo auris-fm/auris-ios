@@ -51,10 +51,12 @@ final class FingerprintTimingManager: NSObject {
         let isStreaming: Bool
         let duration: Double
         let matcher: CheckpointMatcher
-        /// Cloud-alignment reference (Go-scheme fingerprints from the Auris
-        /// cloud), matched with CloudReferenceMatcher. Independent of the
-        /// transcript-sync (Rust engine) reference above.
-        let cloudMatcher: CloudReferenceMatcher?
+        /// Live accessor for the cloud-alignment reference (Go-scheme
+        /// fingerprints from the Auris cloud), independent of the
+        /// transcript-sync reference above. A closure rather than a value so
+        /// a late-arriving matcher is visible to the already-running stream
+        /// (PR #14 wave-2 review: a value snapshot stayed nil forever).
+        let cloudMatcherProvider: () -> CloudReferenceMatcher?
         /// Raw bytes of the reference fingerprint JSON, used to validate the
         /// persistent mapping cache via SHA-256.
         let referenceData: Data
@@ -298,7 +300,7 @@ final class FingerprintTimingManager: NSObject {
             isStreaming: ctx.isStreaming,
             duration: ctx.duration,
             matcher: ctx.matcher,
-            cloudMatcher: ctx.cloudMatcher,
+            cloudMatcherProvider: ctx.cloudMatcherProvider,
             referenceData: ctx.referenceData,
             referenceFilePath: ctx.referenceFilePath,
             referenceDuration: ctx.referenceDuration,
@@ -938,8 +940,8 @@ final class FingerprintTimingManager: NSObject {
             // Transcript-sync configuration runs immediately — the cloud fetch
             // is purely additive and must not gate local preparation (a slow
             // gateway used to delay the context build by up to the full cloud
-            // client timeout). The matcher lands async and the context is
-            // rebuilt on arrival (refreshContextCloudMatcher).
+            // client timeout). The matcher lands async and becomes live via
+            // the context's matcher provider.
             configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
             let flag = cancellationFlag
             fetchTask = Task { [weak self] in
@@ -947,8 +949,10 @@ final class FingerprintTimingManager: NSObject {
                 let matcher = await self.fetchCloudReference(uuid: uuid)
                 self.queue.async { [weak self] in
                     guard let self, !flag.isCancelled else { return }
+                    // The running stream reads the matcher through the
+                    // context's provider, so this assignment alone makes the
+                    // late-arriving reference live immediately.
                     self.cloudMatcher = matcher
-                    self.refreshContextCloudMatcher()
                 }
             }
             return
@@ -994,27 +998,6 @@ final class FingerprintTimingManager: NSObject {
                 self.configureForReference(reference, referenceData: data, episode: episode)
             }
         }
-    }
-
-    /// Makes a late-arriving cloud reference visible to the running stream by
-    /// rebuilding the current context with the manager's current matcher.
-    /// Must run on `queue`. No-op when there is no context or nothing changed.
-    private func refreshContextCloudMatcher() {
-        guard let ctx = context, ctx.cloudMatcher !== cloudMatcher else { return }
-        let flag = cancellationFlag
-        context = GenerationContext(
-            generation: ctx.generation,
-            episodeUuid: ctx.episodeUuid,
-            audioFileURL: ctx.audioFileURL,
-            isStreaming: ctx.isStreaming,
-            duration: ctx.duration,
-            matcher: ctx.matcher,
-            cloudMatcher: cloudMatcher,
-            referenceData: ctx.referenceData,
-            referenceFilePath: ctx.referenceFilePath,
-            referenceDuration: ctx.referenceDuration,
-            isCancelled: { flag.isCancelled }
-        )
     }
 
     private func configureForReference(
@@ -1063,7 +1046,7 @@ final class FingerprintTimingManager: NSObject {
             isStreaming: isStreaming,
             duration: duration,
             matcher: matcher,
-            cloudMatcher: cloudMatcher,
+            cloudMatcherProvider: { [weak self] in self?.cloudMatcher },
             referenceData: referenceData,
             referenceFilePath: refPath,
             referenceDuration: reference.totalDuration,
@@ -1872,7 +1855,7 @@ final class FingerprintTimingManager: NSObject {
         startOffset: Double,
         context ctx: GenerationContext
     ) {
-        guard ctx.cloudMatcher != nil else { return }
+        guard ctx.cloudMatcherProvider() != nil else { return }
         if fingerprinter == nil {
             fingerprinter = CloudFingerprinter()
         }
@@ -1904,7 +1887,10 @@ final class FingerprintTimingManager: NSObject {
         context ctx: GenerationContext
     ) {
         queue.async { [weak self] in
-            guard let self, self.context?.episodeUuid == ctx.episodeUuid else { return }
+            // Same generation guard as dispatchProcessMatches: after a
+            // seek-restart the superseded stream's queued windows must not
+            // interleave with the new stream's bootstrap (PR #14 wave-2).
+            guard let self, self.context?.generation == ctx.generation else { return }
             self.processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
         }
     }
@@ -1918,7 +1904,7 @@ final class FingerprintTimingManager: NSObject {
         startOffset: Double,
         context ctx: GenerationContext
     ) {
-        guard let cloudMatcher = ctx.cloudMatcher else { return }
+        guard let cloudMatcher = ctx.cloudMatcherProvider() else { return }
 
         // Same gates as the transcript path — single-sourced in matchWindowsCore
         // so the two matchers can't drift (PR #14 review).

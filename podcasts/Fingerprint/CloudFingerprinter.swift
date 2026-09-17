@@ -32,7 +32,6 @@ final class CloudFingerprinter {
     private let windowDurationMs = 8000
     private let windowIntervalMs = 1000
     private let targetSampleRate = 16000
-    private let fftSize = 4096
     private let hopSize = 1024
     private let maxPeaksPerFrame = 8
     private let peakMinSeparation = 3
@@ -65,10 +64,12 @@ final class CloudFingerprinter {
     private var nextWindowStartSec = 0
     private var finished = false
 
+    private static let fftSize = 4096
+
     init() {
-        // Uses the fftSize constant (4096) via a local to avoid referencing
-        // self before all members are initialized.
-        let size = 4096
+        // Initialized here (not at the property) because the hann window is
+        // derived state; fftSize is static so it is available before init.
+        let size = Self.fftSize
         hannWindow = (0..<size).map { i in
             0.5 - 0.5 * Foundation.cos(2.0 * Double.pi * Double(i) / Double(size - 1))
         }
@@ -97,16 +98,24 @@ final class CloudFingerprinter {
             emitWindow(nextWindowStartSec)
             nextWindowStartSec += windowIntervalMs / 1000
         }
-        return windows
+        // Only the not-yet-drained tail — callers already consumed everything
+        // up to `consumedWindows`, so returning the whole list re-matched and
+        // re-committed every window at EOF (PR #14 wave-2 review).
+        let pending = Array(windows.dropFirst(consumedWindows))
+        consumedWindows = windows.count
+        return pending
     }
 
     /// Windows emitted so far (a window is only emitted once its tail lookahead is available).
     var windowsSoFar: [Window] { windows }
 
-    /// Returns the windows emitted since the last call to this method.
+    /// Returns the windows emitted since the last call to this method,
+    /// releasing the consumed hash lists — `windows` is otherwise the one
+    /// unbounded buffer left in the streaming refactor (PR #14 wave-2 review).
     func drainWindows() -> [Window] {
         let emitted = Array(windows.dropFirst(consumedWindows))
-        consumedWindows = windows.count
+        windows.removeAll(keepingCapacity: true)
+        consumedWindows = 0
         return emitted
     }
 
@@ -173,14 +182,14 @@ final class CloudFingerprinter {
     }
 
     private func computeFrames() {
-        while frameStart + fftSize <= resampled.count {
-            var re = [Double](repeating: 0, count: fftSize)
-            var im = [Double](repeating: 0, count: fftSize)
-            for i in 0..<fftSize {
+        while frameStart + Self.fftSize <= resampled.count {
+            var re = [Double](repeating: 0, count: Self.fftSize)
+            var im = [Double](repeating: 0, count: Self.fftSize)
+            for i in 0..<Self.fftSize {
                 re[i] = Double(resampled[frameStart + i]) * hannWindow[i]
             }
             fft(re: &re, im: &im)
-            let mag = (0..<(fftSize / 2 + 1)).map { i in Foundation.hypot(re[i], im[i]) }
+            let mag = (0..<(Self.fftSize / 2 + 1)).map { i in Foundation.hypot(re[i], im[i]) }
             framePeaks.append(pickPeaks(mag))
             frameStart += hopSize
         }
@@ -286,7 +295,7 @@ final class CloudFingerprinter {
     }
 
     private func freqCode(_ bin: Int) -> Int {
-        var hz = Double(bin) * Double(targetSampleRate) / Double(fftSize)
+        var hz = Double(bin) * Double(targetSampleRate) / Double(Self.fftSize)
         if hz < 20.0 { hz = 20.0 }
         let lo = log2(20.0)
         let hi = log2(Double(targetSampleRate) / 2.0)

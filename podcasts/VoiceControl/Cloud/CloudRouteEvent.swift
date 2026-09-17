@@ -24,7 +24,9 @@ enum CloudRouteJSONValue: Equatable {
         case .double(let value) where value.rounded() == value:
             // Range guard mirrors CloudRouteClient: values come off the wire, and
             // Int64(1e300) is a runtime trap rather than an overflow error.
-            guard value >= Double(Int64.min), value <= Double(Int64.max) else { return nil }
+            // Upper bound is strict: Double(Int64.max) rounds UP to 2^63, so
+            // `<=` would admit exactly the value that traps the conversion.
+            guard value >= Double(Int64.min), value < Double(Int64.max) else { return nil }
             return Int64(value)
         default: return nil
         }

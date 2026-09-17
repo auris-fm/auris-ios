@@ -287,7 +287,9 @@ extension CloudRouteJSONValue {
         case let n as NSNumber:
             // Distinguish Bool (NSNumber subclass) already handled; prefer Int64 when integral.
             let d = n.doubleValue
-            if d.rounded() == d, d >= Double(Int64.min), d <= Double(Int64.max) {
+            // Strict upper bound: Double(Int64.max) rounds up to 2^63, and
+            // int64Value on that magnitude is implementation-defined.
+            if d.rounded() == d, d >= Double(Int64.min), d < Double(Int64.max) {
                 return .int(n.int64Value)
             }
             return .double(d)
