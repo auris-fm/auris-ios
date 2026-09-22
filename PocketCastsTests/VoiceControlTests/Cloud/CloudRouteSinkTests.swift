@@ -216,9 +216,67 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
+    /// Slice 1: the sink sends one turn envelope — request_id on the wire and
+    /// capabilities only once a structured-results renderer exists.
+    func testSinkSendsTurnEnvelopeWithRequestIdAndGatedCapabilities() async throws {
+        var bodies: [[String: Any]] = []
+        CloudRouteTestURLProtocol.onRequest = { _, body in
+            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                bodies.append(object)
+            }
+        }
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: token
+            data: {"text":"ok"}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+
+        _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext())
+
+        let body = try XCTUnwrap(bodies.first)
+        let requestId = try XCTUnwrap(body["request_id"] as? String)
+        XCTAssertNotNil(UUID(uuidString: requestId), "request_id must be a client-assigned UUID")
+        XCTAssertNil(body["capabilities"], "no renderer yet: capabilities must be omitted so the server uses token+done")
+        XCTAssertNil(body["route_hint"], "free-text turns carry no hint")
+    }
+
+    func testSinkAdvertisesSearchResultsV1OnlyWhenRendererAvailable() async throws {
+        var bodies: [[String: Any]] = []
+        CloudRouteTestURLProtocol.onRequest = { _, body in
+            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                bodies.append(object)
+            }
+        }
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+
+        _ = await makeSink(rendersStructuredResults: true, routeHint: CloudRouteHint(
+            operation: "search_spoken_content",
+            arguments: ["query": .string("climate")]
+        )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext())
+
+        let body = try XCTUnwrap(bodies.first)
+        XCTAssertEqual(body["capabilities"] as? [String], ["search_results_v1"])
+        let hint = try XCTUnwrap(body["route_hint"] as? [String: Any])
+        XCTAssertEqual(hint["operation"] as? String, "search_spoken_content")
+    }
+
     // MARK: - Helpers
 
-    private func makeSink() -> CloudRouteSink {
+    private func makeSink(
+        rendersStructuredResults: Bool = false,
+        routeHint: CloudRouteHint? = nil
+    ) -> CloudRouteSink {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -236,7 +294,9 @@ final class CloudRouteSinkTests: XCTestCase {
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: contextState,
-            analytics: voiceAnalytics
+            analytics: voiceAnalytics,
+            rendersStructuredResults: rendersStructuredResults,
+            routeHintProvider: { routeHint }
         )
     }
 

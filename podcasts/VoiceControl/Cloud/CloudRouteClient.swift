@@ -36,10 +36,32 @@ final class CloudRouteClient {
     }
 
     /// Streams route events until `done`/`error` or connection close.
+    ///
+    /// A fresh `CloudTurnEnvelope` is minted per call — callers that issue
+    /// transport retries for the same logical turn must pass the envelope they
+    /// built for that turn so `request_id` stays stable (see `route(request:context:turn:)`).
     func route(request: String, context: CloudRouteContext) -> AsyncStream<CloudRouteEvent> {
+        route(
+            request: request,
+            context: context,
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        )
+    }
+
+    /// Streams route events for one logical turn.
+    ///
+    /// `turn.requestId` is client-assigned and must be reused across transport
+    /// attempts of the same turn: the server uses it with the verified user id
+    /// for admission/deduplication, so a retry that minted a new id would be
+    /// admitted as a second turn.
+    func route(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performRoute(request: request, context: context, continuation: continuation)
+                await self.performRoute(request: request, context: context, turn: turn, continuation: continuation)
             }
             continuation.onTermination = { _ in
                 task.cancel()
@@ -50,6 +72,7 @@ final class CloudRouteClient {
     private func performRoute(
         request: String,
         context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
         guard let url = URL(string: baseURL + Self.routePath) else {
@@ -66,8 +89,7 @@ final class CloudRouteClient {
         urlRequest.timeoutInterval = requestTimeoutSeconds
 
         do {
-            let body = try JSONEncoder().encode(CloudRouteRequestBody(request: request, context: context))
-            urlRequest.httpBody = body
+            urlRequest.httpBody = try CloudRouteRequestBuilder.body(request: request, context: context, turn: turn)
         } catch {
             continuation.yield(.error(code: "invalid_request", message: "Failed to encode request"))
             continuation.finish()
@@ -186,11 +208,6 @@ final class CloudRouteClient {
         default: return "HTTP \(status)"
         }
     }
-}
-
-private struct CloudRouteRequestBody: Encodable {
-    let request: String
-    let context: CloudRouteContext
 }
 
 /// Incremental SSE frame parser (`event:` / multi-line `data:` / blank-line dispatch).

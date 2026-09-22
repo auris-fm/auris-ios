@@ -10,6 +10,16 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     private let playbackPositionMs: () -> Int64
     private let cloudPlaybackContextState: CloudPlaybackContextState
     private let analytics: VoiceAnalytics?
+    /// Renders structured `search_results_v1` results. False until the discovery
+    /// renderer lands (Item 5 slice 2) — the capability is only advertised when
+    /// the client can actually render result/empty/unavailable.
+    private let rendersStructuredResults: Bool
+    /// Typed-only route hint for the current turn. Free-text turns pass nil and
+    /// keep today's interpretation path.
+    private let routeHintProvider: () -> CloudRouteHint?
+    /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by
+    /// `RecentConversation.bounded`).
+    private let recentConversationProvider: () -> [RecentConversationTurn]
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -28,7 +38,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
         cloudPlaybackContextState: CloudPlaybackContextState,
-        analytics: VoiceAnalytics? = nil
+        analytics: VoiceAnalytics? = nil,
+        rendersStructuredResults: Bool = false,
+        routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
+        recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] }
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
@@ -37,6 +50,9 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         self.playbackPositionMs = playbackPositionMs
         self.cloudPlaybackContextState = cloudPlaybackContextState
         self.analytics = analytics
+        self.rendersStructuredResults = rendersStructuredResults
+        self.routeHintProvider = routeHintProvider
+        self.recentConversationProvider = recentConversationProvider
     }
 
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
@@ -48,6 +64,15 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
+        // One envelope per logical turn: a fresh client-assigned `request_id`
+        // that any transport retry of this turn must reuse, capabilities gated
+        // on the renderer, a typed-only hint and a bounded prior conversation.
+        let turn = CloudTurnEnvelope.make(
+            capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
+            routeHint: routeHintProvider(),
+            recentConversation: recentConversationProvider()
+        )
+
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's
         // captured position (task #12 PR review).
@@ -57,7 +82,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         _ = playbackSink.pause()
         didAutoPause = true
 
-        for await event in client.route(request: request, context: routeContext) {
+        for await event in client.route(request: request, context: routeContext, turn: turn) {
             switch event {
             case let .action(tool, action, params):
                 executeAction(tool: tool, action: action, params: params)
