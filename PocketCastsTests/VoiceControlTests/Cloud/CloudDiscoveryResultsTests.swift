@@ -56,9 +56,31 @@ final class CloudDiscoveryResultsTests: XCTestCase {
         XCTAssertNil(DiscoveryResult.parse(json: json), "unknown kinds must not break the stream")
     }
 
-    func testMalformedResultIsIgnored() {
+    func testMalformedResultPayloadIsIgnoredByTheModelParser() {
         XCTAssertNil(DiscoveryResult.parse(json: "not json"))
         XCTAssertNil(DiscoveryResult.parse(json: #"{"kind":"episode_results"}"#), "items are required")
+    }
+
+    /// Parity with Android's reviewed payload-failure behavior: a malformed
+    /// payload on the *known* `result` event surfaces as `invalid_response`;
+    /// an unknown `kind` stays forward-compatible and is ignored.
+    func testParserSurfacesMalformedResultPayloadAsInvalidResponse() {
+        var parser = CloudRouteSSEParser()
+        _ = parser.consume(line: "event: result")
+        _ = parser.consume(line: #"data: {"kind":"episode_results"}"#)
+        let events = parser.consume(line: "")
+        XCTAssertEqual(events.count, 1)
+        guard case let .error(code, _) = events.first else {
+            return XCTFail("expected invalid_response error, got \(events)")
+        }
+        XCTAssertEqual(code, "invalid_response")
+    }
+
+    func testParserIgnoresUnknownResultKind() {
+        var parser = CloudRouteSSEParser()
+        _ = parser.consume(line: "event: result")
+        _ = parser.consume(line: #"data: {"kind":"something_else_v9","items":[]}"#)
+        XCTAssertTrue(parser.consume(line: "").isEmpty, "unknown kinds must not break the stream")
     }
 
     func testParserEmitsResultEvent() {

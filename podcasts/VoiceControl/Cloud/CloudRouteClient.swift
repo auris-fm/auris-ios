@@ -255,6 +255,22 @@ struct CloudRouteSSEParser {
         return [event]
     }
 
+    /// True when a `result` payload is structurally invalid (valid JSON, but not
+    /// a usable result object). Unknown `kind` values are *not* malformed — they
+    /// are forward-compatible and ignored.
+    private static func isMalformedResultPayload(_ data: String) -> Bool {
+        guard let raw = data.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        else {
+            return true
+        }
+        if object["kind"] == nil { return true }
+        if let kind = object["kind"] as? String, kind != DiscoveryResult.supportedKind {
+            return false // unknown kind: forward-compatible, ignored
+        }
+        return object["scope"] is String == false || object["items"] is [[String: Any]] == false
+    }
+
     static func parse(eventName: String, data: String) -> CloudRouteEvent? {
         guard let raw = data.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
@@ -273,8 +289,13 @@ struct CloudRouteSSEParser {
             guard let text = json["text"] as? String else { return nil }
             return .token(text)
         case "result":
-            // Unknown kinds / malformed payloads are ignored (forward
-            // compatibility) — never terminate the stream over them.
+            // Malformed payload on a known event is a server bug: surface it as
+            // the standard payload-failure error (parity with the other events
+            // and with Android's reviewed behavior). Unknown *kinds* stay
+            // forward-compatible and are ignored.
+            guard !isMalformedResultPayload(data) else {
+                return .error(code: "invalid_response", message: "Invalid result payload")
+            }
             guard let result = DiscoveryResult.parse(json: data) else { return nil }
             return .result(result)
         case "done":
