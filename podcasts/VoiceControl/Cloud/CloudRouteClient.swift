@@ -272,6 +272,11 @@ struct CloudRouteSSEParser {
         case "token":
             guard let text = json["text"] as? String else { return nil }
             return .token(text)
+        case "result":
+            // Unknown kinds / malformed payloads are ignored (forward
+            // compatibility) — never terminate the stream over them.
+            guard let result = DiscoveryResult.parse(json: data) else { return nil }
+            return .result(result)
         case "done":
             let input = intValue(json["input_tokens"]) ?? 0
             let output = intValue(json["output_tokens"]) ?? 0

@@ -20,6 +20,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by
     /// `RecentConversation.bounded`).
     private let recentConversationProvider: () -> [RecentConversationTurn]
+    /// Renders negotiated discovery results. Present only when the UI can show
+    /// result/empty/unavailable states — the same condition that justifies
+    /// advertising `search_results_v1`.
+    private weak var resultsPresenter: DiscoveryResultsPresenting?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -41,7 +45,8 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         analytics: VoiceAnalytics? = nil,
         rendersStructuredResults: Bool = false,
         routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
-        recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] }
+        recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
+        resultsPresenter: DiscoveryResultsPresenting? = nil
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
@@ -53,6 +58,14 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         self.rendersStructuredResults = rendersStructuredResults
         self.routeHintProvider = routeHintProvider
         self.recentConversationProvider = recentConversationProvider
+        self.resultsPresenter = resultsPresenter
+    }
+
+    /// Renders a negotiated discovery result (result / no-match). Rendering
+    /// never initiates playback — selection goes through
+    /// `DiscoverySelectionHandler`.
+    func presentDiscoveryResults(_ model: DiscoveryResultsViewModel) {
+        resultsPresenter?.present(model)
     }
 
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
@@ -88,6 +101,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 executeAction(tool: tool, action: action, params: params)
             case let .token(text):
                 tokenBuffer += text
+            case let .result(result):
+                // Structured results are rendered as they arrive; the turn still
+                // completes on `done` with the same restore/analytics behavior.
+                presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
             case let .done(inputTokens, outputTokens):
                 analytics?.recordCloudAssistantTurn(
                     outcome: "done",
@@ -99,7 +116,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                     return .silent
                 }
                 return .spoken(tokenBuffer)
-            case let .error(_, message):
+            case let .error(code, message):
                 tokenBuffer = ""
                 restoreTransientAudioState()
                 analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
