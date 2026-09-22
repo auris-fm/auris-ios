@@ -89,7 +89,15 @@ final class CloudRouteClient {
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        let credential = await tokenProvider.token() ?? userId
+        // Fail closed when a credential provider yields nothing (parity with the
+        // Android half): no credential ⇒ no turn, rather than sending a hopeful
+        // bearer. The default provider always returns the trust-on-first-use id,
+        // so today's behavior is unchanged.
+        guard let credential = await tokenProvider.token() ?? nonEmpty(userId) else {
+            continuation.yield(.error(code: "unauthorized", message: "No cloud credential available"))
+            continuation.finish()
+            return
+        }
         urlRequest.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -189,6 +197,10 @@ final class CloudRouteClient {
             )
             continuation.finish()
         }
+    }
+
+    private func nonEmpty(_ value: String) -> String? {
+        value.isEmpty ? nil : value
     }
 
     static func preStreamError(status: Int, body: Data) -> CloudRouteEvent {

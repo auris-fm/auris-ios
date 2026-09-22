@@ -212,3 +212,56 @@ final class CloudTokenProvidingTests: XCTestCase {
         XCTAssertEqual(authHeaders.first, "Bearer token_from_issuer", "the provider is authoritative once supplied")
     }
 }
+
+/// Slice 5 parity: no credential ⇒ no request (Android's fail-closed posture).
+final class CloudTokenFailClosedTests: XCTestCase {
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    private struct NoTokenProvider: CloudTokenProviding {
+        func token() async -> String? { nil }
+        func handleUnauthorized() async {}
+    }
+
+    func testRouteSendsNoRequestWithoutACredential() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 200, body: "{}")
+        var requests = 0
+        CloudRouteTestURLProtocol.onRequest = { _, _ in requests += 1 }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "",
+            session: URLSession(configuration: config),
+            tokenProvider: NoTokenProvider()
+        )
+
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
+        XCTAssertEqual(events, [.error(code: "unauthorized", message: "No cloud credential available")])
+    }
+
+    func testPrefetchSendsNoRequestWithoutACredential() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 202, body: #"{"status":"accepted"}"#)
+        var requests = 0
+        CloudRouteTestURLProtocol.onRequest = { _, _ in requests += 1 }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudPrefetchClient(
+            baseURL: "https://cloud.test",
+            userId: "",
+            session: URLSession(configuration: config),
+            tokenProvider: NoTokenProvider()
+        )
+
+        let outcome = await client.prefetch(episodeId: "ep-1", podcastId: nil)
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
+    }
+}

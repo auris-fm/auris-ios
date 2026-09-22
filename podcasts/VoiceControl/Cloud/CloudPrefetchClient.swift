@@ -59,7 +59,12 @@ final class CloudPrefetchClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        let credential = await tokenProvider.token() ?? userId
+        // Fail closed / stay silent without a credential (parity with the
+        // Android half): prefer one attempt that never happens to a hopeful
+        // bearer. Default provider returns the trust-on-first-use id.
+        guard let credential = await tokenProvider.token() ?? (userId.isEmpty ? nil : userId) else {
+            return .failed
+        }
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = Self.defaultTimeoutSeconds
