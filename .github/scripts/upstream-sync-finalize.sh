@@ -35,8 +35,17 @@ read_audit() {
     # shellcheck disable=SC1090
     source "$AUDIT_FILE"
   fi
-  [ -s "${REPORT_DIR}/github_changed_files.txt" ] && [ "$(head -1 "${REPORT_DIR}/github_changed_files.txt")" != "" ] && github_changed=true
-  [ -s "${REPORT_DIR}/workflow_changed_files.txt" ] && [ "$(head -1 "${REPORT_DIR}/workflow_changed_files.txt")" != "" ] && workflow_changed=true
+  # Explicit if-blocks, not trailing `&&` chains: the audit script always writes
+  # these files (even when empty, they hold a single newline), so a `[ ... ] &&
+  # [ ... ] && var=true` chain returns 1 whenever the diff is empty. Under
+  # `set -e` that non-zero status aborted finalize silently right after the
+  # audit line — no push, no PR, exit 1 (the 2026-09-21 sync failure).
+  if [ -s "${REPORT_DIR}/github_changed_files.txt" ] && [ -n "$(head -1 "${REPORT_DIR}/github_changed_files.txt")" ]; then
+    github_changed=true
+  fi
+  if [ -s "${REPORT_DIR}/workflow_changed_files.txt" ] && [ -n "$(head -1 "${REPORT_DIR}/workflow_changed_files.txt")" ]; then
+    workflow_changed=true
+  fi
 }
 
 add_alert() {
@@ -336,4 +345,8 @@ main() {
   fi
 }
 
-main "$@"
+# Only run when executed directly; sourcing this file (for the read_audit
+# regression test) must not run main.
+if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+  main "$@"
+fi
