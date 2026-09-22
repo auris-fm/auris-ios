@@ -170,3 +170,45 @@ final class CloudPrefetchHookTests: XCTestCase {
     }
 }
 
+
+/// Slice 5 — the token seam: one place supplies the credential, and the default
+/// preserves today's trust-on-first-use behavior (design-only until #26).
+final class CloudTokenProvidingTests: XCTestCase {
+    func testStaticProviderReturnsCurrentIdentity() async {
+        let suiteName = "cloud_token_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let provider = CloudStaticIdentityTokenProvider(identity: CloudIdentity(defaults: defaults))
+        let token = await provider.token()
+        XCTAssertEqual(token?.hasPrefix("user_"), true)
+        await provider.handleUnauthorized() // no-op today; must not throw
+    }
+
+    func testRouteClientPresentsProviderCredential() async throws {
+        CloudRouteTestURLProtocol.stubJSON(status: 202, body: #"{"status":"accepted"}"#)
+        var authHeaders: [String] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            authHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+        }
+
+        struct FixedTokenProvider: CloudTokenProviding {
+            let value: String
+            func token() async -> String? { value }
+            func handleUnauthorized() async {}
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_fallback",
+            session: URLSession(configuration: config),
+            tokenProvider: FixedTokenProvider(value: "token_from_issuer")
+        )
+
+        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).first { _ in true }
+
+        XCTAssertEqual(authHeaders.first, "Bearer token_from_issuer", "the provider is authoritative once supplied")
+    }
+}

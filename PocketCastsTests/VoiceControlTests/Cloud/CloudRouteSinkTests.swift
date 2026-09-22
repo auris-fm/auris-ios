@@ -362,3 +362,126 @@ private final class RecordingAnalytics: AnalyticsService {
         events.append((event, properties))
     }
 }
+
+// MARK: - Slice 4: superseded turns
+
+/// A second turn (double wake / barge-in) supersedes the first: the older turn
+/// must stop consuming its stream and must not touch playback state, analytics,
+/// or late actions after the new turn takes over.
+final class CloudRouteSupersedeTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var mapper: RecordingFingerprintMapper!
+    private var analytics: RecordingAnalytics!
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        mapper = RecordingFingerprintMapper()
+        analytics = RecordingAnalytics()
+        suiteName = "cloud_route_supersede_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async {
+        // Turn A: a slow stream that will still be open when B starts.
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
+                chunkDelayNanoseconds: 400_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+
+        // Let A start and pause playback.
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+
+        // Turn B supersedes A and completes cleanly.
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        // Exactly one resume: the superseding turn's. A must not restore after B.
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
+        // Analytics records only the winning turn's outcome.
+        XCTAssertEqual(analytics.events.count, 1)
+    }
+
+    func testSupersededTurnDoesNotExecuteLateActions() async {
+        // Turn A: an action arrives only after a delay — B supersedes first.
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("""
+                event: action
+                data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+
+                event: done
+                data: {"input_tokens":1,"output_tokens":0}
+
+                """.utf8),
+                chunkDelayNanoseconds: 500_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
+        XCTAssertTrue(seeks.isEmpty, "a superseded turn must not execute actions that arrive after it lost the turn")
+    }
+
+    private func makeSink() -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            analytics: VoiceAnalytics(analytics: analytics)
+        )
+    }
+
+    private func sampleContext() -> PlaybackContext {
+        PlaybackContext(
+            episodeId: "ep",
+            podcastId: "pod",
+            referencePositionMs: 1_000,
+            clientPositionMs: 1_100,
+            recentReferencePositions: [],
+            previousReferencePositionMs: nil
+        )
+    }
+}

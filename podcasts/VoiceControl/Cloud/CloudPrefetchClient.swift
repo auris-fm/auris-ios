@@ -24,11 +24,13 @@ final class CloudPrefetchClient {
 
     private let baseURL: String
     private let userId: String
+    private let tokenProvider: CloudTokenProviding
     private let session: URLSession
 
-    init(baseURL: String, userId: String, session: URLSession? = nil) {
+    init(baseURL: String, userId: String, session: URLSession? = nil, tokenProvider: CloudTokenProviding? = nil) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
+        self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         if let session {
             self.session = session
         } else {
@@ -57,7 +59,8 @@ final class CloudPrefetchClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(userId)", forHTTPHeaderField: "Authorization")
+        let credential = await tokenProvider.token() ?? userId
+        request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = Self.defaultTimeoutSeconds
         guard let encoded = try? JSONSerialization.data(withJSONObject: body) else { return .failed }

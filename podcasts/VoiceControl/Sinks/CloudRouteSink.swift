@@ -29,6 +29,29 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     private var preQuotePositionMs: Int64?
     /// True when this turn paused playback so we can restore on error.
     private var didAutoPause = false
+    /// The in-flight turn. A new turn supersedes it: the older turn stops
+    /// consuming its stream and stops touching playback/analytics state, so two
+    /// overlapping turns (double wake, barge-in) cannot interleave actions or
+    /// double-restore the pause.
+    private var activeTurn: CloudTurnToken?
+
+    /// Cancellation handle for one logical turn.
+    final class CloudTurnToken {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
 
     init(
         clientFactory: @escaping () -> CloudRouteClient = {
@@ -77,6 +100,12 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
+        // Supersede any in-flight turn (double wake / barge-in) before touching
+        // shared per-turn state.
+        let turnToken = CloudTurnToken()
+        activeTurn?.cancel()
+        activeTurn = turnToken
+
         // One envelope per logical turn: a fresh client-assigned `request_id`
         // that any transport retry of this turn must reuse, capabilities gated
         // on the renderer, a typed-only hint and a bounded prior conversation.
@@ -95,7 +124,12 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         _ = playbackSink.pause()
         didAutoPause = true
 
-        for await event in client.route(request: request, context: routeContext, turn: turn) {
+        turnLoop: for await event in client.route(request: request, context: routeContext, turn: turn) {
+            // Superseded mid-stream: stop consuming so this turn cannot execute
+            // late actions or overwrite the new turn's state. The stream's own
+            // termination closes the transport. (`break turnLoop` — a bare
+            // `break` inside the switch would only leave the switch.)
+            if turnToken.isCancelled { break turnLoop }
             switch event {
             case let .action(tool, action, params):
                 executeAction(tool: tool, action: action, params: params)
@@ -106,6 +140,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 // completes on `done` with the same restore/analytics behavior.
                 presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
             case let .done(inputTokens, outputTokens):
+                guard !turnToken.isCancelled else { break turnLoop }
                 analytics?.recordCloudAssistantTurn(
                     outcome: "done",
                     inputTokens: inputTokens,
@@ -117,6 +152,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 }
                 return .spoken(tokenBuffer)
             case let .error(code, message):
+                guard !turnToken.isCancelled else { break turnLoop }
                 tokenBuffer = ""
                 restoreTransientAudioState()
                 analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
@@ -127,6 +163,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             }
         }
 
+        if turnToken.isCancelled {
+            // The superseding turn owns pause/restore and analytics.
+            return .silent
+        }
         restoreTransientAudioState()
         return .silent
     }

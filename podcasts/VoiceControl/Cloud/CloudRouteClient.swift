@@ -12,6 +12,7 @@ final class CloudRouteClient {
 
     private let baseURL: String
     private let userId: String
+    private let tokenProvider: CloudTokenProviding
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
 
@@ -19,10 +20,15 @@ final class CloudRouteClient {
         baseURL: String,
         userId: String,
         session: URLSession? = nil,
-        requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds
+        requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
+        tokenProvider: CloudTokenProviding? = nil
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
+        // Seam (slice 5, design-only): the credential comes from one place so the
+        // trusted-issuer swap (task #26) is a provider change. Default preserves
+        // today's trust-on-first-use bearer exactly.
+        self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
         if let session {
             self.session = session
@@ -83,7 +89,8 @@ final class CloudRouteClient {
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.setValue("Bearer \(userId)", forHTTPHeaderField: "Authorization")
+        let credential = await tokenProvider.token() ?? userId
+        urlRequest.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         urlRequest.timeoutInterval = requestTimeoutSeconds
