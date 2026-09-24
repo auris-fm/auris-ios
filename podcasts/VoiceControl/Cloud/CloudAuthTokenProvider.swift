@@ -197,6 +197,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     // MARK: - request paths
 
     private func exchangeCredential() async -> Outcome {
+        // Sampled at request start so the minted tokens are keyed to the account
+        // that actually presented the credential (PR #20 review).
         guard let credential = credentialProvider(), !credential.isEmpty else { return .rejected }
         let body: [String: Any] = [
             "credential": credential,
@@ -205,7 +207,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 "app_version": appVersionProvider(),
             ],
         ]
-        switch await post(path: Self.tokenPath, body: body) {
+        switch await post(path: Self.tokenPath, body: body, presentedCredential: credential) {
         case let .success(tokens):
             store(tokens)
             return .success(tokens)
@@ -217,10 +219,17 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     }
 
     private func performRefresh(refreshToken: String) async -> Outcome {
-        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken])
+        // The account credential — not the rotating refresh token — keys the
+        // cache, so a rotation does not look like an account change.
+        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedCredential: credentialProvider())
     }
 
-    private func post(path: String, body: [String: Any]) async -> Outcome {
+    /// `presentedCredential` is the credential this request actually carried, so
+    /// the minted tokens are stamped with what was *used* rather than with
+    /// whatever `credentialProvider()` returns when the response is decoded — a
+    /// refresh in flight across an account switch would otherwise stamp the new
+    /// account's credential onto the previous account's tokens (PR #20 review).
+    private func post(path: String, body: [String: Any], presentedCredential: String?) async -> Outcome {
         let baseURL = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else { return .inconclusive }
         var request = URLRequest(url: url)
@@ -234,7 +243,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             let (data, response) = try await session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if status == 200 {
-                guard let tokens = decodeTokens(data) else { return .inconclusive }
+                guard let tokens = decodeTokens(data, presentedCredential: presentedCredential) else { return .inconclusive }
                 return .success(tokens)
             }
             // 401/403: checked and rejected. Anything else (5xx/429/other) is
@@ -245,7 +254,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    private func decodeTokens(_ data: Data) -> Tokens? {
+    private func decodeTokens(_ data: Data, presentedCredential: String?) -> Tokens? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = object["access_token"] as? String, !accessToken.isEmpty
         else {
@@ -256,7 +265,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         return Tokens(
             accessToken: accessToken,
             refreshToken: object["refresh_token"] as? String,
-            sourceCredential: credentialProvider(),
+            sourceCredential: presentedCredential,
             expiresAt: issued.addingTimeInterval(max(0, expiresIn - Self.expirySkew)),
             hardExpiresAt: issued.addingTimeInterval(max(0, expiresIn))
         )

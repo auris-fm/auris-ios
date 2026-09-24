@@ -6,14 +6,11 @@ import PocketCastsServer
 /// the existing account path.
 ///
 /// The account verifier exchanges this at `POST /user/token` with
-/// `grant_type=refresh_token` (nightshift's `ModeRefreshExchange`), so the
-/// **account refresh token is the credential**. That's also the value the app
-/// already maintains for both password and SSO sign-in
-/// (`ServerSettings.refreshToken()`, public), and the only session value the
-/// server module exposes — the stored access token lives in module-internal
-/// Keychain access, and widening that API isn't justified for a fallback the
-/// primary exchange mode doesn't use. Nothing is stored or logged here; this
-/// type only reads the session the app already holds.
+/// `grant_type=refresh_token` (`ModeRefreshExchange`), so the **account refresh
+/// token is preferred**. Both values come from the app's existing session
+/// (`ServerSettings.refreshToken()` / `ServerSettings.syncingV2Token`), and
+/// nothing is stored or logged here — this type only reads the session the app
+/// already holds.
 struct CloudAccountSessionCredentialProvider {
     private let refreshTokenReader: () -> String?
     private let accessTokenReader: () -> String?

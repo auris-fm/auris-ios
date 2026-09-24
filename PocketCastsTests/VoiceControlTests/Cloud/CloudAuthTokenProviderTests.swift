@@ -376,3 +376,50 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
         return URLSession(configuration: config)
     }
 }
+
+/// PR #20 review: tokens must be keyed to the credential the *request* presented,
+/// not to whatever the provider returns when the response is decoded — otherwise a
+/// refresh in flight across an account switch stamps the wrong account.
+final class CloudAuthTokenStampRaceTests: XCTestCase {
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testTokensAreStampedWithTheCredentialTheRequestPresented() async {
+        var credential = "cred-A"
+        // The exchange response is delivered slowly enough that the account can
+        // switch before it is decoded.
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"token-for-A","expires_in":900,"refresh_token":"refresh-A"}"#
+        )
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config),
+            now: { self.now }
+        )
+
+        // Switch accounts mid-flight: the decode must still stamp cred-A.
+        let inFlight = Task { await provider.token() }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        credential = "cred-B"
+        let minted = await inFlight.value
+
+        XCTAssertEqual(minted, "token-for-A")
+
+        // The cache now belongs to cred-A, so a call under cred-B must not reuse it.
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"token-for-B","expires_in":900,"refresh_token":"refresh-B"}"#
+        )
+        let second = await provider.token()
+        XCTAssertEqual(second, "token-for-B", "cred-B must not be served cred-A's token")
+    }
+}
