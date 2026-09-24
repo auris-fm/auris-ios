@@ -33,6 +33,11 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     struct Tokens: Equatable {
         let accessToken: String
         let refreshToken: String?
+        /// The account credential these tokens were minted from. Used to drop
+        /// the cache when the signed-in account changes without an app restart
+        /// (PR #20 review) — otherwise a second user's turns would be served
+        /// with the first user's token, and the server admits on subject.
+        let sourceCredential: String?
         /// Proactive-refresh boundary (real expiry minus the skew).
         let expiresAt: Date
         /// The token's real expiry: a request may still use the token up to here,
@@ -90,30 +95,30 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     // MARK: - CloudTokenProviding
 
+    /// Warms the token off the turn path (call when the assistant UI opens or a
+    /// session starts). Idempotent and safe to call repeatedly.
+    func prepare() async {
+        _ = await token()
+    }
+
     func token() async -> String? {
+        // Account change without an app restart: never serve the previous
+        // account's token (PR #20 review).
+        dropCacheIfCredentialChanged()
+
         if let cached = cachedFreshToken() {
             return cached
         }
-        // Past the proactive-refresh boundary: prefer the rotating refresh chain,
-        // fall back to a fresh credential exchange.
+        // Past the proactive boundary but still inside the real lifetime: serve it
+        // and refresh out of band, so the turn path never waits on a network round
+        // trip — the contract this seam documents for `token()` (PR #20 review).
+        if let usable = cachedUsableToken() {
+            refreshInBackground()
+            return usable
+        }
+        // Nothing usable cached: the one unavoidable await.
         let outcome = await singleFlight { [self] in
-            if let stored = currentRefreshToken() {
-                switch await performRefresh(refreshToken: stored) {
-                case let .success(rotated):
-                    store(rotated)
-                    return .success(rotated)
-                case .rejected:
-                    // 401: the chain is revoked/rotated-out — re-acquire from the
-                    // account credential instead of replaying the refresh.
-                    dropChain()
-                    return await exchangeCredential()
-                case .inconclusive:
-                    // Verification path unreachable: keep the chain AND any token
-                    // that is still within its real lifetime.
-                    return .inconclusive
-                }
-            }
-            return await exchangeCredential()
+            await performTokenRefreshPath()
         }
 
         switch outcome {
@@ -127,12 +132,66 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     }
 
     func handleUnauthorized() async {
+        await handleUnauthorized(rejectedToken: nil)
+    }
+
+    func handleUnauthorized(rejectedToken: String?) async {
+        // A rejection for a token a concurrent refresh has already replaced is a
+        // no-op: without this, a burst of N 401s costs N sequential refreshes and
+        // every `token()` in between misses the cache (PR #20 review).
+        if let rejectedToken, !rejectedToken.isEmpty,
+           let current = currentTokens()?.accessToken, current != rejectedToken {
+            return
+        }
         // Drop only the rejected ACCESS token: the refresh chain must survive so
         // the next acquisition rotates it instead of re-exchanging the account
         // credential. Callers do not retry their own request with the result
         // (no same-turn retry).
         invalidateAccessToken()
         _ = await token()
+    }
+
+    /// The refresh-or-exchange path, shared by the foreground call and the
+    /// background refresh: prefer the rotating refresh chain, fall back to a
+    /// fresh credential exchange.
+    private func performTokenRefreshPath() async -> Outcome {
+        if let stored = currentRefreshToken() {
+            switch await performRefresh(refreshToken: stored) {
+            case let .success(rotated):
+                store(rotated)
+                return .success(rotated)
+            case .rejected:
+                // 401: the chain is revoked/rotated-out — re-acquire from the
+                // account credential instead of replaying the refresh.
+                dropChain()
+                return await exchangeCredential()
+            case .inconclusive:
+                // Verification path unreachable: keep the chain AND any token
+                // that is still within its real lifetime.
+                return .inconclusive
+            }
+        }
+        return await exchangeCredential()
+    }
+
+    /// Background refresh that never blocks a caller and shares the single-flight
+    /// handle with the foreground path.
+    private func refreshInBackground() {
+        Task.detached(priority: .utility) { [self] in
+            _ = await singleFlight { [self] in
+                await performTokenRefreshPath()
+            }
+        }
+    }
+
+    /// Drops the cached tokens when the credential behind them is gone or
+    /// different (sign-out, or a different account signing in).
+    private func dropCacheIfCredentialChanged() {
+        let current = credentialProvider()
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stored = tokens?.sourceCredential, stored != current else { return }
+        tokens = nil
     }
 
     // MARK: - request paths
@@ -197,6 +256,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         return Tokens(
             accessToken: accessToken,
             refreshToken: object["refresh_token"] as? String,
+            sourceCredential: credentialProvider(),
             expiresAt: issued.addingTimeInterval(max(0, expiresIn - Self.expirySkew)),
             hardExpiresAt: issued.addingTimeInterval(max(0, expiresIn))
         )
@@ -253,6 +313,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             tokens = Tokens(
                 accessToken: "",
                 refreshToken: existing.refreshToken,
+                sourceCredential: existing.sourceCredential,
                 expiresAt: .distantPast,
                 hardExpiresAt: .distantPast
             )

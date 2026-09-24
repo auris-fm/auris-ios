@@ -151,14 +151,21 @@ final class CloudAuthTokenProviderTests: XCTestCase {
         let duringOutage = await provider.token()
         XCTAssertEqual(duringOutage, "access-1", "an upstream blip must not fail a call with a still-valid token")
 
-        // Service recovers: the SAME refresh chain is used (not a new credential
-        // exchange), proving the chain was never discarded.
+        // Service recovers: the turn path stays non-blocking (it keeps serving the
+        // still-valid token) and the refresh happens out of band.
         var paths: [String] = []
         CloudRouteTestURLProtocol.onRequest = { request, _ in paths.append(request.url?.path ?? "") }
         stubTokenResponse(accessToken: "access-2", refreshToken: "refresh-2", expiresIn: 900)
-        let afterOutage = await provider.token()
+        let immediatelyAfterRecovery = await provider.token()
+        XCTAssertEqual(immediatelyAfterRecovery, "access-1", "the turn path serves the still-valid token rather than waiting")
 
-        XCTAssertEqual(afterOutage, "access-2")
+        // The background refresh then rotates the SAME chain (no re-exchange).
+        var rotated: String?
+        for _ in 0..<20 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if await provider.token() == "access-2" { rotated = "access-2"; break }
+        }
+        XCTAssertEqual(rotated, "access-2", "the background refresh adopts the rotated pair")
         XCTAssertEqual(paths, ["/api/v1/auth/refresh"], "the kept chain is rotated, not re-exchanged")
     }
 
@@ -251,5 +258,121 @@ final class CloudAccountSessionCredentialProviderTests: XCTestCase {
     func testEmptyOrMissingRefreshTokenYieldsNil() {
         XCTAssertNil(CloudAccountSessionCredentialProvider(refreshTokenReader: { "" }).credential())
         XCTAssertNil(CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }).credential(), "signed out ⇒ callers fail closed")
+    }
+}
+
+/// PR #20 review fixes: burst-idempotent 401 handling, a non-blocking turn path,
+/// and a cache keyed to the account it was minted for.
+final class CloudAuthTokenReviewFixTests: XCTestCase {
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    private func stub(access: String, refresh: String) {
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"\#(access)","expires_in":900,"refresh_token":"\#(refresh)"}"#
+        )
+    }
+
+    /// A 401 for a token a concurrent refresh already replaced must be a no-op.
+    func testLateUnauthorizedForAReplacedTokenDoesNotRefreshAgain() async {
+        var refreshCount = 0
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            if request.url?.path == "/api/v1/auth/refresh" { refreshCount += 1 }
+        }
+        stub(access: "access-1", refresh: "refresh-1")
+        let provider = makeProvider { "cred" }
+        let first = await provider.token()
+        XCTAssertEqual(first, "access-1")
+
+        // One refresh for the burst.
+        now = now.addingTimeInterval(901)
+        stub(access: "access-2", refresh: "refresh-2")
+        await provider.handleUnauthorized(rejectedToken: "access-1")
+        XCTAssertEqual(refreshCount, 1)
+
+        // Late 401s carrying the *old* token arrive after the refresh completed.
+        await provider.handleUnauthorized(rejectedToken: "access-1")
+        await provider.handleUnauthorized(rejectedToken: "access-1")
+
+        XCTAssertEqual(refreshCount, 1, "a rejection of an already-replaced token must not rotate again")
+        let current = await provider.token()
+        XCTAssertEqual(current, "access-2", "the refreshed token keeps serving")
+    }
+
+    /// The turn path must not wait on a network round trip while a token is still
+    /// inside its real lifetime: it serves that token and refreshes out of band.
+    func testTurnPathServesTheUsableTokenWithoutWaitingWhenPastTheSkew() async {
+        stub(access: "access-1", refresh: "refresh-1")
+        let provider = makeProvider { "cred" }
+        _ = await provider.token()
+
+        // Past the proactive boundary, inside the real lifetime; the refresh
+        // response is deliberately slow so a blocking implementation would show.
+        now = now.addingTimeInterval(880)
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data(#"{"access_token":"access-2","expires_in":900,"refresh_token":"refresh-2"}"#.utf8),
+                chunkDelayNanoseconds: 300_000_000
+            )
+        }
+
+        let start = Date()
+        let served = await provider.token()
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(served, "access-1", "the still-valid token is served")
+        XCTAssertLessThan(elapsed, 0.25, "the turn path must not wait out the refresh")
+    }
+
+    /// The cache is dropped when the credential behind it changes (sign-out or a
+    /// different account), so a second user is never served the first user's token.
+    func testCacheIsDroppedWhenTheAccountCredentialChanges() async {
+        var credential = "cred-A"
+        var requestedTokens: [String?] = []
+        CloudRouteTestURLProtocol.onRequest = { request, body in
+            if request.url?.path == "/api/v1/auth/token",
+               let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                requestedTokens.append(object["credential"] as? String)
+            }
+        }
+        stub(access: "token-for-A", refresh: "refresh-A")
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            appVersionProvider: { "1.0" },
+            session: testSession(),
+            now: { self.now }
+        )
+        let forA = await provider.token()
+        XCTAssertEqual(forA, "token-for-A")
+
+        // User B signs in without an app restart.
+        credential = "cred-B"
+        stub(access: "token-for-B", refresh: "refresh-B")
+        let forB = await provider.token()
+
+        XCTAssertEqual(forB, "token-for-B", "A's cached token must not be served to B")
+        XCTAssertEqual(requestedTokens, ["cred-A", "cred-B"], "B's exchange presents B's credential")
+    }
+
+    private func makeProvider(credential: @escaping () -> String?) -> CloudAuthTokenProvider {
+        CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: credential,
+            appVersionProvider: { "1.0" },
+            session: testSession(),
+            now: { self.now }
+        )
+    }
+
+    private func testSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        return URLSession(configuration: config)
     }
 }
