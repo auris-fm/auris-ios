@@ -82,15 +82,30 @@ enum RecentConversation {
             let totalBytes = result.reduce(0) { $0 + $1.text.utf8.count }
             if totalBytes <= maxBytes { break }
             if result.count == 1 {
-                // Single oversized turn: keep its tail (newest speech) within budget.
+                // Single oversized turn: keep its tail (newest speech) within
+                // budget, measured in **UTF-8 bytes** — `String.suffix` counts
+                // Characters, so a CJK/emoji turn would trim to 8 Ki *characters*
+                // (~32 KiB of bytes) and blow the bound (review finding on #19).
                 let only = result[0]
-                let truncated = String(only.text.suffix(maxBytes))
+                let truncated = Self.utf8Suffix(only.text, maxBytes: maxBytes)
                 result = [RecentConversationTurn(role: only.role, text: truncated)]
                 break
             }
             result.removeFirst()
         }
         return result
+    }
+
+    /// The longest suffix of `text` within `maxBytes` UTF-8 bytes, without
+    /// splitting a multi-byte scalar (leading continuation bytes are dropped, so
+    /// the result always decodes).
+    static func utf8Suffix(_ text: String, maxBytes: Int) -> String {
+        guard maxBytes > 0, text.utf8.count > maxBytes else { return maxBytes > 0 ? text : "" }
+        var bytes = Array(text.utf8.suffix(maxBytes))
+        while let first = bytes.first, (first & 0b1100_0000) == 0b1000_0000 {
+            bytes.removeFirst()
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
 

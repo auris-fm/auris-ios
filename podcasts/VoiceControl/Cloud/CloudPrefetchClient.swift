@@ -44,9 +44,15 @@ final class CloudPrefetchClient {
 
     /// Fires the hint and returns immediately; the request runs detached and its
     /// outcome is intentionally dropped (no retry, no user-visible failure).
+    ///
+    /// The task captures `self` **strongly on purpose**: the playback-start hook
+    /// creates a client just to fire the hint and drops it immediately, so a weak
+    /// capture let the client deallocate before the request was built and the
+    /// hint silently never went out (review finding on PR #19). The task ends
+    /// when the attempt completes, which releases the client.
     func schedulePrefetch(episodeId: String, podcastId: String?) {
-        Task.detached(priority: .utility) { [weak self] in
-            _ = await self?.prefetch(episodeId: episodeId, podcastId: podcastId)
+        Task.detached(priority: .utility) { [self] in
+            _ = await prefetch(episodeId: episodeId, podcastId: podcastId)
         }
     }
 

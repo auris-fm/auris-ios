@@ -265,3 +265,30 @@ final class CloudTokenFailClosedTests: XCTestCase {
         XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
     }
 }
+
+
+/// PR #19 review: the hint must survive the caller dropping its client — the
+/// playback-start hook creates one just to fire the request.
+final class CloudPrefetchRetentionTests: XCTestCase {
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testHintIsSentEvenWhenTheCallerDropsTheClientImmediately() async {
+        var requests = 0
+        CloudRouteTestURLProtocol.stubJSON(status: 202, body: #"{"status":"accepted"}"#)
+        CloudRouteTestURLProtocol.onRequest = { _, _ in requests += 1 }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        // Exactly the hook's shape: a temporary client, no other reference kept.
+        CloudPrefetchClient(baseURL: "https://cloud.test", userId: "user_test", session: session)
+            .schedulePrefetch(episodeId: "ep-1", podcastId: nil)
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(requests, 1, "a weakly-held client deallocates before the detached task runs, silencing the hint")
+    }
+}

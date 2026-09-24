@@ -94,7 +94,12 @@ final class CloudRouteClient {
         // bearer. The default provider always returns the trust-on-first-use id,
         // so today's behavior is unchanged.
         guard let credential = await tokenProvider.token() ?? nonEmpty(userId) else {
-            continuation.yield(.error(code: "unauthorized", message: "No cloud credential available"))
+            // No human-readable message: `CloudRouteSink` speaks any non-empty
+            // `.error` message through TTS in the user's locale, so a diagnostic
+            // English string here would be read aloud to a non-English user.
+            // The code carries the diagnosis; the sink maps an empty message to
+            // its localized error earcon (review finding on PR #19).
+            continuation.yield(.error(code: "unauthorized", message: ""))
             continuation.finish()
             return
         }
