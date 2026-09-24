@@ -388,10 +388,10 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
     }
 }
 
-/// PR #20 review: tokens must be keyed to the credential the *request* presented,
-/// not to whatever the provider returns when the response is decoded — otherwise a
-/// refresh in flight across an account switch stamps the wrong account.
-final class CloudAuthTokenStampRaceTests: XCTestCase {
+/// PR #20 review: tokens are keyed to the **account** the request was made for,
+/// not to the rotating session credential — otherwise a credential renewal during
+/// a request would look like an account switch.
+final class CloudAuthTokenAccountKeyingTests: XCTestCase {
     private var now = Date(timeIntervalSince1970: 1_700_000_000)
 
     override func tearDown() {
@@ -399,7 +399,7 @@ final class CloudAuthTokenStampRaceTests: XCTestCase {
         super.tearDown()
     }
 
-    func testTokensAreStampedWithTheCredentialTheRequestPresented() async {
+    func testTokensAreKeyedToTheAccountTheRequestWasMadeFor() async {
         var credential = "cred-A"
         var identity = "acct-A"
         // The exchange response is delivered slowly enough that the account can
@@ -538,5 +538,43 @@ final class CloudAuthTokenCredentialLossTests: XCTestCase {
         let after = await provider.token()
 
         XCTAssertNil(after, "no credential ⇒ no token; the caller must dial nothing")
+    }
+}
+
+/// PR #20 review: an acquisition that completes after the credential was
+/// withdrawn must not be handed out — both conditions apply to the *result*.
+final class CloudAuthTokenResultGuardTests: XCTestCase {
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testAcquisitionResultIsRefusedWhenTheCredentialWasWithdrawnMidFlight() async {
+        var credential: String? = "cred-A"
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config),
+            now: { self.now }
+        )
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data(#"{"access_token":"token-A","expires_in":900,"refresh_token":"refresh-A"}"#.utf8),
+                chunkDelayNanoseconds: 200_000_000
+            )
+        }
+
+        let inFlight = Task { await provider.token() }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        credential = nil  // the app abandons the session mid-acquisition
+
+        let minted = await inFlight.value
+        XCTAssertNil(minted, "a token acquired for a withdrawn credential must not be handed out")
     }
 }

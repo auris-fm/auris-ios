@@ -138,7 +138,13 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             dropCacheIfAccountChanged()
 
             switch outcome {
-            case let .success(tokens) where tokens.sourceIdentity == identityProvider():
+            case let .success(tokens)
+                where tokens.sourceIdentity == identityProvider()
+                    && credentialProvider()?.isEmpty == false:
+                // Both conditions again, now on the *result*: an acquisition that
+                // completes after the credential was withdrawn must not be handed
+                // out, or the turn would be dialled as an account the app has
+                // abandoned (PR #20 review).
                 return tokens.accessToken
             case .success:
                 // The in-flight work belonged to a previous account: acquire for
