@@ -578,3 +578,49 @@ final class CloudAuthTokenResultGuardTests: XCTestCase {
         XCTAssertNil(minted, "a token acquired for a withdrawn credential must not be handed out")
     }
 }
+
+/// PR #20 review (scope): the provider must actually be reachable in production —
+/// the credential source is chosen per call from the configured origin.
+final class CloudTokenProviderRouterTests: XCTestCase {
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testConfiguredOriginSelectsTheAurisProvider() async {
+        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test")
+        XCTAssertTrue(provider is CloudAuthTokenProvider, "a configured Auris origin means Auris-issued tokens")
+    }
+
+    func testUnconfiguredOriginKeepsTheStaticProvider() async {
+        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "")
+        XCTAssertTrue(provider is CloudStaticIdentityTokenProvider, "no origin ⇒ today's trust-on-first-use provider")
+    }
+
+    func testConfiguredOriginDoesNotFallBackToTheLegacyBearer() async {
+        // With the Auris provider selected and no credential, the route path must
+        // fail closed rather than dial with `user_<uuid>`.
+        var credential: String? = nil
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        var requests: [String] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in requests.append(request.value(forHTTPHeaderField: "Authorization") ?? "") }
+        let client = CloudRouteClient(
+            baseURL: "https://api.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: CloudAuthTokenProvider(
+                authBaseURLProvider: { "https://auth.test" },
+                credentialProvider: { credential },
+                identityProvider: { "acct-A" },
+                appVersionProvider: { "1.0" },
+                session: URLSession(configuration: config)
+            )
+        )
+
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        XCTAssertTrue(requests.isEmpty, "no credential ⇒ nothing dialled, and never the legacy bearer")
+    }
+}
