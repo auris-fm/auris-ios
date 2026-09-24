@@ -699,11 +699,18 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
         XCTAssertEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "Connection lost. Please try again.")
     }
 
-    func testHyphenatedLocaleFindsItsLanguageBundle() {
-        // zh-Hans has no bundle of its own here; the language subtag must be tried.
+    /// Asserts the **discovered bundle**, not a translation: `zh-Hans.lproj` ships
+    /// no VoiceTemplates table, so a behavioural assertion would pass whether or
+    /// not the hyphenated candidate matched anything (PR #19 review).
+    func testHyphenatedLocaleSelectsItsOwnBundle() {
         let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-Hans-CN"))
-        // The assertion is behaviour, not a specific translation: whatever the app
-        // ships for zh, it must never be the English string.
-        XCTAssertNotEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "Connection lost. Please try again.")
+        XCTAssertEqual(resolver.resolvedLocalization, "zh-Hans", "the full hyphenated tag must match its own .lproj")
+    }
+
+    func testScriptlessLocaleFallsBackToTheLanguageSubtag() {
+        // zh-CN has no `zh-CN.lproj`; the language subtag must be the candidate
+        // that matches, which is what keeps a translated locale speakable.
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-CN"))
+        XCTAssertEqual(resolver.resolvedLocalization, "zh-Hans", "the language subtag still finds the shipped zh bundle")
     }
 }
