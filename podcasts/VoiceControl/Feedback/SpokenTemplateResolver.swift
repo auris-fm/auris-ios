@@ -20,9 +20,21 @@ class SpokenTemplateResolver {
         if let localeBundle {
             self.localeBundle = localeBundle
         } else {
-            let code = Locale.current.language.languageCode?.identifier
-            let path = code.flatMap { mainBundle.path(forResource: $0, ofType: "lproj") }
-            self.localeBundle = path.flatMap { Bundle(path: $0) }
+            // A hyphenated tag (zh-Hans, pt-BR) never matches its own `.lproj`
+            // by full identifier, so try the tag, then the language subtag, then a
+            // preferred-localization match — otherwise a translated locale would
+            // keep the earcon forever and the revisit condition above could never
+            // fire (PR #19 review).
+            let tag = Locale.current.identifier.replacingOccurrences(of: "_", with: "-")
+            let language = Locale.current.language.languageCode?.identifier
+            let candidates = [tag, language].compactMap { $0 }
+            let preferred = Bundle.preferredLocalizations(from: mainBundle.localizations)
+            let names = candidates + preferred
+            self.localeBundle = names
+                .lazy
+                .compactMap { mainBundle.path(forResource: $0, ofType: "lproj") }
+                .compactMap { Bundle(path: $0) }
+                .first
         }
     }
 

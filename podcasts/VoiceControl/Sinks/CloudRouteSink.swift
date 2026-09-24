@@ -98,7 +98,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
 
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
         guard isConfigured() else {
-            return .spoken(SpokenTemplateResolver().resolve("general.cloud_coming_soon"))
+            // Same rule as the error path: a client-authored message is spoken
+            // only in the user's own locale (spec ruling 2026-09-24).
+            let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
+            return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
         }
 
         var tokenBuffer = ""
