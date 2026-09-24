@@ -89,12 +89,14 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
-        // Deterministic: the code carries no message, and the sink resolves the
-        // localized template for `connection_lost`, so the user hears a sentence
-        // rather than nothing. Asserting the value (not a set of accepted shapes)
-        // keeps this pin able to fail if the turn ever regressed to silence
-        // (PR #19 review).
-        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
+        // The code carries no message; the sink speaks it only in the user's own
+        // locale and otherwise emits the error earcon (spec ruling 2026-09-24).
+        // Asserting those two exact values (never `.silent`) keeps this pin able to
+        // fail if the turn ever regressed to silence (PR #19 review).
+        XCTAssertTrue(
+            response == .spoken("Connection lost. Please try again.") || response == .earcon(.error),
+            "expected a locale-appropriate failure signal, got \(response)"
+        )
     }
 
     // MARK: - unaligned quotes

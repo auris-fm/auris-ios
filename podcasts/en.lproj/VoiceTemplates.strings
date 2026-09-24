@@ -83,5 +83,9 @@
 /* Cloud assistant — client-generated failure codes.
    These are spoken ONLY for codes that represent a failed user turn; internal
    diagnostics (invalid_request, invalid_response, unauthorized) intentionally
-   have no entry, so they surface as the error earcon instead of speech. */
+   have no entry, so they surface as the error earcon instead of speech.
+   They are also spoken ONLY in the user's own locale: an untranslated key falls
+   back to the earcon rather than to this base-language text, because speech has
+   no affordance for a language the user doesn't read (spec ruling 2026-09-24).
+   Revisit when translations are added — a locale that carries the key is spoken. */
 "cloud_error_connection_lost" = "Connection lost. Please try again.";
