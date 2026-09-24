@@ -607,8 +607,8 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
 
     func testUntranslatedKeyFallsBackToTheEarconRatherThanBaseLanguageSpeech() async {
         // A **real** localization that exists but carries no VoiceTemplates table
-        // (ca.lproj ships only InfoPlist.strings) — the production shape, rather
-        // than an empty directory (PR #19 review).
+        // (ca.lproj ships InfoPlist/Intents/Localizable but no VoiceTemplates) —
+        // the production shape, rather than an empty directory (PR #19 review).
         let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
         let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
