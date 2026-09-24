@@ -28,26 +28,22 @@ protocol CloudTokenProviding {
     /// for providers whose `token()` is already instant.
     func prepare() async
 
-    /// Called after a 401 to allow an out-of-band refresh. Best effort: callers
-    /// do not retry the turn with the new credential in the same turn.
-    func handleUnauthorized() async
-
-    /// Preferred form: report **which** credential was rejected.
+    /// Called after a 401, reporting **which** credential was rejected.
     ///
-    /// Without it a provider cannot tell a fresh 401 from one for a token a
-    /// concurrent refresh has already replaced, so a burst of N 401s costs N
-    /// sequential refreshes (PR #20 review). Implementations should treat a
-    /// rejection of an already-replaced token as a no-op; the default
-    /// implementation preserves the previous behaviour for conformances that
-    /// don't care.
+    /// The parameter is what lets a provider tell a fresh 401 from one for a
+    /// token a concurrent refresh has already replaced — without it a burst of N
+    /// 401s costs N sequential refreshes (PR #20 review). Implementations should
+    /// treat a rejection of an already-replaced token as a no-op; pass `nil` when
+    /// the caller cannot say which credential was used.
     func handleUnauthorized(rejectedToken: String?) async
 }
 
 extension CloudTokenProviding {
     func prepare() async {}
 
-    func handleUnauthorized(rejectedToken: String?) async {
-        await handleUnauthorized()
+    /// Convenience for callers that cannot name the rejected credential.
+    func handleUnauthorized() async {
+        await handleUnauthorized(rejectedToken: nil)
     }
 }
 
@@ -65,7 +61,7 @@ final class CloudStaticIdentityTokenProvider: CloudTokenProviding {
         identity.userId
     }
 
-    func handleUnauthorized() async {
+    func handleUnauthorized(rejectedToken: String?) async {
         // Trust-on-first-use: there is nothing to refresh yet. The issuer
         // decision (task #26) defines whether this becomes a refresh call.
     }
