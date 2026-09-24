@@ -121,8 +121,16 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             await performTokenRefreshPath()
         }
 
+        // The in-flight work may have been started for a *previous* account (a
+        // 15s refresh can outlive a sign-out), and single-flight hands its result
+        // to whoever is waiting — so re-check whose tokens came back before
+        // returning them, or the new account's first turn is admitted as the old
+        // user (PR #20 review).
+        dropCacheIfCredentialChanged()
+
         switch outcome {
         case let .success(tokens):
+            guard tokens.sourceCredential == credentialProvider() else { return nil }
             return tokens.accessToken
         case .rejected:
             return nil
@@ -156,7 +164,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// fresh credential exchange.
     private func performTokenRefreshPath() async -> Outcome {
         if let stored = currentRefreshToken() {
-            switch await performRefresh(refreshToken: stored) {
+            let owner = currentTokens()?.sourceCredential
+            switch await performRefresh(refreshToken: stored, ownerCredential: owner) {
             case let .success(rotated):
                 store(rotated)
                 return .success(rotated)
@@ -190,8 +199,12 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         let current = credentialProvider()
         lock.lock()
         defer { lock.unlock() }
-        guard let stored = tokens?.sourceCredential, stored != current else { return }
-        tokens = nil
+        // A nil stamp is a mismatch too: it is what a mint during the signed-out
+        // window records, and it must not survive a sign-in (PR #20 review).
+        guard let stored = tokens?.sourceCredential, stored == current else {
+            tokens = nil
+            return
+        }
     }
 
     // MARK: - request paths
@@ -218,10 +231,12 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    private func performRefresh(refreshToken: String) async -> Outcome {
-        // The account credential — not the rotating refresh token — keys the
-        // cache, so a rotation does not look like an account change.
-        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedCredential: credentialProvider())
+    private func performRefresh(refreshToken: String, ownerCredential: String?) async -> Outcome {
+        // Stamp the tokens with the **owner of the chain being rotated**, not a
+        // fresh sample: the /refresh body carries only the refresh token, so the
+        // server never sees an account credential and a fresh sample would be a
+        // client-side guess at whose tokens came back (PR #20 review).
+        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedCredential: ownerCredential)
     }
 
     /// `presentedCredential` is the credential this request actually carried, so

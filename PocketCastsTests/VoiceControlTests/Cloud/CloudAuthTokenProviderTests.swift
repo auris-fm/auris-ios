@@ -423,3 +423,50 @@ final class CloudAuthTokenStampRaceTests: XCTestCase {
         XCTAssertEqual(second, "token-for-B", "cred-B must not be served cred-A's token")
     }
 }
+
+/// PR #20 review: the single-flight result must not be handed to a different
+/// account — a 15s refresh can outlive a sign-out.
+final class CloudAuthTokenInflightSwitchTests: XCTestCase {
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testTokenDoesNotReturnAnotherAccountsInflightRefreshResult() async {
+        var credential = "cred-A"
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config),
+            now: { self.now }
+        )
+
+        // A mints and then its refresh is in flight (slow response).
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"token-for-A","expires_in":900,"refresh_token":"refresh-A"}"#
+        )
+        _ = await provider.token()
+        now = now.addingTimeInterval(901)  // past the skew: the next call refreshes
+
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data(#"{"access_token":"refreshed-for-A","expires_in":900,"refresh_token":"refresh-A2"}"#.utf8),
+                chunkDelayNanoseconds: 300_000_000
+            )
+        }
+        let inFlight = Task { await provider.token() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // B signs in while A's refresh is still running.
+        credential = "cred-B"
+        let forB = await inFlight.value
+
+        XCTAssertNil(forB, "A's in-flight refresh must not be served to B; B's next call acquires its own")
+    }
+}
