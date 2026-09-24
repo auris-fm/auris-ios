@@ -70,10 +70,13 @@ final class CloudDiscoveryResultsTests: XCTestCase {
         _ = parser.consume(line: #"data: {"kind":"episode_results"}"#)
         let events = parser.consume(line: "")
         XCTAssertEqual(events.count, 1)
-        guard case let .error(code, _) = events.first else {
+        guard case let .error(code, message) = events.first else {
             return XCTFail("expected invalid_response error, got \(events)")
         }
         XCTAssertEqual(code, "invalid_response")
+        // The code carries the diagnosis; a non-empty message would be spoken
+        // aloud by TTS in the user's locale (PR #19 review).
+        XCTAssertTrue(message.isEmpty, "internal diagnostics must not be English prose for TTS")
     }
 
     func testParserIgnoresUnknownResultKind() {

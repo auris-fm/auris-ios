@@ -98,6 +98,34 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertEqual(json["capabilities"] as? [String], ["search_results_v1"])
     }
 
+    /// PR #19 review: the 8 KiB bound is a byte bound, so a single CJK/emoji turn
+    /// must not trim to 8 Ki *characters* (~32 KiB of bytes).
+    func testSingleOversizedMultibyteTurnIsTrimmedByUtf8Bytes() {
+        // 4 000 CJK characters = 12 000 UTF-8 bytes, well over the 8 KiB bound.
+        let cjk = String(repeating: "暂", count: 4_000)
+        let bounded = RecentConversation.bounded([RecentConversationTurn(role: .user, text: cjk)])
+
+        XCTAssertEqual(bounded.count, 1)
+        let bytes = bounded[0].text.utf8.count
+        XCTAssertLessThanOrEqual(bytes, RecentConversation.maxBytes, "bound is bytes, not characters")
+        XCTAssertGreaterThan(bytes, 7_000, "the newest speech is still kept, not emptied")
+        XCTAssertFalse(bounded[0].text.isEmpty)
+    }
+
+    func testMultibyteTrimNeverSplitsAScalar() {
+        let emoji = String(repeating: "👨‍👩‍👧‍👦", count: 2_000)
+        let bounded = RecentConversation.bounded([RecentConversationTurn(role: .user, text: emoji)])
+        XCTAssertLessThanOrEqual(bounded[0].text.utf8.count, RecentConversation.maxBytes)
+        // A split scalar would have produced replacement characters.
+        XCTAssertFalse(bounded[0].text.contains("\u{FFFD}"))
+    }
+
+    func testAsciiTurnsStillBoundByBytes() {
+        let ascii = String(repeating: "a", count: 20_000)
+        let bounded = RecentConversation.bounded([RecentConversationTurn(role: .assistant, text: ascii)])
+        XCTAssertEqual(bounded[0].text.utf8.count, RecentConversation.maxBytes)
+    }
+
     // MARK: - route_hint
 
     func testRouteHintOmittedForFreeTextTurns() throws {

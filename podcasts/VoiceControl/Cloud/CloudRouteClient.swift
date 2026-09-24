@@ -94,7 +94,12 @@ final class CloudRouteClient {
         // bearer. The default provider always returns the trust-on-first-use id,
         // so today's behavior is unchanged.
         guard let credential = await tokenProvider.token() ?? nonEmpty(userId) else {
-            continuation.yield(.error(code: "unauthorized", message: "No cloud credential available"))
+            // No human-readable message: `CloudRouteSink` speaks any non-empty
+            // `.error` message through TTS in the user's locale, so a diagnostic
+            // English string here would be read aloud to a non-English user.
+            // The code carries the diagnosis; the sink maps an empty message to
+            // its localized error earcon (review finding on PR #19).
+            continuation.yield(.error(code: "unauthorized", message: ""))
             continuation.finish()
             return
         }
@@ -313,7 +318,11 @@ struct CloudRouteSSEParser {
             // and with Android's reviewed behavior). Unknown *kinds* stay
             // forward-compatible and are ignored.
             guard !isMalformedResultPayload(data) else {
-                return .error(code: "invalid_response", message: "Invalid result payload")
+                // No human-readable message, same reason as the fail-closed guard
+                // below: `CloudRouteSink` speaks any non-empty `.error` message via
+                // TTS in the user's locale, so an internal diagnostic must not be
+                // English prose (PR #19 review, follow-up).
+                return .error(code: "invalid_response", message: "")
             }
             guard let result = DiscoveryResult.parse(json: data) else { return nil }
             return .result(result)
