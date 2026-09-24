@@ -89,18 +89,12 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
-        switch response {
-        case .silent, .spoken:
-            // Either it reports the loss, or it stays silent-but-restored.
-            break
-        case .earcon:
-            // The intended user-facing signal: the client sends a code with an
-            // empty message, no localized template exists for it yet, so the sink
-            // emits the error earcon rather than speaking English (PR #19 review).
-            break
-        case .combined:
-            XCTFail("unexpected response \(response)")
-        }
+        // Deterministic: the code carries no message, and the sink resolves the
+        // localized template for `connection_lost`, so the user hears a sentence
+        // rather than nothing. Asserting the value (not a set of accepted shapes)
+        // keeps this pin able to fail if the turn ever regressed to silence
+        // (PR #19 review).
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
     }
 
     // MARK: - unaligned quotes
