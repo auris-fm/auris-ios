@@ -23,6 +23,11 @@ protocol CloudTokenProviding {
     /// returned and refresh happens out of band.
     func token() async -> String?
 
+    /// Optional warm-up, called off the turn path (assistant UI open, session
+    /// start) so the turn path only ever reads a cache. The default is a no-op
+    /// for providers whose `token()` is already instant.
+    func prepare() async
+
     /// Called after a 401 to allow an out-of-band refresh. Best effort: callers
     /// do not retry the turn with the new credential in the same turn.
     func handleUnauthorized() async
@@ -39,6 +44,8 @@ protocol CloudTokenProviding {
 }
 
 extension CloudTokenProviding {
+    func prepare() async {}
+
     func handleUnauthorized(rejectedToken: String?) async {
         await handleUnauthorized()
     }
