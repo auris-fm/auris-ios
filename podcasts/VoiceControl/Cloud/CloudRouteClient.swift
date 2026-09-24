@@ -119,7 +119,7 @@ final class CloudRouteClient {
         do {
             let (bytes, response) = try await session.bytes(for: urlRequest)
             guard let http = response as? HTTPURLResponse else {
-                continuation.yield(.error(code: "connection_lost", message: "Invalid response"))
+                continuation.yield(.error(code: "connection_lost", message: ""))
                 continuation.finish()
                 return
             }

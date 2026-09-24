@@ -89,12 +89,16 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
-        if case .silent = response {
-            // An interrupted stream without a usable message is silent-but-restored.
-        } else if case .spoken = response {
-            // Or it reports the connection loss. Both are acceptable; the
-            // invariants asserted above are what matter.
-        } else {
+        switch response {
+        case .silent, .spoken:
+            // Either it reports the loss, or it stays silent-but-restored.
+            break
+        case .earcon:
+            // The intended user-facing signal: the client sends a code with an
+            // empty message, no localized template exists for it yet, so the sink
+            // emits the error earcon rather than speaking English (PR #19 review).
+            break
+        case .combined:
             XCTFail("unexpected response \(response)")
         }
     }
