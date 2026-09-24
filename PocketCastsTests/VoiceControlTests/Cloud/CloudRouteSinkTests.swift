@@ -631,3 +631,52 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
     }
 }
+
+/// A whitespace-only server message is treated as absent (PR #19 review): it must
+/// not be spoken as silence, and it follows the same localized-template/earcon
+/// route as a missing message.
+final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_ws_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testWhitespaceOnlyServerMessageIsNotSpokenAsSilence() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"invalid_response","message":"   "}
+
+            """
+        )
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let sink = CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+
+        let response = await sink.routeToCloud(request: "x", tier: .free, context: context)
+
+        XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
+    }
+}

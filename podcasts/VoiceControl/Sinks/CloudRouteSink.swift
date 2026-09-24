@@ -166,9 +166,13 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 // carries a code and an empty message instead of English prose:
                 // resolve a localized template for that code if one exists, and
                 // fall back to the error earcon when it doesn't (PR #19 review).
-                let spoken = message.isEmpty
+                // Whitespace-only counts as absent: a server message of spaces
+                // would otherwise be "spoken" as silence, occupying the turn's
+                // only feedback channel (PR #19 review).
+                let serverMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                let spoken = serverMessage.isEmpty
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
-                    : message
+                    : serverMessage
                 if spoken.isEmpty {
                     return .earcon(.error)
                 }
