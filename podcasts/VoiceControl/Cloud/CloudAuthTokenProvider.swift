@@ -144,11 +144,13 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             switch outcome {
             case let .success(tokens)
                 where tokens.sourceIdentity == identityProvider()
-                    && credentialProvider()?.isEmpty == false:
-                // Both conditions again, now on the *result*: an acquisition that
-                // completes after the credential was withdrawn must not be handed
-                // out, or the turn would be dialled as an account the app has
-                // abandoned (PR #20 review).
+                    && credentialProvider()?.isEmpty == false
+                    && tokens.sourceOrigin == authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+                // All three conditions again, now on the *result*: an acquisition
+                // completing after the credential was withdrawn, or after the app
+                // was repointed at another environment, must not be handed out —
+                // otherwise the turn is dialled as an abandoned account, or with a
+                // token minted by the old origin (PR #20 review).
                 return tokens.accessToken
             case .success:
                 // The in-flight work belonged to a previous account: acquire for
@@ -272,7 +274,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 "app_version": appVersionProvider(),
             ],
         ]
-        switch await post(path: Self.tokenPath, body: body, presentedIdentity: identity) {
+        let origin = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        switch await post(path: Self.tokenPath, body: body, presentedIdentity: identity, presentedOrigin: origin) {
         case let .success(tokens):
             store(tokens)
             return .success(tokens)
@@ -288,14 +291,19 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         // fresh sample: the /refresh body carries only the refresh token, so the
         // server never sees an account credential and a fresh sample would be a
         // client-side guess at whose tokens came back (PR #20 review).
-        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedIdentity: ownerIdentity)
+        await post(
+            path: Self.refreshPath,
+            body: ["refresh_token": refreshToken],
+            presentedIdentity: ownerIdentity,
+            presentedOrigin: authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        )
     }
 
     /// `presentedIdentity` is the account this request was made for, sampled when
     /// it was built — so the minted tokens are stamped with what the request
     /// belonged to rather than with whatever the app reports when the response is
     /// decoded (PR #20 review).
-    private func post(path: String, body: [String: Any], presentedIdentity: String?) async -> Outcome {
+    private func post(path: String, body: [String: Any], presentedIdentity: String?, presentedOrigin: String?) async -> Outcome {
         let baseURL = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else { return .inconclusive }
         var request = URLRequest(url: url)
@@ -309,7 +317,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             let (data, response) = try await session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if status == 200 {
-                guard let tokens = decodeTokens(data, presentedIdentity: presentedIdentity) else { return .inconclusive }
+                guard let tokens = decodeTokens(data, presentedIdentity: presentedIdentity, presentedOrigin: presentedOrigin) else { return .inconclusive }
                 return .success(tokens)
             }
             // 401/403: checked and rejected. Anything else (5xx/429/other) is
@@ -320,7 +328,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    private func decodeTokens(_ data: Data, presentedIdentity: String?) -> Tokens? {
+    private func decodeTokens(_ data: Data, presentedIdentity: String?, presentedOrigin: String?) -> Tokens? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = object["access_token"] as? String, !accessToken.isEmpty
         else {
@@ -332,7 +340,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             accessToken: accessToken,
             refreshToken: object["refresh_token"] as? String,
             sourceIdentity: presentedIdentity,
-            sourceOrigin: authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+            sourceOrigin: presentedOrigin,
             expiresAt: issued.addingTimeInterval(max(0, expiresIn - Self.expirySkew)),
             hardExpiresAt: issued.addingTimeInterval(max(0, expiresIn))
         )

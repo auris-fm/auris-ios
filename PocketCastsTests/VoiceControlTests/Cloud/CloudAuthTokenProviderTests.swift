@@ -638,6 +638,34 @@ final class CloudTokenProviderSharingTests: XCTestCase {
         XCTAssertTrue((staticFirst as AnyObject) === (staticSecond as AnyObject))
     }
 
+    func testInFlightAcquisitionIsRejectedAfterAnOriginChange() async {
+        var origin = "https://auth-one.test"
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { origin },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config)
+        )
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data(#"{"access_token":"one","expires_in":900,"refresh_token":"r1"}"#.utf8),
+                chunkDelayNanoseconds: 200_000_000
+            )
+        }
+        let inFlight = Task { await provider.token() }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        // Repointed at another environment mid-flight.
+        origin = "https://auth-two.test"
+        CloudRouteTestURLProtocol.stubJSON(status: 200, body: #"{"access_token":"two","expires_in":900,"refresh_token":"r2"}"#)
+
+        let minted = await inFlight.value
+        XCTAssertEqual(minted, "two", "the in-flight result belongs to the old origin and must not be published")
+    }
+
     func testSharedProviderDoesNotReplayAnotherOriginsToken() async {
         var origin = "https://auth-one.test"
         var requests: [String] = []
