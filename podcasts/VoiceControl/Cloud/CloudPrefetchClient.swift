@@ -68,7 +68,10 @@ final class CloudPrefetchClient {
         // Fail closed / stay silent without a credential (parity with the
         // Android half): prefer one attempt that never happens to a hopeful
         // bearer. Default provider returns the trust-on-first-use id.
-        guard let credential = await tokenProvider.token() ?? (userId.isEmpty ? nil : userId) else {
+        // No legacy `user_<uuid>` fallback here either: prefetch is an edge call,
+        // so the trust-on-first-use id would be a silent downgrade rather than a
+        // skip. No credential ⇒ no hint, silently (PR #19/#20 review).
+        guard let credential = await tokenProvider.token() else {
             return .failed
         }
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
