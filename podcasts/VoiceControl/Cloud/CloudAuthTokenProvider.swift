@@ -127,27 +127,31 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             refreshInBackground()
             return usable
         }
-        // Nothing usable cached: the one unavoidable await.
-        let outcome = await singleFlight { [self] in
-            await performTokenRefreshPath()
-        }
+        // Nothing usable cached: the unavoidable await. Retried **in place** (not
+        // by recursing into `token()`) when the account changed under an in-flight
+        // acquisition — a joiner can resume before the single-flight owner clears
+        // its handle, and re-reading a published handle would spin (PR #20 review).
+        for attempt in 0..<2 {
+            let outcome = await singleFlight { [self] in
+                await performTokenRefreshPath()
+            }
+            dropCacheIfAccountChanged()
 
-        // The in-flight work may have belonged to a *previous* account (a 15s
-        // refresh can outlive a sign-out), and single-flight hands its result to
-        // whoever is waiting — so re-check whose tokens came back, and acquire for
-        // the current account rather than handing over another account's token
-        // (PR #20 review).
-        dropCacheIfAccountChanged()
-
-        switch outcome {
-        case let .success(tokens):
-            guard tokens.sourceIdentity == identityProvider() else { return await token() }
-            return tokens.accessToken
-        case .rejected:
-            return nil
-        case .inconclusive:
-            return cachedUsableToken()
+            switch outcome {
+            case let .success(tokens) where tokens.sourceIdentity == identityProvider():
+                return tokens.accessToken
+            case .success:
+                // The in-flight work belonged to a previous account: acquire for
+                // the current one rather than handing over that token.
+                guard attempt == 0 else { return nil }
+                continue
+            case .rejected:
+                return nil
+            case .inconclusive:
+                return cachedUsableToken()
+            }
         }
+        return nil
     }
 
     func handleUnauthorized() async {
@@ -206,16 +210,24 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    /// Drops the cached tokens when the account behind them is gone or different
-    /// (sign-out, or a different account signing in). Keyed on the stable account
-    /// identity, so a session-credential renewal does not look like a change.
+    /// Drops the cached tokens when the account behind them is gone, when no
+    /// credential is present, or when a different account signed in — but **not**
+    /// on a mere credential renewal, which is the case keying on the credential
+    /// got wrong (PR #20 review).
+    ///
+    /// The credential-presence half is load-bearing: the app clears
+    /// `syncingV2Token` after a failed re-auth while leaving `userId` set, and for
+    /// a password login that token *is* the credential — so without this the cache
+    /// would keep serving a session the app has already invalidated, against the
+    /// "no credential ⇒ no token" posture.
     private func dropCacheIfAccountChanged() {
         let current = identityProvider()
+        let hasCredential = credentialProvider()?.isEmpty == false
         lock.lock()
         defer { lock.unlock() }
         // A nil stamp is a mismatch too: it is what a mint during the signed-out
-        // window records, and it must not survive a sign-in (PR #20 review).
-        guard let stored = tokens?.sourceIdentity, stored == current else {
+        // window records, and it must not survive a sign-in.
+        guard hasCredential, let stored = tokens?.sourceIdentity, stored == current else {
             tokens = nil
             return
         }

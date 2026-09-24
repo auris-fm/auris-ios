@@ -502,3 +502,41 @@ final class CloudAuthTokenInflightSwitchTests: XCTestCase {
         XCTAssertEqual(forB, "token-for-B", "B gets its own token, never A's in-flight refresh result")
     }
 }
+
+/// PR #20 review (blocking): dropping the *credential* while the account id stays
+/// set — what the app does after a failed re-auth — must fail closed rather than
+/// keep serving the invalidated session.
+final class CloudAuthTokenCredentialLossTests: XCTestCase {
+    private var now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testLosingTheCredentialDropsTheCacheAndFailsClosed() async {
+        var credential: String? = "cred-A"
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            identityProvider: { "acct-A" },  // the app leaves the account id set
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config),
+            now: { self.now }
+        )
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"token-A","expires_in":900,"refresh_token":"refresh-A"}"#
+        )
+        let before = await provider.token()
+        XCTAssertEqual(before, "token-A")
+
+        // The app invalidated the session: credential gone, account id still set.
+        credential = nil
+        let after = await provider.token()
+
+        XCTAssertNil(after, "no credential ⇒ no token; the caller must dial nothing")
+    }
+}
