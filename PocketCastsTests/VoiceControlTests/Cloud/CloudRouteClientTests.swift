@@ -278,3 +278,58 @@ final class CloudRouteClientTests: XCTestCase {
         XCTAssertTrue(text.contains("\"client_position_ms\":1234567"))
     }
 }
+
+/// Convention (PR #19 review): client-generated diagnostics carry a `code` with an
+/// empty `message`, so the sink emits its localized earcon instead of TTS reading
+/// English prose to a non-English user. These pin the sweep across the client.
+final class CloudRouteClientLocaleTests: XCTestCase {
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    private func makeClient() -> CloudRouteClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        return CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_test",
+            session: URLSession(configuration: config)
+        )
+    }
+
+    func testMidStreamDropWithoutDoneCarriesNoEnglishProse() async {
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .complete(status: 200, headers: ["Content-Type": "text/event-stream"], body: Data("event: token\ndata: {\"text\":\"hi\"}\n\n".utf8))
+        }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        guard case let .error(code, message)? = events.last else {
+            return XCTFail("expected a terminal error, got \(events)")
+        }
+        XCTAssertEqual(code, "connection_lost")
+        XCTAssertTrue(message.isEmpty, "a reachable diagnostic must not be English prose for TTS")
+    }
+
+    func testPreStreamErrorWithoutAServerMessageStaysSilent() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        guard case let .error(code, message)? = events.first else {
+            return XCTFail("expected an error event, got \(events)")
+        }
+        XCTAssertEqual(code, "unauthorized")
+        XCTAssertTrue(message.isEmpty, "the server supplied no message; the client must not synthesize English")
+    }
+
+    func testServerSuppliedMessageIsPassedThrough() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 429, body: #"{"code":"limit_exceeded","message":"Daily limit reached"}"#)
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        guard case let .error(code, message)? = events.first else {
+            return XCTFail("expected an error event, got \(events)")
+        }
+        XCTAssertEqual(code, "limit_exceeded")
+        XCTAssertEqual(message, "Daily limit reached", "the server's own message is passed through as-is")
+    }
+}

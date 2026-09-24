@@ -82,7 +82,7 @@ final class CloudRouteClient {
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
         guard let url = URL(string: baseURL + Self.routePath) else {
-            continuation.yield(.error(code: "invalid_request", message: "Invalid base URL"))
+            continuation.yield(.error(code: "invalid_request", message: ""))  // code only: a non-empty message is spoken by TTS (see the fail-closed guard above)
             continuation.finish()
             return
         }
@@ -111,7 +111,7 @@ final class CloudRouteClient {
         do {
             urlRequest.httpBody = try CloudRouteRequestBuilder.body(request: request, context: context, turn: turn)
         } catch {
-            continuation.yield(.error(code: "invalid_request", message: "Failed to encode request"))
+            continuation.yield(.error(code: "invalid_request", message: ""))
             continuation.finish()
             return
         }
@@ -167,9 +167,9 @@ final class CloudRouteClient {
                     continuation.yield(event)
                 }
                 if !sawTerminalEvent {
-                    continuation.yield(
-                        .error(code: "connection_lost", message: "Connection closed before done")
-                    )
+                    // Code only: the user hears a localized earcon rather than an
+                    // English sentence (reachable on any mid-stream drop).
+                    continuation.yield(.error(code: "connection_lost", message: ""))
                 }
                 continuation.finish()
             } catch is CancellationError {
@@ -213,7 +213,10 @@ final class CloudRouteClient {
         let code = (parsed?["code"] as? String)
             ?? (parsed?["error"] as? String)
             ?? httpStatusCode(status)
-        let message = (parsed?["message"] as? String) ?? defaultMessage(for: status)
+        // A server-supplied message is passed through (its localisation is the
+        // server's); a synthesized default stays empty so the client never
+        // invents English prose for TTS.
+        let message = (parsed?["message"] as? String) ?? ""
         return .error(code: code, message: message)
     }
 
@@ -225,13 +228,6 @@ final class CloudRouteClient {
         }
     }
 
-    private static func defaultMessage(for status: Int) -> String {
-        switch status {
-        case 400: return "Invalid request"
-        case 401: return "Unauthorized"
-        default: return "HTTP \(status)"
-        }
-    }
 }
 
 /// Incremental SSE frame parser (`event:` / multi-line `data:` / blank-line dispatch).

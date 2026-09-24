@@ -195,7 +195,7 @@ final class CloudTokenProvidingTests: XCTestCase {
         struct FixedTokenProvider: CloudTokenProviding {
             let value: String
             func token() async -> String? { value }
-            func handleUnauthorized() async {}
+            func handleUnauthorized(rejectedToken: String?) async {}
         }
 
         let config = URLSessionConfiguration.ephemeral
@@ -222,7 +222,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
 
     private struct NoTokenProvider: CloudTokenProviding {
         func token() async -> String? { nil }
-        func handleUnauthorized() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
     }
 
     func testRouteSendsNoRequestWithoutACredential() async {
