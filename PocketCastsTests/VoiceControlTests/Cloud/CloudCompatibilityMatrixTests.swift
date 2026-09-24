@@ -89,14 +89,12 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
-        if case .silent = response {
-            // An interrupted stream without a usable message is silent-but-restored.
-        } else if case .spoken = response {
-            // Or it reports the connection loss. Both are acceptable; the
-            // invariants asserted above are what matter.
-        } else {
-            XCTFail("unexpected response \(response)")
-        }
+        // Deterministic: the code carries no message, and the sink resolves the
+        // localized template for `connection_lost`, so the user hears a sentence
+        // rather than nothing. Asserting the value (not a set of accepted shapes)
+        // keeps this pin able to fail if the turn ever regressed to silence
+        // (PR #19 review).
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
     }
 
     // MARK: - unaligned quotes

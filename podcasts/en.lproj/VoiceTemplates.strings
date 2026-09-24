@@ -79,3 +79,9 @@
 
 /* Publication Date */
 "date.published" = "Published %@";
+
+/* Cloud assistant — client-generated failure codes.
+   These are spoken ONLY for codes that represent a failed user turn; internal
+   diagnostics (invalid_request, invalid_response, unauthorized) intentionally
+   have no entry, so they surface as the error earcon instead of speech. */
+"cloud_error_connection_lost" = "Connection lost. Please try again.";

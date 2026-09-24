@@ -485,3 +485,71 @@ final class CloudRouteSupersedeTests: XCTestCase {
         )
     }
 }
+
+/// The client-generated-diagnostic convention (PR #19 review): a code with an
+/// empty message maps to a localized template when one exists, and to the error
+/// earcon when it doesn't — both branches exercised, so neither is inert.
+final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_error_loc_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testTemplatedCodeIsSpoken() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        )
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
+    }
+
+    func testCodeWithoutATemplateUsesTheErrorEarcon() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"invalid_response","message":""}
+
+            """
+        )
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
+    }
+
+    private func makeSink() -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+    }
+
+    private func sampleContext() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+}

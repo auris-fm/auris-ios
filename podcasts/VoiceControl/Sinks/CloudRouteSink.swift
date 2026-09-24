@@ -156,10 +156,16 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 tokenBuffer = ""
                 restoreTransientAudioState()
                 analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
-                if message.isEmpty {
+                // A server-supplied message passes through (localising it is the
+                // server's job). When the client generated the diagnostic it
+                // carries a code and an empty message instead of English prose:
+                // resolve a localized template for that code if one exists, and
+                // fall back to the error earcon when it doesn't (PR #19 review).
+                let spoken = message.isEmpty ? SpokenTemplateResolver().resolve("cloud_error_\(code)") : message
+                if spoken.isEmpty {
                     return .earcon(.error)
                 }
-                return .spoken(message)
+                return .spoken(spoken)
             }
         }
 
