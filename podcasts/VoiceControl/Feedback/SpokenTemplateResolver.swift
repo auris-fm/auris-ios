@@ -15,7 +15,7 @@ class SpokenTemplateResolver {
     /// - Parameter localeBundle: injectable for tests; defaults to the bundle for
     ///   the current language, discovered explicitly so a missing translation can
     ///   be *detected* rather than silently falling back to the base language.
-    init(mainBundle: Bundle = .main, localeBundle: Bundle? = nil) {
+    init(mainBundle: Bundle = .main, localeBundle: Bundle? = nil, locale: Locale = .current) {
         self.mainBundle = mainBundle
         if let localeBundle {
             self.localeBundle = localeBundle
@@ -25,11 +25,18 @@ class SpokenTemplateResolver {
             // preferred-localization match — otherwise a translated locale would
             // keep the earcon forever and the revisit condition above could never
             // fire (PR #19 review).
-            let tag = Locale.current.identifier.replacingOccurrences(of: "_", with: "-")
-            let language = Locale.current.language.languageCode?.identifier
-            let candidates = [tag, language].compactMap { $0 }
-            let preferred = Bundle.preferredLocalizations(from: mainBundle.localizations)
-            let names = candidates + preferred
+            let tag = locale.identifier.replacingOccurrences(of: "_", with: "-")
+            let language = locale.language.languageCode?.identifier
+            let script = locale.language.script?.identifier
+            // Only candidates **from the user's own locale**: a broad
+            // `preferredLocalizations` fallback would happily return the app's
+            // default English bundle for an unsupported non-English locale, which
+            // is the base-language speech the rule forbids (PR #19 review).
+            let scriptTag: String? = {
+                guard let language, let script else { return nil }
+                return "\(language)-\(script)"
+            }()
+            let names = [tag, scriptTag, language].compactMap { $0 }
             self.localeBundle = names
                 .lazy
                 .compactMap { mainBundle.path(forResource: $0, ofType: "lproj") }
