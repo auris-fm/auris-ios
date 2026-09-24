@@ -7,6 +7,10 @@ import Foundation
 /// a localized spoken string.
 class SpokenTemplateResolver {
     private let tableName = "VoiceTemplates"
+    /// The localization actually selected for the user's locale, exposed so tests
+    /// can assert the *bundle choice* rather than a translation that may not exist
+    /// (PR #19 review).
+    private(set) var resolvedLocalization: String?
     private let mainBundle: Bundle
     /// The bundle holding the **user's own** locale, or nil when the app has no
     /// resources for it.
@@ -20,11 +24,12 @@ class SpokenTemplateResolver {
         if let localeBundle {
             self.localeBundle = localeBundle
         } else {
-            // A hyphenated tag (zh-Hans, pt-BR) never matches its own `.lproj`
-            // by full identifier, so try the tag, then the language subtag, then a
-            // preferred-localization match — otherwise a translated locale would
-            // keep the earcon forever and the revisit condition above could never
-            // fire (PR #19 review).
+            // A hyphenated tag (zh-Hans, pt-BR) never matches its own `.lproj` by
+            // full identifier alone, so the candidates are the full tag, then
+            // language-script, then the bare language — all drawn from the user's
+            // locale, never from the app's preferred localizations (a broad
+            // fallback would return the default English bundle and speak it to an
+            // unsupported non-English user — PR #19 review).
             let tag = locale.identifier.replacingOccurrences(of: "_", with: "-")
             let language = locale.language.languageCode?.identifier
             let script = locale.language.script?.identifier
@@ -37,11 +42,16 @@ class SpokenTemplateResolver {
                 return "\(language)-\(script)"
             }()
             let names = [tag, scriptTag, language].compactMap { $0 }
-            self.localeBundle = names
+            let match = names
                 .lazy
-                .compactMap { mainBundle.path(forResource: $0, ofType: "lproj") }
-                .compactMap { Bundle(path: $0) }
+                .compactMap { name -> (String, Bundle)? in
+                    guard let path = mainBundle.path(forResource: name, ofType: "lproj"),
+                          let bundle = Bundle(path: path) else { return nil }
+                    return (name, bundle)
+                }
                 .first
+            self.resolvedLocalization = match?.0
+            self.localeBundle = match?.1
         }
     }
 
