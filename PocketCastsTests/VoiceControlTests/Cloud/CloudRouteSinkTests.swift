@@ -704,7 +704,7 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
     /// not the hyphenated candidate matched anything (PR #19 review).
     func testHyphenatedLocaleSelectsItsOwnBundle() {
         let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-Hans-CN"))
-        XCTAssertEqual(resolver.resolvedLocalization, "zh-Hans", "the full hyphenated tag must match its own .lproj")
+        XCTAssertEqual(resolver.resolvedLocalization, "zh-Hans", "the language-script candidate must match the shipped zh-Hans bundle")
     }
 
     func testExactHyphenatedTagMatchesItsOwnBundle() {

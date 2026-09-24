@@ -242,7 +242,9 @@ final class CloudTokenFailClosedTests: XCTestCase {
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "No cloud credential available")])
+        // Code only: the message is empty so the sink emits its localized earcon
+        // rather than TTS reading English prose to a non-English user.
+        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
     }
 
     func testPrefetchSendsNoRequestWithoutACredential() async {
