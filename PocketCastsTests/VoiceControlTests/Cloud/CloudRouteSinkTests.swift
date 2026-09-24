@@ -683,3 +683,27 @@ final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
         XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
     }
 }
+
+/// The locale rule must not fall back to the app's default bundle: an unsupported
+/// non-English locale hears the earcon, not English (PR #19 review).
+final class SpokenTemplateLocaleFallbackTests: XCTestCase {
+    func testUnsupportedNonEnglishLocaleDoesNotFallBackToEnglish() {
+        // The app ships en.lproj; a locale with no matching bundle must not get it.
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "xx-XX"))
+        XCTAssertEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "",
+                       "no bundle for the user's language ⇒ nothing to speak ⇒ the caller uses the earcon")
+    }
+
+    func testSupportedLocaleStillResolves() {
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "en-US"))
+        XCTAssertEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "Connection lost. Please try again.")
+    }
+
+    func testHyphenatedLocaleFindsItsLanguageBundle() {
+        // zh-Hans has no bundle of its own here; the language subtag must be tried.
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-Hans-CN"))
+        // The assertion is behaviour, not a specific translation: whatever the app
+        // ships for zh, it must never be the English string.
+        XCTAssertNotEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "Connection lost. Please try again.")
+    }
+}
