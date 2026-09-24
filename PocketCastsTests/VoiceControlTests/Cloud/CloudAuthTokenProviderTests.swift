@@ -624,3 +624,43 @@ final class CloudTokenProviderRouterTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty, "no credential ⇒ nothing dialled, and never the legacy bearer")
     }
 }
+
+/// PR #20 review: the provider must be shared across the production paths, and a
+/// shared instance must not replay another environment's token.
+final class CloudTokenProviderSharingTests: XCTestCase {
+    func testRouterReturnsTheSameProviderAcrossCalls() {
+        let first = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test")
+        let second = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test")
+        XCTAssertTrue((first as AnyObject) === (second as AnyObject),
+                      "a fresh provider per client would start cold every turn and break the shared refresh lock")
+        let staticFirst = CloudTokenProviderRouter.provider(aurisBaseURL: "")
+        let staticSecond = CloudTokenProviderRouter.provider(aurisBaseURL: "")
+        XCTAssertTrue((staticFirst as AnyObject) === (staticSecond as AnyObject))
+    }
+
+    func testSharedProviderDoesNotReplayAnotherOriginsToken() async {
+        var origin = "https://auth-one.test"
+        var requests: [String] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in requests.append(request.url?.absoluteString ?? "") }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        CloudRouteTestURLProtocol.stubJSON(status: 200, body: #"{"access_token":"one","expires_in":900,"refresh_token":"r1"}"#)
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { origin },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.0" },
+            session: URLSession(configuration: config)
+        )
+        let first = await provider.token()
+        XCTAssertEqual(first, "one")
+
+        // The app is repointed at another environment; the cached token belongs to
+        // the previous origin and must not be served.
+        origin = "https://auth-two.test"
+        CloudRouteTestURLProtocol.stubJSON(status: 200, body: #"{"access_token":"two","expires_in":900,"refresh_token":"r2"}"#)
+        let second = await provider.token()
+
+        XCTAssertEqual(second, "two", "a token minted for one origin must not be replayed to another")
+    }
+}

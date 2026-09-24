@@ -44,6 +44,10 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         /// credential comparison cannot tell a renewal from an account switch
         /// (PR #20 review).
         let sourceIdentity: String?
+        /// The auth origin these tokens were minted by. A shared provider can
+        /// outlive a configuration change, so a token minted for one environment
+        /// must not be replayed to another (PR #20 review).
+        let sourceOrigin: String?
         /// Proactive-refresh boundary (real expiry minus the skew).
         let expiresAt: Date
         /// The token's real expiry: a request may still use the token up to here,
@@ -228,12 +232,18 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// "no credential ⇒ no token" posture.
     private func dropCacheIfAccountChanged() {
         let current = identityProvider()
+        let currentOrigin = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let hasCredential = credentialProvider()?.isEmpty == false
         lock.lock()
         defer { lock.unlock() }
         // A nil stamp is a mismatch too: it is what a mint during the signed-out
-        // window records, and it must not survive a sign-in.
-        guard hasCredential, let stored = tokens?.sourceIdentity, stored == current else {
+        // window records, and it must not survive a sign-in. The origin check keeps
+        // a shared provider from replaying one environment's token in another.
+        guard hasCredential,
+              let stored = tokens?.sourceIdentity,
+              stored == current,
+              tokens?.sourceOrigin == currentOrigin
+        else {
             tokens = nil
             return
         }
@@ -322,6 +332,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             accessToken: accessToken,
             refreshToken: object["refresh_token"] as? String,
             sourceIdentity: presentedIdentity,
+            sourceOrigin: authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/")),
             expiresAt: issued.addingTimeInterval(max(0, expiresIn - Self.expirySkew)),
             hardExpiresAt: issued.addingTimeInterval(max(0, expiresIn))
         )
@@ -379,6 +390,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 accessToken: "",
                 refreshToken: existing.refreshToken,
                 sourceIdentity: existing.sourceIdentity,
+                sourceOrigin: existing.sourceOrigin,
                 expiresAt: .distantPast,
                 hardExpiresAt: .distantPast
             )
