@@ -715,12 +715,11 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
         XCTAssertEqual(resolver.resolvedLocalization, "pt-BR", "a shipped hyphenated tag matches exactly")
     }
 
-    func testScriptSubtagCandidateIsReachedWhenTheTagHasNoBundle() {
-        // zh-CN: no zh-CN.lproj. Whichever candidate wins (`zh-Hans` when the
-        // script is inferred, `zh` otherwise), it must never be the base language.
-        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-CN"))
-        XCTAssertNotEqual(resolver.resolvedLocalization, "en", "never the base-language bundle for a non-English locale")
-        XCTAssertTrue(["zh", "zh-Hans", "zh-Hant"].contains(resolver.resolvedLocalization ?? "none"),
-                      "resolved \(resolver.resolvedLocalization ?? "nil") — expected one of the shipped zh bundles")
+    func testLanguageSubtagCandidateMatchesAShippedBundle() {
+        // fr-FR: no fr-FR.lproj, and no script to infer — only the bare-language
+        // candidate can match, and fr.lproj ships. This exercises that candidate
+        // without resting on Foundation's script inference (PR #19 review).
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "fr-FR"))
+        XCTAssertEqual(resolver.resolvedLocalization, "fr", "the bare-language candidate finds the shipped fr bundle")
     }
 }
