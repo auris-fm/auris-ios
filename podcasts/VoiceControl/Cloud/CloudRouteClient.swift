@@ -93,7 +93,12 @@ final class CloudRouteClient {
         // Android half): no credential ⇒ no turn, rather than sending a hopeful
         // bearer. The default provider always returns the trust-on-first-use id,
         // so today's behavior is unchanged.
-        guard let credential = await tokenProvider.token() ?? nonEmpty(userId) else {
+        // No legacy `user_<uuid>` fallback: the edge takes Auris-issued tokens, so
+        // sending the trust-on-first-use id when the provider has no credential
+        // would be a silent downgrade rather than a failure. The static provider
+        // (what is wired until the swap) always returns a value, so this only
+        // ever fires for a provider that genuinely has nothing (PR #20 review).
+        guard let credential = await tokenProvider.token() else {
             // No human-readable message: `CloudRouteSink` speaks any non-empty
             // `.error` message through TTS in the user's locale, so a diagnostic
             // English string here would be read aloud to a non-English user.
@@ -202,10 +207,6 @@ final class CloudRouteClient {
             )
             continuation.finish()
         }
-    }
-
-    private func nonEmpty(_ value: String) -> String? {
-        value.isEmpty ? nil : value
     }
 
     static func preStreamError(status: Int, body: Data) -> CloudRouteEvent {
