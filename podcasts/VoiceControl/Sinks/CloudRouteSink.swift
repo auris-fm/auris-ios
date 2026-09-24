@@ -24,6 +24,9 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     /// result/empty/unavailable states — the same condition that justifies
     /// advertising `search_results_v1`.
     private weak var resultsPresenter: DiscoveryResultsPresenting?
+    /// Spoken templates for client-authored codes. Injectable so the locale rule
+    /// (speak only in the user's own language; earcon otherwise) is testable.
+    private let spokenTemplates: SpokenTemplateResolver
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -69,7 +72,8 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         rendersStructuredResults: Bool = false,
         routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
         recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
-        resultsPresenter: DiscoveryResultsPresenting? = nil
+        resultsPresenter: DiscoveryResultsPresenting? = nil,
+        spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver()
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
@@ -82,6 +86,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         self.routeHintProvider = routeHintProvider
         self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
+        self.spokenTemplates = spokenTemplates
     }
 
     /// Renders a negotiated discovery result (result / no-match). Rendering
@@ -161,7 +166,9 @@ final class CloudRouteSink: VoiceCloudRouteSink {
                 // carries a code and an empty message instead of English prose:
                 // resolve a localized template for that code if one exists, and
                 // fall back to the error earcon when it doesn't (PR #19 review).
-                let spoken = message.isEmpty ? SpokenTemplateResolver().resolve("cloud_error_\(code)") : message
+                let spoken = message.isEmpty
+                    ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
+                    : message
                 if spoken.isEmpty {
                     return .earcon(.error)
                 }

@@ -553,3 +553,81 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
         PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
     }
 }
+
+/// Spec ruling (2026-09-24): a client-authored message is spoken **only** in the
+/// user's own locale; an untranslated key falls back to the error earcon rather
+/// than to base-language English.
+final class CloudRouteSinkLocaleRuleTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_locale_rule_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    private func makeSink(localeBundle: Bundle?) -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: localeBundle)
+        )
+    }
+
+    private func stubError(code: String) {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"\(code)","message":""}
+
+            """
+        )
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+
+    func testUntranslatedKeyFallsBackToTheEarconRatherThanBaseLanguageSpeech() async {
+        // A locale bundle that has no VoiceTemplates entry: the base language does.
+        let empty = Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
+        stubError(code: "connection_lost")
+        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
+        XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
+    }
+
+    /// The default resolver discovers the user's own locale: in this test host that
+    /// is English, whose bundle carries the key, so the message is spoken.
+    func testDefaultResolverUsesTheUsersOwnLocale() {
+        let resolver = SpokenTemplateResolver()
+        XCTAssertEqual(
+            resolver.resolveForUserLocale("cloud_error_connection_lost"),
+            "Connection lost. Please try again."
+        )
+    }
+
+    func testTranslatedKeyInTheUserLocaleIsSpoken() async {
+        stubError(code: "connection_lost")
+        // The test host's own bundle carries the en.lproj translation.
+        let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
+    }
+}
