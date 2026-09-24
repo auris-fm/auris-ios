@@ -240,6 +240,7 @@ final class CloudAuthTokenProviderTests: XCTestCase {
         return CloudAuthTokenProvider(
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
+            identityProvider: { "acct-A" },
             appVersionProvider: { "1.2.3" },
             session: URLSession(configuration: config),
             now: { self.now }
@@ -333,6 +334,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
     /// different account), so a second user is never served the first user's token.
     func testCacheIsDroppedWhenTheAccountCredentialChanges() async {
         var credential = "cred-A"
+        var identity = "acct-A"
         var requestedTokens: [String?] = []
         CloudRouteTestURLProtocol.onRequest = { request, body in
             if request.url?.path == "/api/v1/auth/token",
@@ -344,6 +346,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
         let provider = CloudAuthTokenProvider(
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
+            identityProvider: { identity },
             appVersionProvider: { "1.0" },
             session: testSession(),
             now: { self.now }
@@ -351,8 +354,15 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
         let forA = await provider.token()
         XCTAssertEqual(forA, "token-for-A")
 
-        // User B signs in without an app restart.
+        // Same account, renewed credential (a sync-session refresh): the cache is
+        // kept — keying on the rotating credential made this look like a switch.
         credential = "cred-B"
+        let afterRenewal = await provider.token()
+        XCTAssertEqual(afterRenewal, "token-for-A", "a credential renewal is not an account change")
+        XCTAssertEqual(requestedTokens, ["cred-A"], "no extra exchange for a renewal")
+
+        // A different ACCOUNT signs in without an app restart: dropped and re-acquired.
+        identity = "acct-B"
         stub(access: "token-for-B", refresh: "refresh-B")
         let forB = await provider.token()
 
@@ -364,6 +374,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
         CloudAuthTokenProvider(
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: credential,
+            identityProvider: { "acct-A" },
             appVersionProvider: { "1.0" },
             session: testSession(),
             now: { self.now }
@@ -390,6 +401,7 @@ final class CloudAuthTokenStampRaceTests: XCTestCase {
 
     func testTokensAreStampedWithTheCredentialTheRequestPresented() async {
         var credential = "cred-A"
+        var identity = "acct-A"
         // The exchange response is delivered slowly enough that the account can
         // switch before it is decoded.
         CloudRouteTestURLProtocol.stubJSON(
@@ -401,26 +413,38 @@ final class CloudAuthTokenStampRaceTests: XCTestCase {
         let provider = CloudAuthTokenProvider(
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
+            identityProvider: { identity },
             appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
 
-        // Switch accounts mid-flight: the decode must still stamp cred-A.
+        // A renewed credential mid-flight is not an account change: the mint
+        // still belongs to this account and is served.
         let inFlight = Task { await provider.token() }
         try? await Task.sleep(nanoseconds: 5_000_000)
         credential = "cred-B"
         let minted = await inFlight.value
+        XCTAssertEqual(minted, "token-for-A", "a credential renewal must not invalidate the turn")
 
-        XCTAssertEqual(minted, "token-for-A")
-
-        // The cache now belongs to cred-A, so a call under cred-B must not reuse it.
+        // An ACCOUNT change mid-flight must never hand over the previous
+        // account's token: the caller acquires for the new account instead.
+        now = now.addingTimeInterval(901)
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data(#"{"access_token":"token-for-A2","expires_in":900,"refresh_token":"refresh-A2"}"#.utf8),
+                chunkDelayNanoseconds: 200_000_000
+            )
+        }
+        let secondFlight = Task { await provider.token() }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        identity = "acct-B"
         CloudRouteTestURLProtocol.stubJSON(
             status: 200,
             body: #"{"access_token":"token-for-B","expires_in":900,"refresh_token":"refresh-B"}"#
         )
-        let second = await provider.token()
-        XCTAssertEqual(second, "token-for-B", "cred-B must not be served cred-A's token")
+        let afterSwitch = await secondFlight.value
+        XCTAssertEqual(afterSwitch, "token-for-B", "the new account acquires its own token, never the previous account's")
     }
 }
 
@@ -436,11 +460,13 @@ final class CloudAuthTokenInflightSwitchTests: XCTestCase {
 
     func testTokenDoesNotReturnAnotherAccountsInflightRefreshResult() async {
         var credential = "cred-A"
+        var identity = "acct-A"
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let provider = CloudAuthTokenProvider(
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
+            identityProvider: { identity },
             appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
@@ -463,10 +489,16 @@ final class CloudAuthTokenInflightSwitchTests: XCTestCase {
         let inFlight = Task { await provider.token() }
         try? await Task.sleep(nanoseconds: 50_000_000)
 
-        // B signs in while A's refresh is still running.
+        // A *different account* signs in while A's refresh is still running: that
+        // result belongs to A, so the caller must acquire for B instead of taking it.
         credential = "cred-B"
+        identity = "acct-B"
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"token-for-B","expires_in":900,"refresh_token":"refresh-B"}"#
+        )
         let forB = await inFlight.value
 
-        XCTAssertNil(forB, "A's in-flight refresh must not be served to B; B's next call acquires its own")
+        XCTAssertEqual(forB, "token-for-B", "B gets its own token, never A's in-flight refresh result")
     }
 }

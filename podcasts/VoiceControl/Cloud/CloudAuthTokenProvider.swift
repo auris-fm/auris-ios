@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsServer
 
 /// Task #33 client half — the Auris-issued token implementation behind
 /// `CloudTokenProviding`.
@@ -33,11 +34,16 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     struct Tokens: Equatable {
         let accessToken: String
         let refreshToken: String?
-        /// The account credential these tokens were minted from. Used to drop
+        /// The stable account identity these tokens were minted for. Used to drop
         /// the cache when the signed-in account changes without an app restart
-        /// (PR #20 review) — otherwise a second user's turns would be served
-        /// with the first user's token, and the server admits on subject.
-        let sourceCredential: String?
+        /// (PR #20 review) — otherwise a second user's turns would be served with
+        /// the first user's token, and the server admits on subject.
+        ///
+        /// Deliberately the **account identity, not the session credential**: the
+        /// app rewrites the credential whenever it renews its sync session, so a
+        /// credential comparison cannot tell a renewal from an account switch
+        /// (PR #20 review).
+        let sourceIdentity: String?
         /// Proactive-refresh boundary (real expiry minus the skew).
         let expiresAt: Date
         /// The token's real expiry: a request may still use the token up to here,
@@ -60,6 +66,9 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     private let authBaseURLProvider: () -> String
     private let credentialProvider: () -> String?
+    /// Stable account identity (the account uuid), NOT the rotating session
+    /// credential — see `Tokens.sourceIdentity`.
+    private let identityProvider: () -> String?
     private let appVersionProvider: () -> String
     private let session: URLSession
     private let now: () -> Date
@@ -74,12 +83,14 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     init(
         authBaseURLProvider: @escaping () -> String,
         credentialProvider: @escaping () -> String?,
+        identityProvider: @escaping () -> String? = { ServerSettings.userId },
         appVersionProvider: @escaping () -> String = { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown" },
         session: URLSession? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.authBaseURLProvider = authBaseURLProvider
         self.credentialProvider = credentialProvider
+        self.identityProvider = identityProvider
         self.appVersionProvider = appVersionProvider
         self.now = now
         if let session {
@@ -104,7 +115,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     func token() async -> String? {
         // Account change without an app restart: never serve the previous
         // account's token (PR #20 review).
-        dropCacheIfCredentialChanged()
+        dropCacheIfAccountChanged()
 
         if let cached = cachedFreshToken() {
             return cached
@@ -121,16 +132,16 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             await performTokenRefreshPath()
         }
 
-        // The in-flight work may have been started for a *previous* account (a
-        // 15s refresh can outlive a sign-out), and single-flight hands its result
-        // to whoever is waiting — so re-check whose tokens came back before
-        // returning them, or the new account's first turn is admitted as the old
-        // user (PR #20 review).
-        dropCacheIfCredentialChanged()
+        // The in-flight work may have belonged to a *previous* account (a 15s
+        // refresh can outlive a sign-out), and single-flight hands its result to
+        // whoever is waiting — so re-check whose tokens came back, and acquire for
+        // the current account rather than handing over another account's token
+        // (PR #20 review).
+        dropCacheIfAccountChanged()
 
         switch outcome {
         case let .success(tokens):
-            guard tokens.sourceCredential == credentialProvider() else { return nil }
+            guard tokens.sourceIdentity == identityProvider() else { return await token() }
             return tokens.accessToken
         case .rejected:
             return nil
@@ -163,9 +174,11 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// background refresh: prefer the rotating refresh chain, fall back to a
     /// fresh credential exchange.
     private func performTokenRefreshPath() async -> Outcome {
-        if let stored = currentRefreshToken() {
-            let owner = currentTokens()?.sourceCredential
-            switch await performRefresh(refreshToken: stored, ownerCredential: owner) {
+        // Read the chain token and its owner together: two separate reads can
+        // interleave with a drop, stamping the rotation with `nil` and costing an
+        // extra exchange (PR #20 review).
+        if let (stored, owner) = currentChainAndOwner() {
+            switch await performRefresh(refreshToken: stored, ownerIdentity: owner) {
             case let .success(rotated):
                 store(rotated)
                 return .success(rotated)
@@ -193,18 +206,28 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    /// Drops the cached tokens when the credential behind them is gone or
-    /// different (sign-out, or a different account signing in).
-    private func dropCacheIfCredentialChanged() {
-        let current = credentialProvider()
+    /// Drops the cached tokens when the account behind them is gone or different
+    /// (sign-out, or a different account signing in). Keyed on the stable account
+    /// identity, so a session-credential renewal does not look like a change.
+    private func dropCacheIfAccountChanged() {
+        let current = identityProvider()
         lock.lock()
         defer { lock.unlock() }
         // A nil stamp is a mismatch too: it is what a mint during the signed-out
         // window records, and it must not survive a sign-in (PR #20 review).
-        guard let stored = tokens?.sourceCredential, stored == current else {
+        guard let stored = tokens?.sourceIdentity, stored == current else {
             tokens = nil
             return
         }
+    }
+
+    /// The refresh chain's token and the account it belongs to, read under one
+    /// lock so a concurrent drop cannot interleave between them.
+    private func currentChainAndOwner() -> (token: String, owner: String?)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let tokens, let refresh = tokens.refreshToken, !refresh.isEmpty else { return nil }
+        return (refresh, tokens.sourceIdentity)
     }
 
     // MARK: - request paths
@@ -213,6 +236,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         // Sampled at request start so the minted tokens are keyed to the account
         // that actually presented the credential (PR #20 review).
         guard let credential = credentialProvider(), !credential.isEmpty else { return .rejected }
+        let identity = identityProvider()
         let body: [String: Any] = [
             "credential": credential,
             "device": [
@@ -220,7 +244,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 "app_version": appVersionProvider(),
             ],
         ]
-        switch await post(path: Self.tokenPath, body: body, presentedCredential: credential) {
+        switch await post(path: Self.tokenPath, body: body, presentedIdentity: identity) {
         case let .success(tokens):
             store(tokens)
             return .success(tokens)
@@ -231,20 +255,19 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    private func performRefresh(refreshToken: String, ownerCredential: String?) async -> Outcome {
+    private func performRefresh(refreshToken: String, ownerIdentity: String?) async -> Outcome {
         // Stamp the tokens with the **owner of the chain being rotated**, not a
         // fresh sample: the /refresh body carries only the refresh token, so the
         // server never sees an account credential and a fresh sample would be a
         // client-side guess at whose tokens came back (PR #20 review).
-        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedCredential: ownerCredential)
+        await post(path: Self.refreshPath, body: ["refresh_token": refreshToken], presentedIdentity: ownerIdentity)
     }
 
-    /// `presentedCredential` is the credential this request actually carried, so
-    /// the minted tokens are stamped with what was *used* rather than with
-    /// whatever `credentialProvider()` returns when the response is decoded — a
-    /// refresh in flight across an account switch would otherwise stamp the new
-    /// account's credential onto the previous account's tokens (PR #20 review).
-    private func post(path: String, body: [String: Any], presentedCredential: String?) async -> Outcome {
+    /// `presentedIdentity` is the account this request was made for, sampled when
+    /// it was built — so the minted tokens are stamped with what the request
+    /// belonged to rather than with whatever the app reports when the response is
+    /// decoded (PR #20 review).
+    private func post(path: String, body: [String: Any], presentedIdentity: String?) async -> Outcome {
         let baseURL = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else { return .inconclusive }
         var request = URLRequest(url: url)
@@ -258,7 +281,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             let (data, response) = try await session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if status == 200 {
-                guard let tokens = decodeTokens(data, presentedCredential: presentedCredential) else { return .inconclusive }
+                guard let tokens = decodeTokens(data, presentedIdentity: presentedIdentity) else { return .inconclusive }
                 return .success(tokens)
             }
             // 401/403: checked and rejected. Anything else (5xx/429/other) is
@@ -269,7 +292,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
     }
 
-    private func decodeTokens(_ data: Data, presentedCredential: String?) -> Tokens? {
+    private func decodeTokens(_ data: Data, presentedIdentity: String?) -> Tokens? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = object["access_token"] as? String, !accessToken.isEmpty
         else {
@@ -280,7 +303,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         return Tokens(
             accessToken: accessToken,
             refreshToken: object["refresh_token"] as? String,
-            sourceCredential: presentedCredential,
+            sourceIdentity: presentedIdentity,
             expiresAt: issued.addingTimeInterval(max(0, expiresIn - Self.expirySkew)),
             hardExpiresAt: issued.addingTimeInterval(max(0, expiresIn))
         )
@@ -337,7 +360,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             tokens = Tokens(
                 accessToken: "",
                 refreshToken: existing.refreshToken,
-                sourceCredential: existing.sourceCredential,
+                sourceIdentity: existing.sourceIdentity,
                 expiresAt: .distantPast,
                 hardExpiresAt: .distantPast
             )
