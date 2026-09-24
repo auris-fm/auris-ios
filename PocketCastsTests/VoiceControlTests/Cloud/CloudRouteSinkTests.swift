@@ -606,8 +606,11 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
     }
 
     func testUntranslatedKeyFallsBackToTheEarconRatherThanBaseLanguageSpeech() async {
-        // A locale bundle that has no VoiceTemplates entry: the base language does.
-        let empty = Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
+        // A **real** localization that exists but carries no VoiceTemplates table
+        // (ca.lproj ships only InfoPlist.strings) — the production shape, rather
+        // than an empty directory (PR #19 review).
+        let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
+        let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
         let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
         XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
