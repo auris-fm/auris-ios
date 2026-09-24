@@ -318,7 +318,11 @@ struct CloudRouteSSEParser {
             // and with Android's reviewed behavior). Unknown *kinds* stay
             // forward-compatible and are ignored.
             guard !isMalformedResultPayload(data) else {
-                return .error(code: "invalid_response", message: "Invalid result payload")
+                // No human-readable message, same reason as the fail-closed guard
+                // below: `CloudRouteSink` speaks any non-empty `.error` message via
+                // TTS in the user's locale, so an internal diagnostic must not be
+                // English prose (PR #19 review, follow-up).
+                return .error(code: "invalid_response", message: "")
             }
             guard let result = DiscoveryResult.parse(json: data) else { return nil }
             return .result(result)

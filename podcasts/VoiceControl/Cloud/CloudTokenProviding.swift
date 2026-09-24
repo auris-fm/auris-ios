@@ -26,6 +26,22 @@ protocol CloudTokenProviding {
     /// Called after a 401 to allow an out-of-band refresh. Best effort: callers
     /// do not retry the turn with the new credential in the same turn.
     func handleUnauthorized() async
+
+    /// Preferred form: report **which** credential was rejected.
+    ///
+    /// Without it a provider cannot tell a fresh 401 from one for a token a
+    /// concurrent refresh has already replaced, so a burst of N 401s costs N
+    /// sequential refreshes (PR #20 review). Implementations should treat a
+    /// rejection of an already-replaced token as a no-op; the default
+    /// implementation preserves the previous behaviour for conformances that
+    /// don't care.
+    func handleUnauthorized(rejectedToken: String?) async
+}
+
+extension CloudTokenProviding {
+    func handleUnauthorized(rejectedToken: String?) async {
+        await handleUnauthorized()
+    }
 }
 
 /// Today's behavior, unchanged: a stable client-generated `user_<uuid>`.

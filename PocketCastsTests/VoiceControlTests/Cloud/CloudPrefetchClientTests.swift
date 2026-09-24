@@ -276,9 +276,7 @@ final class CloudPrefetchRetentionTests: XCTestCase {
     }
 
     func testHintIsSentEvenWhenTheCallerDropsTheClientImmediately() async {
-        var requests = 0
         CloudRouteTestURLProtocol.stubJSON(status: 202, body: #"{"status":"accepted"}"#)
-        CloudRouteTestURLProtocol.onRequest = { _, _ in requests += 1 }
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
@@ -288,7 +286,14 @@ final class CloudPrefetchRetentionTests: XCTestCase {
         CloudPrefetchClient(baseURL: "https://cloud.test", userId: "user_test", session: session)
             .schedulePrefetch(episodeId: "ep-1", podcastId: nil)
 
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        XCTAssertEqual(requests, 1, "a weakly-held client deallocates before the detached task runs, silencing the hint")
+        // Poll rather than sleep once: the hint runs on a detached task, and the
+        // protected counter avoids reading a captured var across threads.
+        var observed = 0
+        for _ in 0..<120 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            observed = CloudRouteTestURLProtocol.requestCount
+            if observed > 0 { break }
+        }
+        XCTAssertEqual(observed, 1, "a weakly-held client deallocates before the detached task runs, silencing the hint")
     }
 }
