@@ -30,7 +30,7 @@ final class CloudPrefetchHook {
             return (episode.uuid, episode.parentIdentifier())
         },
         clientFactory: @escaping (String, String) -> CloudPrefetchClient = {
-            CloudPrefetchClient(baseURL: $0, userId: $1)
+            CloudPrefetchClient(baseURL: $0, userId: $1, tokenProvider: CloudTokenProviderRouter.provider())
         },
         scheduler: @escaping (CloudPrefetchClient, String, String?) -> Void = { client, episodeId, podcastId in
             client.schedulePrefetch(episodeId: episodeId, podcastId: podcastId)
