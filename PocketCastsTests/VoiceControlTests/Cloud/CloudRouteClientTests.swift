@@ -333,3 +333,54 @@ final class CloudRouteClientLocaleTests: XCTestCase {
         XCTAssertEqual(message, "Daily limit reached", "the server's own message is passed through as-is")
     }
 }
+
+/// PR #20 review: the client must tell the credential source which credential was
+/// rejected, so a burst of 401s refreshes once rather than once per response.
+final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
+    private final class RecordingProvider: CloudTokenProviding {
+        var token: String? = "token-1"
+        var rejections: [String?] = []
+        func token() async -> String? { token }
+        func handleUnauthorized(rejectedToken: String?) async { rejections.append(rejectedToken) }
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testPreStreamUnauthorizedReportsTheRejectedCredential() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let provider = RecordingProvider()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
+        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
+    }
+
+    func testSuccessfulStreamDoesNotReportARejection() async {
+        CloudRouteTestURLProtocol.stubSSE("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n")
+        let provider = RecordingProvider()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertTrue(provider.rejections.isEmpty, "a successful turn must not invalidate the credential")
+    }
+}

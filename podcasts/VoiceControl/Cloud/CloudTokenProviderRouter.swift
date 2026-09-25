@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// Chooses the credential source for an edge call, per call, while keeping **one
 /// shared Auris provider**.
@@ -22,9 +23,17 @@ enum CloudTokenProviderRouter {
     )
     private static let sharedStaticProvider = CloudStaticIdentityTokenProvider()
 
+    /// - Parameters:
+    ///   - aurisBaseURL: predicate only — *whether* the Auris provider is chosen.
+    ///     The shared provider reads `CloudConfig` itself for the origin it dials.
+    ///   - edgeTokensEnabled: the explicit switch that makes the credential change
+    ///     deferrable; a configured origin alone is not enough, since that is also
+    ///     what makes the assistant work (see `FeatureFlag.cloudEdgeTokens`).
     static func provider(
-        aurisBaseURL: String = CloudConfig.shared.baseUrl
+        aurisBaseURL: String = CloudConfig.shared.baseUrl,
+        edgeTokensEnabled: Bool = FeatureFlag.cloudEdgeTokens.enabled
     ) -> any CloudTokenProviding {
-        aurisBaseURL.isEmpty ? sharedStaticProvider : sharedAurisProvider
+        guard edgeTokensEnabled, !aurisBaseURL.isEmpty else { return sharedStaticProvider }
+        return sharedAurisProvider
     }
 }

@@ -153,8 +153,9 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 // token minted by the old origin (PR #20 review).
                 return tokens.accessToken
             case .success:
-                // The in-flight work belonged to a previous account: acquire for
-                // the current one rather than handing over that token.
+                // The in-flight work belonged to a previous account, arrived after
+                // the credential was withdrawn, or was minted against another
+                // origin: acquire for the current state rather than handing it over.
                 guard attempt == 0 else { return nil }
                 continue
             case .rejected:

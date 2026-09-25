@@ -135,7 +135,15 @@ final class CloudRouteClient {
                     errorBody.append(byte)
                     if errorBody.count > 4096 { break }
                 }
-                continuation.yield(Self.preStreamError(status: http.statusCode, body: errorBody))
+                let event = Self.preStreamError(status: http.statusCode, body: errorBody)
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    // Tell the credential source which credential was rejected so a
+                    // burst of 401s refreshes once rather than once per response
+                    // (PR #20 review). Best effort, no same-turn retry: the caller's
+                    // next turn acquires again.
+                    await tokenProvider.handleUnauthorized(rejectedToken: credential)
+                }
+                continuation.yield(event)
                 continuation.finish()
                 return
             }

@@ -587,14 +587,23 @@ final class CloudTokenProviderRouterTests: XCTestCase {
         super.tearDown()
     }
 
-    func testConfiguredOriginSelectsTheAurisProvider() async {
-        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test")
-        XCTAssertTrue(provider is CloudAuthTokenProvider, "a configured Auris origin means Auris-issued tokens")
+    func testEdgeTokensEnabledSelectsTheAurisProvider() async {
+        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test", edgeTokensEnabled: true)
+        XCTAssertTrue(provider is CloudAuthTokenProvider, "the switch is on and an origin is configured ⇒ Auris tokens")
+    }
+
+    /// The switch is deliberately independent of the origin: a configured origin
+    /// is also what makes the assistant work, so coupling the two would flip every
+    /// configured client to Auris tokens the moment this shipped.
+    func testConfiguredOriginAloneKeepsTheStaticProvider() async {
+        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "https://api.test", edgeTokensEnabled: false)
+        XCTAssertTrue(provider is CloudStaticIdentityTokenProvider,
+                      "a configured origin without the switch ⇒ today's bearer, so the change is deferrable")
     }
 
     func testUnconfiguredOriginKeepsTheStaticProvider() async {
-        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "")
-        XCTAssertTrue(provider is CloudStaticIdentityTokenProvider, "no origin ⇒ today's trust-on-first-use provider")
+        let provider = CloudTokenProviderRouter.provider(aurisBaseURL: "", edgeTokensEnabled: true)
+        XCTAssertTrue(provider is CloudStaticIdentityTokenProvider, "no origin ⇒ nothing to mint against")
     }
 
     func testConfiguredOriginDoesNotFallBackToTheLegacyBearer() async {
