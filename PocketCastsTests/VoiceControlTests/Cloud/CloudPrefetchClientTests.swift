@@ -234,7 +234,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "",
+            userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
             tokenProvider: NoTokenProvider()
         )
@@ -256,7 +256,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            userId: "",
+            userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
             tokenProvider: NoTokenProvider()
         )
