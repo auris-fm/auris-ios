@@ -216,9 +216,67 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
+    /// Slice 1: the sink sends one turn envelope — request_id on the wire and
+    /// capabilities only once a structured-results renderer exists.
+    func testSinkSendsTurnEnvelopeWithRequestIdAndGatedCapabilities() async throws {
+        var bodies: [[String: Any]] = []
+        CloudRouteTestURLProtocol.onRequest = { _, body in
+            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                bodies.append(object)
+            }
+        }
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: token
+            data: {"text":"ok"}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+
+        _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext())
+
+        let body = try XCTUnwrap(bodies.first)
+        let requestId = try XCTUnwrap(body["request_id"] as? String)
+        XCTAssertNotNil(UUID(uuidString: requestId), "request_id must be a client-assigned UUID")
+        XCTAssertNil(body["capabilities"], "no renderer yet: capabilities must be omitted so the server uses token+done")
+        XCTAssertNil(body["route_hint"], "free-text turns carry no hint")
+    }
+
+    func testSinkAdvertisesSearchResultsV1OnlyWhenRendererAvailable() async throws {
+        var bodies: [[String: Any]] = []
+        CloudRouteTestURLProtocol.onRequest = { _, body in
+            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                bodies.append(object)
+            }
+        }
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+
+        _ = await makeSink(rendersStructuredResults: true, routeHint: CloudRouteHint(
+            operation: "search_spoken_content",
+            arguments: ["query": .string("climate")]
+        )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext())
+
+        let body = try XCTUnwrap(bodies.first)
+        XCTAssertEqual(body["capabilities"] as? [String], ["search_results_v1"])
+        let hint = try XCTUnwrap(body["route_hint"] as? [String: Any])
+        XCTAssertEqual(hint["operation"] as? String, "search_spoken_content")
+    }
+
     // MARK: - Helpers
 
-    private func makeSink() -> CloudRouteSink {
+    private func makeSink(
+        rendersStructuredResults: Bool = false,
+        routeHint: CloudRouteHint? = nil
+    ) -> CloudRouteSink {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -236,7 +294,9 @@ final class CloudRouteSinkTests: XCTestCase {
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: contextState,
-            analytics: voiceAnalytics
+            analytics: voiceAnalytics,
+            rendersStructuredResults: rendersStructuredResults,
+            routeHintProvider: { routeHint }
         )
     }
 
@@ -300,5 +360,366 @@ private final class RecordingAnalytics: AnalyticsService {
     var events: [(String, [String: Any])] = []
     func track(_ event: String, properties: [String: Any]) {
         events.append((event, properties))
+    }
+}
+
+// MARK: - Slice 4: superseded turns
+
+/// A second turn (double wake / barge-in) supersedes the first: the older turn
+/// must stop consuming its stream and must not touch playback state, analytics,
+/// or late actions after the new turn takes over.
+final class CloudRouteSupersedeTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var mapper: RecordingFingerprintMapper!
+    private var analytics: RecordingAnalytics!
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        mapper = RecordingFingerprintMapper()
+        analytics = RecordingAnalytics()
+        suiteName = "cloud_route_supersede_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async {
+        // Turn A: a slow stream that will still be open when B starts.
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
+                chunkDelayNanoseconds: 400_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+
+        // Let A start and pause playback.
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+
+        // Turn B supersedes A and completes cleanly.
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        // Exactly one resume: the superseding turn's. A must not restore after B.
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
+        // Analytics records only the winning turn's outcome.
+        XCTAssertEqual(analytics.events.count, 1)
+    }
+
+    func testSupersededTurnDoesNotExecuteLateActions() async {
+        // Turn A: an action arrives only after a delay — B supersedes first.
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("""
+                event: action
+                data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+
+                event: done
+                data: {"input_tokens":1,"output_tokens":0}
+
+                """.utf8),
+                chunkDelayNanoseconds: 500_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
+        XCTAssertTrue(seeks.isEmpty, "a superseded turn must not execute actions that arrive after it lost the turn")
+    }
+
+    private func makeSink() -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            analytics: VoiceAnalytics(analytics: analytics)
+        )
+    }
+
+    private func sampleContext() -> PlaybackContext {
+        PlaybackContext(
+            episodeId: "ep",
+            podcastId: "pod",
+            referencePositionMs: 1_000,
+            clientPositionMs: 1_100,
+            recentReferencePositions: [],
+            previousReferencePositionMs: nil
+        )
+    }
+}
+
+/// The client-generated-diagnostic convention (PR #19 review): a code with an
+/// empty message maps to a localized template when one exists, and to the error
+/// earcon when it doesn't — both branches exercised, so neither is inert.
+final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_error_loc_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testTemplatedCodeIsSpoken() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        )
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
+    }
+
+    func testCodeWithoutATemplateUsesTheErrorEarcon() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"invalid_response","message":""}
+
+            """
+        )
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
+    }
+
+    private func makeSink() -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+    }
+
+    private func sampleContext() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+}
+
+/// Spec ruling (2026-09-24): a client-authored message is spoken **only** in the
+/// user's own locale; an untranslated key falls back to the error earcon rather
+/// than to base-language English.
+final class CloudRouteSinkLocaleRuleTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_locale_rule_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    private func makeSink(localeBundle: Bundle?) -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: localeBundle)
+        )
+    }
+
+    private func stubError(code: String) {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"\(code)","message":""}
+
+            """
+        )
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+
+    func testUntranslatedKeyFallsBackToTheEarconRatherThanBaseLanguageSpeech() async {
+        // A **real** localization that exists but carries no VoiceTemplates table
+        // (ca.lproj ships InfoPlist/Intents/Localizable but no VoiceTemplates) —
+        // the production shape, rather than an empty directory (PR #19 review).
+        let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
+        let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
+        stubError(code: "connection_lost")
+        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
+        XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
+    }
+
+    /// The default resolver discovers the user's own locale: in this test host that
+    /// is English, whose bundle carries the key, so the message is spoken.
+    func testDefaultResolverUsesTheUsersOwnLocale() {
+        let resolver = SpokenTemplateResolver()
+        XCTAssertEqual(
+            resolver.resolveForUserLocale("cloud_error_connection_lost"),
+            "Connection lost. Please try again."
+        )
+    }
+
+    func testTranslatedKeyInTheUserLocaleIsSpoken() async {
+        stubError(code: "connection_lost")
+        // The test host's own bundle carries the en.lproj translation.
+        let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
+        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
+    }
+}
+
+/// A whitespace-only server message is treated as absent (PR #19 review): it must
+/// not be spoken as silence, and it follows the same localized-template/earcon
+/// route as a missing message.
+final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_ws_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    func testWhitespaceOnlyServerMessageIsNotSpokenAsSilence() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: error
+            data: {"code":"invalid_response","message":"   "}
+
+            """
+        )
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let sink = CloudRouteSink(
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+
+        let response = await sink.routeToCloud(request: "x", tier: .free, context: context)
+
+        XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
+    }
+}
+
+/// The locale rule must not fall back to the app's default bundle: an unsupported
+/// non-English locale hears the earcon, not English (PR #19 review).
+final class SpokenTemplateLocaleFallbackTests: XCTestCase {
+    func testUnsupportedNonEnglishLocaleDoesNotFallBackToEnglish() {
+        // The app ships en.lproj; a locale with no matching bundle must not get it.
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "xx-XX"))
+        XCTAssertEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "",
+                       "no bundle for the user's language ⇒ nothing to speak ⇒ the caller uses the earcon")
+    }
+
+    func testSupportedLocaleStillResolves() {
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "en-US"))
+        XCTAssertEqual(resolver.resolveForUserLocale("cloud_error_connection_lost"), "Connection lost. Please try again.")
+    }
+
+    /// Asserts the **discovered bundle**, not a translation: `zh-Hans.lproj` ships
+    /// no VoiceTemplates table, so a behavioural assertion would pass whether or
+    /// not the hyphenated candidate matched anything (PR #19 review).
+    func testHyphenatedLocaleSelectsItsOwnBundle() {
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "zh-Hans-CN"))
+        XCTAssertEqual(resolver.resolvedLocalization, "zh-Hans", "the language-script candidate must match the shipped zh-Hans bundle")
+    }
+
+    func testExactHyphenatedTagMatchesItsOwnBundle() {
+        // pt-BR ships its own `.lproj`, so this exercises the full-tag candidate
+        // without depending on any script inference (reviewer's point: a zh-CN
+        // assertion would rest on Foundation inferring `Hans`).
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "pt-BR"))
+        XCTAssertEqual(resolver.resolvedLocalization, "pt-BR", "a shipped hyphenated tag matches exactly")
+    }
+
+    func testLanguageSubtagCandidateMatchesAShippedBundle() {
+        // fr-FR: no fr-FR.lproj, and no script to infer — only the bare-language
+        // candidate can match, and fr.lproj ships. This exercises that candidate
+        // without resting on Foundation's script inference (PR #19 review).
+        let resolver = SpokenTemplateResolver(locale: Locale(identifier: "fr-FR"))
+        XCTAssertEqual(resolver.resolvedLocalization, "fr", "the bare-language candidate finds the shipped fr bundle")
     }
 }
