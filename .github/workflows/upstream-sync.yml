@@ -23,7 +23,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Test-only, and the only job PRs run. Read-only: a PR must never reach the
+  # sync job below, which pushes branches and opens PRs and would fail on a fork's
+  # token rather than on the tests (review finding).
+  script-tests:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run sync script tests
+        run: |
+          chmod +x ./.github/scripts/tests/*.sh
+          for t in ./.github/scripts/tests/*.sh; do
+            echo "== $t"
+            bash "$t"
+          done
+
   sync:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       UPSTREAM_REPO: Automattic/pocket-casts-ios
@@ -38,14 +60,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Run sync script tests
-        run: |
-          chmod +x ./.github/scripts/tests/*.sh
-          for t in ./.github/scripts/tests/*.sh; do
-            echo "== $t"
-            bash "$t"
-          done
 
       - name: Preflight
         id: preflight
