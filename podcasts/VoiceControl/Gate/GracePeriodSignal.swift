@@ -77,7 +77,13 @@ class GracePeriodSignal: ObservableObject {
     /// The generation a turn is running under, for stamping an intent that was
     /// not created by a fallback. Read when the turn starts, so a completion is
     /// judged against the window it actually belonged to.
-    func currentGeneration() -> Int { generation }
+    func currentGeneration() -> Int {
+        // Same main-queue synchronization as the claim: the generation is mutated
+        // by wake and privacy-close, and reading it off the service thread would
+        // race those rather than snapshot a window.
+        if Thread.isMainThread { return generation }
+        return DispatchQueue.main.sync { generation }
+    }
 
     /// Restores the allowance for a completion that still belongs to its window,
     /// as a single operation on the main queue.

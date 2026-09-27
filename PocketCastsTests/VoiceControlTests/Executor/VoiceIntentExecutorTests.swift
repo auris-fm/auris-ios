@@ -74,9 +74,16 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
+        // Stamped the way the service stamps it: a completion must carry the window
+        // it ran under, so this test supplies one rather than relying on a default.
+        let generation = gracePeriodSignal.currentGeneration()
         XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
 
-        _ = await executor.execute(CloudRouteIntent(request: "what did they say", tier: .unknown))
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(),
@@ -105,6 +112,25 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
         XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
                      "the ended window's completion must not reset the current one")
+    }
+
+    /// A cloud completion with no window identity cannot be attributed to any
+    /// window, so it must not change grace state: falling through to the generic
+    /// reset would let it reopen a session it never belonged to.
+    func test_execute_cloudCompletionWithoutAWindowLeavesGraceStateUntouched() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "this window's allowance is spent")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            origin: .routingFailure
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "an unattributable completion must not restore the allowance")
     }
 
     func test_execute_pause_callsSinkPause() async {
