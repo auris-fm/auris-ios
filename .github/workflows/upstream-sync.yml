@@ -6,6 +6,13 @@ on:
     # preflight no-ops when already synced.
     - cron: '0 10 * * 1'
   workflow_dispatch:
+  # Run the script tests on PRs too: on the weekly schedule alone a regression in
+  # .github/scripts/ could only surface as a failing sync, which is how the
+  # `&&`-chain abort stayed invisible. Paths are limited so unrelated PRs skip it.
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/upstream-sync.yml'
 
 permissions:
   contents: write
