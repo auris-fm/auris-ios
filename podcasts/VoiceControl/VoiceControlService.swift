@@ -328,8 +328,15 @@ class VoiceControlService: ObservableObject {
                 // budget is a local failure and speaks on the *first* refusal:
                 // leaving it to the debounce gave the user silence for their next
                 // attempt, which is the outcome this change exists to remove.
+                // Two different causes reach here: an allowance already spent in
+                // this window, and no open window at all (never woke, expired, or
+                // closed for privacy). Naming them together would report a closed
+                // session as a repeat question, so the log reads the actual state.
+                let cause = gracePeriodSignal.isActive
+                    ? "allowance already spent this window"
+                    : "no open session window"
                 FileLog.shared.addMessage(
-                    "[VoicePipeline] cloud escalation refused (window allowance spent) ← '\(transcript)' (reason=\(reason ?? "?"))"
+                    "[VoicePipeline] cloud escalation refused (\(cause)) ← '\(transcript)' (reason=\(reason ?? "?"))"
                 )
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
