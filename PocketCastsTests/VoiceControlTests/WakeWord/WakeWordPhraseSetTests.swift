@@ -7,10 +7,14 @@ import XCTest
 final class WakeWordPhraseSetTests: XCTestCase {
     /// The owner's exact case: `hey aris` was transcribed, classified `no_match`
     /// and dispatched to the service, which then consumed the window's allowance.
-    func test_ownerCase_wakeWithTrailingPunctuation_isWakeOnly() {
-        XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("hey aris。"))
+    /// The textual half is deliberately conservative: punctuation and casing are
+    /// normalised, but renderings ASR invents are not enumerated — `WakeTranscriptTrimmer`
+    /// decides those from the detector's timing instead, because no spelling
+    /// tolerance separates `Oace.` from a short real word.
+    func test_textRule_isConservative() {
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("Hey Auris!"))
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("auris"))
+        XCTAssertFalse(WakeWordPhraseSet.isWakeOnly("hey aris。"), "a phonetic rendering is the timing rule's job")
     }
 
     /// `ok` is a prefix of `okay`, so a prefix match would remove the wrong number
@@ -30,8 +34,8 @@ final class WakeWordPhraseSetTests: XCTestCase {
     }
 
     func test_theDecisionBoundary_beforeClassification() {
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "hey aris。"), .silentSessionStart)
         XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "auris"), .silentSessionStart)
+        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "Hey Auris!"), .silentSessionStart)
         // A wake plus a question keeps the ordinary rule: it routes, and then the
         // reason decides (`no_match` escalates).
         XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "hey auris, recommend something"), .route)
@@ -51,7 +55,7 @@ final class WakeWordPhraseSetTests: XCTestCase {
 
     /// The phrase source is one place, so detection and exclusion cannot disagree.
     func test_variantsAreBuiltFromTheConfiguredPhraseSet() {
-        let expected = ["auris", "aris"].flatMap { phrase -> [String] in
+        let expected = ["auris"].flatMap { phrase -> [String] in
             ["", "hey", "hi", "ok", "okay"].map { $0 + phrase }
         }
         XCTAssertEqual(WakeWordPhraseSet.wakeOnlyVariants, Set(expected))

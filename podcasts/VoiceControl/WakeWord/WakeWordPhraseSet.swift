@@ -8,6 +8,11 @@ import Foundation
 /// recognise a wake and then treat that same wake as a question, spending the
 /// window's only dispatch on `hey aris`.
 ///
+/// This is the **conservative** half of the rule. Phonetic renderings ASR invents
+/// (`Oace.`, `aris`) are deliberately not enumerated here — no spelling tolerance
+/// separates them from short real words — and are handled instead by the trimmer's
+/// timing test, which asks when the wake fired rather than how it was spelled.
+///
 /// Until now the wake word was only implicit in the trained classifier
 /// (`WakeWordDetector`: "Auris" ONNX model), so this constant is the first place it
 /// is nameable as data. If the detector ever learns its word from the deployment
@@ -15,10 +20,6 @@ import Foundation
 enum WakeWordPhraseSet {
     /// The configured wake word(s).
     static let configured: [String] = ["auris"]
-
-    /// Renderings the detector already tolerates: the obvious mis-hearings ASR
-    /// produces for a name it does not know.
-    static let toleratedRenderings: [String] = ["aris"]
 
     /// Words people put in front of a wake phrase.
     static let toleratedLeadingWords: [String] = ["hey", "hi", "ok", "okay"]
@@ -30,7 +31,7 @@ enum WakeWordPhraseSet {
     /// characters and fails the very case it exists for.
     static let wakeOnlyVariants: Set<String> = {
         var variants = Set<String>()
-        for phrase in configured + toleratedRenderings {
+        for phrase in configured {
             let normalized = normalize(phrase)
             variants.insert(normalized)
             for leading in toleratedLeadingWords {
