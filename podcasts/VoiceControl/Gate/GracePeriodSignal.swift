@@ -60,15 +60,22 @@ class GracePeriodSignal: ObservableObject {
         return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
     }
 
-    /// Marks the current window's budget spent *without* extending the window.
+    /// Continues the window without restoring its escalation allowance.
     ///
-    /// The fallback dispatch itself is a successful command, so the executor
-    /// restarts the grace period when it returns — which would otherwise restore
-    /// the budget and let a second unclear utterance in the same window dispatch
-    /// again. The window is meant to continue; the escalation allowance is not.
-    func markEscalationBudgetSpent() {
-        if Thread.isMainThread { escalationClaimed = true; return }
-        DispatchQueue.main.async { [weak self] in self?.escalationClaimed = true }
+    /// Used when the turn was itself a fallback: the conversation should carry on,
+    /// but re-arming the allowance here would let one window dispatch repeatedly —
+    /// the fallback would be paying for its own permission.
+    func extendWindowKeepingEscalationSpent() {
+        if Thread.isMainThread { startOrResetOnMainKeepingBudget(trigger: "fallback dispatch") ; return }
+        DispatchQueue.main.async { [weak self] in
+            self?.startOrResetOnMainKeepingBudget(trigger: "fallback dispatch")
+        }
+    }
+
+    private func startOrResetOnMainKeepingBudget(trigger: String) {
+        let claimed = escalationClaimed
+        startOrResetOnMain(trigger: trigger)
+        escalationClaimed = claimed
     }
 
     private func claimEscalationBudgetOnMain() -> Bool {

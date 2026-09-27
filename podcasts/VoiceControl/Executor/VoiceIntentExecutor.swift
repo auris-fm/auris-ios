@@ -175,6 +175,11 @@ class VoiceIntentExecutor {
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
+        } else if case let route as CloudRouteIntent = intent, route.origin == .routingFailure {
+            // The conversation continues, but the allowance that permitted this
+            // fallback is not restored by it (shared contract with Android).
+            FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
+            gracePeriodSignal.extendWindowKeepingEscalationSpent()
         } else {
             FileLog.shared.addMessage("[VoicePipeline] Command succeeded — grace period")
             gracePeriodSignal.onCommandRecognized()

@@ -323,12 +323,11 @@ class VoiceControlService: ObservableObject {
                 consecutiveNulls = 0
                 // No error earcon here: the user is getting an answer. A dispatch
                 // that itself fails carries its own earcon from the sink.
-                let response = await executor.execute(CloudRouteIntent(request: transcript, tier: .unknown))
-                // The executor treats that as a successful command and restarts
-                // the grace period, which would restore this window's escalation
-                // allowance and let a second unclear utterance dispatch again.
-                // The window continues; the allowance does not.
-                gracePeriodSignal.markEscalationBudgetSpent()
+                // Marked as a fallback so the executor extends the window without
+                // restoring the allowance that permitted it.
+                let response = await executor.execute(
+                    CloudRouteIntent(request: transcript, tier: .unknown, origin: .routingFailure)
+                )
                 audioRenderer.render(response)
                 return
             }

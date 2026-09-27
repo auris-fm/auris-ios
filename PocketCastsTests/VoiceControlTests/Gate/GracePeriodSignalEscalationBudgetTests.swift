@@ -37,20 +37,31 @@ final class GracePeriodSignalEscalationBudgetTests: XCTestCase {
         XCTAssertTrue(signal.claimEscalationBudget(), "a recognised command is another deliberate act")
     }
 
-    /// The fallback dispatch is a successful command, so the executor restarts the
-    /// window when it returns. The window must continue without restoring the
-    /// allowance, or a second unclear utterance in the same window dispatches again.
-    func testTheFallbackDoesNotRestoreItsOwnAllowance() async {
+    /// A fallback dispatch is not a command the user gave, so handling it extends
+    /// the window without restoring the allowance that permitted it. The ordinary
+    /// command path is asserted alongside, so the two behaviours are distinguished
+    /// rather than assumed apart.
+    func testFallbackExtendsTheWindowWithoutRestoringItsOwnAllowance() async {
         let signal = GracePeriodSignal(timeout: 5)
         await MainActor.run { signal.onWakeWordDetected() }
         XCTAssertTrue(signal.claimEscalationBudget())
 
-        // What the executor does when the fallback's dispatch returns non-error.
-        await MainActor.run { signal.onCommandRecognized() }
-        await MainActor.run { signal.markEscalationBudgetSpent() }
+        await MainActor.run { signal.extendWindowKeepingEscalationSpent() }
 
         XCTAssertTrue(signal.isActive, "the conversation window continues")
-        XCTAssertFalse(signal.claimEscalationBudget(), "but the escalation allowance is not restored")
+        XCTAssertFalse(signal.claimEscalationBudget(), "a fallback does not re-arm its own allowance")
+    }
+
+    /// The contrast case: a command the user actually gave does restore it, which
+    /// is what makes the fallback path a distinction rather than a blanket rule.
+    func testAChosenCommandRestoresTheAllowanceUnlikeAFallback() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertTrue(signal.claimEscalationBudget())
+
+        await MainActor.run { signal.onCommandRecognized() }
+
+        XCTAssertTrue(signal.claimEscalationBudget(), "a deliberate command is a new act")
     }
 
     /// Privacy fail-closed: the window can close without expiring, and a closed

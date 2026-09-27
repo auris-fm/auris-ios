@@ -109,6 +109,25 @@ enum StatsQueryIntent: VoiceIntent, Equatable {
 struct CloudRouteIntent: VoiceIntent, Equatable {
     let request: String
     let tier: CloudTier
+    /// Why this dispatch exists. A dispatch from a routing failure is a *fallback*
+    /// rather than a command the user gave, and the two must not be treated alike
+    /// by the grace window: handling a fallback continues the window but must not
+    /// restore the escalation allowance that permitted it, or one window could
+    /// dispatch repeatedly. Mirrors Android's origin marker on the intent.
+    let origin: CloudRouteOrigin
+
+    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall) {
+        self.request = request
+        self.tier = tier
+        self.origin = origin
+    }
+}
+
+enum CloudRouteOrigin: Equatable {
+    /// The model chose `cloud_route` itself.
+    case modelCall
+    /// The local router produced no answer, so the client escalated.
+    case routingFailure
 }
 
 enum CloudTier: String, Equatable {
