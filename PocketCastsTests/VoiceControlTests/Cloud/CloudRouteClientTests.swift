@@ -367,6 +367,45 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
         guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
     }
 
+    /// PR #20 review: the handler can await a refresh *and* an exchange (15 s
+    /// each), and the sink has already paused playback by then, so recovery must
+    /// not be able to hold the caller's error up. The gate makes that structural
+    /// rather than racy: recovery blocks until the caller has been handed its
+    /// error, so if the client awaited recovery *before* finishing the stream, the
+    /// caller would never be served and this test would time out instead of
+    /// passing.
+    func testRecoveryCannotHoldUpTheCallersError() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let gate = RecoveryGate()
+        let log = OrderLog()
+        let provider = GatedProvider(gate: gate, log: log)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        let stream = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0))
+        let consumer = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in stream {
+                events.append(event)
+                await log.append("delivered")
+                await gate.release()   // the caller owns its failure from here
+            }
+            return events
+        }
+
+        let delivered = await waitFor(log: log, entry: "delivered", timeout: 5)
+        XCTAssertTrue(delivered, "the error must reach the caller without recovery unblocking it")
+        XCTAssertEqual(provider.rejections, ["token-1"], "recovery still names the rejected credential")
+        let events = await consumer.value
+        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
+    }
+
     func testSuccessfulStreamDoesNotReportARejection() async {
         CloudRouteTestURLProtocol.stubSSE("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n")
         let provider = RecordingProvider()
@@ -383,4 +422,55 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
 
         XCTAssertTrue(provider.rejections.isEmpty, "a successful turn must not invalidate the credential")
     }
+}
+
+
+/// Records the order of two things the review requires to be ordered: the caller
+/// receiving its error, and the credential recovery starting.
+actor OrderLog {
+    private(set) var entries: [String] = []
+    func append(_ entry: String) { entries.append(entry) }
+}
+
+/// Hypothesis for the ordering property: recovery starts, then blocks until the
+/// caller has been served. A client that awaited recovery before finishing the
+/// stream can never satisfy it, so the condition is a real gate rather than a
+/// timing assumption.
+actor RecoveryGate {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func release() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
+}
+
+final class GatedProvider: CloudTokenProviding {
+    let gate: RecoveryGate
+    let log: OrderLog
+    var rejections: [String?] = []
+    init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
+    func token() async -> String? { "token-1" }
+    func handleUnauthorized(rejectedToken: String?) async {
+        rejections.append(rejectedToken)
+        await log.append("recovery-started")
+        await gate.wait()
+        await log.append("recovery-finished")
+    }
+}
+
+/// Polls rather than sleeping a fixed interval, so a passing case costs
+/// milliseconds and a broken one fails at the timeout with the message attached.
+func waitFor(log: OrderLog, entry: String, timeout: TimeInterval) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await log.entries.contains(entry) { return true }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    return await log.entries.contains(entry)
 }

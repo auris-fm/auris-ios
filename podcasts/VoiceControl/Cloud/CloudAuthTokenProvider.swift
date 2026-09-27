@@ -225,14 +225,22 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     /// Drops the cached tokens when the account behind them is gone, when no
     /// credential is present, or when a different account signed in — but **not**
-    /// on a mere credential renewal, which is the case keying on the credential
-    /// got wrong (PR #20 review).
+    /// on a renewal that keeps a credential present, which is the case keying on
+    /// the credential got wrong (PR #20 review).
     ///
     /// The credential-presence half is load-bearing: the app clears
     /// `syncingV2Token` after a failed re-auth while leaving `userId` set, and for
     /// a password login that token *is* the credential — so without this the cache
     /// would keep serving a session the app has already invalidated, against the
     /// "no credential ⇒ no token" posture.
+    ///
+    /// The wording above is deliberate, because a password login has no refresh
+    /// token: across its `TokenHelper` renewal window the transiently-cleared
+    /// `syncingV2Token` *is* the credential, so `hasCredential` is false and the
+    /// cache **is** dropped on that renewal. That is the accepted trade rather than
+    /// an oversight. The result guard then refuses a refresh that succeeded inside
+    /// that window as well, so the rotated chain is spent and the next call
+    /// re-exchanges instead of continuing it.
     private func dropCacheIfAccountChanged() {
         let current = identityProvider()
         let currentOrigin = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))

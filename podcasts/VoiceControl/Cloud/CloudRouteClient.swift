@@ -136,15 +136,16 @@ final class CloudRouteClient {
                     if errorBody.count > 4096 { break }
                 }
                 let event = Self.preStreamError(status: http.statusCode, body: errorBody)
-                if http.statusCode == 401 || http.statusCode == 403 {
-                    // Tell the credential source which credential was rejected so a
-                    // burst of 401s refreshes once rather than once per response
-                    // (PR #20 review). Best effort, no same-turn retry: the caller's
-                    // next turn acquires again.
-                    await tokenProvider.handleUnauthorized(rejectedToken: credential)
-                }
                 continuation.yield(event)
                 continuation.finish()
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    // Only *after* the caller owns its failure: the sink has already
+                    // paused playback, and this handler can await a refresh and then
+                    // an exchange (15 s each), so awaiting it before yielding would
+                    // delay the user's error by tens of seconds (PR #20 review).
+                    // Best effort, no same-turn retry: the next turn acquires again.
+                    await tokenProvider.handleUnauthorized(rejectedToken: credential)
+                }
                 return
             }
 
