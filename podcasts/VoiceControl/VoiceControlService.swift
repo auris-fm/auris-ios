@@ -307,13 +307,46 @@ class VoiceControlService: ObservableObject {
             // If dialogResult has no intent and no question (e.g., cancel), do nothing
 
         case .none:
-            consecutiveNulls += 1
             let stage = latestRouterMetrics?.failedStage ?? "?"
-            let reason = latestRouterMetrics?.reason ?? "?"
+            let reason = latestRouterMetrics?.reason
+
+            // A routing failure or a deliberate `no_match` escalates through the
+            // same path a chosen `cloud_route` uses — same intent, same executor —
+            // so the superseded-turn cancellation and the auto-pause obligation
+            // apply to it by construction rather than by a second implementation.
+            // The transcript goes verbatim, the tier is unknown, and no route hint
+            // is sent (hints accompany validated arguments only).
+            if RouteFailureEscalationPolicy.outcome(for: reason) == .escalate,
+               gracePeriodSignal.claimEscalationBudget() {
+                let reasonText = reason ?? "?"
+                FileLog.shared.addMessage("[VoicePipeline] cloud escalation ← '\(transcript)' (reason=\(reasonText))")
+                consecutiveNulls = 0
+                // No error earcon here: the user is getting an answer. A dispatch
+                // that itself fails carries its own earcon from the sink.
+                let response = await executor.execute(CloudRouteIntent(request: transcript, tier: .unknown))
+                // The executor treats that as a successful command and restarts
+                // the grace period, which would restore this window's escalation
+                // allowance and let a second unclear utterance dispatch again.
+                // The window continues; the allowance does not.
+                gracePeriodSignal.markEscalationBudgetSpent()
+                audioRenderer.render(response)
+                return
+            }
+
+            consecutiveNulls += 1
+            let reasonText = reason ?? "?"
             FileLog.shared.addMessage(
-                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reason) (\(consecutiveNulls)/\(maxConsecutiveNulls))"
+                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reasonText) (\(consecutiveNulls)/\(maxConsecutiveNulls))"
             )
-            if consecutiveNulls >= maxConsecutiveNulls {
+            // Local cases speak rather than stay silent. A `blank_transcript`
+            // already played the wake-only tone upstream, so this covers the
+            // capability failures; a refused budget keeps the debounce, since a
+            // burst of unclassified audio is exactly what it exists for.
+            if RouteFailureEscalationPolicy.outcome(for: reason) == .stayLocal,
+               reason != RouterStageDiagnostic.reasonBlankTranscript {
+                audioRenderer.playEarcon(.error)
+                consecutiveNulls = 0
+            } else if consecutiveNulls >= maxConsecutiveNulls {
                 FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0

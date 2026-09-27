@@ -9,6 +9,12 @@ class GracePeriodSignal: ObservableObject {
     @Published private(set) var isActive = false
     private let timeout: TimeInterval
     private var timer: Timer?
+    /// Escalation budget for the current window (shared client contract: at most
+    /// one dispatch per grace window). Restored by anything that opens or resets
+    /// the window — a wake or a recognised command — and never by the escalation
+    /// attempt itself, so a run of routing failures inside one window dispatches
+    /// once instead of once per failure.
+    private var escalationClaimed = false
 
     init(timeout: TimeInterval = 30.0) {
         self.timeout = timeout
@@ -47,11 +53,36 @@ class GracePeriodSignal: ObservableObject {
         }
     }
 
+    /// Consumes the window's escalation budget. Returns `false` when the window
+    /// is closed or already spent — the caller then keeps the turn local.
+    func claimEscalationBudget() -> Bool {
+        if Thread.isMainThread { return claimEscalationBudgetOnMain() }
+        return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
+    }
+
+    /// Marks the current window's budget spent *without* extending the window.
+    ///
+    /// The fallback dispatch itself is a successful command, so the executor
+    /// restarts the grace period when it returns — which would otherwise restore
+    /// the budget and let a second unclear utterance in the same window dispatch
+    /// again. The window is meant to continue; the escalation allowance is not.
+    func markEscalationBudgetSpent() {
+        if Thread.isMainThread { escalationClaimed = true; return }
+        DispatchQueue.main.async { [weak self] in self?.escalationClaimed = true }
+    }
+
+    private func claimEscalationBudgetOnMain() -> Bool {
+        guard isActive, !escalationClaimed else { return false }
+        escalationClaimed = true
+        return true
+    }
+
     private func startOrResetOnMain(trigger: String) {
         // Publish first, then log. Logging while `isActive` still held the old
         // value let Combine condition refreshes resolve the wrong listening mode.
         let becameActive = !isActive
         isActive = true
+        escalationClaimed = false
         if becameActive {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
