@@ -79,10 +79,23 @@ class GracePeriodSignal: ObservableObject {
     /// judged against the window it actually belonged to.
     func currentGeneration() -> Int { generation }
 
-    /// Whether a completion still belongs to the window that issued it. Liveness
-    /// alone would let a turn that finished after a privacy close (or after a
-    /// close and a new wake) touch a window it never belonged to.
-    func isCurrentWindow(_ generation: Int) -> Bool { isActive && self.generation == generation }
+    /// Restores the allowance for a completion that still belongs to its window,
+    /// as a single operation on the main queue.
+    ///
+    /// Checking "is this still current?" and then calling the reset separately
+    /// would leave a gap: the reset hops to the main queue, and a privacy close
+    /// landing in between would be undone by a turn that no longer belongs. Returns
+    /// whether the completion was applied.
+    func recognizeCommandIfCurrentWindow(_ generation: Int) -> Bool {
+        if Thread.isMainThread { return recognizeCommandIfCurrentOnMain(generation) }
+        return DispatchQueue.main.sync { recognizeCommandIfCurrentOnMain(generation) }
+    }
+
+    private func recognizeCommandIfCurrentOnMain(_ generation: Int) -> Bool {
+        guard isActive, self.generation == generation else { return false }
+        startOrResetOnMain(trigger: "cloud route")
+        return true
+    }
 
     /// Whether this refusal should be audible. The first refusal in a generation
     /// speaks — that is the only signal the user gets that their deliberate
@@ -143,7 +156,6 @@ class GracePeriodSignal: ObservableObject {
         isActive = true
         // The allowance is restored for this window, so a refusal in it is new
         // information again and must speak (PR #23 review).
-        escalationClaimed = false
         refusalToneGeneration = nil
         escalationClaimed = false
         if becameActive {

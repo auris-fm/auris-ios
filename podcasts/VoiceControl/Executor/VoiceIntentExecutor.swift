@@ -181,9 +181,10 @@ class VoiceIntentExecutor {
             // the window it was issued under. Applying it to whatever window is
             // current would let a turn that finished after a privacy close reopen
             // or re-arm a window it never belonged to (PR #23 review).
-            if gracePeriodSignal.isCurrentWindow(generation) {
+            // One atomic operation: checking and then resetting separately leaves
+            // a gap in which a privacy close could be undone.
+            if gracePeriodSignal.recognizeCommandIfCurrentWindow(generation) {
                 FileLog.shared.addMessage("[VoicePipeline] Cloud route completed — grace period")
-                gracePeriodSignal.onCommandRecognized()
             } else {
                 FileLog.shared.addMessage("[VoicePipeline] Cloud route completed for an ended window — ignored")
             }
