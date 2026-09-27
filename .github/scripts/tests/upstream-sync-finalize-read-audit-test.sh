@@ -59,12 +59,20 @@ export RUNNER_TEMP="$tmp2"
 REPORT_DIR="${tmp2}/upstream-sync"
 AUDIT_FILE="${REPORT_DIR}/audit.env"
 cp "${tmp1}/upstream-sync/state.env" "${tmp2}/upstream-sync/state.env"
+# Bring the audit file too: without it `read_audit` never takes its
+# `source "$AUDIT_FILE"` branch, which is the path that carries the conflict flag.
+cp "${tmp1}/upstream-sync/audit.env" "${tmp2}/upstream-sync/audit.env"
 printf '.github/workflows/claude.yml\n' >"${tmp2}/upstream-sync/github_changed_files.txt"
 printf '.github/workflows/claude.yml\n' >"${tmp2}/upstream-sync/workflow_changed_files.txt"
 
 github_changed=false
 workflow_changed=false
+set +e
 read_audit
+# Re-capture: `rc` otherwise still holds case 1's status, so this case's exit
+# status was never actually asserted.
+rc=$?
+set -e
 assert_eq "$rc" "0" "read_audit exit status with non-empty audit files"
 assert_eq "$github_changed" "true" "github_changed (workflow-only diff)"
 assert_eq "$workflow_changed" "true" "workflow_changed (workflow-only diff)"

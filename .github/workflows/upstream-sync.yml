@@ -32,6 +32,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Run sync script tests
+        run: |
+          chmod +x ./.github/scripts/tests/*.sh
+          for t in ./.github/scripts/tests/*.sh; do
+            echo "== $t"
+            bash "$t"
+          done
+
       - name: Preflight
         id: preflight
         env:
