@@ -272,8 +272,11 @@ class VoiceControlService: ObservableObject {
         // caught rather than by the trimmer, which cannot recover the tokens it
         // never had.
         guard !WakeWordPhraseSet.isWakeOnly(transcript) else {
-            FileLog.shared.addMessage("[VoicePipeline] wake phrase only ← '\(transcript)' — not routed")
-            audioRenderer.playEarcon(.error)
+            // Silent by contract: a wake-only capture is the start of a session,
+            // not a failed question, so it plays nothing. The earcon table's
+            // "command not understood" covers what we could not understand, not
+            // the user opening the session.
+            FileLog.shared.addMessage("[VoicePipeline] wake phrase only ← '\(transcript)' — not routed, silent")
             return
         }
         let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
