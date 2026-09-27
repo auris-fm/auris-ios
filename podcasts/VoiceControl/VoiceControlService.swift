@@ -322,8 +322,20 @@ class VoiceControlService: ObservableObject {
             // stopped session could still send the transcript. Checked before the
             // claim so a stopped session does not consume the allowance either.
             guard isListening else { return }
-            if RouteFailureEscalationPolicy.outcome(for: reason) == .escalate,
-               gracePeriodSignal.claimEscalationBudget() {
+            let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
+            if escalation == .escalate, !gracePeriodSignal.claimEscalationBudget() {
+                // Eligible, but this window's allowance is spent. A refused
+                // budget is a local failure and speaks on the *first* refusal:
+                // leaving it to the debounce gave the user silence for their next
+                // attempt, which is the outcome this change exists to remove.
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] cloud escalation refused (window allowance spent) ← '\(transcript)' (reason=\(reason ?? "?"))"
+                )
+                audioRenderer.playEarcon(.error)
+                consecutiveNulls = 0
+                return
+            }
+            if escalation == .escalate {
                 let reasonText = reason ?? "?"
                 FileLog.shared.addMessage("[VoicePipeline] cloud escalation ← '\(transcript)' (reason=\(reasonText))")
                 consecutiveNulls = 0
@@ -345,9 +357,11 @@ class VoiceControlService: ObservableObject {
             )
             // Local cases speak rather than stay silent. A `blank_transcript`
             // already played the wake-only tone upstream, so this covers the
-            // capability failures; a refused budget keeps the debounce, since a
-            // burst of unclassified audio is exactly what it exists for.
-            if RouteFailureEscalationPolicy.outcome(for: reason) == .stayLocal,
+            // capability failures. A refused escalation budget speaks above, on
+            // the first refusal; what reaches the debounce here is the
+            // non-escalating `blank_transcript` case, which is exactly what the
+            // debounce exists for.
+            if escalation == .stayLocal,
                reason != RouterStageDiagnostic.reasonBlankTranscript {
                 audioRenderer.playEarcon(.error)
                 consecutiveNulls = 0
