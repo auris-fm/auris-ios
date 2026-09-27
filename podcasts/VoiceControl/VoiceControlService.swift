@@ -271,13 +271,19 @@ class VoiceControlService: ObservableObject {
         // keeps the wake phrase in the transcript, so this is where that case is
         // caught rather than by the trimmer, which cannot recover the tokens it
         // never had.
-        guard !WakeWordPhraseSet.isWakeOnly(transcript) else {
-            // Silent by contract: a wake-only capture is the start of a session,
-            // not a failed question, so it plays nothing. The earcon table's
-            // "command not understood" covers what we could not understand, not
-            // the user opening the session.
-            FileLog.shared.addMessage("[VoicePipeline] wake phrase only ← '\(transcript)' — not routed, silent")
+        switch RouteInputEligibilityPolicy.decide(transcript: transcript) {
+        case .blank, .silentSessionStart:
+            // Silent by contract and *before* classification: a wake-only or blank
+            // capture is the start of a session (or nothing at all), not a failed
+            // question. Letting it reach `.none` would count it as an unclassified
+            // turn and eventually play the error earcon — the outcome the silent
+            // rule forbids.
+            FileLog.shared.addMessage(
+                "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
+            )
             return
+        case .route:
+            break
         }
         let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
         // Snapshot before recording: `recordPipelineLatency` consumes and clears
@@ -353,7 +359,7 @@ class VoiceControlService: ObservableObject {
             // stopped session could still send the transcript. Checked before the
             // claim so a stopped session does not consume the allowance either.
             guard isListening else { return }
-            let escalation = RouteFailureEscalationPolicy.outcome(for: reason, transcript: transcript)
+            let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
             // Claimed as a statement, not a multi-line ternary: a continuation
             // line starting with "?" parses as optional chaining, not as the
             // ternary operator.

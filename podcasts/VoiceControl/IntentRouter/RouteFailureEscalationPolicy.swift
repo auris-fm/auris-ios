@@ -41,16 +41,4 @@ enum RouteFailureEscalationPolicy {
         guard let reason else { return .escalate }
         return localReasons.contains(reason) ? .stayLocal : .escalate
     }
-
-    /// The same decision, with the transcript considered.
-    ///
-    /// A transcript that is the wake phrase and nothing else is a deliberate local
-    /// rejection: speaking the wake word is the signal that the user started
-    /// talking, not a question, so it must not be a routing or escalation candidate
-    /// and must not spend the window's allowance. Anything that survives the wake
-    /// phrase — including words the router failed to classify — follows the
-    /// ordinary rules.
-    static func outcome(for reason: String?, transcript: String) -> RouteFailureEscalation {
-        WakeWordPhraseSet.isWakeOnly(transcript) ? .stayLocal : outcome(for: reason)
-    }
 }
