@@ -265,6 +265,17 @@ class VoiceControlService: ObservableObject {
         guard isListening else { return }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
+
+        // A bare wake is not a question: neither routed nor escalated, and it must
+        // not spend the window's one dispatch. Without per-token timestamps ASR
+        // keeps the wake phrase in the transcript, so this is where that case is
+        // caught rather than by the trimmer, which cannot recover the tokens it
+        // never had.
+        guard !WakeWordPhraseSet.isWakeOnly(transcript) else {
+            FileLog.shared.addMessage("[VoicePipeline] wake phrase only ← '\(transcript)' — not routed")
+            audioRenderer.playEarcon(.error)
+            return
+        }
         let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
         // Snapshot before recording: `recordPipelineLatency` consumes and clears
         // `latestRouterMetrics`, and the escalation policy must read *this* turn's
@@ -339,7 +350,7 @@ class VoiceControlService: ObservableObject {
             // stopped session could still send the transcript. Checked before the
             // claim so a stopped session does not consume the allowance either.
             guard isListening else { return }
-            let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
+            let escalation = RouteFailureEscalationPolicy.outcome(for: reason, transcript: transcript)
             // Claimed as a statement, not a multi-line ternary: a continuation
             // line starting with "?" parses as optional chaining, not as the
             // ternary operator.
