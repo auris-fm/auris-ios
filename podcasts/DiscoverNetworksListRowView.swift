@@ -9,14 +9,14 @@ struct DiscoverNetworksListRowView: View {
 
     @EnvironmentObject var theme: Theme
 
-    @ScaledMetric(relativeTo: .largeTitle) var scaledHeight = CGFloat(351)
+    @ScaledMetric(relativeTo: .largeTitle) var scaledHeight = CGFloat(337)
 
     @ScaledMetric(relativeTo: .largeTitle) var scaledCardSize = CGFloat(168)
 
     @State var currentPage: Int? = 0
 
     var adjustedHeight: CGFloat {
-        max(351, scaledHeight)
+        max(337, scaledHeight)
     }
 
     var adjustedCardSize: CGFloat {
@@ -28,7 +28,7 @@ struct DiscoverNetworksListRowView: View {
             header
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 16) {
-                    ForEach(Array(model.networks.enumerated()), id: \.offset) { index, network in
+                    ForEach(Array(model.visibleNetworks.enumerated()), id: \.offset) { index, network in
                         Button {
                             model.show(network: network)
                         } label: {
@@ -47,9 +47,9 @@ struct DiscoverNetworksListRowView: View {
             .onChange(of: currentPage) { _, page in
                 guard let page else { return }
 
-                model.pageDidChange(to: page + 1, totalPages: model.networks.count)
+                model.pageDidChange(to: page + 1, totalPages: model.visibleNetworks.count)
             }
-            DiscoveryPageIndicatorView(numberOfItems: model.networks.count, currentPage: $currentPage)
+            DiscoveryPageIndicatorView(numberOfItems: model.visibleNetworks.count, currentPage: $currentPage)
             Rectangle()
                 .foregroundColor(theme.primaryUi05)
                 .frame(height: 1)
