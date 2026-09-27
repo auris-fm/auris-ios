@@ -316,6 +316,12 @@ class VoiceControlService: ObservableObject {
             // apply to it by construction rather than by a second implementation.
             // The transcript goes verbatim, the tier is unknown, and no route hint
             // is sent (hints accompany validated arguments only).
+            // Re-checked here as the `.intent` branch does before executing: the
+            // check at the top of this method happens before the synchronous
+            // classification, and capture can stop while that runs. Without this a
+            // stopped session could still send the transcript. Checked before the
+            // claim so a stopped session does not consume the allowance either.
+            guard isListening else { return }
             if RouteFailureEscalationPolicy.outcome(for: reason) == .escalate,
                gracePeriodSignal.claimEscalationBudget() {
                 let reasonText = reason ?? "?"
