@@ -115,11 +115,18 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// restore the escalation allowance that permitted it, or one window could
     /// dispatch repeatedly. Mirrors Android's origin marker on the intent.
     let origin: CloudRouteOrigin
+    /// The grace-window generation this dispatch was issued under, for a fallback.
+    /// Its completion may only affect the window it belonged to: a request that
+    /// returns after a privacy close and a new wake must not extend the new
+    /// window or restore its allowance. `nil` for a route the model chose, which
+    /// is a command in its own right rather than a dispatch against a budget.
+    let generation: Int?
 
-    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall) {
+    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall, generation: Int? = nil) {
         self.request = request
         self.tier = tier
         self.origin = origin
+        self.generation = generation
     }
 }
 

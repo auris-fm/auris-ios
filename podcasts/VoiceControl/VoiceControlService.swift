@@ -266,6 +266,11 @@ class VoiceControlService: ObservableObject {
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
         let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
+        // Snapshot before recording: `recordPipelineLatency` consumes and clears
+        // `latestRouterMetrics`, and the escalation policy must read *this* turn's
+        // reason rather than nil — a cleared reason escalates even the reasons that
+        // must stay local (PR #23 review).
+        let turnMetrics = latestRouterMetrics
         recordPipelineLatency(transcript: transcript)
 
         switch result {
@@ -307,8 +312,8 @@ class VoiceControlService: ObservableObject {
             // If dialogResult has no intent and no question (e.g., cancel), do nothing
 
         case .none:
-            let stage = latestRouterMetrics?.failedStage ?? "?"
-            let reason = latestRouterMetrics?.reason
+            let stage = turnMetrics?.failedStage ?? "?"
+            let reason = turnMetrics?.reason
 
             // A routing failure or a deliberate `no_match` escalates through the
             // same path a chosen `cloud_route` uses — same intent, same executor —
@@ -323,7 +328,14 @@ class VoiceControlService: ObservableObject {
             // claim so a stopped session does not consume the allowance either.
             guard isListening else { return }
             let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
-            if escalation == .escalate, !gracePeriodSignal.claimEscalationBudget() {
+            // Claimed as a statement, not a multi-line ternary: a continuation
+            // line starting with "?" parses as optional chaining, not as the
+            // ternary operator.
+            var dispatchGeneration: Int?
+            if escalation == .escalate {
+                dispatchGeneration = gracePeriodSignal.claimEscalationBudget()
+            }
+            if escalation == .escalate, dispatchGeneration == nil {
                 // Eligible, but this window's allowance is spent. A refused
                 // budget is a local failure and speaks on the *first* refusal:
                 // leaving it to the debounce gave the user silence for their next
@@ -338,11 +350,13 @@ class VoiceControlService: ObservableObject {
                 FileLog.shared.addMessage(
                     "[VoicePipeline] cloud escalation refused (\(cause)) ← '\(transcript)' (reason=\(reason ?? "?"))"
                 )
-                audioRenderer.playEarcon(.error)
+                if gracePeriodSignal.claimRefusalTone() {
+                    audioRenderer.playEarcon(.error)
+                }
                 consecutiveNulls = 0
                 return
             }
-            if escalation == .escalate {
+            if let dispatchGeneration {
                 let reasonText = reason ?? "?"
                 FileLog.shared.addMessage("[VoicePipeline] cloud escalation ← '\(transcript)' (reason=\(reasonText))")
                 consecutiveNulls = 0
@@ -351,7 +365,12 @@ class VoiceControlService: ObservableObject {
                 // Marked as a fallback so the executor extends the window without
                 // restoring the allowance that permitted it.
                 let response = await executor.execute(
-                    CloudRouteIntent(request: transcript, tier: .unknown, origin: .routingFailure)
+                    CloudRouteIntent(
+                        request: transcript,
+                        tier: .unknown,
+                        origin: .routingFailure,
+                        generation: dispatchGeneration
+                    )
                 )
                 audioRenderer.render(response)
                 return

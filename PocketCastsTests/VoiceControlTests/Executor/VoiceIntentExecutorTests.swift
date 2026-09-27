@@ -56,25 +56,31 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_fallbackCloudRouteKeepsTheAllowanceSpent() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertTrue(gracePeriodSignal.claimEscalationBudget())
+        let generation = gracePeriodSignal.claimEscalationBudget()
+        XCTAssertNotNil(generation)
 
-        _ = await executor.execute(CloudRouteIntent(request: "what did they say", tier: .unknown, origin: .routingFailure))
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            origin: .routingFailure,
+            generation: generation
+        ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
-        XCTAssertFalse(gracePeriodSignal.claimEscalationBudget(),
-                       "a fallback must not re-arm the allowance that let it happen")
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "a fallback must not re-arm the allowance that let it happen")
     }
 
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertTrue(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
 
         _ = await executor.execute(CloudRouteIntent(request: "what did they say", tier: .unknown))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
-        XCTAssertTrue(gracePeriodSignal.claimEscalationBudget(),
-                      "a cloud route the model chose is a deliberate act, so the window is refreshed")
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(),
+                        "a cloud route the model chose is a deliberate act, so the window is refreshed")
     }
 
     func test_execute_pause_callsSinkPause() async {
