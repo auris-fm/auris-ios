@@ -139,12 +139,19 @@ final class CloudRouteClient {
                 continuation.yield(event)
                 continuation.finish()
                 if http.statusCode == 401 || http.statusCode == 403 {
-                    // Only *after* the caller owns its failure: the sink has already
-                    // paused playback, and this handler can await a refresh and then
-                    // an exchange (15 s each), so awaiting it before yielding would
-                    // delay the user's error by tens of seconds (PR #20 review).
+                    // Ordered *after* the caller owns its failure, and detached:
+                    // the sink has already paused playback, and this handler can
+                    // await a refresh and then an exchange (15 s each), so awaiting
+                    // it before yielding would delay the user's error by tens of
+                    // seconds. It also cannot be awaited inline, because
+                    // `finish()` runs this stream's `onTermination`, which cancels
+                    // the producer task — recovery would run cancelled and every
+                    // request inside it would throw immediately (PR #20 review).
+                    // An unstructured task does not inherit that cancellation.
                     // Best effort, no same-turn retry: the next turn acquires again.
-                    await tokenProvider.handleUnauthorized(rejectedToken: credential)
+                    let provider = tokenProvider
+                    let rejected = credential
+                    Task { await provider.handleUnauthorized(rejectedToken: rejected) }
                 }
                 return
             }

@@ -402,6 +402,11 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
         let delivered = await waitFor(log: log, entry: "delivered", timeout: 5)
         XCTAssertTrue(delivered, "the error must reach the caller without recovery unblocking it")
         XCTAssertEqual(provider.rejections, ["token-1"], "recovery still names the rejected credential")
+        XCTAssertEqual(provider.ranCancelled, false,
+                       "recovery must not run inside the producer task that finish() cancels")
+        let finished = await waitFor(log: log, entry: "recovery-finished", timeout: 5)
+        XCTAssertTrue(finished, "recovery must run to completion, not out of a cancelled task")
+        XCTAssertTrue(provider.completed, "a cancelled task throws out of its first cancellable await")
         let events = await consumer.value
         guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
     }
@@ -454,12 +459,24 @@ final class GatedProvider: CloudTokenProviding {
     let gate: RecoveryGate
     let log: OrderLog
     var rejections: [String?] = []
+    private(set) var ranCancelled: Bool?
+    private(set) var completed = false
     init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
     func token() async -> String? { "token-1" }
     func handleUnauthorized(rejectedToken: String?) async {
         rejections.append(rejectedToken)
+        // `finish()` runs the stream's onTermination, which cancels the producer
+        // task. Recovery must not run inside it: a cancelled task throws out of
+        // its first cancellable await, so this records whether it did.
+        ranCancelled = Task.isCancelled
         await log.append("recovery-started")
         await gate.wait()
+        do {
+            try await Task.sleep(nanoseconds: 20_000_000)   // cancellable
+            completed = true
+        } catch {
+            completed = false
+        }
         await log.append("recovery-finished")
     }
 }
