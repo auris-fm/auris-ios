@@ -401,6 +401,12 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
 
         let delivered = await waitFor(log: log, entry: "delivered", timeout: 5)
         XCTAssertTrue(delivered, "the error must reach the caller without recovery unblocking it")
+        // Recovery runs detached, so its writes are unordered against delivery.
+        // `recovery-started` is appended by the handler *after* recording
+        // `rejections` and `ranCancelled`, so waiting for it is what orders the two
+        // assertions below (PR #20 review).
+        let started = await waitFor(log: log, entry: "recovery-started", timeout: 5)
+        XCTAssertTrue(started, "recovery must start on its own, not be cancelled with the producer")
         XCTAssertEqual(provider.rejections, ["token-1"], "recovery still names the rejected credential")
         XCTAssertEqual(provider.ranCancelled, false,
                        "recovery must not run inside the producer task that finish() cancels")
