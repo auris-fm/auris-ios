@@ -175,6 +175,18 @@ class VoiceIntentExecutor {
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
+        } else if case let route as CloudRouteIntent = intent, route.origin == .modelCall,
+                  let generation = route.generation {
+            // A cloud route the model chose resets the allowance — but only inside
+            // the window it was issued under. Applying it to whatever window is
+            // current would let a turn that finished after a privacy close reopen
+            // or re-arm a window it never belonged to (PR #23 review).
+            if gracePeriodSignal.isCurrentWindow(generation) {
+                FileLog.shared.addMessage("[VoicePipeline] Cloud route completed — grace period")
+                gracePeriodSignal.onCommandRecognized()
+            } else {
+                FileLog.shared.addMessage("[VoicePipeline] Cloud route completed for an ended window — ignored")
+            }
         } else if case let route as CloudRouteIntent = intent, route.origin == .routingFailure,
                   let generation = route.generation {
             // The conversation continues, but only for the window that issued this

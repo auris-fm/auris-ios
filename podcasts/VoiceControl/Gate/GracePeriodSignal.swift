@@ -74,6 +74,16 @@ class GracePeriodSignal: ObservableObject {
         return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
     }
 
+    /// The generation a turn is running under, for stamping an intent that was
+    /// not created by a fallback. Read when the turn starts, so a completion is
+    /// judged against the window it actually belonged to.
+    func currentGeneration() -> Int { generation }
+
+    /// Whether a completion still belongs to the window that issued it. Liveness
+    /// alone would let a turn that finished after a privacy close (or after a
+    /// close and a new wake) touch a window it never belonged to.
+    func isCurrentWindow(_ generation: Int) -> Bool { isActive && self.generation == generation }
+
     /// Whether this refusal should be audible. The first refusal in a generation
     /// speaks — that is the only signal the user gets that their deliberate
     /// question went unanswered — and repeats within the same generation do not,
@@ -131,6 +141,10 @@ class GracePeriodSignal: ObservableObject {
             generation += 1   // a window belongs to a generation
         }
         isActive = true
+        // The allowance is restored for this window, so a refusal in it is new
+        // information again and must speak (PR #23 review).
+        escalationClaimed = false
+        refusalToneGeneration = nil
         escalationClaimed = false
         if becameActive {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")

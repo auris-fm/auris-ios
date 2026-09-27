@@ -83,6 +83,30 @@ final class VoiceIntentExecutorTests: XCTestCase {
                         "a cloud route the model chose is a deliberate act, so the window is refreshed")
     }
 
+    /// A model-chosen cloud route resets the allowance, but only inside the window
+    /// it was issued under. Completing after a privacy close and a new wake must
+    /// not reset whatever window is current — that would re-arm a session this
+    /// turn never belonged to.
+    func test_execute_modelChosenRouteFromAnEndedWindowCannotResetTheNewOne() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let oldGeneration = gracePeriodSignal.claimEscalationBudget()
+        XCTAssertNotNil(oldGeneration)
+
+        await MainActor.run { gracePeriodSignal.onAppBackgrounded() }
+        gracePeriodSignal.onWakeWordDetected()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "the new window's allowance is spent here")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: oldGeneration
+        ))
+
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "the ended window's completion must not reset the current one")
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)

@@ -93,6 +93,19 @@ final class GracePeriodSignalEscalationBudgetTests: XCTestCase {
         XCTAssertFalse(signal.isActive, "an ended window's completion must not extend the current one")
     }
 
+    /// A recognised command restores the allowance, so a refusal that follows it
+    /// is new information and must be audible. Leaving the tone claim marked from
+    /// the previous allowance makes that first refusal silent.
+    func testARecognisedCommandMakesTheNextRefusalAudibleAgain() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertTrue(signal.claimRefusalTone(), "the first refusal speaks")
+
+        await MainActor.run { signal.onCommandRecognized() }   // restores the allowance
+
+        XCTAssertTrue(signal.claimRefusalTone(), "a refusal against a restored allowance is new information")
+    }
+
     /// Privacy fail-closed: the window can close without expiring, and a closed
     /// window has no budget until something opens it again.
     func testClosingTheWindowWithdrawsTheBudget() async {

@@ -274,8 +274,20 @@ class VoiceControlService: ObservableObject {
         recordPipelineLatency(transcript: transcript)
 
         switch result {
-        case .intent(let intent):
+        case .intent(let rawIntent):
             consecutiveNulls = 0
+            // Stamp a model-chosen cloud route with the window it runs under, so
+            // its completion can be judged against that window rather than against
+            // whatever is current when the network call returns.
+            var intent = rawIntent
+            if let route = rawIntent as? CloudRouteIntent, route.generation == nil {
+                intent = CloudRouteIntent(
+                    request: route.request,
+                    tier: route.tier,
+                    origin: route.origin,
+                    generation: gracePeriodSignal.currentGeneration()
+                )
+            }
 
             // Debounce: skip if same intent type was executed within the debounce window
             let intentType = String(describing: type(of: intent))
