@@ -59,15 +59,28 @@ export RUNNER_TEMP="$tmp2"
 REPORT_DIR="${tmp2}/upstream-sync"
 AUDIT_FILE="${REPORT_DIR}/audit.env"
 cp "${tmp1}/upstream-sync/state.env" "${tmp2}/upstream-sync/state.env"
+# The audit file is the only path that carries the conflict flag, so case 2 writes
+# its own with the flag *set* rather than copying case 1's false. Without that the
+# assertion below would pass with the `source "$AUDIT_FILE"` branch deleted (the
+# reviewer measured exactly that), which made this case cover nothing.
+printf 'has_unresolved_conflicts=true\ngithub_changed=false\nworkflow_changed=false\n' \
+  >"${tmp2}/upstream-sync/audit.env"
 printf '.github/workflows/claude.yml\n' >"${tmp2}/upstream-sync/github_changed_files.txt"
 printf '.github/workflows/claude.yml\n' >"${tmp2}/upstream-sync/workflow_changed_files.txt"
 
 github_changed=false
 workflow_changed=false
+has_unresolved_conflicts=false
+set +e
 read_audit
+# Re-capture: `rc` otherwise still holds case 1's status, so this case's exit
+# status was never actually asserted.
+rc=$?
+set -e
 assert_eq "$rc" "0" "read_audit exit status with non-empty audit files"
 assert_eq "$github_changed" "true" "github_changed (workflow-only diff)"
 assert_eq "$workflow_changed" "true" "workflow_changed (workflow-only diff)"
+assert_eq "$has_unresolved_conflicts" "true" "has_unresolved_conflicts read from the audit file"
 
 rm -rf "$tmp1" "$tmp2"
 
