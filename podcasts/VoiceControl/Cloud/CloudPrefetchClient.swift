@@ -86,6 +86,14 @@ final class CloudPrefetchClient {
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let status = object["status"] as? String
             else {
+                if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                    // Same reporting as the route client, so both production paths
+                    // name a rejected credential (PR #20 review). Prefetch is a
+                    // background hint with no caller waiting on a user-visible
+                    // result, so this cannot delay anything; a burst still refreshes
+                    // once rather than once per hint.
+                    await tokenProvider.handleUnauthorized(rejectedToken: credential)
+                }
                 return .failed
             }
             switch status {

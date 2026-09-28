@@ -135,8 +135,24 @@ final class CloudRouteClient {
                     errorBody.append(byte)
                     if errorBody.count > 4096 { break }
                 }
-                continuation.yield(Self.preStreamError(status: http.statusCode, body: errorBody))
+                let event = Self.preStreamError(status: http.statusCode, body: errorBody)
+                continuation.yield(event)
                 continuation.finish()
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    // Ordered *after* the caller owns its failure, and detached:
+                    // the sink has already paused playback, and this handler can
+                    // await a refresh and then an exchange (15 s each), so awaiting
+                    // it before yielding would delay the user's error by tens of
+                    // seconds. It also cannot be awaited inline, because
+                    // `finish()` runs this stream's `onTermination`, which cancels
+                    // the producer task — recovery would run cancelled and every
+                    // request inside it would throw immediately (PR #20 review).
+                    // An unstructured task does not inherit that cancellation.
+                    // Best effort, no same-turn retry: the next turn acquires again.
+                    let provider = tokenProvider
+                    let rejected = credential
+                    Task { await provider.handleUnauthorized(rejectedToken: rejected) }
+                }
                 return
             }
 

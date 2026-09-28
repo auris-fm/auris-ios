@@ -333,3 +333,167 @@ final class CloudRouteClientLocaleTests: XCTestCase {
         XCTAssertEqual(message, "Daily limit reached", "the server's own message is passed through as-is")
     }
 }
+
+/// PR #20 review: the client must tell the credential source which credential was
+/// rejected, so a burst of 401s refreshes once rather than once per response.
+final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
+    private final class RecordingProvider: CloudTokenProviding {
+        var token: String? = "token-1"
+        var rejections: [String?] = []
+        func token() async -> String? { token }
+        func handleUnauthorized(rejectedToken: String?) async { rejections.append(rejectedToken) }
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        super.tearDown()
+    }
+
+    func testPreStreamUnauthorizedReportsTheRejectedCredential() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let provider = RecordingProvider()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
+        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
+    }
+
+    /// PR #20 review: the handler can await a refresh *and* an exchange (15 s
+    /// each), and the sink has already paused playback by then, so recovery must
+    /// not be able to hold the caller's error up. The gate makes that structural
+    /// rather than racy: recovery blocks until the caller has been handed its
+    /// error, so if the client awaited recovery *before* finishing the stream, the
+    /// caller would never be served and this test would time out instead of
+    /// passing.
+    func testRecoveryCannotHoldUpTheCallersError() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let gate = RecoveryGate()
+        let log = OrderLog()
+        let provider = GatedProvider(gate: gate, log: log)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        let stream = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0))
+        let consumer = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in stream {
+                events.append(event)
+                await log.append("delivered")
+                await gate.release()   // the caller owns its failure from here
+            }
+            return events
+        }
+
+        let delivered = await waitFor(log: log, entry: "delivered", timeout: 5)
+        XCTAssertTrue(delivered, "the error must reach the caller without recovery unblocking it")
+        // Recovery runs detached, so its writes are unordered against delivery.
+        // `recovery-started` is appended by the handler *after* recording
+        // `rejections` and `ranCancelled`, so waiting for it is what orders the two
+        // assertions below (PR #20 review).
+        let started = await waitFor(log: log, entry: "recovery-started", timeout: 5)
+        XCTAssertTrue(started, "recovery must start on its own, not be cancelled with the producer")
+        XCTAssertEqual(provider.rejections, ["token-1"], "recovery still names the rejected credential")
+        XCTAssertEqual(provider.ranCancelled, false,
+                       "recovery must not run inside the producer task that finish() cancels")
+        let finished = await waitFor(log: log, entry: "recovery-finished", timeout: 5)
+        XCTAssertTrue(finished, "recovery must run to completion, not out of a cancelled task")
+        XCTAssertTrue(provider.completed, "a cancelled task throws out of its first cancellable await")
+        let events = await consumer.value
+        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
+    }
+
+    func testSuccessfulStreamDoesNotReportARejection() async {
+        CloudRouteTestURLProtocol.stubSSE("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n")
+        let provider = RecordingProvider()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_legacy",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+
+        XCTAssertTrue(provider.rejections.isEmpty, "a successful turn must not invalidate the credential")
+    }
+}
+
+
+/// Records the order of two things the review requires to be ordered: the caller
+/// receiving its error, and the credential recovery starting.
+actor OrderLog {
+    private(set) var entries: [String] = []
+    func append(_ entry: String) { entries.append(entry) }
+}
+
+/// Hypothesis for the ordering property: recovery starts, then blocks until the
+/// caller has been served. A client that awaited recovery before finishing the
+/// stream can never satisfy it, so the condition is a real gate rather than a
+/// timing assumption.
+actor RecoveryGate {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func release() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
+}
+
+final class GatedProvider: CloudTokenProviding {
+    let gate: RecoveryGate
+    let log: OrderLog
+    var rejections: [String?] = []
+    private(set) var ranCancelled: Bool?
+    private(set) var completed = false
+    init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
+    func token() async -> String? { "token-1" }
+    func handleUnauthorized(rejectedToken: String?) async {
+        rejections.append(rejectedToken)
+        // `finish()` runs the stream's onTermination, which cancels the producer
+        // task. Recovery must not run inside it: a cancelled task throws out of
+        // its first cancellable await, so this records whether it did.
+        ranCancelled = Task.isCancelled
+        await log.append("recovery-started")
+        await gate.wait()
+        do {
+            try await Task.sleep(nanoseconds: 20_000_000)   // cancellable
+            completed = true
+        } catch {
+            completed = false
+        }
+        await log.append("recovery-finished")
+    }
+}
+
+/// Polls rather than sleeping a fixed interval, so a passing case costs
+/// milliseconds and a broken one fails at the timeout with the message attached.
+func waitFor(log: OrderLog, entry: String, timeout: TimeInterval) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await log.entries.contains(entry) { return true }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    return await log.entries.contains(entry)
+}

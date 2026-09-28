@@ -60,7 +60,10 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         clientFactory: @escaping () -> CloudRouteClient = {
             CloudRouteClient(
                 baseURL: CloudConfig.shared.baseUrl,
-                userId: CloudIdentity.shared.userId
+                userId: CloudIdentity.shared.userId,
+                // Per-call: a configured Auris origin switches the credential
+                // source to Auris-issued tokens; otherwise the static provider.
+                tokenProvider: CloudTokenProviderRouter.provider()
             )
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
