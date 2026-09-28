@@ -48,6 +48,91 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// The origin branch is what decides whether a dispatch re-arms the allowance
+    /// that permitted it. A fallback pays for its permission; a cloud route the
+    /// model chose is a deliberate act and does restore it. Asserting the pair is
+    /// what makes this a distinction rather than a blanket rule — and it fails if
+    /// the origin branch is removed.
+    func test_execute_fallbackCloudRouteKeepsTheAllowanceSpent() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.claimEscalationBudget()
+        XCTAssertNotNil(generation)
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            origin: .routingFailure,
+            generation: generation
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "a fallback must not re-arm the allowance that let it happen")
+    }
+
+    func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        // Stamped the way the service stamps it: a completion must carry the window
+        // it ran under, so this test supplies one rather than relying on a default.
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(),
+                        "a cloud route the model chose is a deliberate act, so the window is refreshed")
+    }
+
+    /// A model-chosen cloud route resets the allowance, but only inside the window
+    /// it was issued under. Completing after a privacy close and a new wake must
+    /// not reset whatever window is current — that would re-arm a session this
+    /// turn never belonged to.
+    func test_execute_modelChosenRouteFromAnEndedWindowCannotResetTheNewOne() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let oldGeneration = gracePeriodSignal.claimEscalationBudget()
+        XCTAssertNotNil(oldGeneration)
+
+        await MainActor.run { gracePeriodSignal.onAppBackgrounded() }
+        gracePeriodSignal.onWakeWordDetected()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "the new window's allowance is spent here")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: oldGeneration
+        ))
+
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "the ended window's completion must not reset the current one")
+    }
+
+    /// A cloud completion with no window identity cannot be attributed to any
+    /// window, so it must not change grace state: falling through to the generic
+    /// reset would let it reopen a session it never belonged to.
+    func test_execute_cloudCompletionWithoutAWindowLeavesGraceStateUntouched() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "this window's allowance is spent")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            origin: .routingFailure
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "an unattributable completion must not restore the allowance")
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)
@@ -104,6 +189,15 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(QueueIntent.addTop(episode: "ep123"))
         XCTAssertEqual(mockQueueSink.lastEpisode, "ep123")
     }
+
+    private static let context = PlaybackContext(
+        episodeId: "ep1",
+        podcastId: "pod1",
+        referencePositionMs: 4_000,
+        clientPositionMs: 5_000,
+        recentReferencePositions: [1_000, 2_000],
+        previousReferencePositionMs: 3_000
+    )
 
     func test_execute_cloudRoute_callsCloudSink() async {
         let context = PlaybackContext(
