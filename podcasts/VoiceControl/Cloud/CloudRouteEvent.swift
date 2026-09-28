@@ -4,6 +4,9 @@ import Foundation
 enum CloudRouteEvent: Equatable {
     case action(tool: String, action: String, params: [String: CloudRouteJSONValue])
     case token(String)
+    /// Negotiated structured discovery result (only received when the client
+    /// advertised `search_results_v1`).
+    case result(DiscoveryResult)
     case done(inputTokens: Int, outputTokens: Int)
     case error(code: String, message: String)
 }

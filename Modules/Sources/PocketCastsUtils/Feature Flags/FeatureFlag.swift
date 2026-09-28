@@ -65,6 +65,11 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable synced transcripts with playback timing
     case syncedTranscripts
 
+    /// Fire the optional `POST /api/v1/cloud/context/prefetch` hint on playback
+    /// start. Default off: the worker-side prefetch handler ships separately
+    /// (edge-particle plan Item 6), and prefetch is never required for a turn.
+    case cloudContextPrefetch
+
     /// Encourage Account Creation
     case encourageAccountCreation
 
@@ -327,6 +332,8 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .syncedTranscripts:
             true
+        case .cloudContextPrefetch:
+            false
         case .libroFm:
             false
         case .encourageAccountCreation:
