@@ -214,6 +214,9 @@ enum SlotRepair {
     ///   The sink owns the app's configurable seek interval and applies it in
     ///   the request's direction.
     /// - The mapper must NOT overwrite a sign the model produced.
+    /// - A produced `0` is not a stated amount — when no spoken amount
+    ///   appears in the utterance, zero is dropped so the sink receives
+    ///   `null` and applies its interval in the stated direction.
     /// - The mapper may fill direction when neither delta nor direction is
     ///   stated — defaults to forward (the only defaulting case).
     private static func fillSeekRelativeDefault(
@@ -223,15 +226,29 @@ enum SlotRepair {
         utterance: String
     ) -> [String: Any] {
         guard tool == "playback", action == "seek_relative" else { return params }
+
         // Never manufacture a delta: the sink owns the app's default interval
         // and applies it in the request's direction.
-        if params["delta_seconds"] != nil { return params }
+        // A produced `0` is not a stated amount. When the utterance states
+        // no amount, drop the zero so the sink receives `null` and applies
+        // its interval. When the utterance states an amount, the repair step
+        // (run earlier) has already replaced the zero with the spoken value.
+        var out = params
+        if var delta = params["delta_seconds"] as? Int, delta == 0 {
+            if extractDeltaSeconds(utterance) == nil {
+                // No spoken amount — drop the zero as unstated.
+                out.removeValue(forKey: "delta_seconds")
+            }
+            // If utterance states an amount, keep the repaired value from the
+            // earlier repair step (it replaced 0 with the spoken signed amount).
+        }
+        if out["delta_seconds"] != nil { return out }
+
         // Never overwrite an existing direction with a direction derived from
         // the utterance text — the model's intent is authoritative.
-        if params["direction"] != nil { return params }
+        if out["direction"] != nil { return out }
         // Neither delta nor direction stated — fill a forward default so the
         // mapper produces (nil, FORWARD) and the sink applies its interval.
-        var out = params
         out["direction"] = "forward"
         return out
     }

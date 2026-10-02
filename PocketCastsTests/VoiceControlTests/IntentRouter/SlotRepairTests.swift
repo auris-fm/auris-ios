@@ -100,4 +100,45 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.arguments["direction"] as? String, "backward",
                        "existing direction must not be overwritten by utterance wording")
     }
+
+    func test_repair_seekRelative_zeroDroppedWhenNoSpokenAmount() {
+        // Per the ruling at 1bf6e04: a produced `0` is not a stated amount.
+        // When the utterance states no amount, zero must be dropped so the
+        // sink receives null and applies its interval in the stated direction.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0, direction='backward')]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired?.arguments["delta_seconds"],
+                     "produced zero with no spoken amount must be dropped as unstated")
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "backward",
+                       "direction must survive when zero is dropped")
+    }
+
+    func test_repair_seekRelative_zeroReplacedBySpokenAmount() {
+        // When the model produces `0` but the utterance states a signed amount,
+        // the repair preserves the spoken signed amount.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "rewind fifteen seconds",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -15,
+                       "spoken amount replaces produced zero")
+    }
+
+    func test_repair_seekRelative_nonZeroSignPreserved() {
+        // A nonzero produced sign must never be overwritten.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-30)]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -30,
+                       "nonzero produced sign must be preserved")
+    }
 }
