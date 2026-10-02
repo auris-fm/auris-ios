@@ -259,3 +259,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         _ = playbackSink.seekTo(positionSeconds: clamped)
     }
 }
+
+// MARK: - CloudAudioPlayer.Delegate
+
+extension CloudRouteSink {
+    func audioPlayerDidStartPlaying() {
+        // Audio started — the sink doesn't need to react; the player
+        // already managed the AVAudioEngine and playbackSink ducking
+        // is handled by the sink's own pause/resume on action events.
+    }
+
+    func audioPlayerDidPause() {
+        // Audio paused due to buffer underrun — the sink doesn't need
+        // to react; the player will resume automatically when new
+        // frames arrive.
+    }
+}
