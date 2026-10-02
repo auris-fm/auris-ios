@@ -84,18 +84,37 @@ final class CloudRouteClient {
         }
     }
 
-    // MARK: - WebSocket implementation
+    // MARK: - Transport selection
 
+    /// Try WebSocket first; fall back to SSE if the upgrade fails.
+    ///
+    /// The spec mandates both transports during the transition window:
+    /// WebSocket preferred, SSE fallback. The failed WS upgrade is the
+    /// detection signal — no capability endpoint needed.
     private func performRoute(
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
+        let success = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
+        guard !success else { return }
+        // WebSocket failed or not supported — retry via SSE.
+        await performSSE(request: request, context: context, turn: turn, continuation: continuation)
+
+    // MARK: - WebSocket implementation
+
+    /// Returns `true` if the WebSocket stream completed successfully.
+    private func performWebSocket(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
+        continuation: AsyncStream<CloudRouteEvent>.Continuation
+    ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             continuation.yield(.error(code: "invalid_request", message: ""))
             continuation.finish()
-            return
+            return true
         }
 
         // Build the authentication frame (cloud-assistant.md).
@@ -105,7 +124,7 @@ final class CloudRouteClient {
             turn: turn
         ) else {
             continuation.finish()
-            return
+            return true
         }
 
         let wsTask = session.webSocketTask(for: url)
@@ -153,19 +172,72 @@ final class CloudRouteClient {
                 continuation.yield(.error(code: "connection_lost", message: ""))
             }
             continuation.finish()
+            return true
 
         } catch is CancellationError {
             continuation.finish()
+            return false
         } catch {
             if Task.isCancelled {
                 continuation.finish()
-                return
+                return false
             }
             continuation.yield(
                 .error(code: "connection_lost", message: (error as NSError).localizedDescription)
             )
             continuation.finish()
+            // WebSocket failed — retry with SSE.
+            return false
         }
+    }
+
+    // MARK: - SSE fallback
+
+    /// Fallback SSE stream (POST /api/v1/cloud/route).
+    ///
+    /// Used when WebSocket is not supported or the upgrade fails.
+    /// Uses a custom delegate to stream data chunk-by-chunk.
+    private func performSSE(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
+        continuation: AsyncStream<CloudRouteEvent>.Continuation
+    ) async {
+        guard let url = Self.sseURL(baseURL: baseURL, path: Self.routePath) else {
+            continuation.yield(.error(code: "invalid_request", message: ""))
+            continuation.finish()
+            return
+        }
+
+        let bodyData = buildPostBody(request: request, context: context, turn: turn)
+        let credential = tokenProvider.token() ?? ""
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = requestTimeoutSeconds
+        req.httpBody = bodyData
+
+        // Streaming SSE delegate reads chunks incrementally.
+        let sseDelegate = SSESSEStreamingDelegate(
+            request: req,
+            continuation: continuation,
+            timeout: requestTimeoutSeconds
+        )
+        let sseSession = URLSession(configuration: .default, delegate: sseDelegate, delegateQueue: nil)
+        let task = sseSession.dataTask(with: req)
+        task.resume()
+    }
+    }
+
+    // MARK: - URL construction
+
+    private static func sseURL(baseURL: String, path: String) -> URL? {
+        let scheme = baseURL.hasPrefix("https://") ? "https://" : "http://"
+        let host = baseURL.hasPrefix(scheme) ? String(baseURL.dropFirst(scheme.count)) : baseURL
+        return URL(string: scheme + host + path)
     }
 
     // MARK: - Auth frame
@@ -225,6 +297,51 @@ final class CloudRouteClient {
                 ? "ws://" + baseURL.dropFirst("http://".count)
                 : "wss://" + baseURL
         return URL(string: wsBase + path)
+    }
+
+    // MARK: - SSE body builder
+
+    private static func buildPostBody(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> Data {
+        var contextObject: [String: Any] = [
+            "episode_id": context.episodeId,
+            "client_position_ms": context.clientPositionMs,
+            "recent_reference_positions": context.recentReferencePositions,
+        ]
+        if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
+        if let referencePositionMs = context.referencePositionMs {
+            contextObject["reference_position_ms"] = referencePositionMs
+        }
+        if let previousReferencePositionMs = context.previousReferencePositionMs {
+            contextObject["previous_reference_position_ms"] = previousReferencePositionMs
+        }
+        if !turn.recentConversation.isEmpty {
+            contextObject["recent_conversation"] = turn.recentConversation.map {
+                ["role": $0.role.rawValue, "text": $0.text]
+            }
+        }
+
+        var payload: [String: Any] = [
+            "request": request,
+            "request_id": turn.requestId,
+            "context": contextObject,
+        ]
+        if !turn.capabilities.isEmpty {
+            payload["capabilities"] = turn.capabilities
+        }
+        if let routeHint = turn.routeHint {
+            payload["route_hint"] = [
+                "operation": routeHint.operation,
+                "arguments": CloudRouteRequestBuilder.encodeJSONValues(routeHint.arguments),
+            ]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return Data()
+        }
+        return data
     }
 
     // MARK: - Text frame parsing
@@ -472,5 +589,94 @@ extension CloudRouteJSONValue {
             result[key] = from(value)
         }
         return result
+    }
+}
+
+// MARK: - SSE Streaming Delegate
+
+/// URLSession delegate that streams SSE data chunk-by-chunk for the fallback path.
+private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
+    private let request: URLRequest
+    private let continuation: AsyncStream<CloudRouteEvent>.Continuation
+    private let timeout: TimeInterval
+    private var parser = CloudRouteSSEParser()
+    private var sawTerminal = false
+    private var buffer = Data()
+    private let deadline: Date
+    private var hasError = false
+    private var httpResponseStatusCode: Int = 200
+
+    init(
+        request: URLRequest,
+        continuation: AsyncStream<CloudRouteEvent>.Continuation,
+        timeout: TimeInterval
+    ) {
+        self.request = request
+        self.continuation = continuation
+        self.timeout = timeout
+        self.deadline = Date().addingTimeInterval(timeout)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        httpResponseStatusCode = httpResponse.statusCode
+        if (400...499).contains(httpResponse.statusCode) {
+            // Will yield pre-stream error after reading body.
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard Date() < deadline else { return }
+        buffer.append(data)
+
+        // Process complete lines.
+        let lines = buffer.split(separator: UInt8(10)) // \n
+        for line in lines {
+            let lineStr = String(bytes: line, encoding: .utf8) ?? ""
+            for event in parser.consume(line: lineStr) {
+                continuation.yield(event)
+                if case .done = event { sawTerminal = true }
+                if case .error = event { sawTerminal = true }
+            }
+        }
+
+        // Keep unprocessed bytes.
+        let processedLength = lines.reduce(0) { $0 + $1.count + 1 }
+        if buffer.count > processedLength {
+            buffer = Data(buffer.subdata(with: NSRange(location: processedLength, length: buffer.count - processedLength)))
+        } else {
+            buffer.removeAll()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            if !hasError {
+                continuation.yield(.error(code: "connection_lost", message: ""))
+            }
+            continuation.finish()
+            return
+        }
+
+        // Handle HTTP error body.
+        if (400...499).contains(httpResponseStatusCode) {
+            continuation.yield(Self.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
+            continuation.finish()
+            return
+        }
+
+        // Finalize any remaining data.
+        for event in parser.finish() {
+            continuation.yield(event)
+        }
+
+        if !sawTerminal {
+            continuation.yield(.error(code: "connection_lost", message: ""))
+        }
+        continuation.finish()
     }
 }
