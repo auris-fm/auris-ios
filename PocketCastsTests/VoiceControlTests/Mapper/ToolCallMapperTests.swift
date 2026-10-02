@@ -17,18 +17,34 @@ final class ToolCallMapperTests: XCTestCase {
         XCTAssertEqual(playbackIntent, .resume)
     }
 
-    func test_map_playbackSeekRelative_returnsSeekRelativeIntent() {
+    func test_map_playbackSeekRelative_withPositiveDelta() {
         let call = ToolCall(name: "playback", arguments: ["action": "seek_relative", "delta_seconds": 30])
         let intent = ToolCallMapper().map(call)
         guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
-        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: 30))
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: 30, direction: .forward))
     }
 
-    func test_map_playbackSeekRelative_defaultDelta() {
+    func test_map_playbackSeekRelative_withNegativeDelta() {
+        let call = ToolCall(name: "playback", arguments: ["action": "seek_relative", "delta_seconds": -15])
+        let intent = ToolCallMapper().map(call)
+        guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: -15, direction: .backward))
+    }
+
+    func test_map_playbackSeekRelative_directionOnly() {
+        let call = ToolCall(name: "playback", arguments: ["action": "seek_relative", "direction": "backward"])
+        let intent = ToolCallMapper().map(call)
+        guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
+        // No delta manufactured — the sink owns the interval.
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: nil, direction: .backward))
+    }
+
+    func test_map_playbackSeekRelative_neitherDeltaNorDirection() {
         let call = ToolCall(name: "playback", arguments: ["action": "seek_relative"])
         let intent = ToolCallMapper().map(call)
         guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
-        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: 30))
+        // Neither stated → (nil, FORWARD) so the sink applies its default.
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: nil, direction: .forward))
     }
 
     func test_map_playbackSeekTo_returnsSeekToIntent() {

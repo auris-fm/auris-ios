@@ -5,7 +5,9 @@ protocol VoiceIntent {}
 enum PlaybackIntent: VoiceIntent, Equatable {
     case pause
     case resume
-    case seekRelative(deltaSeconds: Int)
+    /// Relative seek. `deltaSeconds` is nil when the request stated no amount
+    /// — the sink applies its own configurable interval in `direction`.
+    case seekRelative(deltaSeconds: Int?, direction: SeekDirection)
     case seekTo(positionSeconds: Int)
     case nextEpisode
 }

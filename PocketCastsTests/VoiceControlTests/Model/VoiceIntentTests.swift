@@ -3,16 +3,32 @@ import XCTest
 
 final class VoiceIntentTests: XCTestCase {
 
-    func test_playbackIntent_seekRelative_positive() {
-        let intent = PlaybackIntent.seekRelative(deltaSeconds: 30)
-        guard case .seekRelative(let delta) = intent else { XCTFail(); return }
+    func test_playbackIntent_seekRelative_withPositiveDelta() {
+        let intent = PlaybackIntent.seekRelative(deltaSeconds: 30, direction: .forward)
+        guard case .seekRelative(let delta, let dir) = intent else { XCTFail(); return }
         XCTAssertEqual(delta, 30)
+        XCTAssertEqual(dir, .forward)
     }
 
-    func test_playbackIntent_seekRelative_negative() {
-        let intent = PlaybackIntent.seekRelative(deltaSeconds: -15)
-        guard case .seekRelative(let delta) = intent else { XCTFail(); return }
+    func test_playbackIntent_seekRelative_withNegativeDelta() {
+        let intent = PlaybackIntent.seekRelative(deltaSeconds: -15, direction: .backward)
+        guard case .seekRelative(let delta, let dir) = intent else { XCTFail(); return }
         XCTAssertEqual(delta, -15)
+        XCTAssertEqual(dir, .backward)
+    }
+
+    func test_playbackIntent_seekRelative_directionOnly() {
+        let intent = PlaybackIntent.seekRelative(deltaSeconds: nil, direction: .backward)
+        guard case .seekRelative(let delta, let dir) = intent else { XCTFail(); return }
+        XCTAssertNil(delta)
+        XCTAssertEqual(dir, .backward)
+    }
+
+    func test_playbackIntent_seekRelative_neitherStated() {
+        let intent = PlaybackIntent.seekRelative(deltaSeconds: nil, direction: .forward)
+        guard case .seekRelative(let delta, let dir) = intent else { XCTFail(); return }
+        XCTAssertNil(delta)
+        XCTAssertEqual(dir, .forward)
     }
 
     func test_playbackIntent_pause_equality() {

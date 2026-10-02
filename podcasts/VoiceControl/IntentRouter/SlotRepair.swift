@@ -207,7 +207,15 @@ enum SlotRepair {
         return out
     }
 
-    /// When the model omits delta_seconds, fill a signed ±30s default from wording.
+    /// Fill genuinely absent defaults for `seek_relative`.
+    ///
+    /// Per the recovery contract (PR 59, cloud-seek-relative):
+    /// - The mapper must NOT manufacture a delta for a direction-only call.
+    ///   The sink owns the app's configurable seek interval and applies it in
+    ///   the request's direction.
+    /// - The mapper must NOT overwrite a sign the model produced.
+    /// - The mapper may fill direction when neither delta nor direction is
+    ///   stated — defaults to forward (the only defaulting case).
     private static func fillSeekRelativeDefault(
         tool: String,
         action: String,
@@ -215,11 +223,16 @@ enum SlotRepair {
         utterance: String
     ) -> [String: Any] {
         guard tool == "playback", action == "seek_relative" else { return params }
+        // Never manufacture a delta: the sink owns the app's default interval
+        // and applies it in the request's direction.
         if params["delta_seconds"] != nil { return params }
+        // Never overwrite an existing direction with a direction derived from
+        // the utterance text — the model's intent is authoritative.
+        if params["direction"] != nil { return params }
+        // Neither delta nor direction stated — fill a forward default so the
+        // mapper produces (nil, FORWARD) and the sink applies its interval.
         var out = params
-        let lower = utterance.lowercased()
-        let isBack = backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil
-        out["delta_seconds"] = isBack ? -defaultSkipSeconds : defaultSkipSeconds
+        out["direction"] = "forward"
         return out
     }
 
