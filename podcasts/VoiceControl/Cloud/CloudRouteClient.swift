@@ -254,9 +254,10 @@ final class CloudRouteClient {
                 .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
             return [.action(tool: tool, action: action, params: params)]
 
-        case "token":
-            guard let textValue = json["text"] as? String else { return [] }
-            return [.token(textValue)]
+// No token event on the WebSocket contract (cloud-assistant.md):
+        // text frames are connected, action, result, done, error only.
+        // The SSE path (retained below) still carries token events for
+        // backward compatibility during the pre-enablement window.
 
         case "result":
             guard let result = DiscoveryResult.parse(json: text) else { return [] }

@@ -98,17 +98,8 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         }
     }
 
-    func testParsesToken() {
-        let events = CloudRouteClient.parseTextFrame(
-            #"{"type":"token","text":"Hello world"}"#
-        )
-        XCTAssertEqual(events.count, 1)
-        if case .token(let text) = events.first {
-            XCTAssertEqual(text, "Hello world")
-        } else {
-            XCTFail("expected .token")
-        }
-    }
+    // No .token event on the WebSocket contract (cloud-assistant.md).
+    // Token events only exist on the SSE path for backward compatibility.
 
     func testParsesDoneWithUsage() {
         let events = CloudRouteClient.parseTextFrame(
