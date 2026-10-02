@@ -1,6 +1,116 @@
 import XCTest
 @testable import podcasts
 
+// MARK: - CloudAudioFrame tests
+
+final class CloudAudioFrameTests: XCTestCase {
+    func testCreatesFrameWithData() {
+        let payload = Data([0x00, 0x01, 0x02])
+        let frame = CloudAudioFrame(data: payload)
+        XCTAssertEqual(frame.data, payload)
+    }
+
+    func testEmptyDataCreatesFrame() {
+        let frame = CloudAudioFrame(data: Data())
+        XCTAssertTrue(frame.data.isEmpty)
+    }
+
+    func testFrameIsEquatable() {
+        let data = Data([0x01, 0x02])
+        let frame1 = CloudAudioFrame(data: data)
+        let frame2 = CloudAudioFrame(data: data)
+        let frame3 = CloudAudioFrame(data: Data([0x03]))
+        XCTAssertEqual(frame1, frame2)
+        XCTAssertNotEqual(frame1, frame3)
+    }
+}
+
+// MARK: - CloudTurnUsage tests
+
+final class CloudTurnUsageTests: XCTestCase {
+    func testDefaultUsageHasNullTokens() {
+        let usage = CloudTurnUsage()
+        XCTAssertNil(usage.inputTokens)
+        XCTAssertNil(usage.outputTokens)
+        XCTAssertNil(usage.speech)
+    }
+
+    func testUsageWithTokens() {
+        let usage = CloudTurnUsage(inputTokens: 100, outputTokens: 200)
+        XCTAssertEqual(usage.inputTokens, 100)
+        XCTAssertEqual(usage.outputTokens, 200)
+        XCTAssertNil(usage.speech)
+    }
+
+    func testUsageWithSpeech() {
+        let speech = CloudSpeechUsage(amount: 5000, unit: "ms")
+        let usage = CloudTurnUsage(inputTokens: 10, outputTokens: 20, speech: speech)
+        XCTAssertEqual(usage.speech?.amount, 5000)
+        XCTAssertEqual(usage.speech?.unit, "ms")
+    }
+
+    func testSpeechWithEmptyUnitIsNil() {
+        let speech = CloudSpeechUsage(amount: 1000, unit: "")
+        XCTAssertNil(speech)
+    }
+
+    func testUsageWithNullTokens() {
+        let usage = CloudTurnUsage(inputTokens: nil, outputTokens: nil)
+        XCTAssertNil(usage.inputTokens)
+        XCTAssertNil(usage.outputTokens)
+    }
+
+    func testUsageIsEquatable() {
+        let usage1 = CloudTurnUsage(inputTokens: 10, outputTokens: 20)
+        let usage2 = CloudTurnUsage(inputTokens: 10, outputTokens: 20)
+        let usage3 = CloudTurnUsage(inputTokens: 10, outputTokens: 30)
+        XCTAssertEqual(usage1, usage2)
+        XCTAssertNotEqual(usage1, usage3)
+    }
+}
+
+// MARK: - CloudSpeechUsage tests
+
+final class CloudSpeechUsageTests: XCTestCase {
+    func testSpeechUsageWithAmountAndUnit() {
+        let speech = CloudSpeechUsage(amount: 5000, unit: "ms")
+        XCTAssertEqual(speech.amount, 5000)
+        XCTAssertEqual(speech.unit, "ms")
+    }
+
+    func testSpeechUsageIsEquatable() {
+        let s1 = CloudSpeechUsage(amount: 1000, unit: "ms")
+        let s2 = CloudSpeechUsage(amount: 1000, unit: "ms")
+        let s3 = CloudSpeechUsage(amount: 2000, unit: "ms")
+        XCTAssertEqual(s1, s2)
+        XCTAssertNotEqual(s1, s3)
+    }
+}
+
+// MARK: - CloudRouteEvent tests
+
+final class CloudRouteEventTests: XCTestCase {
+    func testAudioFrameEventIsEquatable() {
+        let data = Data([0x01, 0x02])
+        let event1 = CloudRouteEvent.audioFrame(CloudAudioFrame(data: data))
+        let event2 = CloudRouteEvent.audioFrame(CloudAudioFrame(data: data))
+        let event3 = CloudRouteEvent.audioFrame(CloudAudioFrame(data: Data([0x03])))
+        XCTAssertEqual(event1, event2)
+        XCTAssertNotEqual(event1, event3)
+    }
+
+    func testDoneEventWithUsage() {
+        let usage = CloudTurnUsage(inputTokens: 100, outputTokens: 200)
+        let event = CloudRouteEvent.done(usage: usage)
+        if case .done(let u) = event {
+            XCTAssertEqual(u.inputTokens, 100)
+            XCTAssertEqual(u.outputTokens, 200)
+        } else {
+            XCTFail("expected .done")
+        }
+    }
+}
+
 final class CloudRouteSSEParserTests: XCTestCase {
     func testParsesMixedEvents() {
         var parser = CloudRouteSSEParser()
@@ -164,6 +274,41 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     func testMissingTypeReturnsEmpty() {
         let events = CloudRouteClient.parseTextFrame(
             #"{"foo":"bar"}"#
+        )
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    func testParsesDoneWithPartialTokens() {
+        // One token present, one missing.
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","usage":{"input_tokens":42,"speech":{"amount":1000,"unit":"ms"}}}"#
+        )
+        XCTAssertEqual(events.count, 1)
+        if case .done(let usage) = events.first {
+            XCTAssertEqual(usage.inputTokens, 42)
+            XCTAssertNil(usage.outputTokens)
+            XCTAssertEqual(usage.speech?.amount, 1000)
+        } else {
+            XCTFail("expected .done")
+        }
+    }
+
+    func testParsesDoneWithEmptyUsage() {
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","usage":{}}"#
+        )
+        XCTAssertEqual(events.count, 1)
+        if case .done(let usage) = events.first {
+            XCTAssertNil(usage.inputTokens)
+            XCTAssertNil(usage.outputTokens)
+        } else {
+            XCTFail("expected .done")
+        }
+    }
+
+    func testUnknownTypeReturnsEmpty() {
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"unknown_event"}"#
         )
         XCTAssertTrue(events.isEmpty)
     }
