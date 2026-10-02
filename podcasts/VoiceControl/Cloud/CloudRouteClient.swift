@@ -119,6 +119,7 @@ final class CloudRouteClient {
 
         // Build the authentication frame (cloud-assistant.md).
         guard let authFrame = Self.buildAuthFrame(
+            tokenProvider: self.tokenProvider,
             request: request,
             context: context,
             turn: turn
@@ -243,11 +244,12 @@ final class CloudRouteClient {
     // MARK: - Auth frame
 
     private static func buildAuthFrame(
+        tokenProvider: CloudTokenProviding,
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
     ) -> [String: Any]? {
-        guard let credential = CloudTokenProviderRouter.provider().token() else {
+        guard let credential = tokenProvider.token() else {
             return nil
         }
         var contextObject: [String: Any] = [
