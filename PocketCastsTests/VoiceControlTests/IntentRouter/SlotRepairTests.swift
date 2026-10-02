@@ -72,30 +72,32 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.arguments["action"] as? String, "set_volume")
     }
 
-    func test_repair_seekRelativeWithoutDelta_fillsSignedDefaultFromWording() {
-        let forward = SlotRepair.repair(
+    func test_repair_seekRelativeWithoutDelta_fillsDirectionNotDelta() {
+        // Per the recovery contract (PR 59, cloud-seek-relative):
+        // The mapper no longer manufactures a delta for direction-only calls.
+        // The sink owns the app's configurable seek interval and applies it
+        // in the request's direction.
+        let neither = SlotRepair.repair(
             raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance: "skip",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(neither?.arguments["delta_seconds"],
+                     "repair must not manufacture a delta when the model omitted it")
+        XCTAssertEqual(neither?.arguments["direction"] as? String, "forward",
+                       "when neither delta nor direction stated, fill forward default")
+    }
+
+    func test_repair_seekRelative_preservesExistingDirection() {
+        // If the model already produced a direction, repair must not overwrite it.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
             utterance: "skip ahead",
             tool: "playback",
             action: "seek_relative"
         )
-        XCTAssertEqual(forward?.arguments["delta_seconds"] as? Int, 30)
-
-        let backward = SlotRepair.repair(
-            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
-            utterance: "skip back",
-            tool: "playback",
-            action: "seek_relative"
-        )
-        XCTAssertEqual(backward?.arguments["delta_seconds"] as? Int, -30)
-
-        // `\bback\b` does not match inside "backwards" — must still fill -30.
-        let backwards = SlotRepair.repair(
-            raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
-            utterance: "skip backwards",
-            tool: "playback",
-            action: "seek_relative"
-        )
-        XCTAssertEqual(backwards?.arguments["delta_seconds"] as? Int, -30)
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "backward",
+                       "existing direction must not be overwritten by utterance wording")
     }
 }

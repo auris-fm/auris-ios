@@ -220,8 +220,9 @@ private final class RecordingDiscoveryPresenter: DiscoveryResultsPresenting {
 private final class RecordingPlaybackSinkForResults: VoicePlaybackSink {
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }
-    func seekRelative(deltaSeconds: Int) -> VoiceResponse { .silent }
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse { .silent }
     func seekTo(positionSeconds: Int) -> VoiceResponse { .silent }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse { .silent }
     func nextEpisode() -> VoiceResponse { .silent }
 }
 
