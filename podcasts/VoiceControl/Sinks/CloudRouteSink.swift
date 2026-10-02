@@ -1,8 +1,13 @@
 import Foundation
 import PocketCastsUtils
 
-/// Real cloud route sink: SSE client → action dispatch → TTS-on-done.
-final class CloudRouteSink: VoiceCloudRouteSink {
+/// Real cloud route sink: WebSocket client → audio player → action dispatch.
+///
+/// Cloud answers arrive as synthesised audio streamed over the WebSocket; the
+/// client plays them directly through the shared audio output path. Text
+/// accumulation (`.token`) is removed — cloud answers are played, not spoken.
+final class CloudRouteSink: VoiceCloudRouteSink,
+                            CloudAudioPlayer.Delegate {
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
     private let playbackSink: VoicePlaybackSink
@@ -28,9 +33,12 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     /// (speak only in the user's own language; earcon otherwise) is testable.
     private let spokenTemplates: SpokenTemplateResolver
 
+    /// Audio player for cloud-delivered speech.
+    private let audioPlayer: CloudAudioPlayer
+
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
-    /// True when this turn paused playback so we can restore on error.
+    /// True when this turn paused playback so we can restore on done/error.
     private var didAutoPause = false
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
@@ -67,6 +75,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             )
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
+        audioPlayer: CloudAudioPlayer? = nil,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
@@ -80,6 +89,8 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
+        self.audioPlayer = audioPlayer ?? CloudAudioPlayer()
+        self.audioPlayer.delegate = self
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
@@ -107,7 +118,6 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
         }
 
-        var tokenBuffer = ""
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
@@ -131,7 +141,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
 
-        // Pause for the turn; restore on done/error so TTS ducking runs over active playback.
+        // Pause for the turn; restore on done/error so audio ducking runs over active playback.
         _ = playbackSink.pause()
         didAutoPause = true
 
@@ -142,29 +152,30 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             // `break` inside the switch would only leave the switch.)
             if turnToken.isCancelled { break turnLoop }
             switch event {
+            case let .audioFrame(frame):
+                audioPlayer.enqueue(frame)
             case let .action(tool, action, params):
                 executeAction(tool: tool, action: action, params: params)
-            case let .token(text):
-                tokenBuffer += text
+            // .token is no longer accumulated — cloud answers are played as
+            // audio, not text (spec: "cloud answers are played, not spoken").
+            case .token:
+                break
             case let .result(result):
                 // Structured results are rendered as they arrive; the turn still
                 // completes on `done` with the same restore/analytics behavior.
                 presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
-            case let .done(inputTokens, outputTokens):
+            case let .done(usage):
                 guard !turnToken.isCancelled else { break turnLoop }
                 analytics?.recordCloudAssistantTurn(
                     outcome: "done",
-                    inputTokens: inputTokens,
-                    outputTokens: outputTokens
+                    inputTokens: usage.inputTokens,
+                    outputTokens: usage.outputTokens
                 )
                 restoreTransientAudioState()
-                if tokenBuffer.isEmpty {
-                    return .silent
-                }
-                return .spoken(tokenBuffer)
+                return .silent
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
-                tokenBuffer = ""
+                audioPlayer.cancel()
                 restoreTransientAudioState()
                 analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                 // A server-supplied message passes through (localising it is the

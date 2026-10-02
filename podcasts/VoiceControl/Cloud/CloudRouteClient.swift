@@ -1,10 +1,14 @@
 import Foundation
 
-/// SSE client for `POST /api/v1/cloud/route`.
+/// WebSocket client for `GET /api/v1/cloud/route`.
 ///
-/// Pre-stream HTTP failures (400/401) and mid-stream failures surface as a single
-/// `.error` event so callers can handle all outcomes uniformly. Cancellation cancels
-/// the underlying `URLSession` task and closes the byte stream.
+/// Sends an authentication frame, then streams binary audio frames and JSON
+/// text events (action, result, done, error) until a terminal event or
+/// connection close.
+///
+/// The `CloudRouteSSEParser` struct is retained for the pre-stream error
+/// parsing path and for any legacy SSE compatibility; the primary path is
+/// WebSocket.
 final class CloudRouteClient {
     static let routePath = "/api/v1/cloud/route"
     /// Must sit above the server's 5s first-event budget (cloud-assistant.md).
@@ -15,6 +19,9 @@ final class CloudRouteClient {
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
+
+    /// Supported codecs (client offers both; server picks one in `connected`).
+    static let supportedCodecs = ["opus@48k", "pcm_s16le@24k"]
 
     init(
         baseURL: String,
@@ -40,6 +47,8 @@ final class CloudRouteClient {
             self.session = URLSession(configuration: config)
         }
     }
+
+    // MARK: - Public API
 
     /// Streams route events until `done`/`error` or connection close.
     ///
@@ -75,139 +84,76 @@ final class CloudRouteClient {
         }
     }
 
+    // MARK: - WebSocket implementation
+
     private func performRoute(
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
-        guard let url = URL(string: baseURL + Self.routePath) else {
-            continuation.yield(.error(code: "invalid_request", message: ""))  // code only: a non-empty message is spoken by TTS (see the fail-closed guard above)
-            continuation.finish()
-            return
-        }
-
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = "POST"
-        // Fail closed when a credential provider yields nothing (parity with the
-        // Android half): no credential ⇒ no turn, rather than sending a hopeful
-        // bearer. The default provider always returns the trust-on-first-use id,
-        // so today's behavior is unchanged.
-        // No legacy `user_<uuid>` fallback: the edge takes Auris-issued tokens, so
-        // sending the trust-on-first-use id when the provider has no credential
-        // would be a silent downgrade rather than a failure. The static provider
-        // (what is wired until the swap) always returns a value, so this only
-        // ever fires for a provider that genuinely has nothing (PR #20 review).
-        guard let credential = await tokenProvider.token() else {
-            // No human-readable message: `CloudRouteSink` speaks any non-empty
-            // `.error` message through TTS in the user's locale, so a diagnostic
-            // English string here would be read aloud to a non-English user.
-            // The code carries the diagnosis; the sink maps an empty message to
-            // its localized error earcon (review finding on PR #19).
-            continuation.yield(.error(code: "unauthorized", message: ""))
-            continuation.finish()
-            return
-        }
-        urlRequest.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        urlRequest.timeoutInterval = requestTimeoutSeconds
-
-        do {
-            urlRequest.httpBody = try CloudRouteRequestBuilder.body(request: request, context: context, turn: turn)
-        } catch {
+        guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             continuation.yield(.error(code: "invalid_request", message: ""))
             continuation.finish()
             return
         }
 
+        // Build the authentication frame (cloud-assistant.md).
+        guard let authFrame = Self.buildAuthFrame(
+            request: request,
+            context: context,
+            turn: turn
+        ) else {
+            continuation.finish()
+            return
+        }
+
+        let wsTask = session.webSocketTask(for: url)
+        wsTask.timeout.interval = requestTimeoutSeconds
+
         do {
-            let (bytes, response) = try await session.bytes(for: urlRequest)
-            guard let http = response as? HTTPURLResponse else {
-                continuation.yield(.error(code: "connection_lost", message: ""))
-                continuation.finish()
-                return
-            }
+            // Send authentication frame.
+            try await wsTask.send(.string(authFrame))
 
-            if !(200..<300).contains(http.statusCode) {
-                var errorBody = Data()
-                for try await byte in bytes {
-                    errorBody.append(byte)
-                    if errorBody.count > 4096 { break }
-                }
-                let event = Self.preStreamError(status: http.statusCode, body: errorBody)
-                continuation.yield(event)
-                continuation.finish()
-                if http.statusCode == 401 || http.statusCode == 403 {
-                    // Ordered *after* the caller owns its failure, and detached:
-                    // the sink has already paused playback, and this handler can
-                    // await a refresh and then an exchange (15 s each), so awaiting
-                    // it before yielding would delay the user's error by tens of
-                    // seconds. It also cannot be awaited inline, because
-                    // `finish()` runs this stream's `onTermination`, which cancels
-                    // the producer task — recovery would run cancelled and every
-                    // request inside it would throw immediately (PR #20 review).
-                    // An unstructured task does not inherit that cancellation.
-                    // Best effort, no same-turn retry: the next turn acquires again.
-                    let provider = tokenProvider
-                    let rejected = credential
-                    Task { await provider.handleUnauthorized(rejectedToken: rejected) }
-                }
-                return
-            }
-
-            var parser = CloudRouteSSEParser()
             var sawTerminalEvent = false
-            do {
-                var residual = Data()
-                for try await byte in bytes {
-                    try Task.checkCancellation()
-                    residual.append(byte)
-                    while let newline = residual.firstIndex(of: UInt8(ascii: "\n")) {
-                        let lineData = residual.subdata(in: residual.startIndex..<newline)
-                        residual.removeSubrange(residual.startIndex...newline)
-                        let line = String(data: lineData, encoding: .utf8) ?? ""
-                        for event in parser.consume(line: line) {
-                            if case .done = event { sawTerminalEvent = true }
-                            if case .error = event { sawTerminalEvent = true }
-                            continuation.yield(event)
-                        }
-                    }
+
+            // First-frame timeout: server must respond within 5 seconds.
+            let firstFrameTimeout = Task {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if !sawTerminalEvent {
+                    continuation.yield(.error(code: "connection_lost", message: ""))
                 }
-                if !residual.isEmpty {
-                    let line = String(data: residual, encoding: .utf8) ?? ""
-                    for event in parser.consume(line: line) {
+                continuation.finish()
+            }
+
+            while case let .message(message)? = try await wsTask.receive() {
+                // Cancel the timeout on first frame.
+                firstFrameTimeout.cancel()
+
+                switch message {
+                case .data(let data):
+                    // Binary frame: audio payload.
+                    continuation.yield(.audioFrame(CloudAudioFrame(data: data)))
+
+                case .string(let string):
+                    // Text frame: JSON event. One event per text frame.
+                    for event in Self.parseTextFrame(string) {
                         if case .done = event { sawTerminalEvent = true }
                         if case .error = event { sawTerminalEvent = true }
                         continuation.yield(event)
                     }
+
+                default:
+                    break
                 }
-                for event in parser.finish() {
-                    if case .done = event { sawTerminalEvent = true }
-                    if case .error = event { sawTerminalEvent = true }
-                    continuation.yield(event)
-                }
-                if !sawTerminalEvent {
-                    // Code only: the user hears a localized earcon rather than an
-                    // English sentence (reachable on any mid-stream drop).
-                    continuation.yield(.error(code: "connection_lost", message: ""))
-                }
-                continuation.finish()
-            } catch is CancellationError {
-                continuation.finish()
-            } catch {
-                if Task.isCancelled {
-                    continuation.finish()
-                    return
-                }
-                continuation.yield(
-                    .error(
-                        code: "connection_lost",
-                        message: (error as NSError).localizedDescription
-                    )
-                )
-                continuation.finish()
             }
+
+            // WebSocket closed.
+            if !sawTerminalEvent {
+                continuation.yield(.error(code: "connection_lost", message: ""))
+            }
+            continuation.finish()
+
         } catch is CancellationError {
             continuation.finish()
         } catch {
@@ -216,38 +162,158 @@ final class CloudRouteClient {
                 return
             }
             continuation.yield(
-                .error(
-                    code: "connection_lost",
-                    message: (error as NSError).localizedDescription
-                )
+                .error(code: "connection_lost", message: (error as NSError).localizedDescription)
             )
             continuation.finish()
         }
     }
 
-    static func preStreamError(status: Int, body: Data) -> CloudRouteEvent {
-        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-        let code = (parsed?["code"] as? String)
-            ?? (parsed?["error"] as? String)
-            ?? httpStatusCode(status)
-        // A server-supplied message is passed through (its localisation is the
-        // server's); a synthesized default stays empty so the client never
-        // invents English prose for TTS.
-        let message = (parsed?["message"] as? String) ?? ""
-        return .error(code: code, message: message)
+    // MARK: - Auth frame
+
+    private static func buildAuthFrame(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> [String: Any]? {
+        guard let credential = CloudTokenProviderRouter.provider().token() else {
+            return nil
+        }
+        var contextObject: [String: Any] = [
+            "episode_id": context.episodeId,
+            "client_position_ms": context.clientPositionMs,
+            "recent_reference_positions": context.recentReferencePositions,
+        ]
+        if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
+        if let referencePositionMs = context.referencePositionMs {
+            contextObject["reference_position_ms"] = referencePositionMs
+        }
+        if let previousReferencePositionMs = context.previousReferencePositionMs {
+            contextObject["previous_reference_position_ms"] = previousReferencePositionMs
+        }
+        if !turn.recentConversation.isEmpty {
+            contextObject["recent_conversation"] = turn.recentConversation.map {
+                ["role": $0.role.rawValue, "text": $0.text]
+            }
+        }
+
+        var payload: [String: Any] = [
+            "type": "authenticate",
+            "access_token": credential,
+            "request_id": turn.requestId,
+            "request": request,
+            "context": contextObject,
+            "codecs": Self.supportedCodecs,
+        ]
+        if !turn.capabilities.isEmpty {
+            payload["capabilities"] = turn.capabilities
+        }
+        if let routeHint = turn.routeHint {
+            payload["route_hint"] = [
+                "operation": routeHint.operation,
+                "arguments": CloudRouteRequestBuilder.encodeJSONValues(routeHint.arguments),
+            ]
+        }
+        return payload
     }
 
-    private static func httpStatusCode(_ status: Int) -> String {
-        switch status {
-        case 400: return "invalid_request"
-        case 401: return "unauthorized"
-        default: return "http_\(status)"
+    // MARK: - URL construction
+
+    private static func webSocketURL(baseURL: String, path: String) -> URL? {
+        let wsBase = baseURL.hasPrefix("https://")
+            ? "wss://" + baseURL.dropFirst("https://".count)
+            : baseURL.hasPrefix("http://")
+                ? "ws://" + baseURL.dropFirst("http://".count)
+                : "wss://" + baseURL
+        return URL(string: wsBase + path)
+    }
+
+    // MARK: - Text frame parsing
+
+    /// Parse a complete text frame (one JSON event) from the WebSocket.
+    ///
+    /// The server sends one JSON event per text frame — no multi-line
+    /// accumulation needed.
+    private static func parseTextFrame(_ text: String) -> [CloudRouteEvent] {
+        guard let raw = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        else {
+            return []
+        }
+
+        guard let type = json["type"] as? String else { return [] }
+
+        switch type {
+        case "connected":
+            return []
+
+        case "action":
+            guard let tool = json["tool"] as? String,
+                  let action = json["action"] as? String
+            else { return [] }
+            let params = (json["params"] as? [String: Any])
+                .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
+            return [.action(tool: tool, action: action, params: params)]
+
+        case "token":
+            guard let textValue = json["text"] as? String else { return [] }
+            return [.token(textValue)]
+
+        case "result":
+            guard let result = DiscoveryResult.parse(json: text) else { return [] }
+            return [.result(result)]
+
+        case "done":
+            let usage = parseDone(json: json)
+            return [.done(usage: usage)]
+
+        case "error":
+            guard let code = json["code"] as? String,
+                  let message = json["message"] as? String
+            else { return [] }
+            return [.error(code: code, message: message)]
+
+        default:
+            return []
         }
     }
 
+    private static func parseDone(json: [String: Any]) -> CloudTurnUsage {
+        guard let usage = json["usage"] as? [String: Any] else {
+            return CloudTurnUsage()
+        }
+        let inputTokens = intValue(usage["input_tokens"])
+        let outputTokens = intValue(usage["output_tokens"])
+
+        var speech: CloudSpeechUsage? = nil
+        if let speechData = usage["speech"] as? [String: Any] {
+            let amount = intValue(speechData["amount"])
+            let unit = speechData["unit"] as? ?? ""
+            if !unit.isEmpty {
+                speech = CloudSpeechUsage(amount: amount, unit: unit)
+            }
+        }
+        return CloudTurnUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            speech: speech
+        )
+    }
+
+    private static func intValue(_ any: Any?) -> Int? {
+        switch any {
+        case let i as Int: return i
+        case let n as NSNumber: return n.intValue
+        default: return nil
+        }
+    }
 }
 
+// MARK: - SSE parser (retained for pre-stream error parsing)
+
 /// Incremental SSE frame parser (`event:` / multi-line `data:` / blank-line dispatch).
+///
+/// Retained because `preStreamError` parses HTTP error bodies and the
+/// pre-stream error path is still used for non-WebSocket transports.
 struct CloudRouteSSEParser {
     private var eventName: String?
     private var dataLines: [String] = []
@@ -292,9 +358,6 @@ struct CloudRouteSSEParser {
         return [event]
     }
 
-    /// True when a `result` payload is structurally invalid (valid JSON, but not
-    /// a usable result object). Unknown `kind` values are *not* malformed — they
-    /// are forward-compatible and ignored.
     private static func isMalformedResultPayload(_ data: String) -> Bool {
         guard let raw = data.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
@@ -303,7 +366,7 @@ struct CloudRouteSSEParser {
         }
         if object["kind"] == nil { return true }
         if let kind = object["kind"] as? String, kind != DiscoveryResult.supportedKind {
-            return false // unknown kind: forward-compatible, ignored
+            return false
         }
         return object["scope"] is String == false || object["items"] is [[String: Any]] == false
     }
@@ -326,23 +389,19 @@ struct CloudRouteSSEParser {
             guard let text = json["text"] as? String else { return nil }
             return .token(text)
         case "result":
-            // Malformed payload on a known event is a server bug: surface it as
-            // the standard payload-failure error (parity with the other events
-            // and with Android's reviewed behavior). Unknown *kinds* stay
-            // forward-compatible and are ignored.
             guard !isMalformedResultPayload(data) else {
-                // No human-readable message, same reason as the fail-closed guard
-                // below: `CloudRouteSink` speaks any non-empty `.error` message via
-                // TTS in the user's locale, so an internal diagnostic must not be
-                // English prose (PR #19 review, follow-up).
                 return .error(code: "invalid_response", message: "")
             }
             guard let result = DiscoveryResult.parse(json: data) else { return nil }
             return .result(result)
         case "done":
+            // Old SSE path: input/output tokens were non-nullable.
+            // The SSE parser is retained for legacy error handling;
+            // the new WebSocket path uses parseDone() above.
             let input = intValue(json["input_tokens"]) ?? 0
             let output = intValue(json["output_tokens"]) ?? 0
-            return .done(inputTokens: input, outputTokens: output)
+            let usage = CloudTurnUsage(inputTokens: input, outputTokens: output)
+            return .done(usage: usage)
         case "error":
             guard let code = json["code"] as? String,
                   let message = json["message"] as? String
@@ -362,6 +421,29 @@ struct CloudRouteSSEParser {
     }
 }
 
+// MARK: - Pre-stream error (HTTP failures)
+
+extension CloudRouteClient {
+    static func preStreamError(status: Int, body: Data) -> CloudRouteEvent {
+        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let code = (parsed?["code"] as? String)
+            ?? (parsed?["error"] as? String)
+            ?? httpStatusCode(status)
+        let message = (parsed?["message"] as? String) ?? ""
+        return .error(code: code, message: message)
+    }
+
+    private static func httpStatusCode(_ status: Int) -> String {
+        switch status {
+        case 400: return "invalid_request"
+        case 401: return "unauthorized"
+        default: return "http_\(status)"
+        }
+    }
+}
+
+// MARK: - JSON value encoding (shared with CloudTurnEnvelope)
+
 extension CloudRouteJSONValue {
     static func from(_ any: Any?) -> CloudRouteJSONValue {
         switch any {
@@ -369,10 +451,7 @@ extension CloudRouteJSONValue {
         case let s as String: return .string(s)
         case let b as Bool: return .bool(b)
         case let n as NSNumber:
-            // Distinguish Bool (NSNumber subclass) already handled; prefer Int64 when integral.
             let d = n.doubleValue
-            // Strict upper bound: Double(Int64.max) rounds up to 2^63, and
-            // int64Value on that magnitude is implementation-defined.
             if d.rounded() == d, d >= Double(Int64.min), d < Double(Int64.max) {
                 return .int(n.int64Value)
             }

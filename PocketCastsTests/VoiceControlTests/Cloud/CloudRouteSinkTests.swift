@@ -54,7 +54,7 @@ final class CloudRouteSinkTests: XCTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .spoken("She is arguing."))
+        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertTrue(playback.calls.contains(.pause))
         XCTAssertTrue(playback.calls.contains(.resume), "done must restore turn-owned auto-pause")
         XCTAssertEqual(playback.calls.filter { $0 == .seekTo(1200) }.count, 1)
@@ -83,7 +83,7 @@ final class CloudRouteSinkTests: XCTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .spoken("Answer."))
+        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertEqual(playback.calls.first, .pause)
         XCTAssertEqual(playback.calls.last, .resume)
         XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1)

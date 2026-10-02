@@ -1,13 +1,52 @@
 import Foundation
 
-/// SSE events from `POST /api/v1/cloud/route` (cloud-assistant.md).
+/// Audio frame carrying synthesised speech from the cloud server.
+struct CloudAudioFrame: Equatable {
+    /// Raw audio payload in the codec negotiated in the `connected` frame
+    /// (typically Opus packets at 48 kHz mono, 20 ms frames).
+    let data: Data
+}
+
+/// Usage reported in the `done` frame (cloud-assistant.md).
+struct CloudTurnUsage: Equatable {
+    /// Model input tokens; `nil` when the provider completed without reporting.
+    let inputTokens: Int?
+    /// Model output tokens; `nil` when the provider completed without reporting.
+    let outputTokens: Int?
+    /// Speech synthesis usage; `nil` when the provider failed before reporting
+    /// an amount. `amount` may also be zero (explicitly no usage).
+    let speech: CloudSpeechUsage?
+
+    init(inputTokens: Int? = nil, outputTokens: Int? = nil, speech: CloudSpeechUsage? = nil) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.speech = speech
+    }
+}
+
+/// Speech synthesis usage reported in the `done` frame.
+struct CloudSpeechUsage: Equatable {
+    /// Amount of speech produced; `nil` when unavailable.
+    let amount: Int?
+    /// Unit string (e.g. "ms", "samples", "tokens").
+    let unit: String
+}
+
+/// Events from the cloud WebSocket route (cloud-assistant.md).
 enum CloudRouteEvent: Equatable {
+    /// Binary audio frame from the server's speech synthesiser.
+    case audioFrame(CloudAudioFrame)
+    /// Server-directed local action (seek, pause, etc.).
     case action(tool: String, action: String, params: [String: CloudRouteJSONValue])
+    /// Text token — retained for backward-compatibility; cloud answers
+    /// are played as audio, not accumulated text.
     case token(String)
-    /// Negotiated structured discovery result (only received when the client
-    /// advertised `search_results_v1`).
+    /// Negotiated structured discovery result (only when client advertised
+    /// `search_results_v1`).
     case result(DiscoveryResult)
-    case done(inputTokens: Int, outputTokens: Int)
+    /// Terminal success: answer model finished, final audio delivered.
+    case done(usage: CloudTurnUsage)
+    /// Terminal error.
     case error(code: String, message: String)
 }
 

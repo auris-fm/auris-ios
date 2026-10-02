@@ -50,7 +50,7 @@ final class CloudRouteClientTests: XCTestCase {
                 ),
                 .token("She"),
                 .token(" is arguing."),
-                .done(inputTokens: 500, outputTokens: 80),
+                .done(usage: CloudTurnUsage(inputTokens: 500, outputTokens: 80)),
             ]
         )
         assertRouteBody(capturedBody)
@@ -73,7 +73,7 @@ final class CloudRouteClientTests: XCTestCase {
             events,
             [
                 .action(tool: "playback", action: "pause", params: [:]),
-                .done(inputTokens: 10, outputTokens: 0),
+                .done(usage: CloudTurnUsage(inputTokens: 10, outputTokens: 0)),
             ]
         )
     }
@@ -99,7 +99,7 @@ final class CloudRouteClientTests: XCTestCase {
             [
                 .token("Hello"),
                 .token(" world"),
-                .done(inputTokens: 20, outputTokens: 5),
+                .done(usage: CloudTurnUsage(inputTokens: 20, outputTokens: 5)),
             ]
         )
     }
@@ -170,7 +170,7 @@ final class CloudRouteClientTests: XCTestCase {
             events,
             [
                 .token("line1\nline2"),
-                .done(inputTokens: 1, outputTokens: 1),
+                .done(usage: CloudTurnUsage(inputTokens: 1, outputTokens: 1)),
             ]
         )
     }
