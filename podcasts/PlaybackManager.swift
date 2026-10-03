@@ -2920,8 +2920,7 @@ extension PlaybackManager: PlaybackManagerProtocol {
         play(completion: nil, userInitiated: true)
     }
 
-    func currentTime() -> TimeInterval {
-        super.currentTime()
-    }
+    // currentTime() and duration() already exist on PlaybackManager with
+    // exact matching signatures; skip the witness.
 }
 #endif
