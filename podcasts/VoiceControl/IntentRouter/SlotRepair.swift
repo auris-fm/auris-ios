@@ -283,13 +283,14 @@ enum SlotRepair {
         // "go back" ⇒ BACKWARD, "skip ahead" ⇒ FORWARD, etc.
         // This is the fixture's bare-zero case: dropping zero leaves an
         // empty call and the utterance-stated direction must survive.
+        // Ambiguous words like "skip" alone do not produce a direction; the
+        // mapper fills the forward default when the sink needs one.
         if let utteranceDirection = extractDirection(utterance) {
             out["direction"] = utteranceDirection
             return out
         }
-        // Neither delta nor direction stated — fill a forward default so the
-        // mapper produces (nil, FORWARD) and the sink applies its interval.
-        out["direction"] = "forward"
+        // Neither delta nor direction stated — do not fill a default here.
+        // The mapper adds forward only when it needs one for the sink.
         return out
     }
 

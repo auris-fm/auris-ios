@@ -29,7 +29,7 @@ class ToolCallMapper {
             // stated neither amount nor direction maps to FORWARD.
             // Zero delta is treated as "no stated amount" — the sink
             // applies its interval in the request's direction.
-            let delta = (args["delta_seconds"] as? Int).map { $0 == 0 ? nil : $0 }
+            let delta = (args["delta_seconds"] as? Int).compactMap { $0 == 0 ? nil : $0 }
             let direction: SeekDirection
             if let delta {
                 direction = delta < 0 ? .backward : .forward
