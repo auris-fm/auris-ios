@@ -47,6 +47,24 @@ final class ToolCallMapperTests: XCTestCase {
         XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: nil, direction: .forward))
     }
 
+    func test_map_playbackSeekRelative_zeroDeltaNormalizedToNil() {
+        // Zero delta is treated as "no stated amount" — normalizes to nil
+        // so the sink applies its interval in the request's direction.
+        let call = ToolCall(name: "playback", arguments: ["action": "seek_relative", "delta_seconds": 0])
+        let intent = ToolCallMapper().map(call)
+        guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: nil, direction: .forward),
+                       "zero delta normalizes to nil")
+    }
+
+    func test_map_playbackSeekRelative_zeroDeltaWithDirectionPreservesDirection() {
+        let call = ToolCall(name: "playback", arguments: ["action": "seek_relative", "delta_seconds": 0, "direction": "backward"])
+        let intent = ToolCallMapper().map(call)
+        guard let playbackIntent = intent as? PlaybackIntent else { XCTFail(); return }
+        XCTAssertEqual(playbackIntent, .seekRelative(deltaSeconds: nil, direction: .backward),
+                       "zero delta normalizes to nil, direction preserved")
+    }
+
     func test_map_playbackSeekTo_returnsSeekToIntent() {
         let call = ToolCall(name: "playback", arguments: ["action": "seek_to", "position_seconds": 120])
         let intent = ToolCallMapper().map(call)

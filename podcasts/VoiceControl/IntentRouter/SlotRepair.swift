@@ -334,8 +334,12 @@ enum SlotRepair {
             guard let value = parseNumberPhrase(numberText) else { return }
             let afterNumber = match.range.location + match.range.length
             let unitSearch = NSRange(location: afterNumber, length: utterance.utf16.count - afterNumber)
+            // unitRegex has a leading \s* so the match may start after
+            // afterNumber when there is whitespace between number and unit.
+            // Use the full-match location (which includes \s*) as the lower
+            // bound, and extract the unit from group 1.
             guard let unitMatch = unitRegex.firstMatch(in: utterance, options: [], range: unitSearch),
-                  unitMatch.range.location == afterNumber,
+                  unitMatch.range(at: 0).location >= afterNumber,
                   let unitRange = Range(unitMatch.range(at: 1), in: utterance)
             else { return }
             pairs.append((value, String(utterance[unitRange]).lowercased()))
