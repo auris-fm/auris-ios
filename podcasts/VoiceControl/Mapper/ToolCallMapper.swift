@@ -22,8 +22,23 @@ class ToolCallMapper {
         case "pause": return .pause
         case "resume": return .resume
         case "seek_relative":
-            let delta = args["delta_seconds"] as? Int
-            return .seekRelative(deltaSeconds: delta ?? 30)
+            // Per the recovery contract (PR 59, cloud-seek-relative):
+            // The mapper no longer manufactures a default interval for a
+            // direction-only call — the sink owns the app's seek interval
+            // and applies it in the request's direction. A request that
+            // stated neither amount nor direction maps to FORWARD.
+            // Zero delta is treated as "no stated amount" — the sink
+            // applies its interval in the request's direction.
+            let delta = (args["delta_seconds"] as? Int).flatMap { $0 == 0 ? nil : $0 }
+            let direction: SeekDirection
+            if let delta {
+                direction = delta < 0 ? .backward : .forward
+            } else if let str = args["direction"] as? String {
+                direction = str == "backward" ? .backward : .forward
+            } else {
+                direction = .forward
+            }
+            return .seekRelative(deltaSeconds: delta, direction: direction)
         case "seek_to":
             guard let pos = args["position_seconds"] as? Int else { return nil }
             return .seekTo(positionSeconds: pos)

@@ -187,7 +187,8 @@ class VoiceIntentExecutor {
         switch intent {
         case .pause: return playbackSink.pause()
         case .resume: return playbackSink.resume()
-        case .seekRelative(let delta): return playbackSink.seekRelative(deltaSeconds: delta)
+        case .seekRelative(let delta, let direction):
+            return playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
         case .seekTo(let pos): return playbackSink.seekTo(positionSeconds: pos)
         case .nextEpisode: return playbackSink.nextEpisode()
         }

@@ -6,9 +6,17 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
     func test_execute_seekRelative_clampsToBounds() async {
         let sink = IntegrationPlaybackSink(currentPosition: 10, episodeDuration: 60)
         let executor = makeExecutor(playbackSink: sink)
-        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: -30))
+        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: -30, direction: .backward))
         // Position should be clamped to 0
         XCTAssertEqual(sink.lastSeekPosition, 0)
+    }
+
+    func test_execute_seekRelative_directionOnly() async {
+        let sink = IntegrationPlaybackSink(currentPosition: 120, episodeDuration: 600)
+        let executor = makeExecutor(playbackSink: sink)
+        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: nil, direction: .backward))
+        // Default 30s backward should be applied
+        XCTAssertEqual(sink.lastSeekPosition, 90)
     }
 
     func test_execute_seekTo_convertsToAppropriateUnit() async {
@@ -27,7 +35,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
 
     func test_execute_allPlaybackIntents_noCrash() async {
         let executor = makeExecutor()
-        let intents: [PlaybackIntent] = [.pause, .resume, .seekRelative(deltaSeconds: 15), .seekTo(positionSeconds: 60), .nextEpisode]
+        let intents: [PlaybackIntent] = [.pause, .resume, .seekRelative(deltaSeconds: 15, direction: .forward), .seekTo(positionSeconds: 60), .nextEpisode]
         for intent in intents {
             let response = await executor.execute(intent)
             switch response {
@@ -183,13 +191,21 @@ private final class IntegrationPlaybackSink: VoicePlaybackSink {
 
     func pause() -> VoiceResponse { .earcon(.success) }
     func resume() -> VoiceResponse { .silent }
-    func seekRelative(deltaSeconds: Int) -> VoiceResponse {
-        let newPos = max(0, min(episodeDuration, currentPosition + deltaSeconds))
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
+        let delta = deltaSeconds ?? (direction == .backward ? -30 : 30)
+        let newPos = max(0, min(episodeDuration, currentPosition + delta))
         lastSeekPosition = newPos
         return .silent
     }
     func seekTo(positionSeconds: Int) -> VoiceResponse {
         lastSeekPosition = min(episodeDuration, max(0, positionSeconds))
+        return .silent
+    }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        let resolved = positionSeconds < 0
+            ? max(0, min(episodeDurationSeconds, episodeDurationSeconds + positionSeconds))
+            : positionSeconds
+        lastSeekPosition = resolved
         return .silent
     }
     func nextEpisode() -> VoiceResponse { .spoken("Playing next episode") }

@@ -35,6 +35,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Audio player for cloud-delivered speech.
     private let audioPlayer: CloudAudioPlayer
+    private let playbackManager: PlaybackManager?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -76,6 +77,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
         audioPlayer: CloudAudioPlayer? = nil,
+        playbackManager: PlaybackManager? = nil,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
@@ -91,6 +93,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.isConfigured = isConfigured
         self.audioPlayer = audioPlayer ?? CloudAudioPlayer()
         self.audioPlayer.delegate = self
+        self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
@@ -231,6 +234,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let restoreMs = preQuotePositionMs else { return }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
+        case "seek_relative":
+            // Per the recovery contract (PR 59, cloud-seek-relative):
+            // Capture previous position so "go back to where I was" works
+            // after a relative seek.
+            capturePreActionPositionForRelativeSeek()
+            // Zero delta is treated as "no stated amount" — the sink
+            // applies its interval in the request's direction.
+            let delta = params["delta_seconds"]?.int64Value
+                .flatMap { Int($0) == 0 ? nil : Int($0) }
+            let declared = params["direction"]
+            let direction = seekDirectionOf(delta: delta, declared: declared)
+            _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
         case "pause":
             _ = playbackSink.pause()
             didAutoPause = false
@@ -251,12 +266,40 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
     }
 
+    /// Capture the current playback position before a relative seek so that a
+    /// subsequent "go back to where I was" restores the correct place. The
+    /// recovery contract (PR 59, cloud-seek-relative) requires this for all
+    /// relative seeks — not just `seek_to` / `play_quote`.
+    private func capturePreActionPositionForRelativeSeek() {
+        let previous = playbackPositionMs()
+        preQuotePositionMs = previous
+    }
+
+    /// Resolve seek direction when a relative seek arrives.
+    ///
+    /// Per the recovery contract: the delta's sign is authoritative when a
+    /// delta is present; `direction` decides only when it is absent. A request
+    /// that stated neither takes the app's default forward interval.
+    private func seekDirectionOf(delta: Int?, declared: Any?) -> SeekDirection {
+        if let delta {
+            return delta < 0 ? .backward : .forward
+        }
+        if let str = declared as? String {
+            if str == "backward" { return .backward }
+            if str == "forward" { return .forward }
+        }
+        return .forward // default: app's configurable interval
+    }
+
     private func seekToReference(_ referenceMs: Int64) {
         let referenceSeconds = Double(referenceMs) / 1000.0
         let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
             ?? referenceSeconds
-        let clamped = max(0, Int(playbackSeconds.rounded()))
-        _ = playbackSink.seekTo(positionSeconds: clamped)
+        let seconds = Int(playbackSeconds.rounded())
+        // Negative positionSeconds is an offset back from the episode end.
+        // Use the duration-aware overload so the sink resolves and bounds it.
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        _ = playbackSink.seekTo(positionSeconds: seconds, episodeDurationSeconds: durationSeconds)
     }
 }
 
