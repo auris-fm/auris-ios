@@ -74,11 +74,16 @@ class PlaybackManagerSink: VoicePlaybackSink {
     }
 
     func seekTo(positionSeconds: Int) -> VoiceResponse {
-        // Non-negative path: delegate to the duration-aware variant.
-        // Episode duration is not available at this level; callers should use
-        // the overload that accepts it for negative positions.
-        let position = TimeInterval(positionSeconds)
+        // Resolve negative positions against episode duration.
+        // Negative = offset from the episode end.
         let duration = playbackManager.duration()
+        let position: TimeInterval
+        if positionSeconds < 0 {
+            let offsetFromEnd = Double(abs(positionSeconds))
+            position = max(0.0, duration - offsetFromEnd)
+        } else {
+            position = Double(positionSeconds)
+        }
         let clamped = max(0.0, min(duration, position))
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.seekTo(time: clamped)
