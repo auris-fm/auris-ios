@@ -89,16 +89,9 @@ class PlaybackManagerSink: VoicePlaybackSink {
     }
 
     func seekTo(positionSeconds: Int) -> VoiceResponse {
-        // Resolve negative positions against episode duration.
-        // Negative = offset from the episode end.
+        // MUTATION: old clamp that the regression test catches.
+        let position = TimeInterval(positionSeconds)
         let duration = playbackManager.duration()
-        let position: TimeInterval
-        if positionSeconds < 0 {
-            let offsetFromEnd = Double(abs(positionSeconds))
-            position = max(0.0, duration - offsetFromEnd)
-        } else {
-            position = Double(positionSeconds)
-        }
         let clamped = max(0.0, min(duration, position))
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.seekTo(time: clamped)
