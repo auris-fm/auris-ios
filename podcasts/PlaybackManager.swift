@@ -2905,13 +2905,13 @@ extension PlaybackManager {
 
 // MARK: - PlaybackManagerProtocol conformance
 
+// Only available in the iOS app target where PlaybackManagerSink lives.
+#if !os(watchOS) && !os(tvOS) && !APPCLIP
 extension PlaybackManager: PlaybackManagerProtocol {
-    // PlaybackManager's method signatures have default args and don't match
-    // the protocol one-to-one. Add explicit forwarding witnesses.
-    func seekTo(time: TimeInterval) {
-        seekTo(time: time, startPlaybackAfterSeek: false, seekHint: nil)
-    }
-
+    // seekTo(time:) already provided by TranscriptPlaybackManaging extension.
+    // currentTime() and duration() already exist on PlaybackManager with
+    // exact matching signatures; skip those witnesses.
+    // Only need pause() and play() forwarding witnesses.
     func pause() {
         pause(userInitiated: true)
     }
@@ -2919,8 +2919,6 @@ extension PlaybackManager: PlaybackManagerProtocol {
     func play() {
         play(completion: nil, userInitiated: true)
     }
-
-    // currentTime() and duration() already exist on PlaybackManager with
-    // exact matching signatures; skip the witness.
 }
+#endif
 #endif
