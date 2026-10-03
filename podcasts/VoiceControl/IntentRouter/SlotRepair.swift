@@ -196,8 +196,11 @@ enum SlotRepair {
                 // a nonzero produced sign decides the direction; the utterance
                 // only corrects the magnitude. (The fixture: rewind 15s with
                 // predicted 1 → repaired 15, not -15.)
-                if key == "delta_seconds", let existing = out[key] as? Int, existing != 0 {
-                    out[key] = abs(value) * (existing < 0 ? -1 : 1)
+                if key == "delta_seconds",
+                   let existing = out[key] as? Int,
+                   existing != 0,
+                   let spokenInt = value as? Int {
+                    out[key] = Int(abs(spokenInt)) * (existing < 0 ? -1 : 1)
                 } else {
                     out[key] = value
                 }
