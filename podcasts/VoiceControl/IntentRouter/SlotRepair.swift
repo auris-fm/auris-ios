@@ -338,13 +338,13 @@ enum SlotRepair {
             guard let value = parseNumberPhrase(numberText) else { return }
             let afterNumber = match.range.location + match.range.length
             let unitSearch = NSRange(location: afterNumber, length: utterance.utf16.count - afterNumber)
-            // unitRegex has a leading \s* so the match may start after
-            // afterNumber when there is whitespace between number and unit.
-            // Use the full-match location (which includes \s*) as the lower
-            // bound, and extract the unit from group 1.
+            // unitRegex has a leading \s* to allow a single space between
+            // number and unit. The whitespace offset must be 0 or 1 to
+            // prevent binding unrelated numbers to later units.
             guard let unitMatch = unitRegex.firstMatch(in: utterance, options: [], range: unitSearch),
-                  unitMatch.range(at: 0).location >= afterNumber,
-                  let unitRange = Range(unitMatch.range(at: 1), in: utterance)
+                  let unitRange = Range(unitMatch.range(at: 1), in: utterance),
+                  let wsOffset = (unitMatch.range(at: 0).location as? Int).map { $0 - afterNumber },
+                  wsOffset >= 0, wsOffset <= 1
             else { return }
             pairs.append((value, String(utterance[unitRange]).lowercased()))
         }
