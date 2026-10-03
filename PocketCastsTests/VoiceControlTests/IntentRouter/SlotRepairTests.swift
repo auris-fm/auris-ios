@@ -141,4 +141,48 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -30,
                        "nonzero produced sign must be preserved")
     }
+
+    func test_repair_seekRelative_zeroDroppedExtractsDirectionFromUtterance() {
+        // Per the fixture revision at 1c527f6: bare-zero with no model
+        // direction must extract direction from utterance text.
+        // "go back" ⇒ BACKWARD.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired?.arguments["delta_seconds"],
+                     "produced zero with no spoken amount must be dropped")
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "backward",
+                       "direction extracted from utterance when model produced zero")
+    }
+
+    func test_repair_seekRelative_zeroDroppedExtractsForwardFromUtterance() {
+        // "skip ahead" ⇒ FORWARD.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "skip ahead",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired?.arguments["delta_seconds"],
+                     "produced zero with no spoken amount must be dropped")
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "forward",
+                       "direction extracted from utterance when model produced zero")
+    }
+
+    func test_repair_seekRelative_noDirectionExtractedFillsForwardDefault() {
+        // When utterance states neither delta nor direction, fill forward.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "skip",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired?.arguments["delta_seconds"],
+                     "produced zero with no spoken amount must be dropped")
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "forward",
+                       "forward default when no direction extracted from utterance")
+    }
 }

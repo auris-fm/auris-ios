@@ -247,10 +247,31 @@ enum SlotRepair {
         // Never overwrite an existing direction with a direction derived from
         // the utterance text — the model's intent is authoritative.
         if out["direction"] != nil { return out }
+        // Extract direction from the utterance when the model omitted it.
+        // "go back" ⇒ BACKWARD, "skip ahead" ⇒ FORWARD, etc.
+        // This is the fixture's bare-zero case: dropping zero leaves an
+        // empty call and the utterance-stated direction must survive.
+        if let utteranceDirection = extractDirection(utterance) {
+            out["direction"] = utteranceDirection
+            return out
+        }
         // Neither delta nor direction stated — fill a forward default so the
         // mapper produces (nil, FORWARD) and the sink applies its interval.
         out["direction"] = "forward"
         return out
+    }
+
+    /// Extract direction from utterance text.
+    /// Returns "backward" for backward cues, "forward" for forward cues.
+    private static func extractDirection(_ utterance: String) -> String? {
+        let lower = utterance.lowercased()
+        if backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
+            return "backward"
+        }
+        if aheadRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
+            return "forward"
+        }
+        return nil
     }
 
     private static func extractDeltaSeconds(_ utterance: String) -> Int? {
@@ -580,6 +601,8 @@ enum SlotRepair {
     private static let aMinuteRegex = try! NSRegularExpression(pattern: #"\ba\s+minute\b"#)
     // Include backward/backwards — `\bback\b` does not match inside those words.
     private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|backward|backwards|rewind|behind)\b"#)
+    // Forward direction cues — ahead, forward, skip ahead, next.
+    private static let aheadRegex = try! NSRegularExpression(pattern: #"\b(ahead|forward|skip\s*ahead|next|advance)\b"#)
     private static let defaultSkipSeconds = 30
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
