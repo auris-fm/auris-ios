@@ -61,7 +61,7 @@ enum SlotRepair {
         "playback": [
             "pause": [],
             "resume": [],
-            "seek_relative": ["delta_seconds"],
+            "seek_relative": ["delta_seconds", "direction"],
             "seek_to": ["position_seconds"],
             "next_episode": [],
         ],
@@ -192,7 +192,15 @@ enum SlotRepair {
         var out = params
         for (key, value) in extractNumericSlots(tool: tool, action: action, utterance: utterance) {
             if allowed.contains(key) {
-                out[key] = value
+                // Preserve the model's sign when correcting magnitude:
+                // a nonzero produced sign decides the direction; the utterance
+                // only corrects the magnitude. (The fixture: rewind 15s with
+                // predicted 1 → repaired 15, not -15.)
+                if key == "delta_seconds", let existing = out[key] as? Int, existing != 0 {
+                    out[key] = abs(value) * (existing < 0 ? -1 : 1)
+                } else {
+                    out[key] = value
+                }
             }
         }
         return out
@@ -223,8 +231,9 @@ enum SlotRepair {
     ///   `null` and applies its interval in the stated direction.
     /// - The mapper may fill direction when neither delta nor direction is
     ///   stated — defaults to forward (the only defaulting case).
-    /// - Returns nil when the utterance states an amount exceeding ±1 hour
-    ///   (the contract constraint), producing no repaired call at all.
+    /// - Returns nil when the resulting amount exceeds ±1 hour (the contract
+    ///   constraint), producing no repaired call at all. Checks both the
+    ///   utterance-extracted amount and any produced nonzero delta.
     private static func fillSeekRelativeDefault(
         tool: String,
         action: String,
@@ -232,6 +241,14 @@ enum SlotRepair {
         utterance: String
     ) -> [String: Any]? {
         guard tool == "playback", action == "seek_relative" else { return params }
+
+        // Range guard on the resulting amount: a hallucinated two-hour delta
+        // or an out-of-range spoken amount must both be rejected.
+        if let resultingDelta = params["delta_seconds"] as? Int, resultingDelta != 0 {
+            if !isValidDelta(resultingDelta) {
+                return nil
+            }
+        }
 
         // Never manufacture a delta: the sink owns the app's default interval
         // and applies it in the request's direction.
