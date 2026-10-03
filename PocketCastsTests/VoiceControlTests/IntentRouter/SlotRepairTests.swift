@@ -185,4 +185,18 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertEqual(repaired?.arguments["direction"] as? String, "forward",
                        "forward default when no direction extracted from utterance")
     }
+
+    func test_repair_seekRelative_outOfRangeAmountReturnsNull() {
+        // Per the fixture: an unsupported spoken amount (exceeding ±1 hour)
+        // must repair to null (no repaired call), not a clamped or defaulted
+        // one. "jump back ninety minutes" = -5400s is outside the constraint.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "jump back ninety minutes",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired,
+                     "unsupported spoken amount must produce no repaired call")
+    }
 }

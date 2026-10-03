@@ -21,7 +21,11 @@ enum SlotRepair {
         params = repairStringParams(tool: tool, action: action, params: params, utterance: utterance)
         params = sanitizeParams(tool: tool, action: action, params: params)
         params = dropNoneLike(params)
-        params = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance)
+        guard let finalParams = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance) else {
+            // Unsupported spoken amount — no repaired call.
+            return nil
+        }
+        params = finalParams
 
         var arguments = params
         if !action.isEmpty {
@@ -219,12 +223,14 @@ enum SlotRepair {
     ///   `null` and applies its interval in the stated direction.
     /// - The mapper may fill direction when neither delta nor direction is
     ///   stated — defaults to forward (the only defaulting case).
+    /// - Returns nil when the utterance states an amount exceeding ±1 hour
+    ///   (the contract constraint), producing no repaired call at all.
     private static func fillSeekRelativeDefault(
         tool: String,
         action: String,
         params: [String: Any],
         utterance: String
-    ) -> [String: Any] {
+    ) -> [String: Any]? {
         guard tool == "playback", action == "seek_relative" else { return params }
 
         // Never manufacture a delta: the sink owns the app's default interval
@@ -235,12 +241,18 @@ enum SlotRepair {
         // (run earlier) has already replaced the zero with the spoken value.
         var out = params
         if var delta = params["delta_seconds"] as? Int, delta == 0 {
-            if extractDeltaSeconds(utterance) == nil {
+            if let spokenDelta = extractDeltaSeconds(utterance) {
+                // Utterance states an amount — check it is within range.
+                if !isValidDelta(spokenDelta) {
+                    // Unsupported spoken amount — no repaired call.
+                    return nil
+                }
+                // If utterance states an amount, keep the repaired value from the
+                // earlier repair step (it replaced 0 with the spoken signed amount).
+            } else {
                 // No spoken amount — drop the zero as unstated.
                 out.removeValue(forKey: "delta_seconds")
             }
-            // If utterance states an amount, keep the repaired value from the
-            // earlier repair step (it replaced 0 with the spoken signed amount).
         }
         if out["delta_seconds"] != nil { return out }
 
@@ -259,6 +271,11 @@ enum SlotRepair {
         // mapper produces (nil, FORWARD) and the sink applies its interval.
         out["direction"] = "forward"
         return out
+    }
+
+    /// Check if a delta value is within the contract constraint (±1 hour).
+    private static func isValidDelta(_ seconds: Int) -> Bool {
+        return seconds >= -3600 && seconds <= 3600
     }
 
     /// Extract direction from utterance text.
