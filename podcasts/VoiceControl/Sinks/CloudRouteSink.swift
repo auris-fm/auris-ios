@@ -35,6 +35,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Audio player for cloud-delivered speech.
     private let audioPlayer: CloudAudioPlayer
+    private let playbackManager: PlaybackManager?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -76,6 +77,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
         audioPlayer: CloudAudioPlayer? = nil,
+        playbackManager: PlaybackManager? = nil,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
@@ -91,6 +93,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.isConfigured = isConfigured
         self.audioPlayer = audioPlayer ?? CloudAudioPlayer()
         self.audioPlayer.delegate = self
+        self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
@@ -236,7 +239,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Capture previous position so "go back to where I was" works
             // after a relative seek.
             capturePreActionPositionForRelativeSeek()
+            // Zero delta is treated as "no stated amount" — the sink
+            // applies its interval in the request's direction.
             let delta = params["delta_seconds"]?.int64Value.map { Int($0) }
+                .map { $0 == 0 ? nil : $0 }
             let declared = params["direction"]
             let direction = seekDirectionOf(delta: delta, declared: declared)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
@@ -291,8 +297,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             ?? referenceSeconds
         let seconds = Int(playbackSeconds.rounded())
         // Negative positionSeconds is an offset back from the episode end.
-        // The sink resolves and bounds it — callers must not clamp.
-        _ = playbackSink.seekTo(positionSeconds: seconds)
+        // Use the duration-aware overload so the sink resolves and bounds it.
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        _ = playbackSink.seekTo(positionSeconds: seconds, episodeDurationSeconds: durationSeconds)
     }
 }
 

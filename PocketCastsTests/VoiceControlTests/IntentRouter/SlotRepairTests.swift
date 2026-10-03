@@ -248,4 +248,34 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertNil(repaired,
                      "produced negative out-of-range delta must be rejected")
     }
+
+    func test_repair_seekRelative_ninetyMinutesParsedAndRejected() {
+        // "ninety minutes" = 5400s which exceeds ±3600s range guard.
+        // Number parsing must extract ninety, and range guard must reject.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "jump back ninety minutes",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired,
+                     "ninety minutes (5400s) exceeds ±3600s range guard → null result")
+    }
+
+    func test_repair_seekRelative_unitWithLeadingWhitespaceExtracted() {
+        // Whitespace between number word and unit should not prevent extraction.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance: "rewind fifteen seconds",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        // Should produce the repaired value (15 or -15 depending on direction)
+        XCTAssertNotNil(repaired, "whitespace between number and unit must not prevent extraction")
+        if let delta = repaired?.arguments["delta_seconds"] as? Int {
+            XCTAssertEqual(abs(delta), 15, "magnitude should be 15 seconds")
+        } else {
+            XCTFail("expected delta_seconds to be set")
+        }
+    }
 }

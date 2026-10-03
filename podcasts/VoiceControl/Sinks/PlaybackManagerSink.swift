@@ -39,7 +39,8 @@ class PlaybackManagerSink: VoicePlaybackSink {
             // Direction-only call — apply the app's default interval in the
             // request's direction. The sink owns this interval; the mapper
             // must never manufacture a delta for a direction-only call.
-            deltaMs = (direction == .backward ? -1 : 1) * 30_000 // 30s default
+            let interval = direction == .backward ? Settings.skipBackTime : Settings.skipForwardTime
+            deltaMs = (direction == .backward ? -1 : 1) * interval * 1000
         }
 
         let currentPos = Int(playbackManager.currentTime() * 1000)
