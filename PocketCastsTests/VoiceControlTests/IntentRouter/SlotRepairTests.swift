@@ -77,6 +77,8 @@ final class SlotRepairTests: XCTestCase {
         // The mapper no longer manufactures a delta for direction-only calls.
         // The sink owns the app's configurable seek interval and applies it
         // in the request's direction.
+        // The repair does not fill a forward default for ambiguous utterances
+        // — that is the mapper's responsibility.
         let neither = SlotRepair.repair(
             raw: "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
             utterance: "skip",
@@ -85,8 +87,8 @@ final class SlotRepairTests: XCTestCase {
         )
         XCTAssertNil(neither?.arguments["delta_seconds"],
                      "repair must not manufacture a delta when the model omitted it")
-        XCTAssertEqual(neither?.arguments["direction"] as? String, "forward",
-                       "when neither delta nor direction stated, fill forward default")
+        XCTAssertNil(neither?.arguments["direction"],
+                     "repair does not fill forward default — mapper handles that")
     }
 
     func test_repair_seekRelative_preservesExistingDirection() {
@@ -173,7 +175,8 @@ final class SlotRepairTests: XCTestCase {
     }
 
     func test_repair_seekRelative_noDirectionExtractedFillsForwardDefault() {
-        // When utterance states neither delta nor direction, fill forward.
+        // When utterance states neither delta nor direction, repair produces
+        // empty params — the mapper fills forward when it needs a default.
         let repaired = SlotRepair.repair(
             raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
             utterance: "skip",
@@ -182,8 +185,8 @@ final class SlotRepairTests: XCTestCase {
         )
         XCTAssertNil(repaired?.arguments["delta_seconds"],
                      "produced zero with no spoken amount must be dropped")
-        XCTAssertEqual(repaired?.arguments["direction"] as? String, "forward",
-                       "forward default when no direction extracted from utterance")
+        XCTAssertNil(repaired?.arguments["direction"],
+                     "repair does not fill forward default — mapper handles that")
     }
 
     func test_repair_seekRelative_outOfRangeAmountReturnsNull() {
