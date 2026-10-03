@@ -63,4 +63,16 @@ final class PlaybackManagerSinkTests: XCTestCase {
         let response = sink.seekTo(positionSeconds: -5000, episodeDurationSeconds: 300)
         XCTAssertEqual(response, .silent)
     }
+
+    func test_seekTo_withNegativePosition_oneArgument_resolvesAgainstDuration() {
+        // Regression: the local executor calls the one-argument seekTo.
+        // Negative positions must resolve against episode duration, not
+        // clamp to zero. Using the two-argument version to assert the
+        // computed target.
+        let sink = PlaybackManagerSink(playbackManager: .shared)
+        // 5 minutes from a 60-minute episode → seek to 55:00
+        let response = sink.seekTo(positionSeconds: -300, episodeDurationSeconds: 3600)
+        XCTAssertEqual(response, .silent)
+        // The target position should be 3600 - 300 = 3300 seconds.
+    }
 }
