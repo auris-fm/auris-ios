@@ -199,4 +199,53 @@ final class SlotRepairTests: XCTestCase {
         XCTAssertNil(repaired,
                      "unsupported spoken amount must produce no repaired call")
     }
+
+    func test_repair_seekRelative_directionNotStrippedBySanitization() {
+        // Direction must survive sanitization — it is now an allowed param.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0, direction='backward')]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNotNil(repaired, "repair must not return nil")
+        XCTAssertEqual(repaired?.arguments["direction"] as? String, "backward",
+                       "direction must not be stripped by sanitization")
+    }
+
+    func test_repair_seekRelative_numericPreservesProducedSign() {
+        // Numeric repair corrects magnitude but preserves the model's sign.
+        // Model produced 1 (positive), utterance says "rewind fifteen seconds" → 15 (not -15).
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=1)]<|tool_call_end|>",
+            utterance: "rewind fifteen seconds",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, 15,
+                       "magnitude corrected from utterance, sign preserved from model")
+    }
+
+    func test_repair_seekRelative_producedOutOfRangeReturnsNull() {
+        // A hallucinated two-hour delta with no spoken support must be rejected.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=7200)]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired,
+                     "produced out-of-range delta must be rejected even with no spoken amount")
+    }
+
+    func test_repair_seekRelative_producedNegativeOutOfRangeReturnsNull() {
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-7200)]<|tool_call_end|>",
+            utterance: "skip ahead",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertNil(repaired,
+                     "produced negative out-of-range delta must be rejected")
+    }
 }
