@@ -1,6 +1,32 @@
 import XCTest
 @testable import podcasts
 
+// Mock PlaybackManager that captures seekTo calls and provides controlled duration.
+class MockPlaybackManager: PlaybackManager {
+    var capturedSeekTime: TimeInterval?
+    var durationValue: TimeInterval = 0
+
+    override func duration() -> TimeInterval {
+        durationValue
+    }
+
+    override func seekTo(time: TimeInterval, startPlaybackAfterSeek: Bool, seekHint: SeekHint?) {
+        capturedSeekTime = time
+    }
+
+    override func seekTo(time: TimeInterval, startPlaybackAfterSeek: Bool) {
+        capturedSeekTime = time
+    }
+
+    override func seekTo(time: TimeInterval) {
+        capturedSeekTime = time
+    }
+
+    override func seekTo(time: TimeInterval, syncChanges: Bool, startPlaybackAfterSeek: Bool, seekHint: SeekHint?) {
+        capturedSeekTime = time
+    }
+}
+
 final class PlaybackManagerSinkTests: XCTestCase {
 
     func test_pause_setsVoiceCommandsSource() {
@@ -67,12 +93,29 @@ final class PlaybackManagerSinkTests: XCTestCase {
     func test_seekTo_withNegativePosition_oneArgument_resolvesAgainstDuration() {
         // Regression: the local executor calls the one-argument seekTo.
         // Negative positions must resolve against episode duration, not
-        // clamp to zero. Using the two-argument version to assert the
-        // computed target.
-        let sink = PlaybackManagerSink(playbackManager: .shared)
-        // 5 minutes from a 60-minute episode → seek to 55:00
-        let response = sink.seekTo(positionSeconds: -300, episodeDurationSeconds: 3600)
+        // clamp to zero. This test verifies the actual position passed
+        // to playback, not just that .silent is returned.
+        let mock = MockPlaybackManager()
+        mock.durationValue = 3600
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        let response = sink.seekTo(positionSeconds: -300)
         XCTAssertEqual(response, .silent)
-        // The target position should be 3600 - 300 = 3300 seconds.
+        // 5 minutes from a 60-minute episode → seek to 55:00 (3300s)
+        XCTAssertEqual(mock.capturedSeekTime, 3300.0,
+                       "negative position must resolve against episode duration")
+    }
+
+    func test_seekTo_withNegativePosition_oneArgument_oldClampFails() {
+        // Demonstrates that restoring the old clamp (max(0, position))
+        // would fail this assertion, confirming the test is meaningful.
+        let mock = MockPlaybackManager()
+        mock.durationValue = 3600
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        let response = sink.seekTo(positionSeconds: -300)
+        XCTAssertEqual(response, .silent)
+        // If the old clamp were in place, capturedSeekTime would be 0.0.
+        // The new implementation should produce 3300.0.
+        XCTAssertNotEqual(mock.capturedSeekTime, 0.0,
+                          "regression test must fail with the old clamp")
     }
 }
