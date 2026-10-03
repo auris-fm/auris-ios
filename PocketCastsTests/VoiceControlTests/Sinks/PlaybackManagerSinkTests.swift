@@ -1,30 +1,18 @@
 import XCTest
 @testable import podcasts
 
-// Mock PlaybackManager that captures seekTo calls and provides controlled duration.
-class MockPlaybackManager: PlaybackManager {
+// Mock PlaybackManagerProtocol that captures seekTo calls and provides controlled duration.
+final class MockPlaybackManager: PlaybackManagerProtocol {
     var capturedSeekTime: TimeInterval?
     var durationValue: TimeInterval = 0
 
-    override func duration() -> TimeInterval {
-        durationValue
-    }
+    func duration() -> TimeInterval { durationValue }
 
-    override func seekTo(time: TimeInterval, startPlaybackAfterSeek: Bool, seekHint: SeekHint?) {
-        capturedSeekTime = time
-    }
+    func seekTo(time: TimeInterval) { capturedSeekTime = time }
 
-    override func seekTo(time: TimeInterval, startPlaybackAfterSeek: Bool) {
-        capturedSeekTime = time
-    }
+    func pause() {}
 
-    override func seekTo(time: TimeInterval) {
-        capturedSeekTime = time
-    }
-
-    override func seekTo(time: TimeInterval, syncChanges: Bool, startPlaybackAfterSeek: Bool, seekHint: SeekHint?) {
-        capturedSeekTime = time
-    }
+    func play() {}
 }
 
 final class PlaybackManagerSinkTests: XCTestCase {

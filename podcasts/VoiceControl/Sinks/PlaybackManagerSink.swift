@@ -1,15 +1,26 @@
 import Foundation
 
+/// Minimal playback seam for `PlaybackManagerSink`.
+///
+/// Allows test injection of a mock playback manager without depending on
+/// the concrete `PlaybackManager` class (which has a private init).
+protocol PlaybackManagerProtocol {
+    func duration() -> TimeInterval
+    func seekTo(time: TimeInterval)
+    func pause()
+    func play()
+}
+
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
 ///
 /// Per the intent-routing recovery contract (PR 59, cloud-seek-relative), this
 /// sink owns the app's configurable seek interval and applies it in the
 /// request's direction when the model produces a direction-only call.
 class PlaybackManagerSink: VoicePlaybackSink {
-    private let playbackManager: PlaybackManager
+    private let playbackManager: PlaybackManagerProtocol
     private let templates = SpokenTemplateResolver()
 
-    init(playbackManager: PlaybackManager) {
+    init(playbackManager: PlaybackManagerProtocol) {
         self.playbackManager = playbackManager
     }
 
