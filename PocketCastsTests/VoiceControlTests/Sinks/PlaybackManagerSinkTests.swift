@@ -5,14 +5,15 @@ import XCTest
 final class MockPlaybackManager: PlaybackManagerProtocol {
     var capturedSeekTime: TimeInterval?
     var durationValue: TimeInterval = 0
+    var currentTimeValue: TimeInterval = 0
+    var skipResult: String? = nil
 
     func duration() -> TimeInterval { durationValue }
-
+    func currentTime() -> TimeInterval { currentTimeValue }
     func seekTo(time: TimeInterval) { capturedSeekTime = time }
-
     func pause() {}
-
     func play() {}
+    func skipToNextUpNextEpisode() -> String? { skipResult }
 }
 
 final class PlaybackManagerSinkTests: XCTestCase {

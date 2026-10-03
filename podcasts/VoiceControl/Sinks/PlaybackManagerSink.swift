@@ -6,9 +6,11 @@ import Foundation
 /// the concrete `PlaybackManager` class (which has a private init).
 protocol PlaybackManagerProtocol {
     func duration() -> TimeInterval
+    func currentTime() -> TimeInterval
     func seekTo(time: TimeInterval)
     func pause()
     func play()
+    func skipToNextUpNextEpisode() -> String?
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.

@@ -2906,8 +2906,8 @@ extension PlaybackManager {
 // MARK: - PlaybackManagerProtocol conformance
 
 extension PlaybackManager: PlaybackManagerProtocol {
-    func seekTo(time: TimeInterval) {
-        seekTo(time: time)
-    }
+    // PlaybackManager already has seekTo(time: TimeInterval, ...), currentTime(),
+    // skipToNextUpNextEpisode(), pause(), play(), and duration().
+    // The protocol is satisfied by these existing methods.
 }
 #endif
