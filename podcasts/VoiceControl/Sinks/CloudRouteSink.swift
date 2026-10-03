@@ -284,7 +284,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Zero delta is treated as "no stated amount" — the sink
             // applies its interval in the request's direction.
             let delta = params["delta_seconds"]?.int64Value
-                .compactMap { Int($0) == 0 ? nil : Int($0) }
+                .flatMap { Int($0) == 0 ? nil : Int($0) }
             let declared = params["direction"]
             let direction = seekDirectionOf(delta: delta, declared: declared)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)

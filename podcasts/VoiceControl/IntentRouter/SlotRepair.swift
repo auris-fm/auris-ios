@@ -380,8 +380,10 @@ enum SlotRepair {
         if parts.count == 2, let tens = tensMap[parts[0]], let ones = ones1to9[parts[1]] {
             return NSNumber(value: tens + ones)
         }
-        guard parts.count == 1, let ones = onesMap[parts[0]] else { return nil }
-        return NSNumber(value: ones)
+        guard parts.count == 1 else { return nil }
+        if let ones = onesMap[parts[0]] { return NSNumber(value: ones) }
+        if let tens = tensMap[parts[0]] { return NSNumber(value: tens) }
+        return nil
     }
 
     private static let onesMap: [String: Int] = [
