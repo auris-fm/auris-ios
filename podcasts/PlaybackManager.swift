@@ -2902,4 +2902,12 @@ extension PlaybackManager {
         #endif
     }
 }
+
+// MARK: - PlaybackManagerProtocol conformance
+
+extension PlaybackManager: PlaybackManagerProtocol {
+    func seekTo(time: TimeInterval) {
+        seekTo(time: time)
+    }
+}
 #endif
