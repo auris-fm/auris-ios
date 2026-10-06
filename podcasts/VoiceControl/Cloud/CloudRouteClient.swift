@@ -101,6 +101,7 @@ final class CloudRouteClient {
         guard !success else { return }
         // WebSocket failed or not supported — retry via SSE.
         await performSSE(request: request, context: context, turn: turn, continuation: continuation)
+    }
 
     // MARK: - WebSocket implementation
 
@@ -230,7 +231,6 @@ final class CloudRouteClient {
         let sseSession = URLSession(configuration: .default, delegate: sseDelegate, delegateQueue: nil)
         let task = sseSession.dataTask(with: req)
         task.resume()
-    }
     }
 
     // MARK: - URL construction
@@ -407,7 +407,7 @@ final class CloudRouteClient {
         var speech: CloudSpeechUsage? = nil
         if let speechData = usage["speech"] as? [String: Any] {
             let amount = intValue(speechData["amount"])
-            let unit = speechData["unit"] as? ?? ""
+            let unit = speechData["unit"] as? String ?? ""
             if !unit.isEmpty {
                 speech = CloudSpeechUsage(amount: amount, unit: unit)
             }
