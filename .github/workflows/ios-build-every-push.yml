@@ -1,0 +1,94 @@
+# Build the iOS app on every push, and run the tests on pull requests.
+#
+# Why every push, and not only pull requests: this repo has feature branches
+# that pull requests stack on top of. Those base branches have no PR of their
+# own, so PR-only CI never builds them and a compile error can sit on a shared
+# branch — invisible to review, because the broken file is not in any PR's diff.
+# Building on every push is what closes that gap.
+#
+# Which step would have caught the defect this workflow was written for:
+# **Build**. An unbalanced brace and `as? ?? ""` are compile errors, so the
+# build fails and no test needs to run. That is the whole case: a file that no
+# compiler had seen, on a branch that no PR described.
+#
+# Prerequisites the runner must supply (a stock GitHub macOS runner has Xcode
+# and iOS runtimes; the app's own frameworks are fetched/built below):
+#   - a macOS image with Xcode and an iOS simulator runtime
+#   - network access (the llama.cpp build clones its pinned source)
+# The first run on a real runner may reveal further setup steps; those should be
+# added here rather than worked around, or the check fails for environmental
+# reasons and stops being trusted.
+
+name: iOS build
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same ref cancels the older run — cheap check, cheap cancel.
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (StagingDebug)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      # The app cannot build without LocalApiCredentials.swift; this Makefile
+      # target writes an empty one (the repo's `external_contributor` path).
+      - name: Generate credentials stub
+        run: make external_contributor
+
+      # llama.cpp is a pinned static build that this script clones and compiles.
+      # Cache the checkout and the build output so repeat runs are minutes, not
+      # tens of minutes.
+      - name: Cache llama.cpp source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ThirdParty/llama-cpp-build
+            ${{ runner.temp }}/auris-llama-cpp
+          key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: deriveddata-${{ runner.os }}-
+
+      # THIS is the step that fails on a compile error such as an unbalanced
+      # brace or an invalid cast.
+      - name: Build
+        run: make build_staging
+
+  test:
+    name: Test (StagingDebug)
+    # Keep the expensive job where changes are already being reviewed.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate credentials stub
+        run: make external_contributor
+
+      - name: Cache llama.cpp source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ThirdParty/llama-cpp-build
+            ${{ runner.temp }}/auris-llama-cpp
+          key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
+
+      - name: Test
+        run: make test_staging
