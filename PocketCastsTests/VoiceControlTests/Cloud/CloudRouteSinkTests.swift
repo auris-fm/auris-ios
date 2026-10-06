@@ -286,7 +286,8 @@ final class CloudRouteSinkTests: XCTestCase {
                 CloudRouteClient(
                     baseURL: cloudConfig.baseUrl,
                     userId: "user_test",
-                    session: session
+                    session: session,
+                    transport: .sse
                 )
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
@@ -463,7 +464,7 @@ final class CloudRouteSupersedeTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -540,7 +541,7 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
         let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -581,7 +582,7 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -669,7 +670,7 @@ final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         let sink = CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),

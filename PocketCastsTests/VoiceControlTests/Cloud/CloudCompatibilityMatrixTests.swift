@@ -172,7 +172,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,

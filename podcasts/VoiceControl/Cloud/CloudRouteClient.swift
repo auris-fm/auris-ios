@@ -20,6 +20,18 @@ final class CloudRouteClient {
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
 
+    /// Transport the route turn uses.
+    ///
+    /// The voice turn is **WebSocket-only**: a failed upgrade is a terminal turn
+    /// failure, never an automatic SSE fallback. `sse` is an explicit selection
+    /// of the spec's stated POST path — chosen deliberately, never picked up
+    /// after a WebSocket failure.
+    enum Transport {
+        case webSocket
+        case sse
+    }
+    private let transport: Transport
+
     /// Codecs advertised to the server in the authenticate frame.
     ///
     /// PCM only. `CloudAudioPlayer` copies frames as raw Int16 PCM and has no
@@ -36,7 +48,8 @@ final class CloudRouteClient {
         userId: String,
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
-        tokenProvider: CloudTokenProviding? = nil
+        tokenProvider: CloudTokenProviding? = nil,
+        transport: Transport = .webSocket
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
@@ -45,6 +58,7 @@ final class CloudRouteClient {
         // today's trust-on-first-use bearer exactly.
         self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.transport = transport
         if let session {
             self.session = session
         } else {
@@ -84,7 +98,12 @@ final class CloudRouteClient {
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performRoute(request: request, context: context, turn: turn, continuation: continuation)
+                switch self.transport {
+                case .webSocket:
+                    await self.performRoute(request: request, context: context, turn: turn, continuation: continuation)
+                case .sse:
+                    await self.performSSE(request: request, context: context, turn: turn, continuation: continuation)
+                }
             }
             continuation.onTermination = { _ in
                 task.cancel()
@@ -94,11 +113,12 @@ final class CloudRouteClient {
 
     // MARK: - Transport selection
 
-    /// Try WebSocket first; fall back to SSE if the upgrade fails.
+    /// Drives the voice turn over WebSocket.
     ///
-    /// The spec mandates both transports during the transition window:
-    /// WebSocket preferred, SSE fallback. The failed WS upgrade is the
-    /// detection signal — no capability endpoint needed.
+    /// The voice turn is WebSocket-only (no-fallbacks principle): a failed
+    /// upgrade is a terminal turn failure with a visible error. The POST
+    /// transport is reachable only by explicit selection (see `Transport`),
+    /// never automatically after a failure.
     private func performRoute(
         request: String,
         context: CloudRouteContext,
@@ -107,8 +127,9 @@ final class CloudRouteClient {
     ) async {
         let success = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
         guard !success else { return }
-        // WebSocket failed or not supported — retry via SSE.
-        await performSSE(request: request, context: context, turn: turn, continuation: continuation)
+        // A failed upgrade is terminal: report it rather than falling back.
+        continuation.yield(.error(code: "connection_lost", message: ""))
+        continuation.finish()
     }
 
     // MARK: - WebSocket implementation
