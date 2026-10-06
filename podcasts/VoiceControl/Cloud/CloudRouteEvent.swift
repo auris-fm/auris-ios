@@ -2,8 +2,12 @@ import Foundation
 
 /// Audio frame carrying synthesised speech from the cloud server.
 struct CloudAudioFrame: Equatable {
-    /// Raw audio payload in the codec negotiated in the `connected` frame
-    /// (typically Opus packets at 48 kHz mono, 20 ms frames).
+    /// Raw audio payload in the codec negotiated in the `connected` frame.
+    ///
+    /// This client advertises `pcm_s16le@24k` only (see
+    /// `CloudRouteClient.supportedCodecs`) and plays the bytes as raw Int16
+    /// PCM; there is no Opus decoder in this path. The sample rate is encoded
+    /// in the negotiated codec name — the wire has no separate rate field.
     let data: Data
 }
 
