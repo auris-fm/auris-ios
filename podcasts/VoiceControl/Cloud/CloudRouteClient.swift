@@ -125,16 +125,16 @@ final class CloudRouteClient {
         turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
-        let success = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
-        guard !success else { return }
-        // A failed upgrade is terminal: report it rather than falling back.
-        continuation.yield(.error(code: "connection_lost", message: ""))
-        continuation.finish()
+        // `performWebSocket` always terminates the stream itself — on success or
+        // with a delivered error — so there is nothing left to fall back to.
+        _ = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
     }
 
     // MARK: - WebSocket implementation
 
-    /// Returns `true` if the WebSocket stream completed successfully.
+    /// Drives the turn over the WebSocket and always terminates the stream —
+    /// either with the turn's events or with a delivered error. The return value
+    /// is always `true`; it is kept for the caller's shape.
     private func performWebSocket(
         request: String,
         context: CloudRouteContext,
@@ -207,18 +207,17 @@ final class CloudRouteClient {
 
         } catch is CancellationError {
             continuation.finish()
-            return false
+            return true
         } catch {
             if Task.isCancelled {
                 continuation.finish()
-                return false
+                return true
             }
             continuation.yield(
                 .error(code: "connection_lost", message: (error as NSError).localizedDescription)
             )
             continuation.finish()
-            // WebSocket failed — retry with SSE.
-            return false
+            return true
         }
     }
 
