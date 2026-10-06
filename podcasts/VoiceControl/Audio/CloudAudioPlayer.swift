@@ -21,6 +21,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
         func audioPlayerDidPause()
     }
 
+    /// Codecs this player can actually decode and play.
+    ///
+    /// Frames are copied verbatim into an Int16 PCM buffer — there is no Opus
+    /// or Ogg decoder anywhere in this path. `CloudRouteClient.supportedCodecs`
+    /// must stay within this set: advertising a codec with no decoder lets the
+    /// server negotiate a format we then play as noise. Listed as base codec
+    /// names; the advertised form adds a sample rate (`pcm_s16le@24k`).
+    static let decodableCodecs: Set<String> = ["pcm_s16le"]
+
     // MARK: - Public
 
     /// Start (or resume) playback with new frames.
@@ -237,9 +246,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private func playFrame(_ frame: CloudAudioFrame) {
         guard let node = playerNode, let engine = engine else { return }
 
-        // Convert raw Opus/PCM data to AVAudioPcmBuffer.
-        // For now, treat all data as raw Float32 PCM (the server negotiates codec).
-        // In production, the codec would be determined from the `connected` frame.
+        // Frames arrive as raw Int16 PCM in the negotiated codec. This client
+        // advertises PCM only (see `CloudRouteClient.supportedCodecs`); there is
+        // no Opus decoder in this path, so an Opus frame is not handled here.
         guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: engine.inputFormat.sampleRate) else {
             return
         }
@@ -249,8 +258,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     private func pcmBuffer(from data: Data, sampleRate: Double) -> AVAudioPcmBuffer? {
-        // Opus packets need to be decoded; raw PCM can be used directly.
-        // For now, assume raw PCM (the server can negotiate pcm_s16le).
+        // Raw Int16 PCM is copied straight into the buffer. Opus would need a
+        // decoder, which this path does not have.
         guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                          sampleRate: sampleRate,
                                          channels: AVAudioChannelCount(1),

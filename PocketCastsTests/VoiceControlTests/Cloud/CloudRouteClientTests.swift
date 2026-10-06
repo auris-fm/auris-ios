@@ -242,6 +242,28 @@ final class CloudRouteClientTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(client.requestTimeoutSeconds, 15)
     }
 
+    /// The client must never advertise a codec its player cannot decode: a codec
+    /// we cannot play would be negotiated by the server and then played as noise,
+    /// surfacing as "speech is broken" rather than "the client claimed a codec it
+    /// cannot back". `CloudAudioPlayer` copies frames as raw Int16 PCM with no
+    /// Opus decoder, so the list is PCM-only. Re-adding `opus@48k` fails this
+    /// until an Opus decoder exists and is declared in `decodableCodecs`.
+    func testAdvertisedCodecsAreDecodableByThePlayer() {
+        XCTAssertFalse(
+            CloudRouteClient.supportedCodecs.isEmpty,
+            "The client must advertise at least one codec or the server refuses the turn"
+        )
+        for codec in CloudRouteClient.supportedCodecs {
+            // Advertised form is `<base>@<rate>` (e.g. `pcm_s16le@24k`); the
+            // decodable set names the base codec.
+            let base = codec.split(separator: "@").first.map(String.init) ?? codec
+            XCTAssertTrue(
+                CloudAudioPlayer.decodableCodecs.contains(base),
+                "Advertised codec '\(codec)' has no decoder in CloudAudioPlayer.decodableCodecs"
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private func client() -> CloudRouteClient {

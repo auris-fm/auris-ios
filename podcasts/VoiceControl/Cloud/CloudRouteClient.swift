@@ -20,8 +20,16 @@ final class CloudRouteClient {
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
 
-    /// Supported codecs (client offers both; server picks one in `connected`).
-    static let supportedCodecs = ["opus@48k", "pcm_s16le@24k"]
+    /// Codecs advertised to the server in the authenticate frame.
+    ///
+    /// PCM only. `CloudAudioPlayer` copies frames as raw Int16 PCM and has no
+    /// Opus decoder, so advertising `opus@48k` would claim a capability the
+    /// client cannot back — the server could pick it and send frames we cannot
+    /// play, which surfaces as "speech is broken" rather than "the client lied".
+    /// Add `opus@48k` here only together with a real Opus decoder and the
+    /// matching entry in `CloudAudioPlayer.decodableCodecs` (see
+    /// `testAdvertisedCodecsAreDecodableByThePlayer`).
+    static let supportedCodecs = ["pcm_s16le@24k"]
 
     init(
         baseURL: String,
