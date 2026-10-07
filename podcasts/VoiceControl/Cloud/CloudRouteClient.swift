@@ -20,6 +20,18 @@ final class CloudRouteClient {
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
 
+    /// Transport the route turn uses.
+    ///
+    /// The voice turn is **WebSocket-only**: a failed upgrade is a terminal turn
+    /// failure, never an automatic SSE fallback. `sse` is an explicit selection
+    /// of the spec's stated POST path — chosen deliberately, never picked up
+    /// after a WebSocket failure.
+    enum Transport {
+        case webSocket
+        case sse
+    }
+    private let transport: Transport
+
     /// Codecs advertised to the server in the authenticate frame.
     ///
     /// PCM only. `CloudAudioPlayer` copies frames as raw Int16 PCM and has no
@@ -36,7 +48,8 @@ final class CloudRouteClient {
         userId: String,
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
-        tokenProvider: CloudTokenProviding? = nil
+        tokenProvider: CloudTokenProviding? = nil,
+        transport: Transport = .webSocket
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
@@ -45,6 +58,7 @@ final class CloudRouteClient {
         // today's trust-on-first-use bearer exactly.
         self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.transport = transport
         if let session {
             self.session = session
         } else {
@@ -84,7 +98,12 @@ final class CloudRouteClient {
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performRoute(request: request, context: context, turn: turn, continuation: continuation)
+                switch self.transport {
+                case .webSocket:
+                    await self.performRoute(request: request, context: context, turn: turn, continuation: continuation)
+                case .sse:
+                    await self.performSSE(request: request, context: context, turn: turn, continuation: continuation)
+                }
             }
             continuation.onTermination = { _ in
                 task.cancel()
@@ -94,26 +113,35 @@ final class CloudRouteClient {
 
     // MARK: - Transport selection
 
-    /// Try WebSocket first; fall back to SSE if the upgrade fails.
+    /// Drives the voice turn over the selected transport.
     ///
-    /// The spec mandates both transports during the transition window:
-    /// WebSocket preferred, SSE fallback. The failed WS upgrade is the
-    /// detection signal — no capability endpoint needed.
+    /// The default is WebSocket (no-fallbacks principle): a failed upgrade is a
+    /// terminal turn failure with a visible error, never a silent degradation.
+    /// The POST transport is reachable only by explicit selection (see
+    /// `Transport`) — it is never entered automatically after a WebSocket
+    /// failure.
     private func performRoute(
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async {
-        let success = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
-        guard !success else { return }
-        // WebSocket failed or not supported — retry via SSE.
-        await performSSE(request: request, context: context, turn: turn, continuation: continuation)
+        switch transport {
+        case .webSocket:
+            // `performWebSocket` always terminates the stream itself — on
+            // success or with a delivered error — so there is nothing left to
+            // fall back to.
+            _ = await performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
+        case .sse:
+            await performSSE(request: request, context: context, turn: turn, continuation: continuation)
+        }
     }
 
     // MARK: - WebSocket implementation
 
-    /// Returns `true` if the WebSocket stream completed successfully.
+    /// Drives the turn over the WebSocket and always terminates the stream —
+    /// either with the turn's events or with a delivered error. The return value
+    /// is always `true`; it is kept for the caller's shape.
     private func performWebSocket(
         request: String,
         context: CloudRouteContext,
@@ -127,7 +155,7 @@ final class CloudRouteClient {
         }
 
         // Build the authentication frame (cloud-assistant.md).
-        guard let authFrame = Self.buildAuthFrame(
+        guard let authFrame = await Self.buildAuthFrame(
             tokenProvider: self.tokenProvider,
             request: request,
             context: context,
@@ -137,12 +165,20 @@ final class CloudRouteClient {
             return true
         }
 
-        let wsTask = session.webSocketTask(for: url)
-        wsTask.timeout.interval = requestTimeoutSeconds
+        var req = URLRequest(url: url)
+        req.timeoutInterval = requestTimeoutSeconds
+        let wsTask = session.webSocketTask(with: req)
 
         do {
-            // Send authentication frame.
-            try await wsTask.send(.string(authFrame))
+            // Send authentication frame. The task's text message is a String,
+            // so the frame is serialized to JSON text here.
+            let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
+            guard let authText = String(data: authJSON, encoding: .utf8) else {
+                continuation.yield(.error(code: "invalid_request", message: ""))
+                continuation.finish()
+                return true
+            }
+            try await wsTask.send(.string(authText))
 
             var sawTerminalEvent = false
 
@@ -155,7 +191,8 @@ final class CloudRouteClient {
                 continuation.finish()
             }
 
-            while case let .message(message)? = try await wsTask.receive() {
+            while true {
+                let message = try await wsTask.receive()
                 // Cancel the timeout on first frame.
                 firstFrameTimeout.cancel()
 
@@ -186,18 +223,17 @@ final class CloudRouteClient {
 
         } catch is CancellationError {
             continuation.finish()
-            return false
+            return true
         } catch {
             if Task.isCancelled {
                 continuation.finish()
-                return false
+                return true
             }
             continuation.yield(
                 .error(code: "connection_lost", message: (error as NSError).localizedDescription)
             )
             continuation.finish()
-            // WebSocket failed — retry with SSE.
-            return false
+            return true
         }
     }
 
@@ -219,8 +255,16 @@ final class CloudRouteClient {
             return
         }
 
-        let bodyData = buildPostBody(request: request, context: context, turn: turn)
-        let credential = tokenProvider.token() ?? ""
+        let bodyData = Self.buildPostBody(request: request, context: context, turn: turn)
+
+        // Fail closed before dialing: a turn with no credential sends nothing
+        // and reports the same `unauthorized` code the server would return, so
+        // the user gets one line either way.
+        guard let credential = await tokenProvider.token() else {
+            continuation.yield(.error(code: "unauthorized", message: ""))
+            continuation.finish()
+            return
+        }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -230,13 +274,30 @@ final class CloudRouteClient {
         req.timeoutInterval = requestTimeoutSeconds
         req.httpBody = bodyData
 
-        // Streaming SSE delegate reads chunks incrementally.
+        // Streaming SSE delegate reads chunks incrementally. The delegate's
+        // session is built from the injected session's configuration so an
+        // injected protocol class (tests) still intercepts the request;
+        // `.default` here would quietly bypass it.
         let sseDelegate = SSESSEStreamingDelegate(
             request: req,
             continuation: continuation,
-            timeout: requestTimeoutSeconds
+            timeout: requestTimeoutSeconds,
+            onUnauthorized: { [tokenProvider] in
+                await tokenProvider.handleUnauthorized(rejectedToken: credential)
+            }
         )
-        let sseSession = URLSession(configuration: .default, delegate: sseDelegate, delegateQueue: nil)
+        // Rebuild the configuration so the injected session's protocol classes
+        // (test stubs) survive: URLSession copies its configuration, and a
+        // configuration without them would dial the network for real.
+        let sseConfig = URLSessionConfiguration.ephemeral
+        sseConfig.protocolClasses = session.configuration.protocolClasses
+        sseConfig.timeoutIntervalForRequest = session.configuration.timeoutIntervalForRequest
+        sseConfig.timeoutIntervalForResource = session.configuration.timeoutIntervalForResource
+        let sseSession = URLSession(
+            configuration: sseConfig,
+            delegate: sseDelegate,
+            delegateQueue: nil
+        )
         let task = sseSession.dataTask(with: req)
         task.resume()
     }
@@ -256,8 +317,8 @@ final class CloudRouteClient {
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
-    ) -> [String: Any]? {
-        guard let credential = tokenProvider.token() else {
+    ) async -> [String: Any]? {
+        guard let credential = await tokenProvider.token() else {
             return nil
         }
         var contextObject: [String: Any] = [
@@ -292,7 +353,7 @@ final class CloudRouteClient {
         if let routeHint = turn.routeHint {
             payload["route_hint"] = [
                 "operation": routeHint.operation,
-                "arguments": CloudRouteRequestBuilder.encodeJSONValues(routeHint.arguments),
+                "arguments": Self.encodeJSONValues(routeHint.arguments),
             ]
         }
         return payload
@@ -345,7 +406,7 @@ final class CloudRouteClient {
         if let routeHint = turn.routeHint {
             payload["route_hint"] = [
                 "operation": routeHint.operation,
-                "arguments": CloudRouteRequestBuilder.encodeJSONValues(routeHint.arguments),
+                "arguments": Self.encodeJSONValues(routeHint.arguments),
             ]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -360,7 +421,9 @@ final class CloudRouteClient {
     ///
     /// The server sends one JSON event per text frame — no multi-line
     /// accumulation needed.
-    private static func parseTextFrame(_ text: String) -> [CloudRouteEvent] {
+    /// Parses one text frame into the events it carries. Internal so the
+    /// parser tests can exercise it directly.
+    static func parseTextFrame(_ text: String) -> [CloudRouteEvent] {
         guard let raw = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         else {
@@ -405,9 +468,15 @@ final class CloudRouteClient {
         }
     }
 
-    private static func parseDone(json: [String: Any]) -> CloudTurnUsage {
+    static func parseDone(json: [String: Any]) -> CloudTurnUsage {
+        // Usage normally arrives nested under `usage`. Older SSE frames put the
+        // two token counts at the top level; accept both so neither transport's
+        // fixtures silently lose their counts.
         guard let usage = json["usage"] as? [String: Any] else {
-            return CloudTurnUsage()
+            return CloudTurnUsage(
+                inputTokens: intValue(json["input_tokens"]),
+                outputTokens: intValue(json["output_tokens"])
+            )
         }
         let inputTokens = intValue(usage["input_tokens"])
         let outputTokens = intValue(usage["output_tokens"])
@@ -523,13 +592,9 @@ struct CloudRouteSSEParser {
             guard let result = DiscoveryResult.parse(json: data) else { return nil }
             return .result(result)
         case "done":
-            // Old SSE path: input/output tokens were non-nullable.
-            // The SSE parser is retained for legacy error handling;
-            // the new WebSocket path uses parseDone() above.
-            let input = intValue(json["input_tokens"]) ?? 0
-            let output = intValue(json["output_tokens"]) ?? 0
-            let usage = CloudTurnUsage(inputTokens: input, outputTokens: output)
-            return .done(usage: usage)
+            // The `done` payload carries usage under `usage` on the wire (see
+            // `parseDone`). Parse it the same way here so both transports agree.
+            return .done(usage: CloudRouteClient.parseDone(json: json))
         case "error":
             guard let code = json["code"] as? String,
                   let message = json["message"] as? String
@@ -545,6 +610,26 @@ struct CloudRouteSSEParser {
         case let i as Int: return i
         case let n as NSNumber: return n.intValue
         default: return nil
+        }
+    }
+}
+
+extension CloudRouteClient {
+    /// Encodes typed JSON values into the `[String: Any]` shape
+    /// `JSONSerialization` accepts.
+    static func encodeJSONValues(_ values: [String: CloudRouteJSONValue]) -> [String: Any] {
+        values.mapValues { encodeJSONValue($0) }
+    }
+
+    static func encodeJSONValue(_ value: CloudRouteJSONValue) -> Any {
+        switch value {
+        case .string(let string): return string
+        case .int(let int): return int
+        case .double(let double): return double
+        case .bool(let bool): return bool
+        case .null: return NSNull()
+        case .object(let object): return encodeJSONValues(object)
+        case .array(let array): return array.map { encodeJSONValue($0) }
         }
     }
 }
@@ -615,16 +700,22 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
     private let deadline: Date
     private var hasError = false
     private var httpResponseStatusCode: Int = 200
+    /// Called once, after the stream ends, when the server refused the
+    /// credential presented for this turn. The client owns the provider, so the
+    /// delegate reports rather than acting.
+    private let onUnauthorized: (@Sendable () async -> Void)?
 
     init(
         request: URLRequest,
         continuation: AsyncStream<CloudRouteEvent>.Continuation,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        onUnauthorized: (@Sendable () async -> Void)? = nil
     ) {
         self.request = request
         self.continuation = continuation
         self.timeout = timeout
         self.deadline = Date().addingTimeInterval(timeout)
+        self.onUnauthorized = onUnauthorized
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -643,23 +734,22 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
         guard Date() < deadline else { return }
         buffer.append(data)
 
-        // Process complete lines.
-        let lines = buffer.split(separator: UInt8(10)) // \n
-        for line in lines {
-            let lineStr = String(bytes: line, encoding: .utf8) ?? ""
+        // Process only complete lines: everything up to and including the last
+        // `\n`. A trailing partial line stays buffered until its newline
+        // arrives. Splitting this way preserves the *empty* lines that delimit
+        // SSE events, which `split` would drop — without them the parser never
+        // dispatches an event.
+        guard let lastNewline = buffer.lastIndex(of: UInt8(10)) else { return }
+        let complete = buffer[buffer.startIndex...lastNewline]
+        buffer = Data(buffer[buffer.index(after: lastNewline)...])
+
+        for rawLine in complete.split(separator: UInt8(10), omittingEmptySubsequences: false) {
+            let lineStr = String(bytes: rawLine, encoding: .utf8) ?? ""
             for event in parser.consume(line: lineStr) {
                 continuation.yield(event)
                 if case .done = event { sawTerminal = true }
                 if case .error = event { sawTerminal = true }
             }
-        }
-
-        // Keep unprocessed bytes.
-        let processedLength = lines.reduce(0) { $0 + $1.count + 1 }
-        if buffer.count > processedLength {
-            buffer = Data(buffer.subdata(with: NSRange(location: processedLength, length: buffer.count - processedLength)))
-        } else {
-            buffer.removeAll()
         }
     }
 
@@ -673,8 +763,19 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
         }
 
         // Handle HTTP error body.
+        if httpResponseStatusCode == 401 {
+            // Report the rejected credential for recovery. Detached: the spec's
+            // `unauthorized` row owes one refresh, and the caller is handed its
+            // error first so recovery can never delay the user's feedback.
+            if let onUnauthorized {
+                Task.detached { await onUnauthorized() }
+            }
+            continuation.yield(CloudRouteClient.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
+            continuation.finish()
+            return
+        }
         if (400...499).contains(httpResponseStatusCode) {
-            continuation.yield(Self.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
+            continuation.yield(CloudRouteClient.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
             continuation.finish()
             return
         }

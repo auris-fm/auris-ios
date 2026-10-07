@@ -169,7 +169,7 @@ final class CloudRouteSSEParserTests: XCTestCase {
         XCTAssertEqual(events.count, 1)
         if case .result(let result) = events.first {
             XCTAssertEqual(result.kind, "episode_results")
-            XCTAssertEqual(result.scope, "current_episode")
+            XCTAssertEqual(result.scope, .currentEpisode)
         } else {
             XCTFail("expected .result")
         }

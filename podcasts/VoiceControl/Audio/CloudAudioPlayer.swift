@@ -46,7 +46,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         runnerRunning = false
         runnerLock.unlock()
-        condition.signal()
+        runnerLock.signal()
     }
 
     /// Drain remaining buffered frames and stop playback.
@@ -55,7 +55,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         drainRemaining = true
         runnerRunning = false
-        condition.signal()
+        runnerLock.signal()
         runnerLock.unlock()
     }
 
@@ -67,7 +67,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         drainRemaining = false
         runnerRunning = false
-        condition.signal()
+        runnerLock.signal()
         runnerLock.unlock()
     }
 
@@ -86,14 +86,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Private
 
     private let bufferLock = NSLock()
-    private let runnerLock = NSLock()
-    private let condition = NSCondition()
+    /// Guards the runner's state. `NSCondition` is used as *both* the mutex and
+    /// the wait primitive: a separate `NSLock` would be held across
+    /// `runnerLock.wait()` — which releases only the condition's own lock — so
+    /// `enqueue`/`finish`/`cancel` could never acquire it and would deadlock.
+    private let runnerLock = NSCondition()
 
     /// Frame buffer (in-order).
     private var buffer: [CloudAudioFrame] = []
 
     /// Runner thread is alive (waiting or running).
     private var runnerRunning = false
+
+    /// The runner has returned from its loop. This is the runner's own final
+    /// report, set as its last act before returning and observed by `deinit`
+    /// under `runnerLock`.
+    private var runnerExited = false
 
     /// Request drain-and-stop (done / error).
     private var drainRemaining = false
@@ -116,10 +124,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
     deinit {
         runnerLock.lock()
         drainRemaining = true
-        runnerRunning = false
-        condition.signal()
+        runnerLock.signal()
+        // Bounded join: wait for the runner to report that it has exited, but
+        // never block teardown indefinitely on a thread that cannot exit. A
+        // timeout here logs and proceeds — a teardown that never returns is
+        // worse than one that leaves the thread to finish on its own.
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while !runnerExited {
+            if !runnerLock.wait(until: deadline) {
+                break
+            }
+        }
+        if !runnerExited {
+            os_log(.error, "CloudAudioPlayer: runner did not exit within timeout")
+        }
         runnerLock.unlock()
-        runnerThread?.wait()
     }
 
     // MARK: - Runner loop
@@ -128,9 +147,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         while true {
             runnerLock.lock()
 
-            // Wait for work or drain request.
+            // Wait for work or drain request. `runnerLock.wait()` releases the
+            // lock while it blocks, so `enqueue`/`finish`/`cancel` can take it.
             while !runnerRunning && !drainRemaining {
-                condition.wait()
+                runnerLock.wait()
             }
 
             // Drain mode: play remaining then stop.
@@ -138,6 +158,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 drainRemaining = false
                 runnerLock.unlock()
                 drainAndStop()
+                // Last act before returning: report the exit and wake any wait.
+                runnerLock.lock()
+                runnerExited = true
+                runnerLock.signal()
+                runnerLock.unlock()
                 return
             }
 
@@ -196,7 +221,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var paused = false
 
     private var hasEnoughFramesToPlay: Bool {
-        buffer.count >= resumeThreshold
+        buffer.count >= Self.resumeThreshold
     }
 
     private func dequeueFrame() -> CloudAudioFrame? {
@@ -237,7 +262,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         if let engine = engine {
             engine.stop()
             engine.reset()
-            engine.nodes.forEach { engine.detach($0) }
+            engine.attachedNodes.forEach { engine.detach($0) }
         }
         playerNode = nil
         self.engine = nil
@@ -249,22 +274,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Frames arrive as raw Int16 PCM in the negotiated codec. This client
         // advertises PCM only (see `CloudRouteClient.supportedCodecs`); there is
         // no Opus decoder in this path, so an Opus frame is not handled here.
-        guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: engine.inputFormat.sampleRate) else {
+        guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: engine.inputNode.inputFormat(forBus: 0).sampleRate) else {
             return
         }
 
         node.play()
-        node.enqueue(pcmBuffer)
+        node.scheduleBuffer(pcmBuffer)
     }
 
-    private func pcmBuffer(from data: Data, sampleRate: Double) -> AVAudioPcmBuffer? {
+    private func pcmBuffer(from data: Data, sampleRate: Double) -> AVAudioPCMBuffer? {
         // Raw Int16 PCM is copied straight into the buffer. Opus would need a
         // decoder, which this path does not have.
         guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                          sampleRate: sampleRate,
                                          channels: AVAudioChannelCount(1),
                                          interleaved: true),
-              let buffer = AVAudioPcmBuffer(format: format,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
                                             frameCapacity: AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)) else {
             return nil
         }

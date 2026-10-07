@@ -276,7 +276,8 @@ final class CloudRouteClientTests: XCTestCase {
             baseURL: "https://cloud.test",
             userId: userId,
             session: session,
-            requestTimeoutSeconds: 15
+            requestTimeoutSeconds: 15,
+            transport: .sse
         )
     }
 
@@ -316,7 +317,8 @@ final class CloudRouteClientLocaleTests: XCTestCase {
         return CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_test",
-            session: URLSession(configuration: config)
+            session: URLSession(configuration: config),
+            transport: .sse
         )
     }
 
@@ -380,7 +382,8 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             baseURL: "https://cloud.test",
             userId: "user_legacy",
             session: URLSession(configuration: config),
-            tokenProvider: provider
+            tokenProvider: provider,
+            transport: .sse
         )
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
@@ -407,7 +410,8 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             baseURL: "https://cloud.test",
             userId: "user_legacy",
             session: URLSession(configuration: config),
-            tokenProvider: provider
+            tokenProvider: provider,
+            transport: .sse
         )
 
         let stream = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0))
@@ -448,7 +452,8 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             baseURL: "https://cloud.test",
             userId: "user_legacy",
             session: URLSession(configuration: config),
-            tokenProvider: provider
+            tokenProvider: provider,
+            transport: .sse
         )
 
         _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }

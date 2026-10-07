@@ -225,7 +225,8 @@ final class CloudTurnContractTests: XCTestCase {
         return CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_test",
-            session: URLSession(configuration: config)
+            session: URLSession(configuration: config),
+            transport: .sse
         )
     }
 }
