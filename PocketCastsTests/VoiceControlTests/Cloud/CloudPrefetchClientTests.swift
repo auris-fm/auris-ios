@@ -260,8 +260,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
             baseURL: "https://cloud.test",
             userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
-            tokenProvider: NoTokenProvider(),
-            transport: .sse
+            tokenProvider: NoTokenProvider()
         )
 
         let outcome = await client.prefetch(episodeId: "ep-1", podcastId: nil)

@@ -40,6 +40,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private var preQuotePositionMs: Int64?
     /// True when this turn paused playback so we can restore on done/error.
     private var didAutoPause = false
+    /// Whether the host was playing when the turn took its hold. The user's own
+    /// pause stays the user's; only a hold that stopped running playback is
+    /// released by the turn's end (Task 12).
+    private var wasPlayingBeforeHold = false
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -64,7 +68,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
-    init(
+    // `nonisolated`: the sink conforms to `CloudAudioPlayer.Delegate`, which is
+    // `@MainActor`, so `CloudRouteSink` is implicitly main-actor-isolated. The
+    // assembly that builds it is not, and construction only stores dependencies
+    // (no main-actor state is touched), so the initializer is safe to call from
+    // any context.
+    nonisolated init(
         clientFactory: @escaping () -> CloudRouteClient = {
             CloudRouteClient(
                 baseURL: CloudConfig.shared.baseUrl,
@@ -89,8 +98,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
-        self.audioPlayer = audioPlayer ?? CloudAudioPlayer()
-        self.audioPlayer.delegate = self
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
@@ -101,6 +108,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
         self.spokenTemplates = spokenTemplates
+        // Assigned last, and its delegate is set after every stored property is
+        // initialized: `audioPlayer.delegate = self` reads `self` to make the
+        // delegate reference, which Swift forbids before the initializer fully
+        // initializes `self`.
+        let resolvedAudioPlayer = audioPlayer ?? CloudAudioPlayer()
+        self.audioPlayer = resolvedAudioPlayer
+        resolvedAudioPlayer.delegate = self
     }
 
     /// Renders a negotiated discovery result (result / no-match). Rendering
@@ -141,9 +155,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
 
-        // Pause for the turn; restore on done/error so audio ducking runs over active playback.
-        _ = playbackSink.pause()
-        didAutoPause = true
+        // Hold the place for the turn: the server decides when the assistant
+        // speaks, so the client does not pause on its own for a turn that may
+        // not produce audio. The hold is only ours to release if it stopped
+        // playback that was already running.
+        wasPlayingBeforeHold = playbackSink.isPlaying
+        if wasPlayingBeforeHold {
+            _ = playbackSink.pause()
+            didAutoPause = true
+        }
 
         turnLoop: for await event in client.route(request: request, context: routeContext, turn: turn) {
             // Superseded mid-stream: stop consuming so this turn cannot execute
@@ -206,10 +226,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     private func restoreTransientAudioState() {
-        if didAutoPause {
+        // Release only a hold we took, and only if it stopped playback the user
+        // was already hearing. A hold that cannot be told apart from the user's
+        // own pause must not be released — resuming here would start audio the
+        // user asked to stop.
+        if didAutoPause && wasPlayingBeforeHold {
             _ = playbackSink.resume()
-            didAutoPause = false
         }
+        didAutoPause = false
+        wasPlayingBeforeHold = false
         // Seek positions are intentionally not rolled back.
     }
 
@@ -221,12 +246,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
+        // Serve the quote. This does not take or release the hold: the quote
+        // plays over playback the server has already ducked, and the turn's end
+        // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            _ = playbackSink.resume()
-            didAutoPause = false
         case "stop_quote":
             guard let restoreMs = preQuotePositionMs else { return }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())

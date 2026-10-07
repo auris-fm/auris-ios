@@ -6,6 +6,8 @@ class PlaybackManagerSink: VoicePlaybackSink {
 
     init(playbackManager: PlaybackManager) { self.playbackManager = playbackManager }
 
+    var isPlaying: Bool { playbackManager.isPlaying }
+
     func pause() -> VoiceResponse {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.pause()

@@ -90,6 +90,52 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1)
     }
 
+    /// A turn must not start audio the user had stopped. With the host already
+    /// paused the client takes no hold, so there is nothing for the turn's end
+    /// to release.
+    func testDoesNotPauseOrResumeWhenHostWasAlreadyPaused() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: token
+            data: {"text":"Answer."}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+        playback.isPlaying = false
+
+        let response = await makeSink().routeToCloud(
+            request: "what was that about",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        XCTAssertEqual(response, .silent)
+        XCTAssertFalse(playback.calls.contains(.pause), "the user's own pause is not ours to retake")
+        XCTAssertFalse(playback.calls.contains(.resume), "the user asked for it to stop; the turn must not undo that")
+    }
+
+    /// The turn's hold must be released when the turn ends without speaking:
+    /// a `done` with no audio restores the playback it stopped, so the user is
+    /// left exactly as they were.
+    func testTurnWithoutAudioRestoresTheHoldItTook() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        )
+
+        _ = await makeSink().routeToCloud(request: "hi", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "the turn takes one hold")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "and releases it on done")
+        XCTAssertEqual(playback.calls.last, .resume)
+    }
+
     func testPlayQuoteAndStopQuoteRestorePosition() async {
         CloudRouteTestURLProtocol.stubSSE(
             """
@@ -117,6 +163,10 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
         XCTAssertTrue(playback.calls.contains(.seekTo(900)))
         XCTAssertTrue(playback.calls.contains(.resume))
+        // The quote does not release the hold early: the server ducked playback
+        // for the "play that" answer, and the turn's end is the release.
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1)
+        XCTAssertEqual(playback.calls.last, .resume)
     }
 
     func testUnknownActionIgnored() async {
@@ -314,6 +364,9 @@ final class CloudRouteSinkTests: XCTestCase {
 }
 
 private final class RecordingPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     enum Call: Equatable {
         case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode
     }

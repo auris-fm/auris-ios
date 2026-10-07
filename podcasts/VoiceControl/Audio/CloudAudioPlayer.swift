@@ -46,7 +46,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         runnerRunning = false
         runnerLock.unlock()
-        condition.signal()
+        runnerLock.signal()
     }
 
     /// Drain remaining buffered frames and stop playback.
@@ -55,7 +55,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         drainRemaining = true
         runnerRunning = false
-        condition.signal()
+        runnerLock.signal()
         runnerLock.unlock()
     }
 
@@ -67,7 +67,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         drainRemaining = false
         runnerRunning = false
-        condition.signal()
+        runnerLock.signal()
         runnerLock.unlock()
     }
 
@@ -86,8 +86,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Private
 
     private let bufferLock = NSLock()
-    private let runnerLock = NSLock()
-    private let condition = NSCondition()
+    /// Guards the runner's state. `NSCondition` is used as *both* the mutex and
+    /// the wait primitive: a separate `NSLock` would be held across
+    /// `runnerLock.wait()` — which releases only the condition's own lock — so
+    /// `enqueue`/`finish`/`cancel` could never acquire it and would deadlock.
+    private let runnerLock = NSCondition()
 
     /// Frame buffer (in-order).
     private var buffer: [CloudAudioFrame] = []
@@ -121,14 +124,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     deinit {
         runnerLock.lock()
         drainRemaining = true
-        condition.signal()
+        runnerLock.signal()
         // Bounded join: wait for the runner to report that it has exited, but
         // never block teardown indefinitely on a thread that cannot exit. A
         // timeout here logs and proceeds — a teardown that never returns is
         // worse than one that leaves the thread to finish on its own.
         let deadline = Date(timeIntervalSinceNow: 2)
         while !runnerExited {
-            if !condition.wait(until: deadline) {
+            if !runnerLock.wait(until: deadline) {
                 break
             }
         }
@@ -144,9 +147,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         while true {
             runnerLock.lock()
 
-            // Wait for work or drain request.
+            // Wait for work or drain request. `runnerLock.wait()` releases the
+            // lock while it blocks, so `enqueue`/`finish`/`cancel` can take it.
             while !runnerRunning && !drainRemaining {
-                condition.wait()
+                runnerLock.wait()
             }
 
             // Drain mode: play remaining then stop.
@@ -157,7 +161,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 // Last act before returning: report the exit and wake any wait.
                 runnerLock.lock()
                 runnerExited = true
-                condition.signal()
+                runnerLock.signal()
                 runnerLock.unlock()
                 return
             }
