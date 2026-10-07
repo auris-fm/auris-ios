@@ -256,7 +256,15 @@ final class CloudRouteClient {
         }
 
         let bodyData = Self.buildPostBody(request: request, context: context, turn: turn)
-        let credential = await tokenProvider.token() ?? ""
+
+        // Fail closed before dialing: a turn with no credential sends nothing
+        // and reports the same `unauthorized` code the server would return, so
+        // the user gets one line either way.
+        guard let credential = await tokenProvider.token() else {
+            continuation.yield(.error(code: "unauthorized", message: ""))
+            continuation.finish()
+            return
+        }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -273,7 +281,10 @@ final class CloudRouteClient {
         let sseDelegate = SSESSEStreamingDelegate(
             request: req,
             continuation: continuation,
-            timeout: requestTimeoutSeconds
+            timeout: requestTimeoutSeconds,
+            onUnauthorized: { [tokenProvider] in
+                await tokenProvider.handleUnauthorized(rejectedToken: credential)
+            }
         )
         // Rebuild the configuration so the injected session's protocol classes
         // (test stubs) survive: URLSession copies its configuration, and a
@@ -689,16 +700,22 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
     private let deadline: Date
     private var hasError = false
     private var httpResponseStatusCode: Int = 200
+    /// Called once, after the stream ends, when the server refused the
+    /// credential presented for this turn. The client owns the provider, so the
+    /// delegate reports rather than acting.
+    private let onUnauthorized: (@Sendable () async -> Void)?
 
     init(
         request: URLRequest,
         continuation: AsyncStream<CloudRouteEvent>.Continuation,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        onUnauthorized: (@Sendable () async -> Void)? = nil
     ) {
         self.request = request
         self.continuation = continuation
         self.timeout = timeout
         self.deadline = Date().addingTimeInterval(timeout)
+        self.onUnauthorized = onUnauthorized
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -746,6 +763,17 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
         }
 
         // Handle HTTP error body.
+        if httpResponseStatusCode == 401 {
+            // Report the rejected credential for recovery. Detached: the spec's
+            // `unauthorized` row owes one refresh, and the caller is handed its
+            // error first so recovery can never delay the user's feedback.
+            if let onUnauthorized {
+                Task.detached { await onUnauthorized() }
+            }
+            continuation.yield(CloudRouteClient.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
+            continuation.finish()
+            return
+        }
         if (400...499).contains(httpResponseStatusCode) {
             continuation.yield(CloudRouteClient.preStreamError(status: httpResponseStatusCode, body: Data(buffer)))
             continuation.finish()
