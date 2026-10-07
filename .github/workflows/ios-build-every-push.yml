@@ -42,6 +42,15 @@ jobs:
           xcodebuild -version
           xcrun simctl list runtimes
 
+      # The Staging scheme embeds an Apple Watch app, so **watchOS** is required
+      # as well as iOS. A first local build failed on exactly this, on a ~4 GB
+      # platform the runner will not have preinstalled. Install both up front so
+      # the check fails for the code rather than for a missing platform.
+      - name: Ensure iOS and watchOS platforms
+        run: |
+          xcodebuild -downloadPlatform iOS || true
+          xcodebuild -downloadPlatform watchOS || true
+
       # The app cannot build without LocalApiCredentials.swift; this Makefile
       # target writes an empty one (the repo's `external_contributor` path).
       - name: Generate credentials stub
