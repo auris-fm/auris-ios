@@ -80,6 +80,8 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
+                audioPlayer: CloudAudioPlayer(),
+                playbackManager: playbackManager,
                 playbackSink: playbackSink,
                 fingerprintMapper: FingerprintTimingManager.shared,
                 playbackPositionMs: {

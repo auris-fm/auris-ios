@@ -43,6 +43,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         AsrIntentBenchmarkHarness.runIfRequested()
         #endif
 
+        // Optional prefetch hint on playback start (edge-particle Item 5).
+        // Off by default: the worker-side handler ships separately (Item 6) and
+        // prefetch is never required for a turn to work.
+        if FeatureFlag.cloudContextPrefetch.enabled {
+            CloudPrefetchHook.shared.start()
+        }
+
         setupSecrets()
         addAnalyticsObservers()
         setupAnalytics()

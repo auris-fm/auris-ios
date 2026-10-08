@@ -65,6 +65,19 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable synced transcripts with playback timing
     case syncedTranscripts
 
+    /// Fire the optional `POST /api/v1/cloud/context/prefetch` hint on playback
+    /// start. Default off: the worker-side prefetch handler ships separately
+    /// (edge-particle plan Item 6), and prefetch is never required for a turn.
+    case cloudContextPrefetch
+
+    /// Present Auris-issued access tokens instead of the legacy trust-on-first-use
+    /// bearer. Default **off**: the credential switch must be deferrable
+    /// independently of the gateway being configured, because a configured
+    /// origin is what makes the assistant work at all (so coupling the two would
+    /// switch every configured client to Auris tokens the moment this shipped).
+    /// Flip it when clients are pointed at the edge.
+    case cloudEdgeTokens
+
     /// Encourage Account Creation
     case encourageAccountCreation
 
@@ -327,6 +340,10 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .syncedTranscripts:
             true
+        case .cloudContextPrefetch:
+            false
+        case .cloudEdgeTokens:
+            false
         case .libroFm:
             false
         case .encourageAccountCreation:

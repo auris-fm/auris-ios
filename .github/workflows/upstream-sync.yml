@@ -6,6 +6,13 @@ on:
     # preflight no-ops when already synced.
     - cron: '0 10 * * 1'
   workflow_dispatch:
+  # Run the script tests on PRs too: on the weekly schedule alone a regression in
+  # .github/scripts/ could only surface as a failing sync, which is how the
+  # `&&`-chain abort stayed invisible. Paths are limited so unrelated PRs skip it.
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/upstream-sync.yml'
 
 permissions:
   contents: write
@@ -16,7 +23,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Test-only, and the only job PRs run. Read-only: a PR must never reach the
+  # sync job below, which pushes branches and opens PRs and would fail on a fork's
+  # token rather than on the tests (review finding).
+  script-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run sync script tests
+        run: |
+          chmod +x ./.github/scripts/tests/*.sh
+          for t in ./.github/scripts/tests/*.sh; do
+            echo "== $t"
+            bash "$t"
+          done
+
   sync:
+    # Never on a PR (it pushes branches and opens PRs), and never unless the
+    # script tests passed — otherwise a regression in .github/scripts/ could still
+    # reach prepare/finalize on the weekly schedule.
+    if: github.event_name != 'pull_request'
+    needs: script-tests
     runs-on: ubuntu-latest
     env:
       UPSTREAM_REPO: Automattic/pocket-casts-ios

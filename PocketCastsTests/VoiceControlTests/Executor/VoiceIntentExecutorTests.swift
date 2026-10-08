@@ -154,9 +154,16 @@ final class VoiceIntentExecutorTests: XCTestCase {
         }
     }
 
-    func test_execute_seekRelative_forwardsDelta() async {
-        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: 30))
+    func test_execute_seekRelative_withDelta_forwardsDeltaAndDirection() async {
+        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: 30, direction: .forward))
         XCTAssertEqual(mockPlaybackSink.lastSeekRelativeDelta, 30)
+        XCTAssertEqual(mockPlaybackSink.lastSeekRelativeDirection, .forward)
+    }
+
+    func test_execute_seekRelative_directionOnly() async {
+        _ = await executor.execute(PlaybackIntent.seekRelative(deltaSeconds: nil, direction: .backward))
+        XCTAssertNil(mockPlaybackSink.lastSeekRelativeDelta)
+        XCTAssertEqual(mockPlaybackSink.lastSeekRelativeDirection, .backward)
     }
 
     func test_execute_setSpeed_forwardsSpeed() async {
@@ -280,15 +287,27 @@ final class VoiceIntentExecutorTests: XCTestCase {
 // MARK: - Mock Sinks
 
 private final class MockPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     var pauseCalled = false
     var lastSeekRelativeDelta: Int?
+    var lastSeekRelativeDirection: SeekDirection = .forward
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
     func resume() -> VoiceResponse { .silent }
-    func seekRelative(deltaSeconds: Int) -> VoiceResponse { lastSeekRelativeDelta = deltaSeconds; return .silent }
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
+        lastSeekRelativeDelta = deltaSeconds
+        lastSeekRelativeDirection = direction
+        return .silent
+    }
     func seekTo(positionSeconds: Int) -> VoiceResponse { lastSeekToPosition = positionSeconds; return .silent }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        lastSeekToPosition = positionSeconds
+        return .silent
+    }
     func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
 }
 

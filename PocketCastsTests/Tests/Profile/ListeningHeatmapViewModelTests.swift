@@ -85,18 +85,18 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
 
     // MARK: - load() end-to-end with injected DataManager
 
-    func testLoad_emptyData_setsHasDataFalseAndAllIntensityZero() {
+    func testLoad_emptyData_setsHasDataFalseAndAllIntensityZero() async {
         let dataManagerMock = DataManagerMock()
         dataManagerMock.dailyListeningTimeToReturn = [:]
         let viewModel = makeViewModel(dataManager: dataManagerMock, today: date(2026, 4, 20))
 
-        waitForLoad(viewModel)
+        await waitForLoad(viewModel)
 
         XCTAssertEqual(viewModel.weeks.count, 105)
         XCTAssertTrue(viewModel.weeks.flatMap { $0 }.allSatisfy { $0.intensity == .none })
     }
 
-    func testLoad_withData_computesIntensitiesFromQuartiles() {
+    func testLoad_withData_computesIntensitiesFromQuartiles() async {
         let dataManagerMock = DataManagerMock()
         // 4 sorted values: [100, 300, 600, 1200].
         // thresholds: sorted[1]=300, sorted[2]=600, sorted[3]=1200.
@@ -109,7 +109,7 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         ]
         let viewModel = makeViewModel(dataManager: dataManagerMock, today: date(2026, 4, 20))
 
-        waitForLoad(viewModel)
+        await waitForLoad(viewModel)
 
         let bySeconds = Dictionary(uniqueKeysWithValues: viewModel.weeks
             .flatMap { $0 }
@@ -150,13 +150,32 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         return formatter.string(from: date)
     }
 
-    private func waitForLoad(_ viewModel: ListeningHeatmapViewModel) {
+    /// Wait for `load()` to publish weeks.
+    ///
+    /// The timeout is generous on purpose: a 2-second budget was the whole
+    /// assertion on a slower machine — the expectation timed out, and the
+    /// assertions then ran against the *unloaded* state, which reads as a data
+    /// bug rather than as a slow import. A fixture that fails only for being
+    /// slow is a flake, so it waits properly and reports the load that did not
+    /// arrive rather than the values that followed from it.
+    private func waitForLoad(
+        _ viewModel: ListeningHeatmapViewModel,
+        timeout: TimeInterval = 30
+    ) async {
         let expectation = XCTestExpectation(description: "weeks published")
         viewModel.$weeks
             .dropFirst()
             .sink { _ in expectation.fulfill() }
             .store(in: &cancellables)
         viewModel.load()
-        wait(for: [expectation], timeout: 2.0)
+        // `await fulfillment` yields to the run loop instead of blocking the
+        // calling thread. `XCTWaiter().wait` blocks, and `load()` publishes its
+        // result on the *main* queue — so a blocking wait on the main thread can
+        // never be satisfied: it passed locally (fast enough to interleave) and
+        // timed out on a loaded CI runner.
+        // No `file`/`line` forwarding: `fulfillment(of:timeout:)` does not take
+        // them, and unused parameters would attribute a timeout to this helper
+        // rather than to the test that called it.
+        await fulfillment(of: [expectation], timeout: timeout)
     }
 }

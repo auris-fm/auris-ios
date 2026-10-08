@@ -18,6 +18,9 @@ final class CloudRouteTestURLProtocol: URLProtocol {
 
     override func startLoading() {
         let bodyData = Self.readBody(from: request)
+        Self.lock.lock()
+        Self._requestCount += 1
+        Self.lock.unlock()
         Self.onRequest?(request, bodyData)
 
         let handler: ((URLRequest) throws -> CloudRouteTestStub)?
@@ -93,10 +96,35 @@ final class CloudRouteTestURLProtocol: URLProtocol {
         lock.unlock()
     }
 
+    /// Responds with a non-SSE JSON body (e.g. the prefetch 202).
+    static func stubJSON(status: Int, body: String) {
+        let data = Data(body.utf8)
+        lock.lock()
+        _requestCount = 0
+        requestHandler = { _ in
+            .complete(
+                status: status,
+                headers: ["Content-Type": "application/json"],
+                body: data
+            )
+        }
+        lock.unlock()
+    }
+
+    /// Number of requests handled since the last `stubJSON`/`reset`.
+    static var requestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _requestCount
+    }
+
+    private static var _requestCount = 0
+
     static func reset() {
         lock.lock()
         requestHandler = nil
         onRequest = nil
+        _requestCount = 0
         lock.unlock()
     }
 
