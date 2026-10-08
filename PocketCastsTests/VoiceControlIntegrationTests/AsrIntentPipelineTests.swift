@@ -8,7 +8,9 @@ final class AsrIntentPipelineTests: XCTestCase {
     /// `WhisperCppBackendTests.test_ensureReady_missingModelPathFails`). The
     /// environment supplies the rest of the pipeline below.
     func test_backendInitialization_reportsFailureForMissingModel() async {
-        let backend = WhisperCppBackend(modelPath: "/tmp/auris-does-not-exist-\(UUID().uuidString)")
+        // See `WhisperCppBackendTests`: an unwritable parent keeps the model
+        // download from running at all, so the contract is asserted offline.
+        let backend = WhisperCppBackend(modelPath: "/dev/null/auris-missing-\(UUID().uuidString)/model.bin")
         let result = await backend.ensureReady()
         switch result {
         case .success:

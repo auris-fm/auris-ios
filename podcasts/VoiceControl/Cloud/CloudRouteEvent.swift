@@ -52,8 +52,11 @@ struct CloudTurnUsage: Equatable {
     let inputTokens: Int?
     /// Model output tokens; `nil` when the provider completed without reporting.
     let outputTokens: Int?
-    /// Speech synthesis usage; `nil` when the provider failed before reporting
-    /// an amount. `amount` may also be zero (explicitly no usage).
+    /// Speech synthesis usage. `nil` when the frame carried no usable record —
+    /// an absent `speech` object, or one with no unit (see
+    /// `CloudSpeechUsage.init?`). A provider failure is not nil: the server
+    /// reports it as `amount: null` with `unit: "unavailable"`, which is
+    /// information and is kept. `amount` may also be zero (explicitly no usage).
     let speech: CloudSpeechUsage?
 
     init(inputTokens: Int? = nil, outputTokens: Int? = nil, speech: CloudSpeechUsage? = nil) {

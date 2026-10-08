@@ -21,7 +21,13 @@ final class WhisperCppBackendTests: XCTestCase {
     /// real model download, making a unit test network-dependent. The contract
     /// asserted here is the one the shipped configuration has.
     func test_ensureReady_missingModelPathFails() async {
-        let backend = WhisperCppBackend(modelPath: "/tmp/auris-does-not-exist-\(UUID().uuidString)")
+        // A path that cannot exist and cannot be created: `ensureReady`
+        // downloads when the model file is absent, and `ModelDownloader` writes
+        // into the path's *parent*, so a path in `/tmp` would fetch the real
+        // model (~190 MB) and take seconds to do it — the network dependency
+        // this test is supposed to have shed. Under `/dev/null` there is
+        // nowhere to write, so the failure is immediate and local.
+        let backend = WhisperCppBackend(modelPath: "/dev/null/auris-missing-\(UUID().uuidString)/model.bin")
         let result = await backend.ensureReady()
         switch result {
         case .success:

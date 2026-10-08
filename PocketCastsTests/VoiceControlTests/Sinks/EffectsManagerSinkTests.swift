@@ -8,24 +8,28 @@ final class EffectsManagerSinkTests: XCTestCase {
         XCTAssertNotNil(sink)
     }
 
+    /// The speed applied is the contract; the wording is the template's. These
+    /// two asserted the rendered number, which is how a locale or a trailing
+    /// zero turns into a failing test that has nothing to do with the behaviour.
     func test_setSpeed_returnsSpoken() {
         let sink = EffectsManagerSink(playbackManager: .shared)
         let response = sink.setSpeed(1.5)
-        if case .spoken(let text) = response {
-            XCTAssertTrue(text.contains("1.5"))
-        } else {
-            XCTFail("Expected spoken response")
+        guard case .spoken(let text) = response else {
+            return XCTFail("Expected spoken response, got \(response)")
         }
+        XCTAssertFalse(text.isEmpty)
+        XCTAssertEqual(PlaybackManager.shared.effects().playbackSpeed, 1.5)
     }
 
     func test_setSpeed_clampsToMinimum() {
         let sink = EffectsManagerSink(playbackManager: .shared)
         let response = sink.setSpeed(0.1)
-        if case .spoken(let text) = response {
-            XCTAssertTrue(text.contains("0.5"))
-        } else {
-            XCTFail("Expected spoken response")
+        guard case .spoken(let text) = response else {
+            return XCTFail("Expected spoken response, got \(response)")
         }
+        XCTAssertFalse(text.isEmpty)
+        XCTAssertEqual(PlaybackManager.shared.effects().playbackSpeed, 0.5,
+                       "a speed below the minimum is clamped to it")
     }
 
     /// The clamp is the contract; the spoken wording is a template and its
