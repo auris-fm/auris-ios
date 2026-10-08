@@ -151,8 +151,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
 
-    /// Teardown only: the runner returns and `deinit` can join it. Turn ends
-    /// (`finish`) must not set this — the player is reused across turns.
+    /// Teardown only, and reachable in principle rather than in practice: the
+    /// runner thread holds the player for the app session, so `deinit` does not
+    /// run. Turn ends (`finish`) must never set this — the player is reused.
     private var shutdownRequested = false
 
     /// Runner thread.
@@ -170,10 +171,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerThread?.start()
     }
 
+    /// Lifetime: the player is built once per app session
+    /// (`VoiceControlAssembly`) and the runner thread retains it, so this
+    /// deinitializer does not run in practice and the shutdown path below
+    /// exists for completeness rather than as live teardown. The runner must
+    /// therefore survive a drain — `finish()` ends a turn, not the thread, and
+    /// returning there is what made every turn after the first silent.
     deinit {
         runnerLock.lock()
-        // The player lives for the app session, so the runner must survive a
-        // drain (`finish()` ends a turn, not the thread). Only teardown stops it.
         shutdownRequested = true
         runnerRunning = true
         runnerLock.signal()

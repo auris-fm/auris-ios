@@ -196,17 +196,13 @@ enum SlotRepair {
         var out = params
         for (key, value) in extractNumericSlots(tool: tool, action: action, utterance: utterance) {
             if allowed.contains(key) {
-                // The utterance's own sign wins when it states one: "rewind
-                // fifteen seconds" with a produced `delta_seconds = 1` must
-                // repair to -15, not +15 — otherwise the user asks to go back
-                // and hears a forward skip. The model's sign is used only when
-                // the utterance states no direction of its own.
-                if key == "delta_seconds",
-                   let spokenInt = value as? Int {
-                    out[key] = spokenInt
-                } else {
-                    out[key] = value
-                }
+                // `extractNumericSlots` returns the spoken value with the sign
+                // the utterance states ("rewind fifteen seconds" ⇒ -15), so the
+                // utterance is authoritative whenever it yields a number; the
+                // model's own sign is not consulted here. A direction-only
+                // utterance (no amount) is handled in
+                // `fillSeekRelativeDefault`, which has no number to work from.
+                out[key] = value
             }
         }
         return out
@@ -277,6 +273,22 @@ enum SlotRepair {
                 out.removeValue(forKey: "delta_seconds")
             }
         }
+        if let delta = out["delta_seconds"] as? Int, delta != 0 {
+            // A stated direction with no stated amount: "go back" with a
+            // produced `+30` must seek backward the model's amount, not forward
+            // — the direction is the one thing the utterance states, and the
+            // magnitude is the one thing the model produced. Consulting the
+            // utterance only when it also names an amount left this case
+            // seeking the wrong way.
+            if let utteranceDirection = extractDirection(utterance) {
+                let negative = utteranceDirection == "backward"
+                if (delta < 0) != negative {
+                    out["delta_seconds"] = -delta
+                }
+            }
+            return out
+        }
+
         if out["delta_seconds"] != nil { return out }
 
         // Never overwrite an existing direction with a direction derived from

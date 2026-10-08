@@ -244,6 +244,32 @@ final class SlotRepairTests: XCTestCase {
                        "a forward request must repair forward")
     }
 
+    func test_repair_seekRelative_directionOnlyUtteranceFlipsAProducedPositiveDelta() {
+        // "go back" states a direction and no amount: the model's magnitude is
+        // kept and the utterance's direction decides the sign. Before this, the
+        // utterance was consulted only when it also named an amount, so this
+        // repaired forward — the user asked to go back and heard a skip ahead.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=30)]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -30,
+                       "a direction-only backward request must seek backward")
+    }
+
+    func test_repair_seekRelative_directionOnlyUtteranceLeavesAProducedNegativeDeltaAlone() {
+        // The same rule must not flip a delta that already agrees.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-30)]<|tool_call_end|>",
+            utterance: "go back",
+            tool: "playback",
+            action: "seek_relative"
+        )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -30)
+    }
+
     func test_repair_seekRelative_producedOutOfRangeReturnsNull() {
         // A hallucinated two-hour delta with no spoken support must be rejected.
         let repaired = SlotRepair.repair(
