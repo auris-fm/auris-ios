@@ -35,6 +35,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Audio player for cloud-delivered speech.
     private let audioPlayer: CloudAudioPlayer
+    private let playbackManager: PlaybackManager?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -44,6 +45,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// pause stays the user's; only a hold that stopped running playback is
     /// released by the turn's end (Task 12).
     private var wasPlayingBeforeHold = false
+
+    /// Set when the turn has completed and the player is draining: the hold is
+    /// released from `audioPlayerDidStop` rather than at `done`.
+    private var restoreHeldForPlayerDrain = false
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -85,6 +90,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
         audioPlayer: CloudAudioPlayer? = nil,
+        playbackManager: PlaybackManager? = nil,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
@@ -98,6 +104,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
+        self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
@@ -207,7 +214,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     inputTokens: usage.inputTokens,
                     outputTokens: usage.outputTokens
                 )
-                restoreTransientAudioState()
+                // Restore playback only once the answer has stopped coming out
+                // of the speaker: `done` means the server has finished sending,
+                // not that the client has finished playing, so restoring here
+                // would resume the episode under the answer's tail. With nothing
+                // left to play the drain is a no-op and the restore is immediate.
+                if audioPlayer.hasPendingAudio {
+                    restoreHeldForPlayerDrain = true
+                } else {
+                    restoreTransientAudioState()
+                }
+                audioPlayer.finish()
                 return .silent
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
@@ -273,6 +290,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let restoreMs = preQuotePositionMs else { return }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
+        case "seek_relative":
+            // Per the recovery contract (PR 59, cloud-seek-relative):
+            // Capture previous position so "go back to where I was" works
+            // after a relative seek.
+            capturePreActionPositionForRelativeSeek()
+            // Zero delta is treated as "no stated amount" — the sink
+            // applies its interval in the request's direction.
+            let delta = params["delta_seconds"]?.int64Value
+                .flatMap { Int($0) == 0 ? nil : Int($0) }
+            // The parameter is a `CloudRouteJSONValue`; take its string. Typing
+            // this as `String?` rather than `Any?` makes the compiler reject the
+            // next call site that passes the wrapper where a string is wanted.
+            let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
+            _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
         case "pause":
             _ = playbackSink.pause()
             didAutoPause = false
@@ -293,12 +324,38 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
     }
 
+    /// Capture the current playback position before a relative seek so that a
+    /// subsequent "go back to where I was" restores the correct place. The
+    /// recovery contract (PR 59, cloud-seek-relative) requires this for all
+    /// relative seeks — not just `seek_to` / `play_quote`.
+    private func capturePreActionPositionForRelativeSeek() {
+        let previous = playbackPositionMs()
+        preQuotePositionMs = previous
+    }
+
+    /// Resolve seek direction when a relative seek arrives.
+    ///
+    /// Per the recovery contract: the delta's sign is authoritative when a
+    /// delta is present; `direction` decides only when it is absent. A request
+    /// that stated neither takes the app's default forward interval.
+    private func seekDirectionOf(delta: Int?, declared: String?) -> SeekDirection {
+        if let delta {
+            return delta < 0 ? .backward : .forward
+        }
+        if declared == "backward" { return .backward }
+        if declared == "forward" { return .forward }
+        return .forward // default: app's configurable interval
+    }
+
     private func seekToReference(_ referenceMs: Int64) {
         let referenceSeconds = Double(referenceMs) / 1000.0
         let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
             ?? referenceSeconds
-        let clamped = max(0, Int(playbackSeconds.rounded()))
-        _ = playbackSink.seekTo(positionSeconds: clamped)
+        let seconds = Int(playbackSeconds.rounded())
+        // Negative positionSeconds is an offset back from the episode end.
+        // Use the duration-aware overload so the sink resolves and bounds it.
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        _ = playbackSink.seekTo(positionSeconds: seconds, episodeDurationSeconds: durationSeconds)
     }
 }
 
@@ -315,5 +372,15 @@ extension CloudRouteSink {
         // Audio paused due to buffer underrun — the sink doesn't need
         // to react; the player will resume automatically when new
         // frames arrive.
+    }
+
+    func audioPlayerDidStop() {
+        // The player has drained its buffer and stopped output. This is when a
+        // hold taken for the turn may be released, so the answer is not played
+        // over the resumed episode, and the turn's held state stays consistent
+        // even though the sink has already returned to its caller.
+        guard restoreHeldForPlayerDrain else { return }
+        restoreHeldForPlayerDrain = false
+        restoreTransientAudioState()
     }
 }

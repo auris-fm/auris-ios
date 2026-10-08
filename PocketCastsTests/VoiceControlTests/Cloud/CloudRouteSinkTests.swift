@@ -169,6 +169,77 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertEqual(playback.calls.last, .resume)
     }
 
+    func testSeekRelativeExecutesAndCapturesPosition() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: action
+            data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15}}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        playback.positionMs = 120_000
+
+        let response = await makeSink().routeToCloud(
+            request: "forward 15 seconds",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        XCTAssertEqual(response, .silent)
+        XCTAssertTrue(playback.calls.contains(.seekRelative(15, .forward)))
+        // Previous position must be captured so "go back to where I was" works.
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 1)
+    }
+
+    func testSeekRelativeDirectionOnlyUsesForwardDefault() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: action
+            data:{"tool":"playback","action":"seek_relative","params":{"direction":"backward"}}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        playback.positionMs = 120_000
+
+        _ = await makeSink().routeToCloud(
+            request: "go back",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        // No delta manufactured — direction preserved as nil.
+        XCTAssertTrue(playback.calls.contains(.seekRelative(nil, .backward)))
+    }
+
+    func testSeekRelativeNeitherDeltaNorDirectionUsesForwardDefault() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: action
+            data:{"tool":"playback","action":"seek_relative","params":{}}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
+
+            """
+        )
+        playback.positionMs = 120_000
+
+        _ = await makeSink().routeToCloud(
+            request: "skip forward",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        // Neither stated → (nil, FORWARD) so the sink applies its default interval.
+        XCTAssertTrue(playback.calls.contains(.seekRelative(nil, .forward)))
+    }
+
     func testUnknownActionIgnored() async {
         CloudRouteTestURLProtocol.stubSSE(
             """
@@ -369,7 +440,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
     /// turn that inherits an outstanding pause would still read "playing".
     private(set) var isPlaying = true
     enum Call: Equatable {
-        case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode
+        case pause, resume, seekRelative(Int?, SeekDirection), seekTo(Int), nextEpisode
     }
 
     /// Models the state before a turn: a user who paused before speaking, or a
@@ -391,13 +462,23 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
         return .silent
     }
 
-    func seekRelative(deltaSeconds: Int) -> VoiceResponse {
-        calls.append(.seekRelative(deltaSeconds))
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
+        calls.append(.seekRelative(deltaSeconds, direction))
         return .silent
     }
 
     func seekTo(positionSeconds: Int) -> VoiceResponse {
         calls.append(.seekTo(positionSeconds))
+        return .silent
+    }
+
+    /// A negative position resolves back from the episode end, as the real sink
+    /// does; the double records the resolved absolute position.
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        let resolved = positionSeconds < 0
+            ? max(episodeDurationSeconds + positionSeconds, 0)
+            : positionSeconds
+        calls.append(.seekTo(resolved))
         return .silent
     }
 

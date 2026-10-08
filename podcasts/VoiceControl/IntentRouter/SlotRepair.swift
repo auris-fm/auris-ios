@@ -21,7 +21,11 @@ enum SlotRepair {
         params = repairStringParams(tool: tool, action: action, params: params, utterance: utterance)
         params = sanitizeParams(tool: tool, action: action, params: params)
         params = dropNoneLike(params)
-        params = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance)
+        guard let finalParams = fillSeekRelativeDefault(tool: tool, action: action, params: params, utterance: utterance) else {
+            // Unsupported spoken amount — no repaired call.
+            return nil
+        }
+        params = finalParams
 
         var arguments = params
         if !action.isEmpty {
@@ -57,7 +61,11 @@ enum SlotRepair {
         "playback": [
             "pause": [],
             "resume": [],
-            "seek_relative": ["delta_seconds"],
+            // `direction` is accepted when the model emits it for a
+            // direction-only request, but it is not part of the trained tool
+            // schema (ToolSchema), so the utterance is the only guaranteed
+            // source of direction.
+            "seek_relative": ["delta_seconds", "direction"],
             "seek_to": ["position_seconds"],
             "next_episode": [],
         ],
@@ -188,6 +196,12 @@ enum SlotRepair {
         var out = params
         for (key, value) in extractNumericSlots(tool: tool, action: action, utterance: utterance) {
             if allowed.contains(key) {
+                // `extractNumericSlots` returns the spoken value with the sign
+                // the utterance states ("rewind fifteen seconds" ⇒ -15), so the
+                // utterance is authoritative whenever it yields a number; the
+                // model's own sign is not consulted here. A direction-only
+                // utterance (no amount) is handled in
+                // `fillSeekRelativeDefault`, which has no number to work from.
                 out[key] = value
             }
         }
@@ -207,20 +221,114 @@ enum SlotRepair {
         return out
     }
 
-    /// When the model omits delta_seconds, fill a signed ±30s default from wording.
+    /// Fill genuinely absent defaults for `seek_relative`.
+    ///
+    /// Per the recovery contract (PR 59, cloud-seek-relative):
+    /// - The mapper must NOT manufacture a delta for a direction-only call.
+    ///   The sink owns the app's configurable seek interval and applies it in
+    ///   the request's direction.
+    /// - A direction the utterance states decides the sign. When the utterance
+    ///   also states an amount, `repairNumericParams` has already replaced the
+    ///   magnitude with the spoken one ("rewind fifteen seconds" ⇒ -15). When it
+    ///   states a direction alone, the model's magnitude is kept and only the
+    ///   sign is corrected ("go back" with a produced `+30` ⇒ `-30`).
+    /// - A produced `0` is not a stated amount — when no spoken amount
+    ///   appears in the utterance, zero is dropped so the sink receives
+    ///   `null` and applies its interval in the stated direction.
+    /// - The mapper may fill direction when neither delta nor direction is
+    ///   stated — defaults to forward (the only defaulting case).
+    /// - Returns nil when the resulting amount exceeds ±1 hour (the contract
+    ///   constraint), producing no repaired call at all. Checks both the
+    ///   utterance-extracted amount and any produced nonzero delta.
     private static func fillSeekRelativeDefault(
         tool: String,
         action: String,
         params: [String: Any],
         utterance: String
-    ) -> [String: Any] {
+    ) -> [String: Any]? {
         guard tool == "playback", action == "seek_relative" else { return params }
-        if params["delta_seconds"] != nil { return params }
+
+        // Range guard on the resulting amount: a hallucinated two-hour delta
+        // or an out-of-range spoken amount must both be rejected.
+        if let resultingDelta = params["delta_seconds"] as? Int, resultingDelta != 0 {
+            if !isValidDelta(resultingDelta) {
+                return nil
+            }
+        }
+
+        // Never manufacture a delta: the sink owns the app's default interval
+        // and applies it in the request's direction.
+        // A produced `0` is not a stated amount. When the utterance states
+        // no amount, drop the zero so the sink receives `null` and applies
+        // its interval. When the utterance states an amount, the repair step
+        // (run earlier) has already replaced the zero with the spoken value.
         var out = params
-        let lower = utterance.lowercased()
-        let isBack = backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil
-        out["delta_seconds"] = isBack ? -defaultSkipSeconds : defaultSkipSeconds
+        if let delta = params["delta_seconds"] as? Int, delta == 0 {
+            if let spokenDelta = extractDeltaSeconds(utterance) {
+                // Utterance states an amount — check it is within range.
+                if !isValidDelta(spokenDelta) {
+                    // Unsupported spoken amount — no repaired call.
+                    return nil
+                }
+                // If utterance states an amount, keep the repaired value from the
+                // earlier repair step (it replaced 0 with the spoken signed amount).
+            } else {
+                // No spoken amount — drop the zero as unstated.
+                out.removeValue(forKey: "delta_seconds")
+            }
+        }
+        if let delta = out["delta_seconds"] as? Int, delta != 0 {
+            // A stated direction with no stated amount: "go back" with a
+            // produced `+30` must seek backward the model's amount, not forward
+            // — the direction is the one thing the utterance states, and the
+            // magnitude is the one thing the model produced. Consulting the
+            // utterance only when it also names an amount left this case
+            // seeking the wrong way.
+            if let utteranceDirection = extractDirection(utterance) {
+                let negative = utteranceDirection == "backward"
+                if (delta < 0) != negative {
+                    out["delta_seconds"] = -delta
+                }
+            }
+            return out
+        }
+
+        if out["delta_seconds"] != nil { return out }
+
+        // Never overwrite an existing direction with a direction derived from
+        // the utterance text — the model's intent is authoritative.
+        if out["direction"] != nil { return out }
+        // Extract direction from the utterance when the model omitted it.
+        // "go back" ⇒ BACKWARD, "skip ahead" ⇒ FORWARD, etc.
+        // This is the fixture's bare-zero case: dropping zero leaves an
+        // empty call and the utterance-stated direction must survive.
+        // Ambiguous words like "skip" alone do not produce a direction; the
+        // mapper fills the forward default when the sink needs one.
+        if let utteranceDirection = extractDirection(utterance) {
+            out["direction"] = utteranceDirection
+            return out
+        }
+        // Neither delta nor direction stated — do not fill a default here.
+        // The mapper adds forward only when it needs one for the sink.
         return out
+    }
+
+    /// Check if a delta value is within the contract constraint (±1 hour).
+    private static func isValidDelta(_ seconds: Int) -> Bool {
+        return seconds >= -3600 && seconds <= 3600
+    }
+
+    /// Extract direction from utterance text.
+    /// Returns "backward" for backward cues, "forward" for forward cues.
+    private static func extractDirection(_ utterance: String) -> String? {
+        let lower = utterance.lowercased()
+        if backRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
+            return "backward"
+        }
+        if aheadRegex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
+            return "forward"
+        }
+        return nil
     }
 
     private static func extractDeltaSeconds(_ utterance: String) -> Int? {
@@ -249,9 +357,14 @@ enum SlotRepair {
             guard let value = parseNumberPhrase(numberText) else { return }
             let afterNumber = match.range.location + match.range.length
             let unitSearch = NSRange(location: afterNumber, length: utterance.utf16.count - afterNumber)
+            // unitRegex has a leading \s* to allow a single space between
+            // number and unit. The whitespace offset must be 0 or 1 to
+            // prevent binding unrelated numbers to later units.
+            // `NSRange.location` is already `Int`, so no cast is needed and the
+            // offset cannot be negative for a match inside `unitSearch`.
             guard let unitMatch = unitRegex.firstMatch(in: utterance, options: [], range: unitSearch),
-                  unitMatch.range.location == afterNumber,
-                  let unitRange = Range(unitMatch.range(at: 1), in: utterance)
+                  let unitRange = Range(unitMatch.range(at: 1), in: utterance),
+                  unitMatch.range(at: 0).location - afterNumber <= 1
             else { return }
             pairs.append((value, String(utterance[unitRange]).lowercased()))
         }
@@ -287,8 +400,10 @@ enum SlotRepair {
         if parts.count == 2, let tens = tensMap[parts[0]], let ones = ones1to9[parts[1]] {
             return NSNumber(value: tens + ones)
         }
-        guard parts.count == 1, let ones = onesMap[parts[0]] else { return nil }
-        return NSNumber(value: ones)
+        guard parts.count == 1 else { return nil }
+        if let ones = onesMap[parts[0]] { return NSNumber(value: ones) }
+        if let tens = tensMap[parts[0]] { return NSNumber(value: tens) }
+        return nil
     }
 
     private static let onesMap: [String: Int] = [
@@ -550,7 +665,11 @@ enum SlotRepair {
     private static let aMinuteRegex = try! NSRegularExpression(pattern: #"\ba\s+minute\b"#)
     // Include backward/backwards — `\bback\b` does not match inside those words.
     private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|backward|backwards|rewind|behind)\b"#)
-    private static let defaultSkipSeconds = 30
+    // Forward direction cues — ahead, forward, skip ahead, next.
+    private static let aheadRegex = try! NSRegularExpression(pattern: #"\b(ahead|forward|skip\s*ahead|next|advance)\b"#)
+    // The app's default seek interval is owned by the playback sink
+    // (`PlaybackManagerSink`), not by the repair step; a constant here would be
+    // a second source of truth and is dead code.
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
         options: [.caseInsensitive]

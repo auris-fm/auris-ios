@@ -202,15 +202,23 @@ private final class MatrixPlaybackSink: VoicePlaybackSink {
     /// Host playing at the moment the turn reads it. Tests set this to
     /// false to model a user who paused before speaking.
     var isPlaying = true
-    enum Call: Equatable { case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode }
+    enum Call: Equatable { case pause, resume, seekRelative(Int?, SeekDirection), seekTo(Int), nextEpisode }
+
 
     var calls: [Call] = []
     var positionMs: Int64 = 0
 
     func pause() -> VoiceResponse { calls.append(.pause); return .earcon(.success) }
     func resume() -> VoiceResponse { calls.append(.resume); return .silent }
-    func seekRelative(deltaSeconds: Int) -> VoiceResponse { calls.append(.seekRelative(deltaSeconds)); return .silent }
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
+        calls.append(.seekRelative(deltaSeconds, direction))
+        return .silent
+    }
     func seekTo(positionSeconds: Int) -> VoiceResponse { calls.append(.seekTo(positionSeconds)); return .silent }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        calls.append(.seekTo(positionSeconds))
+        return .silent
+    }
     func nextEpisode() -> VoiceResponse { calls.append(.nextEpisode); return .silent }
 }
 

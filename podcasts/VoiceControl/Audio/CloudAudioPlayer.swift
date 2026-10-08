@@ -19,6 +19,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         func audioPlayerDidStartPlaying()
         /// Called when the player paused due to buffer underrun.
         func audioPlayerDidPause()
+        /// Called when the player has drained and stopped output — the point at
+        /// which playback the turn ducked may be restored, so the answer's tail
+        /// does not play mixed with the resumed episode.
+        func audioPlayerDidStop()
     }
 
     /// Codecs this player can actually decode and play.
@@ -53,11 +57,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         buffer.append(frame)
         bufferLock.unlock()
 
-        // Kick the runner if it's idle.
+        // Wake the runner: `runnerRunning` is "there is work to do", and the
+        // runner waits until it is true. Clearing it here (the previous
+        // behaviour) could never satisfy that wait, so frames buffered and the
+        // user heard silence for every turn.
         runnerLock.lock()
-        runnerRunning = false
-        runnerLock.unlock()
+        runnerRunning = true
         runnerLock.signal()
+        runnerLock.unlock()
     }
 
     /// Drain remaining buffered frames and stop playback.
@@ -65,7 +72,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     func finish() {
         runnerLock.lock()
         drainRemaining = true
-        runnerRunning = false
+        runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
     }
@@ -85,7 +92,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         drainRemaining = false
         stopRequested = true
-        runnerRunning = false
+        runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
     }
@@ -127,7 +134,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return CloudRouteClient.advertisedPCMasterRateHz
     }
 
-    /// Runner thread is alive (waiting or running).
+    /// There is work for the runner to do. The runner waits *until this is
+    /// true* and clears it before processing; `enqueue` sets it, which is what
+    /// wakes the loop (clearing it here — the earlier behaviour — could never
+    /// satisfy the wait, so nothing ever played).
     private var runnerRunning = false
 
     /// The runner has returned from its loop. This is the runner's own final
@@ -140,6 +150,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+
+    /// Teardown only, and reachable in principle rather than in practice: the
+    /// runner thread holds the player for the app session, so `deinit` does not
+    /// run. Turn ends (`finish`) must never set this — the player is reused.
+    private var shutdownRequested = false
 
     /// Runner thread.
     private var runnerThread: Thread?
@@ -156,9 +171,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerThread?.start()
     }
 
+    /// Lifetime: the player is built once per app session
+    /// (`VoiceControlAssembly`) and the runner thread retains it, so this
+    /// deinitializer does not run in practice and the shutdown path below
+    /// exists for completeness rather than as live teardown. The runner must
+    /// therefore survive a drain — `finish()` ends a turn, not the thread, and
+    /// returning there is what made every turn after the first silent.
     deinit {
         runnerLock.lock()
-        drainRemaining = true
+        shutdownRequested = true
+        runnerRunning = true
         runnerLock.signal()
         // Bounded join: wait for the runner to report that it has exited, but
         // never block teardown indefinitely on a thread that cannot exit. A
@@ -182,10 +204,24 @@ final class CloudAudioPlayer: @unchecked Sendable {
         while true {
             runnerLock.lock()
 
-            // Wait for work or drain request. `runnerLock.wait()` releases the
-            // lock while it blocks, so `enqueue`/`finish`/`cancel` can take it.
-            while !runnerRunning && !drainRemaining && !stopRequested {
+            // Wait for work or a request. `enqueue` sets `runnerRunning`, and
+            // `finish`/`cancel` set their own flags, so any of the three wakes
+            // this loop.
+            while !runnerRunning && !drainRemaining && !stopRequested && !shutdownRequested {
                 runnerLock.wait()
+            }
+
+            if shutdownRequested {
+                shutdownRequested = false
+                runnerLock.unlock()
+                stopEngine()
+                isPlaying = false
+                paused = false
+                runnerLock.lock()
+                runnerExited = true
+                runnerLock.signal()
+                runnerLock.unlock()
+                return
             }
 
             // Cancelled: drop everything and stop the engine, without draining.
@@ -195,6 +231,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 stopEngine()
                 isPlaying = false
                 paused = false
+                notifyDidStop()
                 runnerLock.lock()
                 runnerExited = false
                 runnerLock.signal()
@@ -202,23 +239,23 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 continue
             }
 
-            // Drain mode: play remaining then stop.
+            // Drain mode: play the rest of this turn, then go back to waiting.
+            // Returning here would end the thread at the first answer — the
+            // player is built once for the app session, so every later turn
+            // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
                 runnerLock.unlock()
                 drainAndStop()
-                // Last act before returning: report the exit and wake any wait.
-                runnerLock.lock()
-                runnerExited = true
-                runnerLock.signal()
-                runnerLock.unlock()
-                return
+                continue
             }
 
-            runnerRunning = true
+            // Claim the wake, then release the lock; the flag is cleared
+            // *before* processing so an `enqueue` that lands mid-processing is
+            // not lost — it sets the flag again and the next iteration runs.
+            runnerRunning = false
             runnerLock.unlock()
 
-            // Process available frames.
             processFrames()
         }
     }
@@ -250,6 +287,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // lock: `cancel()` empties the buffer from another thread (a server
         // error after audio started), so a count taken outside it can outlive
         // the frames it describes.
+        //
+        // `playFrame` is best-effort (no engine, no output), but the frames are
+        // still taken: a player that leaves them queued on an engine failure
+        // would report "playing" with nothing coming out.
         let framesToProcess = bufferedFrameCount
         for _ in 0..<framesToProcess {
             guard let frame = dequeueFrame() else { break }
@@ -305,6 +346,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private func startEngine() {
         stopEngine()
 
+        // No output device (a test host, or a detached process): the frames are
+        // still consumed by the runner, but nothing is scheduled. Creating the
+        // engine in that state trips an assertion inside CoreAudio rather than
+        // throwing, so the check has to come first.
+        guard Self.audioOutputIsAvailable else {
+            os_log(.info, "CloudAudioPlayer: no audio output available; frames will be consumed silently")
+            return
+        }
+
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
         engine.attach(playerNode)
@@ -358,6 +408,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
         node.scheduleBuffer(pcmBuffer)
     }
 
+    /// Whether this process has an audio output to render into. `AVAudioEngine`
+    /// asserts (rather than throwing) when a node graph is built without one,
+    /// so the player checks before constructing any graph.
+    static var audioOutputIsAvailable: Bool {
+        #if targetEnvironment(simulator)
+        // The simulator's audio unit asserts if a node graph is built before an
+        // output device exists, which is the case in the test host.
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        #else
+        return true
+        #endif
+    }
+
     /// Mono Int16 PCM at `sampleRate` — the shape the negotiated `pcm_s16le`
     /// codec delivers.
     static func pcmFormat(sampleRate: Double) -> AVAudioFormat? {
@@ -383,6 +446,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return buffer
     }
 
+    // MARK: - Testing seams
+
+    /// Buffered frame count, for tests that assert the runner actually consumes
+    /// frames (a player that buffers forever plays nothing).
+    var bufferedFrameCountForTesting: Int { bufferedFrameCount }
+
+    /// Whether this player holds nothing left to play. A turn that produced no
+    /// audio can restore immediately; one that is still draining restores when
+    /// the drain completes.
+    var hasPendingAudio: Bool {
+        bufferLock.lock(); defer { bufferLock.unlock() }
+        return !buffer.isEmpty
+    }
+
     // MARK: - Drain
 
     private func drainAndStop() {
@@ -392,5 +469,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
             playFrame(frame)
         }
         stopEngine()
+        isPlaying = false
+        paused = false
+        notifyDidStop()
+    }
+
+    /// Report that output has stopped, so the caller can restore what the turn
+    /// ducked. Delivered on the main queue like the other delegate callbacks.
+    private func notifyDidStop() {
+        guard let delegate = delegate else { return }
+        DispatchQueue.main.async {
+            delegate.audioPlayerDidStop()
+        }
     }
 }
