@@ -136,6 +136,11 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: macos-26
     timeout-minutes: 90
+    env:
+      # Absolute and resolved in the shell for the check step's use; the upload
+      # step gets the same value through the job env rather than a step-local
+      # one (which does not reach a `uses:` step).
+      RESULTS_DIR: /Users/runner/Library/Developer/Xcode/DerivedData
     steps:
       - uses: actions/checkout@v4
 
@@ -202,13 +207,21 @@ jobs:
       # number for that reason.
       # `if-no-files-found: error` on purpose: this step's only job is to
       # upload, so finding nothing means the mechanism failed, and a green step
-      # with no artifact is the exact state this exists to prevent. `~` is not
-      # expanded by the action, so the path is built from the runner's home.
-      - name: Upload test results
+      # with no artifact is the exact state this exists to prevent.
+      #
+      # The path is absolute and the home is resolved in the shell: `~` is not
+      # expanded by the action, and `runner.home` is not an Actions context
+      # (it expanded to nothing, giving `/Library/...`). `$HOME` is the value
+      # that actually holds, and the existence check makes a miss explicit.
+      - name: Check the result bundle exists
         if: failure()
-        uses: actions/upload-artifact@v4
+        run: |
+          ls -d "$RESULTS_DIR"/*/Logs/Test/*.xcresult || {
+            echo "no .xcresult bundle found under $RESULTS_DIR — the upload below would preserve nothing"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: failure()
         with:
           name: test-results-attempt-${{ github.run_attempt }}
-          path: ${{ runner.home }}/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+          path: ${{ env.RESULTS_DIR }}/**/Logs/Test/*.xcresult
           if-no-files-found: error
           retention-days: 14
