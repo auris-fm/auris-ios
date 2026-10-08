@@ -499,6 +499,11 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
 
         _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
+        // A successful turn must never report a rejection. There is nothing to
+        // wait *for* here, so give any erroneous report the same window a real
+        // one gets rather than asserting the instant the stream drains — the
+        // shape that cost two rounds on the sibling test.
+        _ = await awaitCondition(timeout: 1) { !provider.rejections.isEmpty }
         XCTAssertTrue(provider.rejections.isEmpty, "a successful turn must not invalidate the credential")
     }
 }
