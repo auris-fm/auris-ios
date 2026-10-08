@@ -203,8 +203,12 @@ jobs:
             ${{ runner.temp }}/auris-llama-cpp
           key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
 
-      # Same key as the build job: its post-step save has already landed, so
-      # this restores the compile rather than paying for it twice.
+      # Same key as the build job. Measured on a warm run: this restore costs
+      # ~1m49s and 4.2 GB of transfer, and the build then recompiles 569 Swift
+      # files anyway — so it is not known to be buying anything. Kept for now
+      # rather than removed on reasoning, because the next run answers it either
+      # way: no slower without it ⇒ it was overhead; slower ⇒ it does carry
+      # dependency artefacts and needs a better key, not no key.
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
