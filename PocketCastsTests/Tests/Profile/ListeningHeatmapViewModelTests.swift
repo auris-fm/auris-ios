@@ -85,18 +85,18 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
 
     // MARK: - load() end-to-end with injected DataManager
 
-    func testLoad_emptyData_setsHasDataFalseAndAllIntensityZero() {
+    func testLoad_emptyData_setsHasDataFalseAndAllIntensityZero() async {
         let dataManagerMock = DataManagerMock()
         dataManagerMock.dailyListeningTimeToReturn = [:]
         let viewModel = makeViewModel(dataManager: dataManagerMock, today: date(2026, 4, 20))
 
-        waitForLoad(viewModel)
+        await waitForLoad(viewModel)
 
         XCTAssertEqual(viewModel.weeks.count, 105)
         XCTAssertTrue(viewModel.weeks.flatMap { $0 }.allSatisfy { $0.intensity == .none })
     }
 
-    func testLoad_withData_computesIntensitiesFromQuartiles() {
+    func testLoad_withData_computesIntensitiesFromQuartiles() async {
         let dataManagerMock = DataManagerMock()
         // 4 sorted values: [100, 300, 600, 1200].
         // thresholds: sorted[1]=300, sorted[2]=600, sorted[3]=1200.
@@ -109,7 +109,7 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         ]
         let viewModel = makeViewModel(dataManager: dataManagerMock, today: date(2026, 4, 20))
 
-        waitForLoad(viewModel)
+        await waitForLoad(viewModel)
 
         let bySeconds = Dictionary(uniqueKeysWithValues: viewModel.weeks
             .flatMap { $0 }
@@ -163,14 +163,18 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         timeout: TimeInterval = 30,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
+    ) async {
         let expectation = XCTestExpectation(description: "weeks published")
         viewModel.$weeks
             .dropFirst()
             .sink { _ in expectation.fulfill() }
             .store(in: &cancellables)
         viewModel.load()
-        let result = XCTWaiter().wait(for: [expectation], timeout: timeout)
-        XCTAssertEqual(result, .completed, "load() did not publish within \(timeout)s", file: file, line: line)
+        // `await fulfillment` yields to the run loop instead of blocking the
+        // calling thread. `XCTWaiter().wait` blocks, and `load()` publishes its
+        // result on the *main* queue — so a blocking wait on the main thread can
+        // never be satisfied: it passed locally (fast enough to interleave) and
+        // timed out on a loaded CI runner.
+        await fulfillment(of: [expectation], timeout: timeout)
     }
 }
