@@ -368,6 +368,17 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
         func handleUnauthorized(rejectedToken: String?) async { rejections.append(rejectedToken) }
     }
 
+    /// Waits briefly for an async side effect, so the assertion measures the
+    /// behaviour rather than the scheduling. (Not named `waitFor`: XCTest has a
+    /// global by that name and it would be shadowed here.)
+    private func awaitCondition(timeout: TimeInterval = 5, _ condition: () -> Bool) async {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
         super.tearDown()
@@ -388,6 +399,11 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
+        // The rejection is reported off the caller's path by design (recovery
+        // must never delay the user's error), so it is awaited rather than
+        // raced: asserting immediately is a race the slower CI machine loses,
+        // which is how this failed there while passing locally.
+        await awaitCondition { !provider.rejections.isEmpty }
         XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
         guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
     }
