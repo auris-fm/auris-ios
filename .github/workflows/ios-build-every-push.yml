@@ -200,12 +200,15 @@ jobs:
       # gone the moment anyone re-runs the job — the failing set becomes a
       # recollection rather than an artifact. The name carries the attempt
       # number for that reason.
+      # `if-no-files-found: error` on purpose: this step's only job is to
+      # upload, so finding nothing means the mechanism failed, and a green step
+      # with no artifact is the exact state this exists to prevent. `~` is not
+      # expanded by the action, so the path is built from the runner's home.
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-attempt-${{ github.run_attempt }}
-          # The path `xcodebuild test` reports in its own output.
-          path: ~/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
-          if-no-files-found: warn
+          path: ${{ runner.home }}/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+          if-no-files-found: error
           retention-days: 14
