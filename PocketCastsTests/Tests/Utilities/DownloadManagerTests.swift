@@ -18,7 +18,12 @@ final class DownloadManagerTests: DBTestCase {
         // Verify the episode has been removed from the data manager
         XCTAssertNil(dataManager.findEpisode(uuid: episode.uuid))
 
-        await DownloadManager.shared.clearStuckDownloads()
+        // The task was queued on the *injected* manager (`setUpQueuedDownload`),
+        // so the cleanup must run on the same instance. `DownloadManager.shared`
+        // is a different object constructed from `DataManager.sharedManager`, and
+        // cancelling there never reaches this task — which is why this case failed
+        // in every CI run while the assertion read like a concurrency problem.
+        await downloadManager.clearStuckDownloads()
 
         // Wait for the task to fulfill the completion expectation: that it is completed
         await fulfillment(of: [publishExpectation])
