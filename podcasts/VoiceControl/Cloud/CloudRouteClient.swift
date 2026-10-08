@@ -211,7 +211,10 @@ final class CloudRouteClient {
             }
             try await wsTask.send(.string(authText))
 
-            var sawTerminalEvent = false
+            // Written by the receive loop and read by the timeout task, so the
+            // flag is lock-protected rather than a plain `Bool` shared across
+            // tasks.
+            let terminalFlag = TerminalFlag()
 
             // First-frame timeout: server must respond within 5 seconds.
             //
@@ -225,7 +228,7 @@ final class CloudRouteClient {
                 } catch {
                     return // cancelled: a frame arrived, the main loop owns the stream
                 }
-                if !sawTerminalEvent {
+                if !terminalFlag.isSet {
                     continuation.yield(.error(code: "connection_lost", message: ""))
                     continuation.finish()
                 }
@@ -249,8 +252,8 @@ final class CloudRouteClient {
                         // connection after `done`/`error`, so continuing to
                         // receive would turn that normal close into a spurious
                         // `connection_lost` after a successful answer.
-                        if case .done = event { sawTerminalEvent = true; break receiveLoop }
-                        if case .error = event { sawTerminalEvent = true; break receiveLoop }
+                        if case .done = event { terminalFlag.set(); break receiveLoop }
+                        if case .error = event { terminalFlag.set(); break receiveLoop }
                     }
 
                 default:
@@ -259,7 +262,7 @@ final class CloudRouteClient {
             }
 
             // WebSocket closed.
-            if !sawTerminalEvent {
+            if !terminalFlag.isSet {
                 continuation.yield(.error(code: "connection_lost", message: ""))
             }
             continuation.finish()
@@ -845,3 +848,21 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
 
 // The real task satisfies the seam unchanged.
 extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {}
+
+/// A one-way flag shared between the receive loop and the first-frame timeout
+/// task. Plain cross-task `Bool` access is a data race; this is the smallest
+/// thing that is not.
+private final class TerminalFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock(); defer { lock.unlock() }
+        value = true
+    }
+}
