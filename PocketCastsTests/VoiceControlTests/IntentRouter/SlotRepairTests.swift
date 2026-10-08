@@ -216,17 +216,32 @@ final class SlotRepairTests: XCTestCase {
                        "direction must not be stripped by sanitization")
     }
 
-    func test_repair_seekRelative_numericPreservesProducedSign() {
-        // Numeric repair corrects magnitude but preserves the model's sign.
-        // Model produced 1 (positive), utterance says "rewind fifteen seconds" → 15 (not -15).
+    func test_repair_seekRelative_utteranceSignWins() {
+        // The utterance's own direction decides: "rewind" is a backward request,
+        // so the produced magnitude is corrected *and* the sign comes from what
+        // the user said. Preserving the model's sign here made the user ask to
+        // go back and hear a forward skip.
         let repaired = SlotRepair.repair(
             raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=1)]<|tool_call_end|>",
             utterance: "rewind fifteen seconds",
             tool: "playback",
             action: "seek_relative"
         )
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -15,
+                       "a backward request must repair backward, whatever sign the model produced")
+    }
+
+    func test_repair_seekRelative_forwardUtteranceRepairsPositive() {
+        // The other direction, so the rule is not one-sided: a forward request
+        // repairs positive even when the model produced a negative delta.
+        let repaired = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-1)]<|tool_call_end|>",
+            utterance: "forward fifteen seconds",
+            tool: "playback",
+            action: "seek_relative"
+        )
         XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, 15,
-                       "magnitude corrected from utterance, sign preserved from model")
+                       "a forward request must repair forward")
     }
 
     func test_repair_seekRelative_producedOutOfRangeReturnsNull() {

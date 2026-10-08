@@ -134,7 +134,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return CloudRouteClient.advertisedPCMasterRateHz
     }
 
-    /// Runner thread is alive (waiting or running).
+    /// There is work for the runner to do. The runner waits *until this is
+    /// true* and clears it before processing; `enqueue` sets it, which is what
+    /// wakes the loop (clearing it here — the earlier behaviour — could never
+    /// satisfy the wait, so nothing ever played).
     private var runnerRunning = false
 
     /// The runner has returned from its loop. This is the runner's own final
@@ -147,6 +150,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+
+    /// Teardown only: the runner returns and `deinit` can join it. Turn ends
+    /// (`finish`) must not set this — the player is reused across turns.
+    private var shutdownRequested = false
 
     /// Runner thread.
     private var runnerThread: Thread?
@@ -165,7 +172,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     deinit {
         runnerLock.lock()
-        drainRemaining = true
+        // The player lives for the app session, so the runner must survive a
+        // drain (`finish()` ends a turn, not the thread). Only teardown stops it.
+        shutdownRequested = true
+        runnerRunning = true
         runnerLock.signal()
         // Bounded join: wait for the runner to report that it has exited, but
         // never block teardown indefinitely on a thread that cannot exit. A
@@ -192,8 +202,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // Wait for work or a request. `enqueue` sets `runnerRunning`, and
             // `finish`/`cancel` set their own flags, so any of the three wakes
             // this loop.
-            while !runnerRunning && !drainRemaining && !stopRequested {
+            while !runnerRunning && !drainRemaining && !stopRequested && !shutdownRequested {
                 runnerLock.wait()
+            }
+
+            if shutdownRequested {
+                shutdownRequested = false
+                runnerLock.unlock()
+                stopEngine()
+                isPlaying = false
+                paused = false
+                runnerLock.lock()
+                runnerExited = true
+                runnerLock.signal()
+                runnerLock.unlock()
+                return
             }
 
             // Cancelled: drop everything and stop the engine, without draining.
@@ -211,22 +234,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 continue
             }
 
-            // Drain mode: play remaining then stop.
+            // Drain mode: play the rest of this turn, then go back to waiting.
+            // Returning here would end the thread at the first answer — the
+            // player is built once for the app session, so every later turn
+            // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
                 runnerLock.unlock()
                 drainAndStop()
-                // Last act before returning: report the exit and wake any wait.
-                runnerLock.lock()
-                runnerExited = true
-                runnerLock.signal()
-                runnerLock.unlock()
-                return
+                continue
             }
 
-            // Claim the wake and process; the flag is cleared under the lock
-            // *after* the work, so an `enqueue` that lands mid-processing is not
-            // lost (it sets the flag again and the next iteration runs).
+            // Claim the wake, then release the lock; the flag is cleared
+            // *before* processing so an `enqueue` that lands mid-processing is
+            // not lost — it sets the flag again and the next iteration runs.
             runnerRunning = false
             runnerLock.unlock()
 

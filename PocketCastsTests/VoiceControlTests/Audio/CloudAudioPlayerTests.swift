@@ -54,6 +54,26 @@ final class CloudAudioPlayerTests: XCTestCase {
         XCTAssertEqual(player.bufferedFrameCountForTesting, 0, "a cancelled turn holds no frames")
     }
 
+    /// A second turn must play. The player is built once for the app session,
+    /// so a runner that returns at the first drain makes every later answer
+    /// silent and never releases that turn's hold. This is the case the
+    /// follow-up review caught after the wake fix.
+    func testASecondTurnStillPlaysAfterTheFirstDrains() async {
+        let player = CloudAudioPlayer()
+
+        for _ in 0..<8 {
+            player.enqueue(CloudAudioFrame(data: Data(repeating: 0x55, count: 480)))
+        }
+        player.finish() // ends turn one
+        _ = await waitFor(timeout: 3.0) { player.bufferedFrameCountForTesting == 0 }
+
+        for _ in 0..<8 {
+            player.enqueue(CloudAudioFrame(data: Data(repeating: 0x66, count: 480)))
+        }
+        let secondTurnDrained = await waitFor(timeout: 3.0) { player.bufferedFrameCountForTesting == 0 }
+        XCTAssertTrue(secondTurnDrained, "the runner must survive a finish() and serve the next turn")
+    }
+
     private func waitFor(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {

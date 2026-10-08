@@ -55,7 +55,6 @@ enum ToolSchema {
             parameter("action", "string", enum: ["pause", "resume", "seek_relative", "seek_to", "next_episode"]),
             parameter("position_seconds", "integer", "Non-negative absolute episode position in seconds from the beginning. Use with seek_to; 0 means the beginning."),
             parameter("delta_seconds", "integer", "Signed seek delta. Use with seek_relative; positive=forward, negative=backward."),
-            parameter("direction", "string", "Seek direction when no magnitude is stated. Values: forward, backward. The app's default interval applies in this direction."),
         ]
     )
 

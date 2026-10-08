@@ -61,6 +61,10 @@ enum SlotRepair {
         "playback": [
             "pause": [],
             "resume": [],
+            // `direction` is accepted when the model emits it for a
+            // direction-only request, but it is not part of the trained tool
+            // schema (ToolSchema), so the utterance is the only guaranteed
+            // source of direction.
             "seek_relative": ["delta_seconds", "direction"],
             "seek_to": ["position_seconds"],
             "next_episode": [],
@@ -192,15 +196,14 @@ enum SlotRepair {
         var out = params
         for (key, value) in extractNumericSlots(tool: tool, action: action, utterance: utterance) {
             if allowed.contains(key) {
-                // Preserve the model's sign when correcting magnitude:
-                // a nonzero produced sign decides the direction; the utterance
-                // only corrects the magnitude. (The fixture: rewind 15s with
-                // predicted 1 → repaired 15, not -15.)
+                // The utterance's own sign wins when it states one: "rewind
+                // fifteen seconds" with a produced `delta_seconds = 1` must
+                // repair to -15, not +15 — otherwise the user asks to go back
+                // and hears a forward skip. The model's sign is used only when
+                // the utterance states no direction of its own.
                 if key == "delta_seconds",
-                   let existing = out[key] as? Int,
-                   existing != 0,
                    let spokenInt = value as? Int {
-                    out[key] = Int(abs(spokenInt)) * (existing < 0 ? -1 : 1)
+                    out[key] = spokenInt
                 } else {
                     out[key] = value
                 }
@@ -260,7 +263,7 @@ enum SlotRepair {
         // its interval. When the utterance states an amount, the repair step
         // (run earlier) has already replaced the zero with the spoken value.
         var out = params
-        if var delta = params["delta_seconds"] as? Int, delta == 0 {
+        if let delta = params["delta_seconds"] as? Int, delta == 0 {
             if let spokenDelta = extractDeltaSeconds(utterance) {
                 // Utterance states an amount — check it is within range.
                 if !isValidDelta(spokenDelta) {
@@ -341,10 +344,11 @@ enum SlotRepair {
             // unitRegex has a leading \s* to allow a single space between
             // number and unit. The whitespace offset must be 0 or 1 to
             // prevent binding unrelated numbers to later units.
+            // `NSRange.location` is already `Int`, so no cast is needed and the
+            // offset cannot be negative for a match inside `unitSearch`.
             guard let unitMatch = unitRegex.firstMatch(in: utterance, options: [], range: unitSearch),
                   let unitRange = Range(unitMatch.range(at: 1), in: utterance),
-                  let wsOffset = (unitMatch.range(at: 0).location as? Int).map { $0 - afterNumber },
-                  wsOffset >= 0, wsOffset <= 1
+                  unitMatch.range(at: 0).location - afterNumber <= 1
             else { return }
             pairs.append((value, String(utterance[unitRange]).lowercased()))
         }
@@ -647,7 +651,9 @@ enum SlotRepair {
     private static let backRegex = try! NSRegularExpression(pattern: #"\b(back|backward|backwards|rewind|behind)\b"#)
     // Forward direction cues — ahead, forward, skip ahead, next.
     private static let aheadRegex = try! NSRegularExpression(pattern: #"\b(ahead|forward|skip\s*ahead|next|advance)\b"#)
-    private static let defaultSkipSeconds = 30
+    // The app's default seek interval is owned by the playback sink
+    // (`PlaybackManagerSink`), not by the repair step; a constant here would be
+    // a second source of truth and is dead code.
     private static let numberRegex = try! NSRegularExpression(
         pattern: #"(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])"#,
         options: [.caseInsensitive]
