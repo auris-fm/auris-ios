@@ -227,9 +227,11 @@ enum SlotRepair {
     /// - The mapper must NOT manufacture a delta for a direction-only call.
     ///   The sink owns the app's configurable seek interval and applies it in
     ///   the request's direction.
-    /// - A direction the utterance states decides the sign, whether or not it
-    ///   also states an amount: "go back" with a produced `+30` becomes `-30`.
-    ///   The model's magnitude is kept; only the sign is corrected.
+    /// - A direction the utterance states decides the sign. When the utterance
+    ///   also states an amount, `repairNumericParams` has already replaced the
+    ///   magnitude with the spoken one ("rewind fifteen seconds" ⇒ -15). When it
+    ///   states a direction alone, the model's magnitude is kept and only the
+    ///   sign is corrected ("go back" with a produced `+30` ⇒ `-30`).
     /// - A produced `0` is not a stated amount — when no spoken amount
     ///   appears in the utterance, zero is dropped so the sink receives
     ///   `null` and applies its interval in the stated direction.
