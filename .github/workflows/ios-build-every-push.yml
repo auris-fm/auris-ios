@@ -49,6 +49,14 @@ concurrency:
 jobs:
   build:
     name: Build (StagingDebug)
+    # Push only. The test job below compiles the app as part of
+    # `xcodebuild test`, so on a pull request this job was a **second full
+    # compile of the same commit** — 15m44s of a 25-minute run, twice paid.
+    # What the build job still uniquely covers is a **push to a branch with no
+    # PR**: a base branch that other PRs stack on has no PR of its own, so a
+    # compile error there is invisible to every review. That is the gap this
+    # job exists for, and it is the reason it must not be removed entirely.
+    if: github.event_name == 'push'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -129,10 +137,17 @@ jobs:
   test:
     name: Test (StagingDebug)
     # Keep the expensive job where changes are already being reviewed.
-    # No `needs: build` on purpose: the two jobs are independent by design, and
-    # depending on a build that the concurrency group may have cancelled (its
-    # sibling from the `push` event) would skip the tests for an ordinary PR.
-    # `make test_staging` builds what it needs.
+    #
+    # No `needs: build` on purpose: the jobs are independent, and depending on a
+    # build that the concurrency group may have cancelled (its sibling from the
+    # `push` event) would skip the tests for an ordinary PR.
+    #
+    # `make test_staging` compiles the app itself. The DerivedData cache step
+    # below restores `~/Library/Developer/Xcode/DerivedData`, but it does NOT
+    # spare this job the compile: a warm run measured 16m46s here with only
+    # ~4 minutes of testing, against a 15m44s build job. A restore *can* happen;
+    # the duration says what did. The build job no longer runs on PRs for that
+    # reason — this job was paying the compile twice over, not once.
     if: github.event_name == 'pull_request'
     runs-on: macos-26
     timeout-minutes: 90
