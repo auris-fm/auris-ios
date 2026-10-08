@@ -532,11 +532,11 @@ actor RecoveryGate {
 final class GatedProvider: CloudTokenProviding {
     let gate: RecoveryGate
     let log: OrderLog
-    /// Same box as the sibling provider above: `handleUnauthorized` runs off the
-    /// caller's path, so its record is written by one task and read by the test
-    /// task. The read happens to be ordered today by the preceding
-    /// `waitFor(log:entry:)`, which is why it has not bitten — this makes it
-    /// sound rather than lucky.
+    /// The same *pattern* as the sibling provider above — its own box, not a
+    /// shared one. `handleUnauthorized` runs off the caller's path, so the
+    /// record is written by one task and read by the test task. The read
+    /// happens to be ordered today by the preceding `waitFor(log:entry:)`,
+    /// which is why it has not bitten; this makes it sound rather than lucky.
     private let box = GatedProviderBox()
     var rejections: [String?] { box.rejections }
     var ranCancelled: Bool? { box.ranCancelled }
