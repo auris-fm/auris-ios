@@ -1,8 +1,13 @@
 import Foundation
 import PocketCastsUtils
 
-/// Real cloud route sink: SSE client → action dispatch → TTS-on-done.
-final class CloudRouteSink: VoiceCloudRouteSink {
+/// Real cloud route sink: WebSocket client → audio player → action dispatch.
+///
+/// Cloud answers arrive as synthesised audio streamed over the WebSocket; the
+/// client plays them directly through the shared audio output path. Text
+/// accumulation (`.token`) is removed — cloud answers are played, not spoken.
+final class CloudRouteSink: VoiceCloudRouteSink,
+                            CloudAudioPlayer.Delegate {
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
     private let playbackSink: VoicePlaybackSink
@@ -28,10 +33,17 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     /// (speak only in the user's own language; earcon otherwise) is testable.
     private let spokenTemplates: SpokenTemplateResolver
 
+    /// Audio player for cloud-delivered speech.
+    private let audioPlayer: CloudAudioPlayer
+
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
-    /// True when this turn paused playback so we can restore on error.
+    /// True when this turn paused playback so we can restore on done/error.
     private var didAutoPause = false
+    /// Whether the host was playing when the turn took its hold. The user's own
+    /// pause stays the user's; only a hold that stopped running playback is
+    /// released by the turn's end (Task 12).
+    private var wasPlayingBeforeHold = false
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -56,7 +68,12 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         }
     }
 
-    init(
+    // `nonisolated`: the sink conforms to `CloudAudioPlayer.Delegate`, which is
+    // `@MainActor`, so `CloudRouteSink` is implicitly main-actor-isolated. The
+    // assembly that builds it is not, and construction only stores dependencies
+    // (no main-actor state is touched), so the initializer is safe to call from
+    // any context.
+    nonisolated init(
         clientFactory: @escaping () -> CloudRouteClient = {
             CloudRouteClient(
                 baseURL: CloudConfig.shared.baseUrl,
@@ -67,6 +84,7 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             )
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
+        audioPlayer: CloudAudioPlayer? = nil,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
@@ -90,6 +108,13 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
         self.spokenTemplates = spokenTemplates
+        // Assigned last, and its delegate is set after every stored property is
+        // initialized: `audioPlayer.delegate = self` reads `self` to make the
+        // delegate reference, which Swift forbids before the initializer fully
+        // initializes `self`.
+        let resolvedAudioPlayer = audioPlayer ?? CloudAudioPlayer()
+        self.audioPlayer = resolvedAudioPlayer
+        resolvedAudioPlayer.delegate = self
     }
 
     /// Renders a negotiated discovery result (result / no-match). Rendering
@@ -107,7 +132,6 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
         }
 
-        var tokenBuffer = ""
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
@@ -131,9 +155,27 @@ final class CloudRouteSink: VoiceCloudRouteSink {
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
 
-        // Pause for the turn; restore on done/error so TTS ducking runs over active playback.
-        _ = playbackSink.pause()
-        didAutoPause = true
+        // Hold the place for the turn: the server decides when the assistant
+        // speaks, so the client does not pause on its own for a turn that may
+        // not produce audio. The hold is only ours to release if it stopped
+        // playback that was already running.
+        //
+        // A superseded turn leaves its hold in place (it returns without
+        // restoring, deliberately: the winning turn does that). `isPlaying` is
+        // therefore already false, and reading it here would lose the hold —
+        // the user would be left paused for good. Inherit the outstanding hold
+        // instead, so this turn releases it exactly once at its own end.
+        if didAutoPause && wasPlayingBeforeHold {
+            // Turn B started while A's hold was still in effect: B owns the
+            // release now (A must not also resume — see the supersede tests).
+            didAutoPause = true
+        } else {
+            wasPlayingBeforeHold = playbackSink.isPlaying
+            if wasPlayingBeforeHold {
+                _ = playbackSink.pause()
+                didAutoPause = true
+            }
+        }
 
         turnLoop: for await event in client.route(request: request, context: routeContext, turn: turn) {
             // Superseded mid-stream: stop consuming so this turn cannot execute
@@ -142,29 +184,34 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             // `break` inside the switch would only leave the switch.)
             if turnToken.isCancelled { break turnLoop }
             switch event {
+            case let .connected(codec):
+                // The server names the codec for this turn's binary frames;
+                // the player decodes at that rate rather than the hardware's.
+                audioPlayer.setNegotiatedCodec(codec)
+            case let .audioFrame(frame):
+                audioPlayer.enqueue(frame)
             case let .action(tool, action, params):
                 executeAction(tool: tool, action: action, params: params)
-            case let .token(text):
-                tokenBuffer += text
+            // .token is no longer accumulated — cloud answers are played as
+            // audio, not text (spec: "cloud answers are played, not spoken").
+            case .token:
+                break
             case let .result(result):
                 // Structured results are rendered as they arrive; the turn still
                 // completes on `done` with the same restore/analytics behavior.
                 presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
-            case let .done(inputTokens, outputTokens):
+            case let .done(usage):
                 guard !turnToken.isCancelled else { break turnLoop }
                 analytics?.recordCloudAssistantTurn(
                     outcome: "done",
-                    inputTokens: inputTokens,
-                    outputTokens: outputTokens
+                    inputTokens: usage.inputTokens,
+                    outputTokens: usage.outputTokens
                 )
                 restoreTransientAudioState()
-                if tokenBuffer.isEmpty {
-                    return .silent
-                }
-                return .spoken(tokenBuffer)
+                return .silent
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
-                tokenBuffer = ""
+                audioPlayer.cancel()
                 restoreTransientAudioState()
                 analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                 // A server-supplied message passes through (localising it is the
@@ -195,10 +242,15 @@ final class CloudRouteSink: VoiceCloudRouteSink {
     }
 
     private func restoreTransientAudioState() {
-        if didAutoPause {
+        // Release only a hold we took, and only if it stopped playback the user
+        // was already hearing. A hold that cannot be told apart from the user's
+        // own pause must not be released — resuming here would start audio the
+        // user asked to stop.
+        if didAutoPause && wasPlayingBeforeHold {
             _ = playbackSink.resume()
-            didAutoPause = false
         }
+        didAutoPause = false
+        wasPlayingBeforeHold = false
         // Seek positions are intentionally not rolled back.
     }
 
@@ -210,12 +262,13 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
+        // Serve the quote. This does not take or release the hold: the quote
+        // plays over playback the server has already ducked, and the turn's end
+        // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            _ = playbackSink.resume()
-            didAutoPause = false
         case "stop_quote":
             guard let restoreMs = preQuotePositionMs else { return }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
@@ -246,5 +299,21 @@ final class CloudRouteSink: VoiceCloudRouteSink {
             ?? referenceSeconds
         let clamped = max(0, Int(playbackSeconds.rounded()))
         _ = playbackSink.seekTo(positionSeconds: clamped)
+    }
+}
+
+// MARK: - CloudAudioPlayer.Delegate
+
+extension CloudRouteSink {
+    func audioPlayerDidStartPlaying() {
+        // Audio started — the sink doesn't need to react; the player
+        // already managed the AVAudioEngine and playbackSink ducking
+        // is handled by the sink's own pause/resume on action events.
+    }
+
+    func audioPlayerDidPause() {
+        // Audio paused due to buffer underrun — the sink doesn't need
+        // to react; the player will resume automatically when new
+        // frames arrive.
     }
 }

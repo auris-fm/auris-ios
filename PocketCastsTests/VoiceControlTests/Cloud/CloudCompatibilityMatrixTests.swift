@@ -172,7 +172,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -199,6 +199,9 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 // MARK: - local test doubles (the shared ones are file-private)
 
 private final class MatrixPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     enum Call: Equatable { case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode }
 
     var calls: [Call] = []

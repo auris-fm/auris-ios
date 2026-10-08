@@ -186,6 +186,9 @@ final class VoiceIntentExecutorTests: XCTestCase {
 // MARK: - Mock Sinks
 
 private final class MockPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     var pauseCalled = false
     var lastSeekRelativeDelta: Int?
     var lastSeekToPosition: Int?

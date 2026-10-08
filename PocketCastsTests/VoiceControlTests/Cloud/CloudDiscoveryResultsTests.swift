@@ -184,6 +184,7 @@ final class CloudDiscoveryResultsTests: XCTestCase {
 
     // MARK: - presentation
 
+    @MainActor
     func testPresenterReceivesRenderedResultsAndNeverAutoPlays() async {
         let presenter = RecordingDiscoveryPresenter()
         let sink = CloudRouteSink(
@@ -218,6 +219,9 @@ private final class RecordingDiscoveryPresenter: DiscoveryResultsPresenting {
 }
 
 private final class RecordingPlaybackSinkForResults: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int) -> VoiceResponse { .silent }

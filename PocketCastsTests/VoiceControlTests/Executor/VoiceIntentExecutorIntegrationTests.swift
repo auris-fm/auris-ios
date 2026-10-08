@@ -172,6 +172,9 @@ private final class MockIntegrationAnalytics: AnalyticsService {
 // MARK: - Integration Sinks
 
 private final class IntegrationPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. Tests set this to
+    /// false to model a user who paused before speaking.
+    var isPlaying = true
     let currentPosition: Int
     let episodeDuration: Int
     var lastSeekPosition: Int?

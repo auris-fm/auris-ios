@@ -54,7 +54,7 @@ final class CloudRouteSinkTests: XCTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .spoken("She is arguing."))
+        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertTrue(playback.calls.contains(.pause))
         XCTAssertTrue(playback.calls.contains(.resume), "done must restore turn-owned auto-pause")
         XCTAssertEqual(playback.calls.filter { $0 == .seekTo(1200) }.count, 1)
@@ -83,11 +83,57 @@ final class CloudRouteSinkTests: XCTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .spoken("Answer."))
+        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertEqual(playback.calls.first, .pause)
         XCTAssertEqual(playback.calls.last, .resume)
         XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1)
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1)
+    }
+
+    /// A turn must not start audio the user had stopped. With the host already
+    /// paused the client takes no hold, so there is nothing for the turn's end
+    /// to release.
+    func testDoesNotPauseOrResumeWhenHostWasAlreadyPaused() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: token
+            data: {"text":"Answer."}
+
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
+
+            """
+        )
+        playback.setPlaying(false)
+
+        let response = await makeSink().routeToCloud(
+            request: "what was that about",
+            tier: .free,
+            context: sampleContext()
+        )
+
+        XCTAssertEqual(response, .silent)
+        XCTAssertFalse(playback.calls.contains(.pause), "the user's own pause is not ours to retake")
+        XCTAssertFalse(playback.calls.contains(.resume), "the user asked for it to stop; the turn must not undo that")
+    }
+
+    /// The turn's hold must be released when the turn ends without speaking:
+    /// a `done` with no audio restores the playback it stopped, so the user is
+    /// left exactly as they were.
+    func testTurnWithoutAudioRestoresTheHoldItTook() async {
+        CloudRouteTestURLProtocol.stubSSE(
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        )
+
+        _ = await makeSink().routeToCloud(request: "hi", tier: .free, context: sampleContext())
+
+        XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "the turn takes one hold")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "and releases it on done")
+        XCTAssertEqual(playback.calls.last, .resume)
     }
 
     func testPlayQuoteAndStopQuoteRestorePosition() async {
@@ -117,6 +163,10 @@ final class CloudRouteSinkTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
         XCTAssertTrue(playback.calls.contains(.seekTo(900)))
         XCTAssertTrue(playback.calls.contains(.resume))
+        // The quote does not release the hold early: the server ducked playback
+        // for the "play that" answer, and the turn's end is the release.
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1)
+        XCTAssertEqual(playback.calls.last, .resume)
     }
 
     func testUnknownActionIgnored() async {
@@ -286,7 +336,8 @@ final class CloudRouteSinkTests: XCTestCase {
                 CloudRouteClient(
                     baseURL: cloudConfig.baseUrl,
                     userId: "user_test",
-                    session: session
+                    session: session,
+                    transport: .sse
                 )
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
@@ -313,20 +364,30 @@ final class CloudRouteSinkTests: XCTestCase {
 }
 
 private final class RecordingPlaybackSink: VoicePlaybackSink {
+    /// Host playing at the moment the turn reads it. `pause()` and `resume()`
+    /// keep it true to playback: a constant `true` hides a lost hold, because a
+    /// turn that inherits an outstanding pause would still read "playing".
+    private(set) var isPlaying = true
     enum Call: Equatable {
         case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode
     }
+
+    /// Models the state before a turn: a user who paused before speaking, or a
+    /// player that is running. `pause()`/`resume()` maintain it thereafter.
+    func setPlaying(_ playing: Bool) { isPlaying = playing }
 
     var calls: [Call] = []
     var positionMs: Int64 = 0
 
     func pause() -> VoiceResponse {
         calls.append(.pause)
+        isPlaying = false
         return .earcon(.success)
     }
 
     func resume() -> VoiceResponse {
         calls.append(.resume)
+        isPlaying = true
         return .silent
     }
 
@@ -456,6 +517,37 @@ final class CloudRouteSupersedeTests: XCTestCase {
         XCTAssertTrue(seeks.isEmpty, "a superseded turn must not execute actions that arrive after it lost the turn")
     }
 
+    /// A barge-in must not leave the podcast paused. Turn A pauses for its hold
+    /// and is superseded before it finishes; B inherits that hold and is the
+    /// turn that releases it. With a test double whose `isPlaying` ignored
+    /// `pause()` this could not fail — which is why the double now models
+    /// playback state faithfully.
+    func testBargeInResumesPlaybackHeldByTheSupersededTurn() async {
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
+                chunkDelayNanoseconds: 400_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+        XCTAssertFalse(playback.isPlaying, "the hold is in effect while the first turn runs")
+
+        CloudRouteTestURLProtocol.stubSSE("""
+        event: done
+        data: {"input_tokens":1,"output_tokens":1}
+
+        """)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        XCTAssertTrue(playback.isPlaying, "the winning turn must release the hold taken for the superseded one")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one resume")
+    }
+
     private func makeSink() -> CloudRouteSink {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
@@ -463,7 +555,7 @@ final class CloudRouteSupersedeTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session)
+                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -540,7 +632,7 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
         let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -581,7 +673,7 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -669,7 +761,7 @@ final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         let sink = CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config)) },
+            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
