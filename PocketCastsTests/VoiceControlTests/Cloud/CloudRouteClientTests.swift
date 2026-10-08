@@ -363,20 +363,44 @@ final class CloudRouteClientLocaleTests: XCTestCase {
 final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
     private final class RecordingProvider: CloudTokenProviding {
         var token: String? = "token-1"
-        var rejections: [String?] = []
+
+        // `handleUnauthorized` runs off the caller's path, so its record is read
+        // from the test task while another task writes it: the box makes that
+        // exchange sound rather than lucky.
+        private let box = RejectionBox()
+        var rejections: [String?] { box.values }
         func token() async -> String? { token }
-        func handleUnauthorized(rejectedToken: String?) async { rejections.append(rejectedToken) }
+        func handleUnauthorized(rejectedToken: String?) async { box.append(rejectedToken) }
     }
 
-    /// Waits briefly for an async side effect, so the assertion measures the
-    /// behaviour rather than the scheduling. (Not named `waitFor`: XCTest has a
-    /// global by that name and it would be shadowed here.)
-    private func awaitCondition(timeout: TimeInterval = 5, _ condition: () -> Bool) async {
+    /// Appends from one task, reads from another. A lock is the smallest thing
+    /// that is correct here; the poll below runs while the report lands.
+    private final class RejectionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String?] = []
+        var values: [String?] {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+        func append(_ value: String?) {
+            lock.lock(); defer { lock.unlock() }
+            stored.append(value)
+        }
+    }
+
+    /// Waits for an async side effect so the assertion measures the behaviour
+    /// rather than the scheduling. Returns whether it arrived, so a timeout is
+    /// the failure rather than a silent five-second pause before an unrelated
+    /// assertion fails. (Not named `waitFor`: this file has a global by that
+    /// name, and it would be shadowed here.)
+    @discardableResult
+    private func awaitCondition(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {
-            if condition() { return }
+            if condition() { return true }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+        return condition()
     }
 
     override func tearDown() {
@@ -403,7 +427,8 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
         // must never delay the user's error), so it is awaited rather than
         // raced: asserting immediately is a race the slower CI machine loses,
         // which is how this failed there while passing locally.
-        await awaitCondition { !provider.rejections.isEmpty }
+        let reported = await awaitCondition { !provider.rejections.isEmpty }
+        XCTAssertTrue(reported, "the rejected credential must be reported within the timeout")
         XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
         guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
     }
