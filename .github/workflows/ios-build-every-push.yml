@@ -209,10 +209,10 @@ jobs:
       # upload, so finding nothing means the mechanism failed, and a green step
       # with no artifact is the exact state this exists to prevent.
       #
-      # The path is absolute and the home is resolved in the shell: `~` is not
-      # expanded by the action, and `runner.home` is not an Actions context
-      # (it expanded to nothing, giving `/Library/...`). `$HOME` is the value
-      # that actually holds, and the existence check makes a miss explicit.
+      # The directory is an absolute path from the job env: `~` is not expanded
+      # by the action, and `runner.home` is not an Actions context (it expanded
+      # to nothing, giving `/Library/...`). The check step makes a miss say why,
+      # rather than surfacing only as an opaque upload error.
       - name: Check the result bundle exists
         if: failure()
         run: |
