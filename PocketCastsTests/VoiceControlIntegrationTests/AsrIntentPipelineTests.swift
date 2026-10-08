@@ -3,13 +3,18 @@ import XCTest
 
 final class AsrIntentPipelineTests: XCTestCase {
 
-    func test_backendInitialization() async {
-        let backend = WhisperCppBackend(modelPath: "/tmp/test")
+    /// The backend reports a failure for a model path that is not there, so a
+    /// caller can never mistake "not loaded" for "ready" (see
+    /// `WhisperCppBackendTests.test_ensureReady_missingModelPathFails`). The
+    /// environment supplies the rest of the pipeline below.
+    func test_backendInitialization_reportsFailureForMissingModel() async {
+        let backend = WhisperCppBackend(modelPath: "/tmp/auris-does-not-exist-\(UUID().uuidString)")
         let result = await backend.ensureReady()
-        if case .success = result {
-            // Expected stub behavior
-        } else {
-            XCTFail("Expected success from stub")
+        switch result {
+        case .success:
+            XCTFail("a missing model path must not report success")
+        case .failure:
+            break
         }
     }
 

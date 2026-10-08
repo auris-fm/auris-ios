@@ -28,14 +28,20 @@ final class EffectsManagerSinkTests: XCTestCase {
         }
     }
 
+    /// The clamp is the contract; the spoken wording is a template and its
+    /// formatting is the template's business. Asserting `text.contains("3.0")`
+    /// made this test depend on how the number is rendered (locale, trailing
+    /// zero), which is not what "clamps to maximum" means.
     func test_setSpeed_clampsToMaximum() {
         let sink = EffectsManagerSink(playbackManager: .shared)
         let response = sink.setSpeed(5.0)
-        if case .spoken(let text) = response {
-            XCTAssertTrue(text.contains("3.0"))
-        } else {
-            XCTFail("Expected spoken response")
+
+        guard case .spoken(let text) = response else {
+            return XCTFail("Expected a spoken response, got \(response)")
         }
+        XCTAssertFalse(text.isEmpty, "a spoken response must say something")
+        XCTAssertEqual(PlaybackManager.shared.effects().playbackSpeed, 3.0,
+                       "a speed above the maximum is clamped to it")
     }
 
     func test_setTrimMode_returnsEarcon() {

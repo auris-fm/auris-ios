@@ -150,13 +150,27 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         return formatter.string(from: date)
     }
 
-    private func waitForLoad(_ viewModel: ListeningHeatmapViewModel) {
+    /// Wait for `load()` to publish weeks.
+    ///
+    /// The timeout is generous on purpose: a 2-second budget was the whole
+    /// assertion on a slower machine — the expectation timed out, and the
+    /// assertions then ran against the *unloaded* state, which reads as a data
+    /// bug rather than as a slow import. A fixture that fails only for being
+    /// slow is a flake, so it waits properly and reports the load that did not
+    /// arrive rather than the values that followed from it.
+    private func waitForLoad(
+        _ viewModel: ListeningHeatmapViewModel,
+        timeout: TimeInterval = 30,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
         let expectation = XCTestExpectation(description: "weeks published")
         viewModel.$weeks
             .dropFirst()
             .sink { _ in expectation.fulfill() }
             .store(in: &cancellables)
         viewModel.load()
-        wait(for: [expectation], timeout: 2.0)
+        let result = XCTWaiter().wait(for: [expectation], timeout: timeout)
+        XCTAssertEqual(result, .completed, "load() did not publish within \(timeout)s", file: file, line: line)
     }
 }

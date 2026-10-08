@@ -72,16 +72,16 @@ final class CloudTurnUsageTests: XCTestCase {
 // MARK: - CloudSpeechUsage tests
 
 final class CloudSpeechUsageTests: XCTestCase {
-    func testSpeechUsageWithAmountAndUnit() {
-        let speech = CloudSpeechUsage(amount: 5000, unit: "ms")
+    func testSpeechUsageWithAmountAndUnit() throws {
+        let speech = try XCTUnwrap(CloudSpeechUsage(amount: 5000, unit: "ms"))
         XCTAssertEqual(speech.amount, 5000)
         XCTAssertEqual(speech.unit, "ms")
     }
 
-    func testSpeechUsageIsEquatable() {
-        let s1 = CloudSpeechUsage(amount: 1000, unit: "ms")
-        let s2 = CloudSpeechUsage(amount: 1000, unit: "ms")
-        let s3 = CloudSpeechUsage(amount: 2000, unit: "ms")
+    func testSpeechUsageIsEquatable() throws {
+        let s1 = try XCTUnwrap(CloudSpeechUsage(amount: 1000, unit: "ms"))
+        let s2 = try XCTUnwrap(CloudSpeechUsage(amount: 1000, unit: "ms"))
+        let s3 = try XCTUnwrap(CloudSpeechUsage(amount: 2000, unit: "ms"))
         XCTAssertEqual(s1, s2)
         XCTAssertNotEqual(s1, s3)
     }

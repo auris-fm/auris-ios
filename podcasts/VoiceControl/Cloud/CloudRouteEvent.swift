@@ -69,6 +69,15 @@ struct CloudSpeechUsage: Equatable {
     let amount: Int?
     /// Unit string (e.g. "ms", "samples", "tokens").
     let unit: String
+
+    /// A usage record with no unit cannot be interpreted (the amount means
+    /// nothing without one), so it is not a usable record: an empty unit is
+    /// treated as absent rather than carried as a value nobody can read.
+    init?(amount: Int?, unit: String) {
+        guard !unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        self.amount = amount
+        self.unit = unit
+    }
 }
 
 /// Events from the cloud WebSocket route (cloud-assistant.md).
