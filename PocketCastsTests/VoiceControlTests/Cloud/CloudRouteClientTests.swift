@@ -532,27 +532,50 @@ actor RecoveryGate {
 final class GatedProvider: CloudTokenProviding {
     let gate: RecoveryGate
     let log: OrderLog
-    var rejections: [String?] = []
-    private(set) var ranCancelled: Bool?
-    private(set) var completed = false
+    /// Same box as the sibling provider above: `handleUnauthorized` runs off the
+    /// caller's path, so its record is written by one task and read by the test
+    /// task. The read happens to be ordered today by the preceding
+    /// `waitFor(log:entry:)`, which is why it has not bitten — this makes it
+    /// sound rather than lucky.
+    private let box = GatedProviderBox()
+    var rejections: [String?] { box.rejections }
+    var ranCancelled: Bool? { box.ranCancelled }
+    var completed: Bool { box.completed }
     init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
     func token() async -> String? { "token-1" }
     func handleUnauthorized(rejectedToken: String?) async {
-        rejections.append(rejectedToken)
+        box.appendRejection(rejectedToken)
         // `finish()` runs the stream's onTermination, which cancels the producer
         // task. Recovery must not run inside it: a cancelled task throws out of
         // its first cancellable await, so this records whether it did.
-        ranCancelled = Task.isCancelled
+        box.setRanCancelled(Task.isCancelled)
         await log.append("recovery-started")
         await gate.wait()
         do {
             try await Task.sleep(nanoseconds: 20_000_000)   // cancellable
-            completed = true
+            box.setCompleted(true)
         } catch {
-            completed = false
+            box.setCompleted(false)
         }
         await log.append("recovery-finished")
     }
+}
+
+/// Holds `GatedProvider`'s cross-task state behind one lock. A single box for
+/// the three fields keeps the provider's reads and writes in one place.
+final class GatedProviderBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRejections: [String?] = []
+    private var storedRanCancelled: Bool?
+    private var storedCompleted = false
+
+    var rejections: [String?] { lock.lock(); defer { lock.unlock() }; return storedRejections }
+    var ranCancelled: Bool? { lock.lock(); defer { lock.unlock() }; return storedRanCancelled }
+    var completed: Bool { lock.lock(); defer { lock.unlock() }; return storedCompleted }
+
+    func appendRejection(_ value: String?) { lock.lock(); defer { lock.unlock() }; storedRejections.append(value) }
+    func setRanCancelled(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedRanCancelled = value }
+    func setCompleted(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedCompleted = value }
 }
 
 /// Polls rather than sleeping a fixed interval, so a passing case costs
