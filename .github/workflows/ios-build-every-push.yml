@@ -35,9 +35,13 @@ on:
   pull_request:
 
 # A newer push to the same ref cancels the older run — cheap check, cheap
-# cancel. Keyed on the ref *or* the PR head, so the `push` and `pull_request`
-# events for one commit cannot run in parallel: without that, a branch with an
-# open PR builds twice (see the `build` job's `if:` for why only one event runs).
+# cancel. Keyed on the branch, so the `push` and `pull_request` events for one
+# commit land in the SAME group and one cancels the other. That is how a single
+# build per commit is achieved: both events run the same build, so whichever
+# survives does the work (the surviving `pull_request` run also tests).
+# Keying on `github.ref` alone was the bug — `refs/heads/x` and
+# `refs/pull/N/merge` are different refs, so neither run cancelled the other and
+# every PR push built twice.
 concurrency:
   group: ios-build-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -47,11 +51,6 @@ jobs:
     name: Build (StagingDebug)
     runs-on: macos-26
     timeout-minutes: 60
-    # One run per commit, not two. A same-repo branch with an open PR fires both
-    # `push` and `pull_request`; the push is enough, and it also covers stacked
-    # base branches, which have no PR of their own. Fork PRs are the exception:
-    # they have no `push` event here, so the `pull_request` run is kept for them.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@v4
 
@@ -130,10 +129,10 @@ jobs:
   test:
     name: Test (StagingDebug)
     # Keep the expensive job where changes are already being reviewed.
-    # No `needs: build` on purpose: a same-repo PR is built by its `push` run,
-    # and this job's sibling `build` is skipped by its own `if:`. Depending on a
-    # skipped job would skip this one too, so the tests would never run for the
-    # ordinary (same-repo) PR case. `make test_staging` builds what it needs.
+    # No `needs: build` on purpose: the two jobs are independent by design, and
+    # depending on a build that the concurrency group may have cancelled (its
+    # sibling from the `push` event) would skip the tests for an ordinary PR.
+    # `make test_staging` builds what it needs.
     if: github.event_name == 'pull_request'
     runs-on: macos-26
     timeout-minutes: 90
