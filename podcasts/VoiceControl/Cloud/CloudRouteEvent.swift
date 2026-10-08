@@ -101,6 +101,15 @@ enum CloudRouteJSONValue: Equatable {
     case object([String: CloudRouteJSONValue])
     case array([CloudRouteJSONValue])
 
+    /// The string this value carries, if it is one. Action parameters arrive
+    /// from the wire as `CloudRouteJSONValue`, so reading one as a string has to
+    /// go through the enum — `as? String` on the wrapper always fails, which is
+    /// how a direction-only `seek_relative` silently lost its direction.
+    var stringValue: String? {
+        if case let .string(value) = self { return value }
+        return nil
+    }
+
     var int64Value: Int64? {
         switch self {
         case .int(let value): return value

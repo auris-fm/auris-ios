@@ -299,8 +299,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // applies its interval in the request's direction.
             let delta = params["delta_seconds"]?.int64Value
                 .flatMap { Int($0) == 0 ? nil : Int($0) }
-            let declared = params["direction"]
-            let direction = seekDirectionOf(delta: delta, declared: declared)
+            // The parameter is a `CloudRouteJSONValue`; take its string. Typing
+            // this as `String?` rather than `Any?` makes the compiler reject the
+            // next call site that passes the wrapper where a string is wanted.
+            let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
         case "pause":
             _ = playbackSink.pause()
@@ -336,14 +338,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Per the recovery contract: the delta's sign is authoritative when a
     /// delta is present; `direction` decides only when it is absent. A request
     /// that stated neither takes the app's default forward interval.
-    private func seekDirectionOf(delta: Int?, declared: Any?) -> SeekDirection {
+    private func seekDirectionOf(delta: Int?, declared: String?) -> SeekDirection {
         if let delta {
             return delta < 0 ? .backward : .forward
         }
-        if let str = declared as? String {
-            if str == "backward" { return .backward }
-            if str == "forward" { return .forward }
-        }
+        if declared == "backward" { return .backward }
+        if declared == "forward" { return .forward }
         return .forward // default: app's configurable interval
     }
 
