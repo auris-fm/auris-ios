@@ -363,9 +363,44 @@ final class CloudRouteClientLocaleTests: XCTestCase {
 final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
     private final class RecordingProvider: CloudTokenProviding {
         var token: String? = "token-1"
-        var rejections: [String?] = []
+
+        // `handleUnauthorized` runs off the caller's path, so its record is read
+        // from the test task while another task writes it: the box makes that
+        // exchange sound rather than lucky.
+        private let box = RejectionBox()
+        var rejections: [String?] { box.values }
         func token() async -> String? { token }
-        func handleUnauthorized(rejectedToken: String?) async { rejections.append(rejectedToken) }
+        func handleUnauthorized(rejectedToken: String?) async { box.append(rejectedToken) }
+    }
+
+    /// Appends from one task, reads from another. A lock is the smallest thing
+    /// that is correct here; the poll below runs while the report lands.
+    private final class RejectionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String?] = []
+        var values: [String?] {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+        func append(_ value: String?) {
+            lock.lock(); defer { lock.unlock() }
+            stored.append(value)
+        }
+    }
+
+    /// Waits for an async side effect so the assertion measures the behaviour
+    /// rather than the scheduling. Returns whether it arrived, so a timeout is
+    /// the failure rather than a silent five-second pause before an unrelated
+    /// assertion fails. (Not named `waitFor`: this file has a global by that
+    /// name, and it would be shadowed here.)
+    @discardableResult
+    private func awaitCondition(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
     }
 
     override func tearDown() {
@@ -388,6 +423,12 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
+        // The rejection is reported off the caller's path by design (recovery
+        // must never delay the user's error), so it is awaited rather than
+        // raced: asserting immediately is a race the slower CI machine loses,
+        // which is how this failed there while passing locally.
+        let reported = await awaitCondition { !provider.rejections.isEmpty }
+        XCTAssertTrue(reported, "the rejected credential must be reported within the timeout")
         XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
         guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
     }
@@ -491,27 +532,50 @@ actor RecoveryGate {
 final class GatedProvider: CloudTokenProviding {
     let gate: RecoveryGate
     let log: OrderLog
-    var rejections: [String?] = []
-    private(set) var ranCancelled: Bool?
-    private(set) var completed = false
+    /// The same *pattern* as the sibling provider above — its own box, not a
+    /// shared one. `handleUnauthorized` runs off the caller's path, so the
+    /// record is written by one task and read by the test task. The read
+    /// happens to be ordered today by the preceding `waitFor(log:entry:)`,
+    /// which is why it has not bitten; this makes it sound rather than lucky.
+    private let box = GatedProviderBox()
+    var rejections: [String?] { box.rejections }
+    var ranCancelled: Bool? { box.ranCancelled }
+    var completed: Bool { box.completed }
     init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
     func token() async -> String? { "token-1" }
     func handleUnauthorized(rejectedToken: String?) async {
-        rejections.append(rejectedToken)
+        box.appendRejection(rejectedToken)
         // `finish()` runs the stream's onTermination, which cancels the producer
         // task. Recovery must not run inside it: a cancelled task throws out of
         // its first cancellable await, so this records whether it did.
-        ranCancelled = Task.isCancelled
+        box.setRanCancelled(Task.isCancelled)
         await log.append("recovery-started")
         await gate.wait()
         do {
             try await Task.sleep(nanoseconds: 20_000_000)   // cancellable
-            completed = true
+            box.setCompleted(true)
         } catch {
-            completed = false
+            box.setCompleted(false)
         }
         await log.append("recovery-finished")
     }
+}
+
+/// Holds `GatedProvider`'s cross-task state behind one lock. A single box for
+/// the three fields keeps the provider's reads and writes in one place.
+final class GatedProviderBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRejections: [String?] = []
+    private var storedRanCancelled: Bool?
+    private var storedCompleted = false
+
+    var rejections: [String?] { lock.lock(); defer { lock.unlock() }; return storedRejections }
+    var ranCancelled: Bool? { lock.lock(); defer { lock.unlock() }; return storedRanCancelled }
+    var completed: Bool { lock.lock(); defer { lock.unlock() }; return storedCompleted }
+
+    func appendRejection(_ value: String?) { lock.lock(); defer { lock.unlock() }; storedRejections.append(value) }
+    func setRanCancelled(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedRanCancelled = value }
+    func setCompleted(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedCompleted = value }
 }
 
 /// Polls rather than sleeping a fixed interval, so a passing case costs
