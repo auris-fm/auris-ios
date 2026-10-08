@@ -160,9 +160,7 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
     /// arrive rather than the values that followed from it.
     private func waitForLoad(
         _ viewModel: ListeningHeatmapViewModel,
-        timeout: TimeInterval = 30,
-        file: StaticString = #filePath,
-        line: UInt = #line
+        timeout: TimeInterval = 30
     ) async {
         let expectation = XCTestExpectation(description: "weeks published")
         viewModel.$weeks
@@ -175,6 +173,9 @@ final class ListeningHeatmapViewModelTests: XCTestCase {
         // result on the *main* queue — so a blocking wait on the main thread can
         // never be satisfied: it passed locally (fast enough to interleave) and
         // timed out on a loaded CI runner.
+        // No `file`/`line` forwarding: `fulfillment(of:timeout:)` does not take
+        // them, and unused parameters would attribute a timeout to this helper
+        // rather than to the test that called it.
         await fulfillment(of: [expectation], timeout: timeout)
     }
 }
