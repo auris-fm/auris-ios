@@ -11,13 +11,22 @@
 # build fails and no test needs to run. That is the whole case: a file that no
 # compiler had seen, on a branch that no PR described.
 #
-# Prerequisites the runner must supply (a stock GitHub macOS runner has Xcode
-# and iOS runtimes; the app's own frameworks are fetched/built below):
-#   - a macOS image with Xcode and an iOS simulator runtime
-#   - network access (the llama.cpp build clones its pinned source)
-# The first run on a real runner may reveal further setup steps; those should be
-# added here rather than worked around, or the check fails for environmental
-# reasons and stops being trusted.
+# The toolchain is pinned, not inherited. `.xcode-version` is this repo's pin
+# (the same file `.buildkite/shared-pipeline-vars` turns into the release image
+# `xcode-26.6`), so both jobs select that exact Xcode, install it if the image
+# does not ship it, and fail loudly if it cannot be selected. A run under a
+# different Xcode is worse than no run: `supportedModes: IntentModes` compiles
+# only against the iOS 26 SDK, so an image default of Xcode 16.4 reports a
+# toolchain failure as a code failure — and, in the other direction, a green
+# build under an unpinned toolchain does not vouch for the release toolchain.
+#
+# Prerequisites the runner must supply:
+#   - a macOS image (Xcode is installed below from the pin; the app's own
+#     frameworks are fetched/built here too)
+#   - network access (Xcode download, if needed, and the llama.cpp clone)
+# Platform and toolchain mismatches are asserted, never assumed: each job fails
+# at the step that detects the mismatch rather than later, opaquely, inside
+# `xcodebuild`.
 
 name: iOS build
 
@@ -25,45 +34,65 @@ on:
   push:
   pull_request:
 
-# A newer push to the same ref cancels the older run — cheap check, cheap cancel.
+# A newer push to the same ref cancels the older run — cheap check, cheap
+# cancel. Keyed on the ref *or* the PR head, so the `push` and `pull_request`
+# events for one commit cannot run in parallel: without that, a branch with an
+# open PR builds twice (see the `build` job's `if:` for why only one event runs).
 concurrency:
-  group: ios-build-${{ github.ref }}
+  group: ios-build-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: Build (StagingDebug)
     runs-on: macos-15
+    timeout-minutes: 60
+    # One run per commit, not two. A same-repo branch with an open PR fires both
+    # `push` and `pull_request`; the push is enough, and it also covers stacked
+    # base branches, which have no PR of their own. Fork PRs are the exception:
+    # they have no `push` event here, so the `pull_request` run is kept for them.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@v4
 
-      # The image's default Xcode can lag the SDK the code is written against.
-      # Concretely: `supportedModes: IntentModes` (AppIntents) exists only in
-      # the iOS 26 SDK, and the 2026-10-07 run failed with `cannot find type
-      # 'IntentModes' in scope` under the image default Xcode 16.4 while
-      # Xcode 26.6 built the same tree clean. Select the newest installed
-      # Xcode explicitly so the check tracks the SDK, not the image default.
-      - name: Select newest Xcode
+      # Install and select the pinned Xcode (the image's default can be older,
+      # and "newest installed" is not the pin). The action fails if the version
+      # cannot be provided, so a wrong-toolchain run cannot look like a pass.
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version-file: .xcode-version
+      - name: Assert pinned Xcode
         run: |
-          ls -d /Applications/Xcode*.app
-          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          echo "Selecting $latest"
-          sudo xcode-select -s "$latest"
+          want=$(sed -E 's/^~> ?//' .xcode-version)
           xcodebuild -version
-
-      - name: Toolchain
-        run: |
-          xcodebuild -version
-          xcrun simctl list runtimes
+          xcodebuild -version | grep -q "Xcode $want" || {
+            echo "expected Xcode $want, found:"; xcodebuild -version; exit 1; }
 
       # The Staging scheme embeds an Apple Watch app, so **watchOS** is required
-      # as well as iOS. A first local build failed on exactly this, on a ~4 GB
-      # platform the runner will not have preinstalled. Install both up front so
-      # the check fails for the code rather than for a missing platform.
+      # as well as iOS. Install both up front so the check fails for the code
+      # rather than for a missing platform — and assert the outcome, because a
+      # download that yields no usable runtime must not report success
+      # (`|| true` here is what made that failure surface later, opaquely,
+      # inside `xcodebuild`).
       - name: Ensure iOS and watchOS platforms
         run: |
-          xcodebuild -downloadPlatform iOS || true
-          xcodebuild -downloadPlatform watchOS || true
+          xcrun simctl list runtimes
+          for platform in iOS watchOS; do
+            if ! xcrun simctl list runtimes | grep -qi "$platform"; then
+              xcodebuild -downloadPlatform "$platform"
+            fi
+            xcrun simctl list runtimes | grep -qi "$platform" || {
+              echo "$platform runtime is not available after download"; exit 1; }
+          done
+          xcrun simctl list runtimes
+
+      # `make test_staging` resolves its simulator as
+      # `xcrun simctl list devices available | grep iPhone | tail -1`, so an
+      # empty device list would become an opaque destination error much later.
+      - name: Assert a simulator is available
+        run: |
+          xcrun simctl list devices available | grep -i iPhone
 
       # The app cannot build without LocalApiCredentials.swift; this Makefile
       # target writes an empty one (the repo's `external_contributor` path).
@@ -96,17 +125,45 @@ jobs:
   test:
     name: Test (StagingDebug)
     # Keep the expensive job where changes are already being reviewed.
+    # No `needs: build` on purpose: a same-repo PR is built by its `push` run,
+    # and this job's sibling `build` is skipped by its own `if:`. Depending on a
+    # skipped job would skip this one too, so the tests would never run for the
+    # ordinary (same-repo) PR case. `make test_staging` builds what it needs.
     if: github.event_name == 'pull_request'
     runs-on: macos-15
-    needs: build
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest Xcode
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version-file: .xcode-version
+      - name: Assert pinned Xcode
         run: |
-          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          sudo xcode-select -s "$latest"
+          want=$(sed -E 's/^~> ?//' .xcode-version)
           xcodebuild -version
+          xcodebuild -version | grep -q "Xcode $want" || {
+            echo "expected Xcode $want, found:"; xcodebuild -version; exit 1; }
+
+      # The test job runs the same Staging scheme with `buildForTesting = YES`,
+      # so it needs the watchOS runtime exactly as the build job does. Provision
+      # and assert here too, so a missing platform fails legibly instead of
+      # surfacing as an opaque test failure.
+      - name: Ensure iOS and watchOS platforms
+        run: |
+          for platform in iOS watchOS; do
+            if ! xcrun simctl list runtimes | grep -qi "$platform"; then
+              xcodebuild -downloadPlatform "$platform"
+            fi
+            xcrun simctl list runtimes | grep -qi "$platform" || {
+              echo "$platform runtime is not available after download"; exit 1; }
+          done
+          xcrun simctl list runtimes
+
+      - name: Assert a simulator is available
+        run: |
+          xcrun simctl list devices available | grep -i iPhone
 
       - name: Generate credentials stub
         run: make external_contributor
@@ -118,6 +175,15 @@ jobs:
             ThirdParty/llama-cpp-build
             ${{ runner.temp }}/auris-llama-cpp
           key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
+
+      # Same key as the build job: its post-step save has already landed, so
+      # this restores the compile rather than paying for it twice.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: deriveddata-${{ runner.os }}-
 
       - name: Test
         run: make test_staging
