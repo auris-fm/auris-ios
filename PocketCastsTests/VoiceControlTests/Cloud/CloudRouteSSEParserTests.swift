@@ -180,10 +180,19 @@ final class CloudRouteSSEParserTests: XCTestCase {
 
 final class CloudRouteClientTextParserTests: XCTestCase {
     func testParsesConnected() {
+        // `connected` carries the codec the server negotiated; the player needs
+        // it (rate included) to decode the binary frames that follow.
         let events = CloudRouteClient.parseTextFrame(
-            #"{"type":"connected","codec":"opus@48k","reservation_id":"abc"}"#
+            #"{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"abc"}"#
         )
-        XCTAssertTrue(events.isEmpty)
+        XCTAssertEqual(events, [.connected(codec: CloudAudioCodec(name: "pcm_s16le@24k")!)])
+    }
+
+    func testConnectedWithoutCodecIsIgnored() {
+        XCTAssertTrue(
+            CloudRouteClient.parseTextFrame(#"{"type":"connected","reservation_id":"abc"}"#).isEmpty,
+            "a connected frame with no codec tells the client nothing"
+        )
     }
 
     func testParsesAudioFrameBinaryNotFromText() {

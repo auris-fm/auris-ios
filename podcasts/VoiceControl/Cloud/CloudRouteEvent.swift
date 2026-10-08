@@ -1,5 +1,40 @@
 import Foundation
 
+/// The codec the server negotiated in its `connected` frame, with the sample
+/// rate parsed from the codec name (the wire carries no separate rate field).
+///
+/// The bytes of every binary frame are in this codec at this rate, so the
+/// player must build its buffer at this rate rather than at the output
+/// hardware's — a 24 kHz stream played through a 48 kHz buffer is double-speed.
+struct CloudAudioCodec: Equatable {
+    /// The codec as negotiated, e.g. `pcm_s16le@24k`.
+    let name: String
+    /// Base codec name without the rate suffix, e.g. `pcm_s16le`.
+    let base: String
+    /// Negotiated sample rate in Hz, when the name carries one.
+    let sampleRateHz: Double?
+
+    init?(name: String) {
+        guard !name.isEmpty else { return nil }
+        self.name = name
+        if let at = name.lastIndex(of: "@") {
+            let base = String(name[name.startIndex..<at])
+            let suffix = String(name[name.index(after: at)...]).lowercased()
+            self.base = base.isEmpty ? name : base
+            if suffix.hasSuffix("k"), let value = Double(suffix.dropLast()) {
+                self.sampleRateHz = value * 1000
+            } else if let value = Double(suffix) {
+                self.sampleRateHz = value
+            } else {
+                self.sampleRateHz = nil
+            }
+        } else {
+            self.base = name
+            self.sampleRateHz = nil
+        }
+    }
+}
+
 /// Audio frame carrying synthesised speech from the cloud server.
 struct CloudAudioFrame: Equatable {
     /// Raw audio payload in the codec negotiated in the `connected` frame.
@@ -38,6 +73,8 @@ struct CloudSpeechUsage: Equatable {
 
 /// Events from the cloud WebSocket route (cloud-assistant.md).
 enum CloudRouteEvent: Equatable {
+    /// Server handshake: the codec selected for this turn's audio frames.
+    case connected(codec: CloudAudioCodec)
     /// Binary audio frame from the server's speech synthesiser.
     case audioFrame(CloudAudioFrame)
     /// Server-directed local action (seek, pause, etc.).

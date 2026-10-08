@@ -524,3 +524,135 @@ func waitFor(log: OrderLog, entry: String, timeout: TimeInterval) async -> Bool 
     }
     return await log.entries.contains(entry)
 }
+
+// MARK: - Production transport (WebSocket) through the task seam
+
+/// `URLProtocol` stubs only the URL loading system, which
+/// `URLSessionWebSocketTask` does not go through — so the transport the app
+/// actually uses had no test behind it. These drive it through
+/// `CloudRouteClient.WebSocketTasking`.
+private final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
+    private var incoming: [URLSessionWebSocketTask.Message]
+    private(set) var sent: [URLSessionWebSocketTask.Message] = []
+    private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
+    var receiveError: Error?
+
+    init(_ incoming: [URLSessionWebSocketTask.Message]) {
+        self.incoming = incoming
+    }
+
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        sent.append(message)
+    }
+
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        if let receiveError { throw receiveError }
+        guard !incoming.isEmpty else {
+            throw URLError(.badServerResponse)
+        }
+        return incoming.removeFirst()
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        cancelled = (closeCode, reason)
+    }
+}
+
+final class CloudRouteWebSocketPathTests: XCTestCase {
+    private func client(task: StubWebSocketTask, token: String?) -> CloudRouteClient {
+        CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_test",
+            requestTimeoutSeconds: 15,
+            tokenProvider: StubTokenProvider(token: token),
+            transport: .webSocket,
+            webSocketTaskFactory: { _ in task }
+        )
+    }
+
+    private func collect(_ stream: AsyncStream<CloudRouteEvent>) async -> [CloudRouteEvent] {
+        var events: [CloudRouteEvent] = []
+        for await event in stream { events.append(event) }
+        return events
+    }
+
+    /// The socket is closed as the transport call returns (it is a `defer`), so
+    /// a consumer that has drained the stream can still observe the closure a
+    /// moment later. Wait briefly for it rather than racing the assertion.
+    private func waitForCancellation(_ task: StubWebSocketTask) async -> Bool {
+        for _ in 0..<50 {
+            if task.cancelled != nil { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return task.cancelled != nil
+    }
+
+    private func context() -> CloudRouteContext {
+        CloudRouteContext(from: PlaybackContext(
+            episodeId: "ep",
+            podcastId: "pod",
+            referencePositionMs: 1_000,
+            clientPositionMs: 1_100,
+            recentReferencePositions: [],
+            previousReferencePositionMs: nil
+        ))
+    }
+
+    /// A turn with no credential must end with a terminal `unauthorized` event.
+    /// Finishing silently leaves the user with no error and no outcome.
+    func testMissingCredentialYieldsUnauthorizedError() async {
+        let task = StubWebSocketTask([])
+        let events = await collect(client(task: task, token: nil).route(request: "hello", context: context()))
+
+        XCTAssertEqual(events.last, .error(code: "unauthorized", message: ""),
+                       "a turn with no credential must report the failure, not end silently")
+        XCTAssertEqual(task.sent.count, 0, "nothing is sent without a credential")
+    }
+
+    /// The production path parses `connected` for the negotiated codec, plays
+    /// binary frames as audio, and closes the socket when the turn ends.
+    func testConnectedThenAudioThenDoneOnProductionTransport() async {
+        let connected = #"{"type":"connected","codec":"pcm_s16le@24k"}"#
+        let done = #"{"type":"done","input_tokens":3,"output_tokens":4}"#
+        let task = StubWebSocketTask([
+            .string(connected),
+            .data(Data([0x01, 0x00, 0x02, 0x00])),
+            .string(done)
+        ])
+
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+        XCTAssertEqual(events.count, 3, "connected, one audio frame, done — got \(events)")
+        if case let .connected(codec) = events[0] {
+            XCTAssertEqual(codec.base, "pcm_s16le")
+            XCTAssertEqual(codec.sampleRateHz, 24_000, "the negotiated rate comes from the codec name")
+        } else {
+            XCTFail("expected a .connected event carrying the negotiated codec, got \(events[0])")
+        }
+        let frames = events.compactMap { if case let .audioFrame(f) = $0 { return f }; return nil }
+        XCTAssertEqual(frames.map(\.data), [Data([0x01, 0x00, 0x02, 0x00])], "the binary frame arrives as audio")
+        XCTAssertEqual(events.last, .done(usage: CloudTurnUsage(inputTokens: 3, outputTokens: 4)),
+                       "the turn ends on done")
+        XCTAssertEqual(task.sent.count, 1, "the auth frame went out")
+        let closed = await waitForCancellation(task)
+        XCTAssertTrue(closed, "the socket must be closed when the turn ends")
+    }
+
+    /// A stream that ends without a terminal event is reported, not silent.
+    func testClosedWithoutTerminalYieldsConnectionLost() async {
+        let task = StubWebSocketTask([.string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#)])
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+
+        guard case let .error(code, _)? = events.last else {
+            return XCTFail("expected a terminal error, got \(String(describing: events.last))")
+        }
+        XCTAssertEqual(code, "connection_lost", "a stream that ends without a terminal event is reported")
+        let closed = await waitForCancellation(task)
+        XCTAssertTrue(closed, "the socket is closed on the non-terminal path too")
+    }
+}
+
+private struct StubTokenProvider: CloudTokenProviding {
+    let token: String?
+    func token() async -> String? { token }
+    func handleUnauthorized(rejectedToken: String?) async {}
+}

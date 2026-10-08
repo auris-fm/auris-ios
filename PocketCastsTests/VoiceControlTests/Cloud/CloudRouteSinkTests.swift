@@ -104,7 +104,7 @@ final class CloudRouteSinkTests: XCTestCase {
 
             """
         )
-        playback.isPlaying = false
+        playback.setPlaying(false)
 
         let response = await makeSink().routeToCloud(
             request: "what was that about",
@@ -364,23 +364,30 @@ final class CloudRouteSinkTests: XCTestCase {
 }
 
 private final class RecordingPlaybackSink: VoicePlaybackSink {
-    /// Host playing at the moment the turn reads it. Tests set this to
-    /// false to model a user who paused before speaking.
-    var isPlaying = true
+    /// Host playing at the moment the turn reads it. `pause()` and `resume()`
+    /// keep it true to playback: a constant `true` hides a lost hold, because a
+    /// turn that inherits an outstanding pause would still read "playing".
+    private(set) var isPlaying = true
     enum Call: Equatable {
         case pause, resume, seekRelative(Int), seekTo(Int), nextEpisode
     }
+
+    /// Models the state before a turn: a user who paused before speaking, or a
+    /// player that is running. `pause()`/`resume()` maintain it thereafter.
+    func setPlaying(_ playing: Bool) { isPlaying = playing }
 
     var calls: [Call] = []
     var positionMs: Int64 = 0
 
     func pause() -> VoiceResponse {
         calls.append(.pause)
+        isPlaying = false
         return .earcon(.success)
     }
 
     func resume() -> VoiceResponse {
         calls.append(.resume)
+        isPlaying = true
         return .silent
     }
 
@@ -508,6 +515,37 @@ final class CloudRouteSupersedeTests: XCTestCase {
 
         let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
         XCTAssertTrue(seeks.isEmpty, "a superseded turn must not execute actions that arrive after it lost the turn")
+    }
+
+    /// A barge-in must not leave the podcast paused. Turn A pauses for its hold
+    /// and is superseded before it finishes; B inherits that hold and is the
+    /// turn that releases it. With a test double whose `isPlaying` ignored
+    /// `pause()` this could not fail — which is why the double now models
+    /// playback state faithfully.
+    func testBargeInResumesPlaybackHeldByTheSupersededTurn() async {
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .slowChunks(
+                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
+                chunkDelayNanoseconds: 400_000_000
+            )
+        }
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+        XCTAssertFalse(playback.isPlaying, "the hold is in effect while the first turn runs")
+
+        CloudRouteTestURLProtocol.stubSSE("""
+        event: done
+        data: {"input_tokens":1,"output_tokens":1}
+
+        """)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        _ = await slow.value
+
+        XCTAssertTrue(playback.isPlaying, "the winning turn must release the hold taken for the superseded one")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one resume")
     }
 
     private func makeSink() -> CloudRouteSink {

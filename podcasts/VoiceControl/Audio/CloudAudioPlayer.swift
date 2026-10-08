@@ -32,6 +32,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     // MARK: - Public
 
+    /// The codec negotiated for this turn, from the server's `connected` frame.
+    /// Frames are decoded at this rate; the output node is connected with it so
+    /// the mixer resamples to the hardware instead of the hardware's rate being
+    /// assumed for the stream (which plays 24 kHz PCM at double speed on a
+    /// 48 kHz device).
+    func setNegotiatedCodec(_ codec: CloudAudioCodec) {
+        bufferLock.lock()
+        negotiatedCodec = codec
+        bufferLock.unlock()
+    }
+
     /// Start (or resume) playback with new frames.
     ///
     /// Call for each frame received on the WebSocket.  If the player was
@@ -60,12 +71,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     /// Reset state immediately (e.g. on cancellation).
+    ///
+    /// Stops the engine as well as dropping the buffered frames: a buffer
+    /// already handed to `scheduleBuffer` keeps playing otherwise, so the tail
+    /// of an abandoned answer would play over the error feedback and
+    /// `isPlaying`/`paused` would stay true into the next turn (whose first
+    /// frames are then treated as an underrun). The runner thread owns the
+    /// engine, so the stop is done in drain mode.
     func cancel() {
         bufferLock.lock()
         buffer.removeAll()
         bufferLock.unlock()
         runnerLock.lock()
         drainRemaining = false
+        stopRequested = true
         runnerRunning = false
         runnerLock.signal()
         runnerLock.unlock()
@@ -95,6 +114,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Frame buffer (in-order).
     private var buffer: [CloudAudioFrame] = []
 
+    /// Codec negotiated in the server's `connected` frame (guarded by
+    /// `bufferLock`, written on the main actor and read on the runner thread).
+    private var negotiatedCodec: CloudAudioCodec?
+
+    /// Sample rate the negotiated codec delivers, defaulting to the advertised
+    /// codec's rate when no `connected` frame has been seen yet.
+    private var negotiatedSampleRate: Double {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        if let rate = negotiatedCodec?.sampleRateHz { return rate }
+        return CloudRouteClient.advertisedPCMasterRateHz
+    }
+
     /// Runner thread is alive (waiting or running).
     private var runnerRunning = false
 
@@ -105,6 +137,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request drain-and-stop (done / error).
     private var drainRemaining = false
+
+    /// Request an immediate stop without draining (cancel).
+    private var stopRequested = false
 
     /// Runner thread.
     private var runnerThread: Thread?
@@ -149,8 +184,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
             // Wait for work or drain request. `runnerLock.wait()` releases the
             // lock while it blocks, so `enqueue`/`finish`/`cancel` can take it.
-            while !runnerRunning && !drainRemaining {
+            while !runnerRunning && !drainRemaining && !stopRequested {
                 runnerLock.wait()
+            }
+
+            // Cancelled: drop everything and stop the engine, without draining.
+            if stopRequested {
+                stopRequested = false
+                runnerLock.unlock()
+                stopEngine()
+                isPlaying = false
+                paused = false
+                runnerLock.lock()
+                runnerExited = false
+                runnerLock.signal()
+                runnerLock.unlock()
+                continue
             }
 
             // Drain mode: play remaining then stop.
@@ -197,15 +246,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // If not playing and not enough frames, wait.
         guard isPlaying else { return }
 
-        // Drain as many frames as we can.
-        let framesToProcess = buffer.count
+        // Drain as many frames as we can. The count is read under the buffer
+        // lock: `cancel()` empties the buffer from another thread (a server
+        // error after audio started), so a count taken outside it can outlive
+        // the frames it describes.
+        let framesToProcess = bufferedFrameCount
         for _ in 0..<framesToProcess {
             guard let frame = dequeueFrame() else { break }
             playFrame(frame)
         }
 
         // Check if buffer drained.
-        if buffer.isEmpty && !drainRemaining {
+        if isBufferEmpty && !drainRemaining {
             paused = true
             isPlaying = false
             stopEngine()
@@ -221,14 +273,31 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var paused = false
 
     private var hasEnoughFramesToPlay: Bool {
-        buffer.count >= Self.resumeThreshold
+        bufferedFrameCount >= Self.resumeThreshold
     }
 
+    /// Buffered frame count, read under the lock. `buffer` is mutated from the
+    /// main actor (`enqueue`/`cancel`) while the runner drains it.
+    private var bufferedFrameCount: Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return buffer.count
+    }
+
+    private var isBufferEmpty: Bool {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return buffer.isEmpty
+    }
+
+    /// Removes the oldest frame, or `nil` when the buffer was emptied by a
+    /// concurrent `cancel()`. `removeFirst()` on an empty array traps, so the
+    /// emptiness is decided under the same lock as the removal.
     private func dequeueFrame() -> CloudAudioFrame? {
         bufferLock.lock()
-        let frame = buffer.removeFirst()
-        bufferLock.unlock()
-        return frame
+        defer { bufferLock.unlock() }
+        guard !buffer.isEmpty else { return nil }
+        return buffer.removeFirst()
     }
 
     // MARK: - Audio engine
@@ -239,7 +308,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
         engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: nil)
+        // Connect with the *negotiated* format rather than `nil`: `nil` uses the
+        // node's default format, which does not match mono Int16 at the
+        // negotiated rate, and nothing ties the buffer to the node's format.
+        let format = Self.pcmFormat(sampleRate: negotiatedSampleRate)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
 
         do {
             try engine.start()
@@ -274,7 +347,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Frames arrive as raw Int16 PCM in the negotiated codec. This client
         // advertises PCM only (see `CloudRouteClient.supportedCodecs`); there is
         // no Opus decoder in this path, so an Opus frame is not handled here.
-        guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: engine.inputNode.inputFormat(forBus: 0).sampleRate) else {
+        // The frame's own rate (negotiated), not `engine.inputNode`'s hardware
+        // rate — reading the input node for a playback-only engine is also
+        // unreliable, and on a 48 kHz device it played 24 kHz PCM at double speed.
+        guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: negotiatedSampleRate) else {
             return
         }
 
@@ -282,13 +358,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
         node.scheduleBuffer(pcmBuffer)
     }
 
+    /// Mono Int16 PCM at `sampleRate` — the shape the negotiated `pcm_s16le`
+    /// codec delivers.
+    static func pcmFormat(sampleRate: Double) -> AVAudioFormat? {
+        AVAudioFormat(commonFormat: .pcmFormatInt16,
+                      sampleRate: sampleRate,
+                      channels: AVAudioChannelCount(1),
+                      interleaved: true)
+    }
+
     private func pcmBuffer(from data: Data, sampleRate: Double) -> AVAudioPCMBuffer? {
         // Raw Int16 PCM is copied straight into the buffer. Opus would need a
         // decoder, which this path does not have.
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                         sampleRate: sampleRate,
-                                         channels: AVAudioChannelCount(1),
-                                         interleaved: true),
+        guard let format = Self.pcmFormat(sampleRate: sampleRate),
               let buffer = AVAudioPCMBuffer(pcmFormat: format,
                                             frameCapacity: AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)) else {
             return nil

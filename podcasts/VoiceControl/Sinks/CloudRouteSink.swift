@@ -159,10 +159,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // speaks, so the client does not pause on its own for a turn that may
         // not produce audio. The hold is only ours to release if it stopped
         // playback that was already running.
-        wasPlayingBeforeHold = playbackSink.isPlaying
-        if wasPlayingBeforeHold {
-            _ = playbackSink.pause()
+        //
+        // A superseded turn leaves its hold in place (it returns without
+        // restoring, deliberately: the winning turn does that). `isPlaying` is
+        // therefore already false, and reading it here would lose the hold —
+        // the user would be left paused for good. Inherit the outstanding hold
+        // instead, so this turn releases it exactly once at its own end.
+        if didAutoPause && wasPlayingBeforeHold {
+            // Turn B started while A's hold was still in effect: B owns the
+            // release now (A must not also resume — see the supersede tests).
             didAutoPause = true
+        } else {
+            wasPlayingBeforeHold = playbackSink.isPlaying
+            if wasPlayingBeforeHold {
+                _ = playbackSink.pause()
+                didAutoPause = true
+            }
         }
 
         turnLoop: for await event in client.route(request: request, context: routeContext, turn: turn) {
@@ -172,6 +184,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // `break` inside the switch would only leave the switch.)
             if turnToken.isCancelled { break turnLoop }
             switch event {
+            case let .connected(codec):
+                // The server names the codec for this turn's binary frames;
+                // the player decodes at that rate rather than the hardware's.
+                audioPlayer.setNegotiatedCodec(codec)
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
             case let .action(tool, action, params):

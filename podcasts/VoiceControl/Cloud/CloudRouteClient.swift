@@ -32,6 +32,10 @@ final class CloudRouteClient {
     }
     private let transport: Transport
 
+    /// Optional seam for the WebSocket task (see `WebSocketTasking`); `nil`
+    /// uses the session's real web socket.
+    private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
+
     /// Codecs advertised to the server in the authenticate frame.
     ///
     /// PCM only. `CloudAudioPlayer` copies frames as raw Int16 PCM and has no
@@ -43,13 +47,28 @@ final class CloudRouteClient {
     /// `testAdvertisedCodecsAreDecodableByThePlayer`).
     static let supportedCodecs = ["pcm_s16le@24k"]
 
+    /// The rate of the codec this client advertises, used until the server's
+    /// `connected` frame names the negotiated one.
+    static let advertisedPCMasterRateHz: Double = 24_000
+
+    /// Seam for the WebSocket task so tests can drive the transport the app
+    /// actually uses. `URLProtocol` stubs only the URL loading system, which
+    /// `URLSessionWebSocketTask` does not go through, so without this the
+    /// production path has no test behind it.
+    protocol WebSocketTasking: AnyObject {
+        func send(_ message: URLSessionWebSocketTask.Message) async throws
+        func receive() async throws -> URLSessionWebSocketTask.Message
+        func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    }
+
     init(
         baseURL: String,
         userId: String,
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
-        transport: Transport = .webSocket
+        transport: Transport = .webSocket,
+        webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
@@ -59,6 +78,7 @@ final class CloudRouteClient {
         self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.transport = transport
+        self.webSocketTaskFactory = webSocketTaskFactory
         if let session {
             self.session = session
         } else {
@@ -161,13 +181,24 @@ final class CloudRouteClient {
             context: context,
             turn: turn
         ) else {
+            // No credential: fail closed with the same terminal event the SSE
+            // path and `main` yield, so the sink can speak/earcon the failure.
+            // Finishing silently left the user with no error and no outcome.
+            continuation.yield(.error(code: "unauthorized", message: ""))
             continuation.finish()
             return true
         }
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        let wsTask = session.webSocketTask(with: req)
+        let wsTask: WebSocketTasking = webSocketTaskFactory?(req) ?? session.webSocketTask(with: req)
+
+        // Close the socket whenever this call returns, on every path. The
+        // stream's `onTermination` cancels only the surrounding Swift task, so
+        // without this a superseded turn leaves the socket open and the server
+        // generating and streaming an answer the user abandoned (billed, and
+        // the connection held until the server's own idle timeout).
+        defer { wsTask.cancel(with: .goingAway, reason: nil) }
 
         do {
             // Send authentication frame. The task's text message is a String,
@@ -183,15 +214,24 @@ final class CloudRouteClient {
             var sawTerminalEvent = false
 
             // First-frame timeout: server must respond within 5 seconds.
+            //
+            // The task must not finish the stream once it has been cancelled:
+            // cancellation is how a received frame says "the deadline was met",
+            // and `Task.sleep` throwing on cancel would otherwise fall through
+            // to `finish()` and truncate the turn's remaining events.
             let firstFrameTimeout = Task {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch {
+                    return // cancelled: a frame arrived, the main loop owns the stream
+                }
                 if !sawTerminalEvent {
                     continuation.yield(.error(code: "connection_lost", message: ""))
+                    continuation.finish()
                 }
-                continuation.finish()
             }
 
-            while true {
+            receiveLoop: while true {
                 let message = try await wsTask.receive()
                 // Cancel the timeout on first frame.
                 firstFrameTimeout.cancel()
@@ -204,9 +244,13 @@ final class CloudRouteClient {
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
-                        if case .done = event { sawTerminalEvent = true }
-                        if case .error = event { sawTerminalEvent = true }
                         continuation.yield(event)
+                        // A terminal event ends the turn: the server closes the
+                        // connection after `done`/`error`, so continuing to
+                        // receive would turn that normal close into a spurious
+                        // `connection_lost` after a successful answer.
+                        if case .done = event { sawTerminalEvent = true; break receiveLoop }
+                        if case .error = event { sawTerminalEvent = true; break receiveLoop }
                     }
 
                 default:
@@ -434,7 +478,13 @@ final class CloudRouteClient {
 
         switch type {
         case "connected":
-            return []
+            // The negotiated codec decides how the binary frames are decoded:
+            // `pcm_s16le@24k` means raw 16-bit PCM at 24 kHz. Dropping it left
+            // the player guessing a rate from the output hardware.
+            guard let name = json["codec"] as? String,
+                  let codec = CloudAudioCodec(name: name)
+            else { return [] }
+            return [.connected(codec: codec)]
 
         case "action":
             guard let tool = json["tool"] as? String,
@@ -791,3 +841,7 @@ private final class SSESSEStreamingDelegate: NSObject, URLSessionDataDelegate {
         continuation.finish()
     }
 }
+
+
+// The real task satisfies the seam unchanged.
+extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {}
