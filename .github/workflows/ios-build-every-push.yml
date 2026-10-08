@@ -194,3 +194,18 @@ jobs:
 
       - name: Test
         run: make test_staging
+
+      # Keep the result bundle per *attempt*. A re-run replaces the previous
+      # attempt's log in place, so without this a flaky failure's evidence is
+      # gone the moment anyone re-runs the job — the failing set becomes a
+      # recollection rather than an artifact. The name carries the attempt
+      # number for that reason.
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-attempt-${{ github.run_attempt }}
+          # The path `xcodebuild test` reports in its own output.
+          path: ~/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+          if-no-files-found: warn
+          retention-days: 14
