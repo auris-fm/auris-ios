@@ -7,6 +7,7 @@ final class MockPlaybackManager: PlaybackManagerProtocol {
     var durationValue: TimeInterval = 0
     var currentTimeValue: TimeInterval = 0
     var skipResult: String? = nil
+    var isPlaying = false
 
     func duration() -> TimeInterval { durationValue }
     func currentTime() -> TimeInterval { currentTimeValue }
@@ -30,42 +31,42 @@ final class PlaybackManagerSinkTests: XCTestCase {
     }
 
     func test_sink_initialization_doesNotCrash() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         XCTAssertNotNil(sink)
     }
 
     func test_pause_returnsSuccessEarcon() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.pause()
         XCTAssertEqual(response, .earcon(.success))
     }
 
     func test_resume_returnsSilent() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.resume()
         XCTAssertEqual(response, .silent)
     }
 
     func test_seekTo_returnsSilent() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.seekTo(positionSeconds: 120)
         XCTAssertEqual(response, .silent)
     }
 
     func test_seekRelative_withDelta_returnsSilent() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.seekRelative(deltaSeconds: 30, direction: .forward)
         XCTAssertEqual(response, .silent)
     }
 
     func test_seekRelative_withNilDelta_usesDirectionDefault() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.seekRelative(deltaSeconds: nil, direction: .backward)
         XCTAssertEqual(response, .silent)
     }
 
     func test_seekTo_withNegativePosition_resolvesAgainstDuration() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         // Negative position: offset from episode end. The sink should not crash
         // and should return silent.
         let response = sink.seekTo(positionSeconds: -50, episodeDurationSeconds: 3600)
@@ -73,7 +74,7 @@ final class PlaybackManagerSinkTests: XCTestCase {
     }
 
     func test_seekTo_withNegativePositionBeyondDuration_clampsToStart() {
-        let sink = PlaybackManagerSink(playbackManager: .shared)
+        let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         // Negative offset longer than episode — should clamp to 0.
         let response = sink.seekTo(positionSeconds: -5000, episodeDurationSeconds: 300)
         XCTAssertEqual(response, .silent)

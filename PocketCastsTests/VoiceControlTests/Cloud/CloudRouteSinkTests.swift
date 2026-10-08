@@ -472,6 +472,16 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
         return .silent
     }
 
+    /// A negative position resolves back from the episode end, as the real sink
+    /// does; the double records the resolved absolute position.
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        let resolved = positionSeconds < 0
+            ? max(episodeDurationSeconds + positionSeconds, 0)
+            : positionSeconds
+        calls.append(.seekTo(resolved))
+        return .silent
+    }
+
     func nextEpisode() -> VoiceResponse {
         calls.append(.nextEpisode)
         return .silent

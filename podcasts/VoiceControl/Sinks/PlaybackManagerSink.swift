@@ -5,6 +5,10 @@ import Foundation
 /// Allows test injection of a mock playback manager without depending on
 /// the concrete `PlaybackManager` class (which has a private init).
 protocol PlaybackManagerProtocol {
+    /// Whether playback is currently running. The cloud route's hold logic reads
+    /// this to decide whether a turn may pause and later release playback (a
+    /// pause the user made themselves must not be released).
+    var isPlaying: Bool { get }
     func duration() -> TimeInterval
     func currentTime() -> TimeInterval
     func seekTo(time: TimeInterval)

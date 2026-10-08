@@ -45,6 +45,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// pause stays the user's; only a hold that stopped running playback is
     /// released by the turn's end (Task 12).
     private var wasPlayingBeforeHold = false
+
+    /// Set when the turn has completed and the player is draining: the hold is
+    /// released from `audioPlayerDidStop` rather than at `done`.
+    private var restoreHeldForPlayerDrain = false
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -210,7 +214,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     inputTokens: usage.inputTokens,
                     outputTokens: usage.outputTokens
                 )
-                restoreTransientAudioState()
+                // Restore playback only once the answer has stopped coming out
+                // of the speaker: `done` means the server has finished sending,
+                // not that the client has finished playing, so restoring here
+                // would resume the episode under the answer's tail. With nothing
+                // left to play the drain is a no-op and the restore is immediate.
+                if audioPlayer.hasPendingAudio {
+                    restoreHeldForPlayerDrain = true
+                } else {
+                    restoreTransientAudioState()
+                }
+                audioPlayer.finish()
                 return .silent
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
@@ -358,5 +372,15 @@ extension CloudRouteSink {
         // Audio paused due to buffer underrun — the sink doesn't need
         // to react; the player will resume automatically when new
         // frames arrive.
+    }
+
+    func audioPlayerDidStop() {
+        // The player has drained its buffer and stopped output. This is when a
+        // hold taken for the turn may be released, so the answer is not played
+        // over the resumed episode, and the turn's held state stays consistent
+        // even though the sink has already returned to its caller.
+        guard restoreHeldForPlayerDrain else { return }
+        restoreHeldForPlayerDrain = false
+        restoreTransientAudioState()
     }
 }
