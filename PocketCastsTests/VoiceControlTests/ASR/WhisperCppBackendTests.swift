@@ -15,11 +15,12 @@ final class WhisperCppBackendTests: XCTestCase {
 
     /// `ensureReady` for a model path that does not exist must report a failure.
     ///
-    /// This test previously asserted success, which was only ever true of a build
-    /// without whisper linked (the `#else` stub branch) — with whisper linked the
-    /// linked path has always failed for a missing model. It also attempted a
-    /// real model download, making a unit test network-dependent. The contract
-    /// asserted here is the one the shipped configuration has.
+    /// This test previously asserted success, and that assertion held in no
+    /// configuration: with whisper linked the linked path fails for a missing
+    /// model, and without it the `#else` branch returns
+    /// `.failure(.whisperNotLinked)`. It also drove a real model download, so
+    /// the unit test was network-dependent and the download — not the assertion
+    /// — decided what it observed.
     func test_ensureReady_missingModelPathFails() async {
         // A path that cannot exist and cannot be created: `ensureReady`
         // downloads when the model file is absent, and `ModelDownloader` writes
