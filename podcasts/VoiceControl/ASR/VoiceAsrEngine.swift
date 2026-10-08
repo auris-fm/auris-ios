@@ -21,9 +21,15 @@ class VoiceAsrEngine {
     /// Called on every positive detection so the service can reset grace and
     /// play the `WAKE_WORD` earcon exactly once.
     var onWakeWordDetected: (() -> Void)?
-    /// Called when a positive wake result leaves no routable transcript
-    /// (wake-only utterance); the service plays the `ERROR` earcon.
+    /// Called when a positive wake result leaves no routable transcript, i.e. the
+    /// user woke the assistant and said nothing else. Silent by contract: the wake
+    /// is the start of a session, not a failed question, so nothing is played.
     var onWakeOnly: (() -> Void)?
+    /// Called when a capture was heard but cannot be routed (a translation failed,
+    /// so the English-only intent model must not see it). This — not `onWakeOnly`
+    /// — is what the service renders as the `ERROR` earcon: the capture was a
+    /// question we could not understand, which is a different event.
+    var onUnroutable: (() -> Void)?
     /// Emitted after ASR with monotonic stage durations per
     /// recognition-pipeline.md "Production Recognition Latency Metrics".
     var onStageTiming: ((PipelineStageTiming) -> Void)?
@@ -200,7 +206,7 @@ class VoiceAsrEngine {
             wakePositive: isWakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
-            utteranceDurationMs: durationMs
+            samples: utterance
         )
         let trimNote: String? = {
             guard isWakePositive, asrResult.text != trimmedText else { return nil }
@@ -230,7 +236,7 @@ class VoiceAsrEngine {
         if Self.isNonEnglishTranslateFailure(translateNote) {
             // Don't feed untranslated CJK into the English-only intent model.
             FileLog.shared.addMessage("[VoicePipeline] → drop (\(translateNote ?? "translate"))")
-            onWakeOnly?() // service maps this to ERROR earcon
+            onUnroutable?()
             return
         }
         onRoutingInput?(Self.makeRoutingInput(

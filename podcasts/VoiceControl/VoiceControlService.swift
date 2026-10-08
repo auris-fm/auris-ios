@@ -194,7 +194,13 @@ class VoiceControlService: ObservableObject {
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
         }
-        asrEngine.onWakeOnly = { [weak self] in
+        // Silent by contract: a wake-only capture is the user opening a session,
+        // not a failed question, so it plays nothing. The "command not understood"
+        // earcon covers what we could not understand — it is not the opening.
+        // (`onWakeOnly` takes no arguments; a listener is registered rather than
+        // left nil so the intent is visible at the call site.)
+        asrEngine.onWakeOnly = {}
+        asrEngine.onUnroutable = { [weak self] in
             self?.audioRenderer.playEarcon(.error)
         }
 

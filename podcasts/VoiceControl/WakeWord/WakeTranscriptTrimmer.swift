@@ -20,6 +20,61 @@ enum WakeTranscriptTrimmer {
         return utteranceDurationMs <= completionMs + padMs
     }
 
+
+    /// Sample index of the last frame whose energy is above `threshold`, i.e. the
+    /// end of the speech in a capture. `-1` when the capture has no speech.
+    ///
+    /// The segmenter always appends trailing silence before emitting (it waits
+    /// `silenceTimeoutMs`), so the buffer's end is *not* where the user stopped
+    /// speaking. Timing the wake against the buffer end makes every real capture
+    /// look long and the wake-only case unreachable.
+    static func lastSpeechSample(
+        samples: [Float],
+        sampleRateHz: Int,
+        frameMs: Int = 10,
+        threshold: Float = 0.01
+    ) -> Int {
+        guard !samples.isEmpty, sampleRateHz > 0 else { return -1 }
+        let frame = max(sampleRateHz * frameMs / 1000, 1)
+        var last = -1
+        var index = 0
+        while index < samples.count {
+            let end = min(index + frame, samples.count)
+            var sum: Float = 0
+            for i in index..<end { sum += samples[i] * samples[i] }
+            let rms = (sum / Float(end - index)).squareRoot()
+            if rms >= threshold { last = end - 1 }
+            index = end
+        }
+        return last
+    }
+
+    static func ms(ofSample sample: Int, sampleRateHz: Int) -> Int {
+        let rate = max(sampleRateHz, 1)
+        return Int((Int64(sample) * 1000) / Int64(rate))
+    }
+
+
+    /// `commandText` for a real capture: the band test is made against the end of
+    /// the *speech* in the capture, not the end of the buffer, because the
+    /// segmenter's trailing silence is not something the user said.
+    static func commandText(
+        result: AsrResult,
+        wakePositive: Bool,
+        completionSample: Int,
+        sampleRateHz: Int,
+        samples: [Float]
+    ) -> String {
+        let speechEnd = lastSpeechSample(samples: samples, sampleRateHz: sampleRateHz)
+        return commandText(
+            result: result,
+            wakePositive: wakePositive,
+            completionSample: completionSample,
+            sampleRateHz: sampleRateHz,
+            utteranceDurationMs: ms(ofSample: max(speechEnd, 0), sampleRateHz: sampleRateHz)
+        )
+    }
+
     static func commandText(
         result: AsrResult,
         wakePositive: Bool,
