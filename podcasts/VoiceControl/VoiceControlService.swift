@@ -328,7 +328,18 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent)
-            gracePeriodSignal.onCommandRecognized()
+            // Do not reset the window unconditionally here. A cloud route's
+            // completion is the executor's to attribute — it already does so
+            // against the generation the route was issued under
+            // (`recognizeCommandIfCurrentWindow`), and resetting again from here
+            // re-opened windows that had ended, undoing that guard: a model-chosen
+            // cloud route landing after a privacy close would re-arm a session it
+            // never belonged to, and the gate maps an active window to continuous
+            // capture. Local intents have no window identity of their own, so the
+            // generic reset is right for them.
+            if !(intent is CloudRouteIntent) {
+                gracePeriodSignal.onCommandRecognized()
+            }
             lastIntentType = intentType
             lastExecutionTime = Date()
             audioRenderer.render(response)
