@@ -37,6 +37,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The image's default Xcode can lag the SDK the code is written against.
+      # Concretely: `supportedModes: IntentModes` (AppIntents) exists only in
+      # the iOS 26 SDK, and the 2026-10-07 run failed with `cannot find type
+      # 'IntentModes' in scope` under the image default Xcode 16.4 while
+      # Xcode 26.6 built the same tree clean. Select the newest installed
+      # Xcode explicitly so the check tracks the SDK, not the image default.
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
       - name: Toolchain
         run: |
           xcodebuild -version
@@ -87,6 +101,12 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
 
       - name: Generate credentials stub
         run: make external_contributor
