@@ -119,4 +119,32 @@ final class GracePeriodSignalEscalationBudgetTests: XCTestCase {
         await MainActor.run { signal.onWakeWordDetected() }
         XCTAssertNotNil(signal.claimEscalationBudget(), "the next wake opens a fresh session")
     }
+
+    /// A fallback completing must not release the refusal-tone claim.
+    ///
+    /// The fallback keeps the escalation spent (`extendWindowKeepingEscalationSpent`),
+    /// so the allowance that produced the refusal is *still* spent when its own
+    /// answer lands. If the reset clears the tone claim, the next refusal in the
+    /// same window beeps again for that same spent allowance — two tones for one
+    /// fact, which is what the claim exists to prevent.
+    func testFallbackCompletionKeepsTheRefusalToneClaim() async {
+        let signal = GracePeriodSignal(timeout: 30)
+        await MainActor.run { signal.onWakeWordDetected() }
+
+        // Spend the window's allowance, then announce its refusal: the tone claim
+        // is now held for this generation.
+        guard let generation = signal.claimEscalationBudget() else {
+            return XCTFail("the first failure in an open window escalates")
+        }
+        XCTAssertTrue(signal.claimRefusalTone(), "the refusal is announced once")
+        XCTAssertFalse(signal.claimRefusalTone(), "and not twice in the same window")
+
+        // The fallback's own answer lands: the window extends, the allowance stays spent.
+        signal.extendWindowKeepingEscalationSpent(underGeneration: generation)
+
+        XCTAssertFalse(
+            signal.claimRefusalTone(),
+            "the allowance from that refusal is still spent, so a later refusal in the same window is not new information"
+        )
+    }
 }

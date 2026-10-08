@@ -141,9 +141,15 @@ class GracePeriodSignal: ObservableObject {
     }
 
     private func startOrResetOnMainKeepingBudget(trigger: String) {
+        // The allowance stays spent across this reset, so the refusal that spent
+        // it is still the latest news in this window: restore the tone claim with
+        // it, or the next refusal beeps again for the *same* spent allowance —
+        // two tones for one fact, which is what the claim exists to prevent.
         let claimed = escalationClaimed
+        let toneClaimed = refusalToneGeneration
         startOrResetOnMain(trigger: trigger)
         escalationClaimed = claimed
+        refusalToneGeneration = toneClaimed
     }
 
     private func claimEscalationBudgetOnMain() -> Int? {
