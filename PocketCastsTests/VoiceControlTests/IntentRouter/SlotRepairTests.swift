@@ -132,16 +132,18 @@ final class SlotRepairTests: XCTestCase {
                        "spoken amount replaces produced zero")
     }
 
-    func test_repair_seekRelative_nonZeroSignPreserved() {
-        // A nonzero produced sign must never be overwritten.
+    func test_repair_seekRelative_directionOnlyUtteranceFlipsAProducedNegativeDelta() {
+        // The flip runs in both directions: a produced negative delta with an
+        // utterance that says "forward" must come out positive, so the rule is
+        // not "make deltas negative".
         let repaired = SlotRepair.repair(
             raw: "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-30)]<|tool_call_end|>",
-            utterance: "go back",
+            utterance: "skip forward",
             tool: "playback",
             action: "seek_relative"
         )
-        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, -30,
-                       "nonzero produced sign must be preserved")
+        XCTAssertEqual(repaired?.arguments["delta_seconds"] as? Int, 30,
+                       "a forward request must not stay negative")
     }
 
     func test_repair_seekRelative_zeroDroppedExtractsDirectionFromUtterance() {
