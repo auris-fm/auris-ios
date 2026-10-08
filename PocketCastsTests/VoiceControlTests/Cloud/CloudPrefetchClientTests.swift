@@ -92,9 +92,23 @@ final class CloudPrefetchClientTests: XCTestCase {
         // Returns immediately (no await) — the request proceeds in the background.
         client.schedulePrefetch(episodeId: "ep-1", podcastId: nil)
         // If the call had blocked on the network, this assertion would still pass,
-        // so pair it with the request actually being issued.
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertGreaterThan(CloudRouteTestURLProtocol.requestCount, 0, "the background attempt is issued")
+        // so pair it with the request actually being issued. Wait for the
+        // condition rather than sleeping a fixed 200 ms: on a loaded runner the
+        // background attempt lands later, which failed the count at zero and read
+        // as "the request was never issued".
+        let issued = await waitUntil(timeout: 10) { CloudRouteTestURLProtocol.requestCount > 0 }
+        XCTAssertTrue(issued, "the background attempt is issued")
+    }
+
+    /// Polls for a condition, so the test measures the behaviour instead of the
+    /// scheduler's speed.
+    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return condition()
     }
 
     private func makeClient() -> CloudPrefetchClient {
