@@ -536,11 +536,12 @@ final class CloudRouteClient {
 
         var speech: CloudSpeechUsage? = nil
         if let speechData = usage["speech"] as? [String: Any] {
+            // `CloudSpeechUsage` owns the validity rule (a unit-less amount is
+            // not a usable record), so the parse does not restate it — a second
+            // check here is how the two drift apart.
             let amount = intValue(speechData["amount"])
             let unit = speechData["unit"] as? String ?? ""
-            if !unit.isEmpty {
-                speech = CloudSpeechUsage(amount: amount, unit: unit)
-            }
+            speech = CloudSpeechUsage(amount: amount, unit: unit)
         }
         return CloudTurnUsage(
             inputTokens: inputTokens,

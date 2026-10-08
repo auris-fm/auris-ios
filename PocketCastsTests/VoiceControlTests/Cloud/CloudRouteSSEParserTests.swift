@@ -50,8 +50,23 @@ final class CloudTurnUsageTests: XCTestCase {
     }
 
     func testSpeechWithEmptyUnitIsNil() {
+        // A unit-less amount cannot be interpreted, so the record is absent
+        // rather than carried unreadable.
         let speech = CloudSpeechUsage(amount: 1000, unit: "")
         XCTAssertNil(speech)
+    }
+
+    /// The other side of the same boundary, and the one the server actually
+    /// sends on a provider failure: `amount: null` with `unit: "unavailable"`
+    /// (cloud-assistant.md) is a *usable* record — "the provider failed" is
+    /// information — so it must be kept. Without this case, the guard above
+    /// could be "simplified" into dropping exactly the record the spec sends,
+    /// and no test would object.
+    func testSpeechUnavailableUnitWithNullAmountIsKept() {
+        let speech = CloudSpeechUsage(amount: nil, unit: "unavailable")
+        XCTAssertNotNil(speech, "a provider-failure record is information, not an absent record")
+        XCTAssertNil(speech?.amount)
+        XCTAssertEqual(speech?.unit, "unavailable")
     }
 
     func testUsageWithNullTokens() {
@@ -72,16 +87,16 @@ final class CloudTurnUsageTests: XCTestCase {
 // MARK: - CloudSpeechUsage tests
 
 final class CloudSpeechUsageTests: XCTestCase {
-    func testSpeechUsageWithAmountAndUnit() {
-        let speech = CloudSpeechUsage(amount: 5000, unit: "ms")
+    func testSpeechUsageWithAmountAndUnit() throws {
+        let speech = try XCTUnwrap(CloudSpeechUsage(amount: 5000, unit: "ms"))
         XCTAssertEqual(speech.amount, 5000)
         XCTAssertEqual(speech.unit, "ms")
     }
 
-    func testSpeechUsageIsEquatable() {
-        let s1 = CloudSpeechUsage(amount: 1000, unit: "ms")
-        let s2 = CloudSpeechUsage(amount: 1000, unit: "ms")
-        let s3 = CloudSpeechUsage(amount: 2000, unit: "ms")
+    func testSpeechUsageIsEquatable() throws {
+        let s1 = try XCTUnwrap(CloudSpeechUsage(amount: 1000, unit: "ms"))
+        let s2 = try XCTUnwrap(CloudSpeechUsage(amount: 1000, unit: "ms"))
+        let s3 = try XCTUnwrap(CloudSpeechUsage(amount: 2000, unit: "ms"))
         XCTAssertEqual(s1, s2)
         XCTAssertNotEqual(s1, s3)
     }
