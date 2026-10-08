@@ -45,7 +45,7 @@ concurrency:
 jobs:
   build:
     name: Build (StagingDebug)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     # One run per commit, not two. A same-repo branch with an open PR fires both
     # `push` and `pull_request`; the push is enough, and it also covers stacked
@@ -135,7 +135,7 @@ jobs:
     # skipped job would skip this one too, so the tests would never run for the
     # ordinary (same-repo) PR case. `make test_staging` builds what it needs.
     if: github.event_name == 'pull_request'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
