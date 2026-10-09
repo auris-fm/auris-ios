@@ -8,25 +8,20 @@ import XCTest
 final class CloudTurnContractTests: XCTestCase {
     // MARK: - request_id
 
-    func testRequestIdIsPresentAndStableWhenReused() throws {
+    func testRequestIdIsPresentAndStableWhenReused() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
             recentConversation: []
         )
-        let body = try CloudRouteRequestBuilder.body(
-            request: "what did they say about AI?",
-            context: sampleContext(),
-            turn: turn
-        )
-        let json = try decode(body)
+        let json = try await authFrame(request: "what did they say about AI?", turn: turn)
 
         XCTAssertEqual(json["request_id"] as? String, turn.requestId, "request_id must come from the envelope")
         XCTAssertNotNil(UUID(uuidString: turn.requestId), "request_id must be a UUID")
 
         // A transport retry reuses the same logical-turn envelope.
-        let retry = try CloudRouteRequestBuilder.body(request: "what did they say about AI?", context: sampleContext(), turn: turn)
-        XCTAssertEqual(try decode(retry)["request_id"] as? String, turn.requestId, "retries keep the same request_id")
+        let retry = try await authFrame(request: "what did they say about AI?", turn: turn)
+        XCTAssertEqual(retry["request_id"] as? String, turn.requestId, "retries keep the same request_id")
     }
 
     func testDistinctTurnsGetDistinctRequestIds() {
@@ -41,41 +36,44 @@ final class CloudTurnContractTests: XCTestCase {
     /// never be auto-retried at all — there is no client retry loop.)
     func testDuplicateTransportAttemptsReuseTheSameRequestId() async throws {
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        var capturedIds: [String] = []
-        CloudRouteTestURLProtocol.onRequest = { _, body in
-            guard let body,
-                  let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-                  let requestId = object["request_id"] as? String
-            else { return }
-            capturedIds.append(requestId)
-        }
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
 
-        let client = makeClient()
-        for _ in 0..<2 {
-            for await _ in client.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
-        }
+        // One client per attempt: each carries the envelope it was given, so the
+        // id on the wire is readable per attempt.
+        let firstAttempt = makeClient()
+        for await _ in firstAttempt.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
+        let sameTask = capturedTasks.removeLast()
 
-        XCTAssertEqual(capturedIds.count, 2, "both transport attempts reached the server")
-        XCTAssertEqual(Set(capturedIds), [turn.requestId], "duplicate attempts carry one request_id (one admitted turn)")
-
-        // A genuinely new logical turn gets its own id.
-        capturedIds.removeAll()
+        // The same *envelope* re-driven and a fresh envelope: the id belongs to
+        // the logical turn, not to the attempt.
+        capturedTasks.removeAll()
+        let retry = makeClient()
+        for await _ in retry.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
         let secondTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        for await _ in client.route(request: "next turn", context: sampleContext(), turn: secondTurn) {}
-        XCTAssertEqual(capturedIds, [secondTurn.requestId])
+        let fresh = makeClient()
+        for await _ in fresh.route(request: "next turn", context: sampleContext(), turn: secondTurn) {}
+
+        // The first attempt, the retry of the same envelope, then a fresh turn.
+        XCTAssertEqual(
+            sameTask.sentAuthFrame?["request_id"] as? String,
+            turn.requestId,
+            "the attempt carries the envelope's own id"
+        )
+        let retriedId = capturedTasks[0].sentAuthFrame?["request_id"] as? String
+        XCTAssertEqual(retriedId, turn.requestId, "a re-driven envelope reuses its id (one admitted turn)")
+        let freshId = capturedTasks[1].sentAuthFrame?["request_id"] as? String
+        XCTAssertEqual(freshId, secondTurn.requestId, "a genuinely new turn gets its own id")
         XCTAssertNotEqual(secondTurn.requestId, turn.requestId)
     }
 
     // MARK: - capabilities
 
-    func testCapabilitiesOmittedWhenRendererNotAvailable() throws {
+    func testCapabilitiesOmittedWhenRendererNotAvailable() async throws {
         // Default iOS posture: no `search_results_v1` renderer yet, so nothing
         // is advertised and the server falls back to short token text + done.
         let turn = CloudTurnEnvelope.make(
@@ -85,16 +83,16 @@ final class CloudTurnContractTests: XCTestCase {
         )
         XCTAssertTrue(turn.capabilities.isEmpty)
 
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "x", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "x", turn: turn)
         XCTAssertNil(json["capabilities"], "capabilities must be omitted, not sent empty")
     }
 
-    func testCapabilitiesAdvertiseSearchResultsV1Only() throws {
+    func testCapabilitiesAdvertiseSearchResultsV1Only() async throws {
         let capabilities = CloudClientCapabilities.advertised(rendersStructuredResults: true)
         XCTAssertEqual(capabilities, ["search_results_v1"])
 
         let turn = CloudTurnEnvelope.make(capabilities: capabilities, routeHint: nil, recentConversation: [])
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "x", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "x", turn: turn)
         XCTAssertEqual(json["capabilities"] as? [String], ["search_results_v1"])
     }
 
@@ -128,19 +126,19 @@ final class CloudTurnContractTests: XCTestCase {
 
     // MARK: - route_hint
 
-    func testRouteHintOmittedForFreeTextTurns() throws {
+    func testRouteHintOmittedForFreeTextTurns() async throws {
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "play the bit about AI", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "play the bit about AI", turn: turn)
         XCTAssertNil(json["route_hint"], "free-text cloud_route keeps working without a hint")
     }
 
-    func testRouteHintSerializesOperationAndArguments() throws {
+    func testRouteHintSerializesOperationAndArguments() async throws {
         let hint = CloudRouteHint(
             operation: "search_spoken_content",
             arguments: ["query": .string("climate"), "scope": .string("current_episode")]
         )
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: hint, recentConversation: [])
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "x", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "x", turn: turn)
 
         let hintJSON = try XCTUnwrap(json["route_hint"] as? [String: Any])
         XCTAssertEqual(hintJSON["operation"] as? String, "search_spoken_content")
@@ -171,20 +169,20 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertEqual(bounded.last?.text, big, "the newest turn is kept")
     }
 
-    func testRecentConversationOmittedWhenEmpty() throws {
+    func testRecentConversationOmittedWhenEmpty() async throws {
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "x", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
         XCTAssertNil(context["recent_conversation"])
     }
 
-    func testRecentConversationSerializesRoleAndText() throws {
+    func testRecentConversationSerializesRoleAndText() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
             recentConversation: [RecentConversationTurn(role: .user, text: "who is speaking?")]
         )
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "x", context: sampleContext(), turn: turn))
+        let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
         let conversation = try XCTUnwrap(context["recent_conversation"] as? [[String: Any]])
         XCTAssertEqual(conversation.count, 1)
@@ -194,8 +192,8 @@ final class CloudTurnContractTests: XCTestCase {
 
     // MARK: - existing contract preserved
 
-    func testExistingContextFieldsUnchanged() throws {
-        let json = try decode(try CloudRouteRequestBuilder.body(request: "hello", context: sampleContext(), turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])))
+    func testExistingContextFieldsUnchanged() async throws {
+        let json = try await authFrame(request: "hello", turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: []))
         XCTAssertEqual(json["request"] as? String, "hello")
         let context = try XCTUnwrap(json["context"] as? [String: Any])
         XCTAssertEqual(context["episode_id"] as? String, "ep")
@@ -215,18 +213,37 @@ final class CloudTurnContractTests: XCTestCase {
         )
     }
 
-    private func decode(_ data: Data) throws -> [String: Any] {
-        try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    }
-
-    private func makeClient() -> CloudRouteClient {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        return CloudRouteClient(
+    /// The authenticate frame the client **actually sends** for a turn.
+    ///
+    /// Driven through the real transport rather than a parallel builder: these
+    /// cases pin the turn envelope, and the only way to pin what ships is to read
+    /// the frame the socket carries. (They previously read a POST body built by a
+    /// second implementation that no production path called, so the assertions
+    /// could pass while the wired frame drifted.)
+    private func authFrame(
+        request: String,
+        turn: CloudTurnEnvelope,
+        token: String? = "test_token"
+    ) async throws -> [String: Any] {
+        let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
+        let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_test",
-            session: URLSession(configuration: config),
-            transport: .sse
+            requestTimeoutSeconds: 15,
+            tokenProvider: StubTokenProvider(token: token),
+            webSocketTaskFactory: { _ in task }
         )
+        for await _ in client.route(request: request, context: sampleContext(), turn: turn) {}
+        return try XCTUnwrap(task.sentAuthFrame)
+    }
+
+    /// One entry per client built, so a case can assert the id the client *sent*
+    /// on each attempt (the auth frame carries `request_id`).
+    private var capturedTasks: [StubWebSocketTask] = []
+
+    private func makeClient() -> CloudRouteClient {
+        let built = CloudRouteClient.stubbed(fixture: nextFixture())
+        capturedTasks.append(built.task)
+        return built.client
     }
 }

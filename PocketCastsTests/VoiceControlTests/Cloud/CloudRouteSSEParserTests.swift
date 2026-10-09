@@ -126,74 +126,57 @@ final class CloudRouteEventTests: XCTestCase {
     }
 }
 
-final class CloudRouteSSEParserTests: XCTestCase {
-    func testParsesMixedEvents() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        let lines = """
-            event: action
-            data: {"tool":"playback","action":"pause","params":{}}
-
-            event: token
-            data: {"text":"Hi"}
-
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-            """.components(separatedBy: "\n")
-        for line in lines {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        events.append(contentsOf: parser.finish())
-        XCTAssertEqual(
-            events,
-            [
-                .action(tool: "playback", action: "pause", params: [:]),
-                .token("Hi"),
-                .done(usage: CloudTurnUsage(inputTokens: 1, outputTokens: 1)),
-            ]
-        )
-    }
-
-    func testJoinsMultiLineDataWithNewline() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        for line in ["event: token", "data: {\"text\":", "data: \"ab\"}", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events, [.token("ab")])
-    }
-
-    func testParseError() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        for line in ["event: error", "data: {\"code\":\"limit_exceeded\",\"message\":\"\"}", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events, [.error(code: "limit_exceeded", message: "")])
-    }
-
-    func testParseResult() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        let json = """
-        {"kind":"episode_results","scope":"current_episode","items":[],"next_cursor":null}
-        """
-        for line in ["event: result", "data: \(json)", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events.count, 1)
-        if case .result(let result) = events.first {
-            XCTAssertEqual(result.kind, "episode_results")
-            XCTAssertEqual(result.scope, .currentEpisode)
-        } else {
-            XCTFail("expected .result")
-        }
-    }
-}
-
 // MARK: - WebSocket text frame parser tests
 
 final class CloudRouteClientTextParserTests: XCTestCase {
+    /// The socket carries `token` frames, so the socket parser must read them.
+    ///
+    /// This looks like an SSE leftover and is not one: the Worker's
+    /// `lifecycle.ts` `sendVisible("token", { text })` writes them on the live
+    /// WebSocket path. A parser without this case falls to `default: return []`
+    /// and drops a frame the wire defines. That is a fidelity defect rather than
+    /// a user-visible one — `CloudRouteSink` plays answers instead of speaking
+    /// them — and the frame still has to be read for what it is.
+    func testParsesTokenOnTheSocket() {
+        XCTAssertEqual(
+            CloudRouteClient.parseTextFrame(#"{"type":"token","text":"forty-two"}"#),
+            [.token("forty-two")],
+            "token rides the socket; dropping it loses the answer text"
+        )
+    }
+
+    /// The `usage` counts have exactly **one** shape on the wire, and a frame
+    /// that omits it parses to no recorded cost rather than to a top-level
+    /// fallback.
+    ///
+    /// This is the test that pins the *absence* of that fallback: it fails if one
+    /// is ever restored, which a fixture-level check cannot do (a fixture using
+    /// the nested shape passes either way). The Worker nests the counts
+    /// (`protocol/frames.ts`). The detection is this assertion returning the flat
+    /// frame as unknown — not the parse rejecting it, which would only record
+    /// unknown counts in the same silence.
+    func testDoneWithoutNestedUsage_recordsNoCost_ratherThanFallingBack() {
+        let nested = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","usage":{"input_tokens":7,"output_tokens":3}}"#
+        )
+        XCTAssertEqual(
+            nested,
+            [.done(usage: CloudTurnUsage(inputTokens: 7, outputTokens: 3))],
+            "the Worker's nested shape is read"
+        )
+
+        // Flat top-level counts are not a shape the wire defines: they must not
+        // be picked up, so a frame carrying only those records nothing.
+        let flat = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","input_tokens":7,"output_tokens":3}"#
+        )
+        XCTAssertEqual(
+            flat,
+            [.done(usage: CloudTurnUsage(inputTokens: nil, outputTokens: nil))],
+            "top-level counts are not a fallback shape"
+        )
+    }
+
     func testParsesConnected() {
         // `connected` carries the codec the server negotiated; the player needs
         // it (rate included) to decode the binary frames that follow.
@@ -231,9 +214,6 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             XCTFail("expected .action")
         }
     }
-
-    // No .token event on the WebSocket contract (cloud-assistant.md).
-    // Token events only exist on the SSE path for backward compatibility.
 
     func testParsesDoneWithUsage() {
         let events = CloudRouteClient.parseTextFrame(

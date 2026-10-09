@@ -18,8 +18,7 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testMixedStreamEmitsActionTokensAndDone() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
 
@@ -30,13 +29,9 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"text":" is arguing."}
 
             event: done
-            data: {"input_tokens":500,"output_tokens":80}
+            data: {"usage":{"input_tokens":500,"output_tokens":80}}
 
             """
-        )
-
-        var capturedBody: Data?
-        CloudRouteTestURLProtocol.onRequest = { _, body in capturedBody = body }
 
         let events = await collect(client().route(request: "What did she mean?", context: sampleContext))
 
@@ -53,20 +48,18 @@ final class CloudRouteClientTests: XCTestCase {
                 .done(usage: CloudTurnUsage(inputTokens: 500, outputTokens: 80)),
             ]
         )
-        assertRouteBody(capturedBody)
+        assertRouteBody(capturedTask?.sentTextFrames.first)
     }
 
     func testActionOnlyStream() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"pause","params":{}}
 
             event: done
-            data: {"input_tokens":10,"output_tokens":0}
+            data: {"usage":{"input_tokens":10,"output_tokens":0}}
 
             """
-        )
 
         let events = await collect(client().route(request: "pause", context: sampleContext))
         XCTAssertEqual(
@@ -79,8 +72,7 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testTokenOnlyStream() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: token
             data: {"text":"Hello"}
 
@@ -88,10 +80,9 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"text":" world"}
 
             event: done
-            data: {"input_tokens":20,"output_tokens":5}
+            data: {"usage":{"input_tokens":20,"output_tokens":5}}
 
             """
-        )
 
         let events = await collect(client().route(request: "summarize", context: sampleContext))
         XCTAssertEqual(
@@ -104,44 +95,18 @@ final class CloudRouteClientTests: XCTestCase {
         )
     }
 
-    func test400InvalidRequestEmitsErrorBeforeStream() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 400,
-                headers: ["Content-Type": "application/json"],
-                body: Data(#"{"code":"invalid_request","message":"missing request"}"#.utf8)
-            )
-        }
-
-        let events = await collect(client().route(request: "", context: sampleContext))
-        XCTAssertEqual(events, [.error(code: "invalid_request", message: "missing request")])
-    }
-
-    func test401EmitsErrorBeforeStream() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 401,
-                headers: ["Content-Type": "application/json"],
-                body: Data(#"{"message":"unauthorized"}"#.utf8)
-            )
-        }
-
-        let events = await collect(client().route(request: "hello", context: sampleContext))
-        guard case let .error(code, _)? = events.first, events.count == 1 else {
-            XCTFail("Expected single error, got \(events)")
-            return
-        }
-        XCTAssertEqual(code, "unauthorized")
-    }
+    /// The HTTP-era pre-stream cases (400/401 status bodies surfacing as error
+    /// events) retired with the SSE transport: on the socket the credential
+    /// rides the first frame, so a rejected credential is an `unauthorized`
+    /// error *frame* — pinned by `testMissingCredentialYieldsUnauthorizedError`
+    /// and the unauthorized-signal suites — and there is no status code to read.
 
     func testInlineErrorEventLimitExceeded() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: error
             data: {"code":"limit_exceeded","message":"You've used 10/10 free requests today."}
 
             """
-        )
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(
@@ -150,20 +115,22 @@ final class CloudRouteClientTests: XCTestCase {
         )
     }
 
-    func testMultiLineDataFieldIsJoinedBeforeParsing() async {
-        // Multi-line `data:` frames are joined with `\n` (SSE). Split where a
-        // newline is legal JSON whitespace so Foundation's parser accepts it.
-        CloudRouteTestURLProtocol.stubSSE(
+    /// A token carries embedded newlines through the socket unchanged.
+    ///
+    /// This replaces the SSE line-joining case: the socket sends one JSON object
+    /// per text frame, so there is no `data:`-line joining to test — but text
+    /// with newlines must still survive the frame and reach the sink intact, or
+    /// a multi-paragraph answer is read as a run-on.
+    func testTokenWithEmbeddedNewlinesSurvivesTheFrame() async {
+        self.pendingFixture =
             """
             event: token
-            data: {"text":
-            data: "line1\\nline2"}
+            data: {"text":"line1\\nline2"}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        )
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(
@@ -176,22 +143,14 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testMidStreamConnectionDropEmitsConnectionError() async {
-        // Deliver a partial SSE body then cleanly close (no `done`/`error`).
-        // URLSession.bytes does not reliably surface didLoad-before-didFail;
-        // truncated EOF without a terminal event is the portable drop signal.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 200,
-                headers: ["Content-Type": "text/event-stream"],
-                body: Data(
-                    """
-                    event: token
-                    data: {"text":"partial"}
+        // Frames arrive, then the socket ends with no terminal event — what a
+        // dropped connection looks like from the client's side.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"partial"}
 
-                    """.utf8
-                )
-            )
-        }
+            """
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(events.first, .token("partial"))
@@ -203,21 +162,17 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testClientCancellationStopsCollection() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data(
-                    """
-                    event: token
-                    data: {"text":"first"}
+        // Two tokens are queued; the collector stops after the first and must
+        // never observe the second.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"first"}
 
-                    event: token
-                    data: {"text":"second"}
+            event: token
+            data: {"text":"second"}
 
-                    """.utf8
-                ),
-                chunkDelayNanoseconds: 200_000_000
-            )
-        }
+            """
 
         let stream = client().route(request: "hello", context: sampleContext)
         var received: [CloudRouteEvent] = []
@@ -236,6 +191,7 @@ final class CloudRouteClientTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(received, [.token("first")])
     }
+
 
     func testRequestTimeoutExceedsServerBudget() {
         let client = CloudRouteClient(baseURL: "https://example.com", userId: userId)
@@ -266,19 +222,14 @@ final class CloudRouteClientTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// The socket the most recent client in this test was built on, so a case
+    /// can assert on the frames the client *sent*.
+    private var capturedTask: StubWebSocketTask?
+
     private func client() -> CloudRouteClient {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60
-        let session = URLSession(configuration: config)
-        return CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: userId,
-            session: session,
-            requestTimeoutSeconds: 15,
-            transport: .sse
-        )
+        let built = CloudRouteClient.stubbed(userId: userId, fixture: nextFixture())
+        capturedTask = built.task
+        return built.client
     }
 
     private func collect(_ stream: AsyncStream<CloudRouteEvent>) async -> [CloudRouteEvent] {
@@ -289,9 +240,9 @@ final class CloudRouteClientTests: XCTestCase {
         return events
     }
 
-    private func assertRouteBody(_ body: Data?) {
-        guard let body, let text = String(data: body, encoding: .utf8) else {
-            XCTFail("Expected captured request body")
+    private func assertRouteBody(_ text: String?) {
+        guard let text else {
+            XCTFail("Expected a captured auth frame")
             return
         }
         XCTAssertTrue(text.contains("\"request\":\"What did she mean?\""))
@@ -312,20 +263,17 @@ final class CloudRouteClientLocaleTests: XCTestCase {
     }
 
     private func makeClient() -> CloudRouteClient {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        return CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_test",
-            session: URLSession(configuration: config),
-            transport: .sse
-        )
+        CloudRouteClient.stubbed(fixture: nextFixture()).client
     }
 
     func testMidStreamDropWithoutDoneCarriesNoEnglishProse() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(status: 200, headers: ["Content-Type": "text/event-stream"], body: Data("event: token\ndata: {\"text\":\"hi\"}\n\n".utf8))
-        }
+        // Frames arrive, then the socket closes with no terminal event.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"hi"}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.last else {
@@ -335,8 +283,17 @@ final class CloudRouteClientLocaleTests: XCTestCase {
         XCTAssertTrue(message.isEmpty, "a reachable diagnostic must not be English prose for TTS")
     }
 
-    func testPreStreamErrorWithoutAServerMessageStaysSilent() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+    /// A rejected credential arrives as an error **frame** on the socket, not an
+    /// HTTP status — the credential rides the first frame, so there is no 401
+    /// body to read. This replaces an HTTP-era case that asserted the 401 body's
+    /// text; the property it protected (a rejection is never silent) is kept.
+    func testRejectedCredentialFrameStaysSilentWithoutAServerMessage() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"unauthorized","message":""}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.first else {
@@ -347,7 +304,12 @@ final class CloudRouteClientLocaleTests: XCTestCase {
     }
 
     func testServerSuppliedMessageIsPassedThrough() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 429, body: #"{"code":"limit_exceeded","message":"Daily limit reached"}"#)
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"limit_exceeded","message":"Daily limit reached"}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.first else {
@@ -360,272 +322,21 @@ final class CloudRouteClientLocaleTests: XCTestCase {
 
 /// PR #20 review: the client must tell the credential source which credential was
 /// rejected, so a burst of 401s refreshes once rather than once per response.
-final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
-    private final class RecordingProvider: CloudTokenProviding {
-        var token: String? = "token-1"
-
-        // `handleUnauthorized` runs off the caller's path, so its record is read
-        // from the test task while another task writes it: the box makes that
-        // exchange sound rather than lucky.
-        private let box = RejectionBox()
-        var rejections: [String?] { box.values }
-        func token() async -> String? { token }
-        func handleUnauthorized(rejectedToken: String?) async { box.append(rejectedToken) }
-    }
-
-    /// Appends from one task, reads from another. A lock is the smallest thing
-    /// that is correct here; the poll below runs while the report lands.
-    private final class RejectionBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored: [String?] = []
-        var values: [String?] {
-            lock.lock(); defer { lock.unlock() }
-            return stored
-        }
-        func append(_ value: String?) {
-            lock.lock(); defer { lock.unlock() }
-            stored.append(value)
-        }
-    }
-
-    /// Waits for an async side effect so the assertion measures the behaviour
-    /// rather than the scheduling. Returns whether it arrived, so a timeout is
-    /// the failure rather than a silent five-second pause before an unrelated
-    /// assertion fails. (Not named `waitFor`: this file has a global by that
-    /// name, and it would be shadowed here.)
-    @discardableResult
-    private func awaitCondition(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        return condition()
-    }
-
-    override func tearDown() {
-        CloudRouteTestURLProtocol.reset()
-        super.tearDown()
-    }
-
-    func testPreStreamUnauthorizedReportsTheRejectedCredential() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
-        let provider = RecordingProvider()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let client = CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_legacy",
-            session: URLSession(configuration: config),
-            tokenProvider: provider,
-            transport: .sse
-        )
-
-        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
-
-        // The rejection is reported off the caller's path by design (recovery
-        // must never delay the user's error), so it is awaited rather than
-        // raced: asserting immediately is a race the slower CI machine loses,
-        // which is how this failed there while passing locally.
-        let reported = await awaitCondition { !provider.rejections.isEmpty }
-        XCTAssertTrue(reported, "the rejected credential must be reported within the timeout")
-        XCTAssertEqual(provider.rejections, ["token-1"], "the credential that was rejected must be named")
-        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
-    }
-
-    /// PR #20 review: the handler can await a refresh *and* an exchange (15 s
-    /// each), and the sink has already paused playback by then, so recovery must
-    /// not be able to hold the caller's error up. The gate makes that structural
-    /// rather than racy: recovery blocks until the caller has been handed its
-    /// error, so if the client awaited recovery *before* finishing the stream, the
-    /// caller would never be served and this test would time out instead of
-    /// passing.
-    func testRecoveryCannotHoldUpTheCallersError() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
-        let gate = RecoveryGate()
-        let log = OrderLog()
-        let provider = GatedProvider(gate: gate, log: log)
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let client = CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_legacy",
-            session: URLSession(configuration: config),
-            tokenProvider: provider,
-            transport: .sse
-        )
-
-        let stream = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0))
-        let consumer = Task { () -> [CloudRouteEvent] in
-            var events: [CloudRouteEvent] = []
-            for await event in stream {
-                events.append(event)
-                await log.append("delivered")
-                await gate.release()   // the caller owns its failure from here
-            }
-            return events
-        }
-
-        let delivered = await waitFor(log: log, entry: "delivered", timeout: 5)
-        XCTAssertTrue(delivered, "the error must reach the caller without recovery unblocking it")
-        // Recovery runs detached, so its writes are unordered against delivery.
-        // `recovery-started` is appended by the handler *after* recording
-        // `rejections` and `ranCancelled`, so waiting for it is what orders the two
-        // assertions below (PR #20 review).
-        let started = await waitFor(log: log, entry: "recovery-started", timeout: 5)
-        XCTAssertTrue(started, "recovery must start on its own, not be cancelled with the producer")
-        XCTAssertEqual(provider.rejections, ["token-1"], "recovery still names the rejected credential")
-        XCTAssertEqual(provider.ranCancelled, false,
-                       "recovery must not run inside the producer task that finish() cancels")
-        let finished = await waitFor(log: log, entry: "recovery-finished", timeout: 5)
-        XCTAssertTrue(finished, "recovery must run to completion, not out of a cancelled task")
-        XCTAssertTrue(provider.completed, "a cancelled task throws out of its first cancellable await")
-        let events = await consumer.value
-        guard case .error = events.first else { return XCTFail("expected an error event, got \(events)") }
-    }
-
-    func testSuccessfulStreamDoesNotReportARejection() async {
-        CloudRouteTestURLProtocol.stubSSE("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n")
-        let provider = RecordingProvider()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let client = CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_legacy",
-            session: URLSession(configuration: config),
-            tokenProvider: provider,
-            transport: .sse
-        )
-
-        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
-
-        // A successful turn must never report a rejection. There is nothing to
-        // wait *for* here, so give any erroneous report the same window a real
-        // one gets rather than asserting the instant the stream drains — the
-        // shape that cost two rounds on the sibling test.
-        _ = await awaitCondition(timeout: 1) { !provider.rejections.isEmpty }
-        XCTAssertTrue(provider.rejections.isEmpty, "a successful turn must not invalidate the credential")
-    }
-}
-
-
-/// Records the order of two things the review requires to be ordered: the caller
-/// receiving its error, and the credential recovery starting.
-actor OrderLog {
-    private(set) var entries: [String] = []
-    func append(_ entry: String) { entries.append(entry) }
-}
-
-/// Hypothesis for the ordering property: recovery starts, then blocks until the
-/// caller has been served. A client that awaited recovery before finishing the
-/// stream can never satisfy it, so the condition is a real gate rather than a
-/// timing assumption.
-actor RecoveryGate {
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var isOpen = false
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-    func release() {
-        isOpen = true
-        for waiter in waiters { waiter.resume() }
-        waiters = []
-    }
-}
-
-final class GatedProvider: CloudTokenProviding {
-    let gate: RecoveryGate
-    let log: OrderLog
-    /// The same *pattern* as the sibling provider above — its own box, not a
-    /// shared one. `handleUnauthorized` runs off the caller's path, so the
-    /// record is written by one task and read by the test task. The read
-    /// happens to be ordered today by the preceding `waitFor(log:entry:)`,
-    /// which is why it has not bitten; this makes it sound rather than lucky.
-    private let box = GatedProviderBox()
-    var rejections: [String?] { box.rejections }
-    var ranCancelled: Bool? { box.ranCancelled }
-    var completed: Bool { box.completed }
-    init(gate: RecoveryGate, log: OrderLog) { self.gate = gate; self.log = log }
-    func token() async -> String? { "token-1" }
-    func handleUnauthorized(rejectedToken: String?) async {
-        box.appendRejection(rejectedToken)
-        // `finish()` runs the stream's onTermination, which cancels the producer
-        // task. Recovery must not run inside it: a cancelled task throws out of
-        // its first cancellable await, so this records whether it did.
-        box.setRanCancelled(Task.isCancelled)
-        await log.append("recovery-started")
-        await gate.wait()
-        do {
-            try await Task.sleep(nanoseconds: 20_000_000)   // cancellable
-            box.setCompleted(true)
-        } catch {
-            box.setCompleted(false)
-        }
-        await log.append("recovery-finished")
-    }
-}
-
-/// Holds `GatedProvider`'s cross-task state behind one lock. A single box for
-/// the three fields keeps the provider's reads and writes in one place.
-final class GatedProviderBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedRejections: [String?] = []
-    private var storedRanCancelled: Bool?
-    private var storedCompleted = false
-
-    var rejections: [String?] { lock.lock(); defer { lock.unlock() }; return storedRejections }
-    var ranCancelled: Bool? { lock.lock(); defer { lock.unlock() }; return storedRanCancelled }
-    var completed: Bool { lock.lock(); defer { lock.unlock() }; return storedCompleted }
-
-    func appendRejection(_ value: String?) { lock.lock(); defer { lock.unlock() }; storedRejections.append(value) }
-    func setRanCancelled(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedRanCancelled = value }
-    func setCompleted(_ value: Bool) { lock.lock(); defer { lock.unlock() }; storedCompleted = value }
-}
-
-/// Polls rather than sleeping a fixed interval, so a passing case costs
-/// milliseconds and a broken one fails at the timeout with the message attached.
-func waitFor(log: OrderLog, entry: String, timeout: TimeInterval) async -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        if await log.entries.contains(entry) { return true }
-        try? await Task.sleep(nanoseconds: 20_000_000)
-    }
-    return await log.entries.contains(entry)
-}
-
-// MARK: - Production transport (WebSocket) through the task seam
-
-/// `URLProtocol` stubs only the URL loading system, which
-/// `URLSessionWebSocketTask` does not go through — so the transport the app
-/// actually uses had no test behind it. These drive it through
-/// `CloudRouteClient.WebSocketTasking`.
-private final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
-    private var incoming: [URLSessionWebSocketTask.Message]
-    private(set) var sent: [URLSessionWebSocketTask.Message] = []
-    private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
-    var receiveError: Error?
-
-    init(_ incoming: [URLSessionWebSocketTask.Message]) {
-        self.incoming = incoming
-    }
-
-    func send(_ message: URLSessionWebSocketTask.Message) async throws {
-        sent.append(message)
-    }
-
-    func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let receiveError { throw receiveError }
-        guard !incoming.isEmpty else {
-            throw URLError(.badServerResponse)
-        }
-        return incoming.removeFirst()
-    }
-
-    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        cancelled = (closeCode, reason)
-    }
-}
+/// Retired with the SSE transport.
+///
+/// These three cases drove a **401 pre-stream status** through the route client
+/// and asserted that the rejected credential was reported to the token provider.
+/// The socket carries the credential in its first frame, so there is no status
+/// to read and the route client no longer reports rejections — the contract now
+/// belongs to the HTTP prefetch client, which calls
+/// `handleUnauthorized(rejectedToken:)` on a 401 and is covered by
+/// `CloudPrefetchClientTests`. The route client's own unauthorized handling is
+/// pinned by `testMissingCredentialYieldsUnauthorizedError` above (an
+/// `unauthorized` frame, never silence).
+///
+/// Nothing was lost here by deletion: the reporting path these cases exercised
+/// is gone, and the assertions that remain true of the socket are covered by
+/// that case and by the locale/contract suites.
 
 final class CloudRouteWebSocketPathTests: XCTestCase {
     private func client(task: StubWebSocketTask, token: String?) -> CloudRouteClient {
@@ -634,7 +345,6 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
             userId: "user_test",
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
-            transport: .webSocket,
             webSocketTaskFactory: { _ in task }
         )
     }
@@ -648,12 +358,10 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// The socket is closed as the transport call returns (it is a `defer`), so
     /// a consumer that has drained the stream can still observe the closure a
     /// moment later. Wait briefly for it rather than racing the assertion.
+    /// Shared with the other suites (`StubWebSocketTask.awaitCancellation`), so
+    /// the cross-task ordering hazard is handled in one place.
     private func waitForCancellation(_ task: StubWebSocketTask) async -> Bool {
-        for _ in 0..<50 {
-            if task.cancelled != nil { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return task.cancelled != nil
+        await task.awaitCancellation()
     }
 
     private func context() -> CloudRouteContext {
@@ -682,7 +390,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// binary frames as audio, and closes the socket when the turn ends.
     func testConnectedThenAudioThenDoneOnProductionTransport() async {
         let connected = #"{"type":"connected","codec":"pcm_s16le@24k"}"#
-        let done = #"{"type":"done","input_tokens":3,"output_tokens":4}"#
+        let done = #"{"type":"done","usage":{"input_tokens":3,"output_tokens":4}}"#
         let task = StubWebSocketTask([
             .string(connected),
             .data(Data([0x01, 0x00, 0x02, 0x00])),
@@ -718,10 +426,27 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let closed = await waitForCancellation(task)
         XCTAssertTrue(closed, "the socket is closed on the non-terminal path too")
     }
-}
 
-private struct StubTokenProvider: CloudTokenProviding {
-    let token: String?
-    func token() async -> String? { token }
-    func handleUnauthorized(rejectedToken: String?) async {}
+    /// A failed WebSocket upgrade is terminal: the retired SSE fallback used to
+    /// be reachable here, so this pins the no-fallback property itself — the
+    /// turn reports the failure and sends **no** second request.
+    func testFailedUpgradeIsTerminalAndIssuesNoSecondRequest() async {
+        let task = StubWebSocketTask([])
+        task.receiveError = URLError(.cannotConnectToHost)
+        let client = client(task: task, token: "tok")
+
+        let events = await collect(client.route(request: "hello", context: context()))
+
+        guard case let .error(code, message)? = events.last else {
+            return XCTFail("a failed upgrade must report an error, got \(events)")
+        }
+        XCTAssertEqual(code, "connection_lost")
+        XCTAssertTrue(message.isEmpty, "no English URLSession prose reaches the user")
+
+        // The auth frame is the only thing the client ever sends. A fallback
+        // transport would have posted a second request; there is none.
+        let sent = task.sentTextFrames
+        XCTAssertEqual(sent.count, 1, "exactly one frame — the auth frame — and no fallback request")
+        XCTAssertTrue(sent[0].contains("authenticate"), "the one frame is the authenticate frame")
+    }
 }

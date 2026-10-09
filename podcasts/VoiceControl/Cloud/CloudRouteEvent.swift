@@ -91,8 +91,9 @@ enum CloudRouteEvent: Equatable {
     case audioFrame(CloudAudioFrame)
     /// Server-directed local action (seek, pause, etc.).
     case action(tool: String, action: String, params: [String: CloudRouteJSONValue])
-    /// Text token — retained for backward-compatibility; cloud answers
-    /// are played as audio, not accumulated text.
+    /// Text token the Worker sends on the socket. It rides the live transport
+    /// rather than a retired one; the sink plays answers as audio instead of
+    /// accumulating text, so this is parsed and then intentionally unused.
     case token(String)
     /// Negotiated structured discovery result (only when client advertised
     /// `search_results_v1`).

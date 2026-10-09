@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-final class CloudRouteSinkTests: XCTestCase {
+final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
     private var contextState: CloudPlaybackContextState!
@@ -29,7 +29,7 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testMixedStreamDispatchesSeekSpeaksTokensOnDone() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
@@ -41,10 +41,9 @@ final class CloudRouteSinkTests: XCTestCase {
             data: {"text":" is arguing."}
 
             event: done
-            data: {"input_tokens":10,"output_tokens":4}
+            data: {"usage":{"input_tokens":10,"output_tokens":4}}
 
             """
-        )
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
         playback.positionMs = 500_000
 
@@ -66,16 +65,15 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testDoneResumesTurnOwnedAutoPause() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: token
             data: {"text":"Answer."}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        )
 
         let response = await makeSink().routeToCloud(
             request: "summarize",
@@ -94,16 +92,15 @@ final class CloudRouteSinkTests: XCTestCase {
     /// paused the client takes no hold, so there is nothing for the turn's end
     /// to release.
     func testDoesNotPauseOrResumeWhenHostWasAlreadyPaused() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: token
             data: {"text":"Answer."}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        )
         playback.setPlaying(false)
 
         let response = await makeSink().routeToCloud(
@@ -121,13 +118,12 @@ final class CloudRouteSinkTests: XCTestCase {
     /// a `done` with no audio restores the playback it stopped, so the user is
     /// left exactly as they were.
     func testTurnWithoutAudioRestoresTheHoldItTook() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
 
         _ = await makeSink().routeToCloud(request: "hi", tier: .free, context: sampleContext())
 
@@ -137,7 +133,7 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testPlayQuoteAndStopQuoteRestorePosition() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
@@ -146,10 +142,9 @@ final class CloudRouteSinkTests: XCTestCase {
             data: {"tool":"playback","action":"stop_quote","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         mapper.playbackSecondsForReference = [500.0: 510.0]
         playback.positionMs = 900_000
 
@@ -170,16 +165,15 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testSeekRelativeExecutesAndCapturesPosition() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         playback.positionMs = 120_000
 
         let response = await makeSink().routeToCloud(
@@ -195,16 +189,15 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testSeekRelativeDirectionOnlyUsesForwardDefault() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{"direction":"backward"}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         playback.positionMs = 120_000
 
         _ = await makeSink().routeToCloud(
@@ -218,16 +211,15 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testSeekRelativeNeitherDeltaNorDirectionUsesForwardDefault() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         playback.positionMs = 120_000
 
         _ = await makeSink().routeToCloud(
@@ -241,7 +233,7 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testUnknownActionIgnored() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"do_a_barrel_roll","params":{}}
@@ -250,17 +242,16 @@ final class CloudRouteSinkTests: XCTestCase {
             data: {"tool":"bookmarks","action":"add","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
 
         _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
     func testErrorClearsBufferRestoresPauseDoesNotRollbackSeek() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
@@ -272,7 +263,6 @@ final class CloudRouteSinkTests: XCTestCase {
             data: {"code":"limit_exceeded","message":"rate limited"}
 
             """
-        )
         mapper.playbackSecondsForReference = [100.0: 110.0]
         playback.positionMs = 50_000
 
@@ -285,16 +275,15 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testUnmappedReferenceSeeksAsIsBestEffort() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
         XCTAssertTrue(playback.calls.contains(.seekTo(200)))
     }
@@ -308,31 +297,29 @@ final class CloudRouteSinkTests: XCTestCase {
         let sink = makeSink()
 
         // Turn 1 captures a pre-quote position via play_quote.
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext())
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
 
         // Turn 2 (same sink): stop_quote without play_quote must be a no-op seek-wise.
         playback.calls.removeAll()
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: action
             data: {"tool":"playback","action":"stop_quote","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         _ = await sink.routeToCloud(request: "stop", tier: .free, context: sampleContext())
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
@@ -340,26 +327,19 @@ final class CloudRouteSinkTests: XCTestCase {
     /// Slice 1: the sink sends one turn envelope — request_id on the wire and
     /// capabilities only once a structured-results renderer exists.
     func testSinkSendsTurnEnvelopeWithRequestIdAndGatedCapabilities() async throws {
-        var bodies: [[String: Any]] = []
-        CloudRouteTestURLProtocol.onRequest = { _, body in
-            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-                bodies.append(object)
-            }
-        }
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: token
             data: {"text":"ok"}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        )
 
         _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext())
 
-        let body = try XCTUnwrap(bodies.first)
+        let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         let requestId = try XCTUnwrap(body["request_id"] as? String)
         XCTAssertNotNil(UUID(uuidString: requestId), "request_id must be a client-assigned UUID")
         XCTAssertNil(body["capabilities"], "no renderer yet: capabilities must be omitted so the server uses token+done")
@@ -367,26 +347,19 @@ final class CloudRouteSinkTests: XCTestCase {
     }
 
     func testSinkAdvertisesSearchResultsV1OnlyWhenRendererAvailable() async throws {
-        var bodies: [[String: Any]] = []
-        CloudRouteTestURLProtocol.onRequest = { _, body in
-            if let body, let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-                bodies.append(object)
-            }
-        }
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
 
         _ = await makeSink(rendersStructuredResults: true, routeHint: CloudRouteHint(
             operation: "search_spoken_content",
             arguments: ["query": .string("climate")]
         )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext())
 
-        let body = try XCTUnwrap(bodies.first)
+        let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         XCTAssertEqual(body["capabilities"] as? [String], ["search_results_v1"])
         let hint = try XCTUnwrap(body["route_hint"] as? [String: Any])
         XCTAssertEqual(hint["operation"] as? String, "search_spoken_content")
@@ -398,18 +371,15 @@ final class CloudRouteSinkTests: XCTestCase {
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil
     ) -> CloudRouteSink {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(
+                let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl,
-                    userId: "user_test",
-                    session: session,
-                    transport: .sse
+                    fixture: self.nextFixture()
                 )
+                self.capturedTask = built.task
+                return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -510,7 +480,7 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
-final class CloudRouteSupersedeTests: XCTestCase {
+final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
     private var analytics: RecordingAnalytics!
@@ -533,29 +503,30 @@ final class CloudRouteSupersedeTests: XCTestCase {
         super.tearDown()
     }
 
-    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async {
-        // Turn A: a slow stream that will still be open when B starts.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
-                chunkDelayNanoseconds: 400_000_000
-            )
-        }
+    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
+        // Turn A: held open, so it is still running when B starts. Its fixture is
+        // bound to A's client explicitly, because B's turn is built in between.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
 
-        // Let A start and pause playback.
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+        gate.release()
 
         // Turn B supersedes A and completes cleanly.
-        CloudRouteTestURLProtocol.stubSSE(
+        self.nextTurnFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        )
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
         _ = await slow.value
 
@@ -563,34 +534,46 @@ final class CloudRouteSupersedeTests: XCTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
         // Analytics records only the winning turn's outcome.
         XCTAssertEqual(analytics.events.count, 1)
+        // The losing turn's socket is closed rather than left running: the client
+        // closes the socket on every exit path, and a superseded turn that kept it
+        // open would bill for a stream nobody reads and hold the connection until
+        // the server's own idle timeout.
+        XCTAssertEqual(
+            heldTurn?.task.sentTextFrames.count, 1,
+            "the held turn sent its auth frame and is the turn these assertions are about"
+        )
+        // Asserted on the producer, not on consumer completion: only the client
+        // setting `cancelled` proves the losing turn's socket was closed, and a
+        // bounded wait turns an intermittent miss into a deterministic failure on
+        // that same property rather than making the ordering guaranteed.
+        let heldTask = try XCTUnwrap(heldTurn?.task, "the case held a turn open")
+        let closed = await heldTask.awaitCancellation()
+        XCTAssertTrue(closed, "the superseded turn's socket is closed")
     }
 
     func testSupersededTurnDoesNotExecuteLateActions() async {
-        // Turn A: an action arrives only after a delay — B supersedes first.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("""
-                event: action
-                data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+        // Turn A: its action arrives only after it has already been superseded.
+        self.nextTurnFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
 
-                event: done
-                data: {"input_tokens":1,"output_tokens":0}
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
-                """.utf8),
-                chunkDelayNanoseconds: 500_000_000
-            )
-        }
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        gate.release()
 
-        CloudRouteTestURLProtocol.stubSSE(
+        self.nextTurnFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        )
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
         _ = await slow.value
 
@@ -604,24 +587,27 @@ final class CloudRouteSupersedeTests: XCTestCase {
     /// `pause()` this could not fail — which is why the double now models
     /// playback state faithfully.
     func testBargeInResumesPlaybackHeldByTheSupersededTurn() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
-                chunkDelayNanoseconds: 400_000_000
-            )
-        }
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
 
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
         XCTAssertFalse(playback.isPlaying, "the hold is in effect while the first turn runs")
+        gate.release()
 
-        CloudRouteTestURLProtocol.stubSSE("""
-        event: done
-        data: {"input_tokens":1,"output_tokens":1}
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
-        """)
+            """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
         _ = await slow.value
 
@@ -629,14 +615,43 @@ final class CloudRouteSupersedeTests: XCTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one resume")
     }
 
+    /// The turn held open by `holdNextTurn()`, so a case can assert on the socket
+    /// the superseding turn closed. A stub that answers instantly cannot express
+    /// "A is still in flight when B starts", which is the whole premise of these
+    /// cases; the socket is also where "the losing turn was closed, not left
+    /// running" is observable (`StubWebSocketTask.cancelled`).
+    private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
+
+    /// Stalls the *next* client's turn until `release()` is called on the returned
+    /// gate, so another turn can supersede it while it is still running.
+    @discardableResult
+    private func holdNextTurn() -> Gate {
+        let gate = Gate()
+        pendingHeldGate = gate
+        return gate
+    }
+
+    private var pendingHeldGate: Gate?
+    /// Consumed by the next `makeSink()`: the fixture that sink's turn carries.
+    /// Explicit because these cases run two turns at once and the shared
+    /// `pendingFixture` handoff would let the second overwrite the first's.
+    private var nextTurnFixture: String?
+
     private func makeSink() -> CloudRouteSink {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
+                let fixture = self.nextTurnFixture ?? self.nextFixture()
+                self.nextTurnFixture = nil
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture)
+                if let gate = self.pendingHeldGate {
+                    // The held turn waits for frames; the test releases it later.
+                    built.task.holdUntilReleased(gate)
+                    self.heldTurn = (built.task, gate)
+                    self.pendingHeldGate = nil
+                }
+                self.capturedTask = built.task
+                return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -662,7 +677,7 @@ final class CloudRouteSupersedeTests: XCTestCase {
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
 /// empty message maps to a localized template when one exists, and to the error
 /// earcon when it doesn't — both branches exercised, so neither is inert.
-final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
+final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -682,26 +697,24 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
     }
 
     func testTemplatedCodeIsSpoken() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: error
             data: {"code":"connection_lost","message":""}
 
             """
-        )
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
     }
 
     func testCodeWithoutATemplateUsesTheErrorEarcon() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: error
             data: {"code":"invalid_response","message":""}
 
             """
-        )
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
@@ -713,7 +726,11 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
         let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse) },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -730,7 +747,7 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
 /// Spec ruling (2026-09-24): a client-authored message is spoken **only** in the
 /// user's own locale; an untranslated key falls back to the error earcon rather
 /// than to base-language English.
-final class CloudRouteSinkLocaleRuleTests: XCTestCase {
+final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -754,7 +771,11 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -765,13 +786,12 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
     }
 
     private func stubError(code: String) {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: error
             data: {"code":"\(code)","message":""}
 
             """
-        )
     }
 
     private func context() -> PlaybackContext {
@@ -811,7 +831,7 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
 /// A whitespace-only server message is treated as absent (PR #19 review): it must
 /// not be spoken as silence, and it follows the same localized-template/earcon
 /// route as a missing message.
-final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
+final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -831,18 +851,21 @@ final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
     }
 
     func testWhitespaceOnlyServerMessageIsNotSpokenAsSilence() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture = 
             """
             event: error
             data: {"code":"invalid_response","message":"   "}
 
             """
-        )
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         let sink = CloudRouteSink(
-            clientFactory: { CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: URLSession(configuration: config), transport: .sse) },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
