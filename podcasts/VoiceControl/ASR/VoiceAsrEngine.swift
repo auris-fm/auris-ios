@@ -200,7 +200,6 @@ class VoiceAsrEngine {
         emitStageTiming(detectedConfidence: detectedConfidence)
 
         let isWakePositive = detectedConfidence != nil
-        let durationMs = utterance.count * 1000 / 16000
         let trimmedText = WakeTranscriptTrimmer.commandText(
             result: asrResult,
             wakePositive: isWakePositive,
