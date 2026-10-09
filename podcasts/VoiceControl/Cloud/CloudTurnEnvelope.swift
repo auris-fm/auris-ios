@@ -109,13 +109,22 @@ enum RecentConversation {
     }
 }
 
-/// Encodes the `/api/v1/cloud/route` request body, including the turn envelope.
+/// Builds the turn envelope — the per-turn fields the server contracts on
+/// (`request_id`, `capabilities` gating, typed-only `route_hint`, a bounded
+/// `context.recent_conversation`).
+///
+/// This is the **single** place that asserts the envelope's shape: the WebSocket
+/// authenticate frame is built from it, and the contract tests pin it through
+/// that frame. It previously duplicated the frame assembly as a POST-body
+/// builder that no production path called, which meant the tests could pass while
+/// the shipped frame drifted from what they pinned.
 enum CloudRouteRequestBuilder {
-    static func body(
+    /// The transport-neutral envelope, as the frame/body merges it.
+    static func envelope(
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
-    ) throws -> Data {
+    ) -> [String: Any] {
         var contextObject: [String: Any] = [
             "episode_id": context.episodeId,
             "client_position_ms": context.clientPositionMs,
@@ -146,7 +155,7 @@ enum CloudRouteRequestBuilder {
                 "arguments": encodeJSONValues(routeHint.arguments),
             ]
         }
-        return try JSONSerialization.data(withJSONObject: payload)
+        return payload
     }
 
     private static func encodeJSONValues(_ values: [String: CloudRouteJSONValue]) -> [String: Any] {

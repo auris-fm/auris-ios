@@ -249,6 +249,11 @@ final class CloudRouteClient {
 
     // MARK: - Auth frame
 
+    /// Builds the WebSocket authenticate frame.
+    ///
+    /// The envelope comes from `CloudRouteRequestBuilder` — the same builder the
+    /// contract tests pin — so the frame the app sends and the frame the tests
+    /// assert on are one construction rather than two that can drift.
     private static func buildAuthFrame(
         tokenProvider: CloudTokenProviding,
         request: String,
@@ -258,42 +263,14 @@ final class CloudRouteClient {
         guard let credential = await tokenProvider.token() else {
             return nil
         }
-        var contextObject: [String: Any] = [
-            "episode_id": context.episodeId,
-            "client_position_ms": context.clientPositionMs,
-            "recent_reference_positions": context.recentReferencePositions,
-        ]
-        if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
-        if let referencePositionMs = context.referencePositionMs {
-            contextObject["reference_position_ms"] = referencePositionMs
-        }
-        if let previousReferencePositionMs = context.previousReferencePositionMs {
-            contextObject["previous_reference_position_ms"] = previousReferencePositionMs
-        }
-        if !turn.recentConversation.isEmpty {
-            contextObject["recent_conversation"] = turn.recentConversation.map {
-                ["role": $0.role.rawValue, "text": $0.text]
-            }
-        }
-
-        var payload: [String: Any] = [
-            "type": "authenticate",
-            "access_token": credential,
-            "request_id": turn.requestId,
-            "request": request,
-            "context": contextObject,
-            "codecs": Self.supportedCodecs,
-        ]
-        if !turn.capabilities.isEmpty {
-            payload["capabilities"] = turn.capabilities
-        }
-        if let routeHint = turn.routeHint {
-            payload["route_hint"] = [
-                "operation": routeHint.operation,
-                "arguments": Self.encodeJSONValues(routeHint.arguments),
-            ]
-        }
-        return payload
+        var frame = CloudRouteRequestBuilder.envelope(request: request, context: context, turn: turn)
+        // Transport-specific fields: the credential rides the first frame, and
+        // the codecs are advertised here so the server negotiates the binary
+        // frame format up front.
+        frame["type"] = "authenticate"
+        frame["access_token"] = credential
+        frame["codecs"] = Self.supportedCodecs
+        return frame
     }
 
     // MARK: - URL construction
