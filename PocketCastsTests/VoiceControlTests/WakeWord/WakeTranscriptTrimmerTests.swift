@@ -95,7 +95,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         )
     }
 
-    // MARK: - Real-capture timing (the segmenter's trailing silence)
+    // MARK: - Time band and the quiet-command case
 
     /// A quietly spoken command survives: it is in the transcript, so it routes.
     ///
