@@ -145,6 +145,38 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         )
     }
 
+    /// The `usage` counts have exactly **one** shape on the wire, and a frame
+    /// that omits it parses to no recorded cost rather than to a top-level
+    /// fallback.
+    ///
+    /// This is the test that pins the *absence* of that fallback: it fails if one
+    /// is ever restored, which a fixture-level check cannot do (a fixture using
+    /// the nested shape passes either way). The Worker nests the counts
+    /// (`protocol/frames.ts`), and with a single transport an accepted second
+    /// shape could only absorb a format change silently instead of failing —
+    /// which is the detection the removed comment claimed to provide.
+    func testDoneWithoutNestedUsage_recordsNoCost_ratherThanFallingBack() {
+        let nested = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","usage":{"input_tokens":7,"output_tokens":3}}"#
+        )
+        XCTAssertEqual(
+            nested,
+            [.done(usage: CloudTurnUsage(inputTokens: 7, outputTokens: 3))],
+            "the Worker's nested shape is read"
+        )
+
+        // Flat top-level counts are not a shape the wire defines: they must not
+        // be picked up, so a frame carrying only those records nothing.
+        let flat = CloudRouteClient.parseTextFrame(
+            #"{"type":"done","input_tokens":7,"output_tokens":3}"#
+        )
+        XCTAssertEqual(
+            flat,
+            [.done(usage: CloudTurnUsage(inputTokens: nil, outputTokens: nil))],
+            "top-level counts are not a fallback shape"
+        )
+    }
+
     func testParsesConnected() {
         // `connected` carries the codec the server negotiated; the player needs
         // it (rate included) to decode the binary frames that follow.
