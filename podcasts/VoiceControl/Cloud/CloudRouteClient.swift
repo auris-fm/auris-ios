@@ -8,10 +8,10 @@ import Foundation
 ///
 /// All six are parsed because the wire defines all six. Two are easy to omit
 /// from a summary and both matter: `connected` names the codec the binary frames
-/// are decoded at, and `token` is the event this PR restored after the parser
-/// dropped it — a wire-fidelity fix rather than a user-visible one, since the
-/// sink plays answers instead of speaking them (`CloudRouteSink`). The list is
-/// kept current with the dispatch rather than paraphrased.
+/// are decoded at, and `token` is an event the parser used to drop — a
+/// wire-fidelity fix rather than a user-visible one, since the sink plays answers
+/// instead of speaking them (`CloudRouteSink`). The list is kept current with the
+/// dispatch rather than paraphrased.
 ///
 /// WebSocket is the only transport: a failed upgrade is a terminal turn
 /// failure with a visible error, never a silent fallback. (The legacy SSE path
@@ -341,10 +341,10 @@ final class CloudRouteClient {
             return [.action(tool: tool, action: action, params: params)]
 
         case "token":
-            // `token` rides the **socket**, not just the retired SSE path: the
-            // Worker's `lifecycle.ts` calls `sendVisible("token", { text })` on
-            // the live WebSocket. Without this case a text answer fell to
-            // `default: return []` and the words were dropped in silence.
+            // `token` rides the **socket**: the Worker's `lifecycle.ts` calls
+            // `sendVisible("token", { text })` on the live WebSocket. Without this
+            // case the frame fell to `default: return []`, so the parser dropped
+            // an event the wire defines.
             guard let text = json["text"] as? String else { return [] }
             return [.token(text)]
 
