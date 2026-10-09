@@ -215,9 +215,6 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         }
     }
 
-    // `token` rides the socket (see `testParsesTokenOnTheSocket`); it is not an
-    // SSE-only event.
-
     func testParsesDoneWithUsage() {
         let events = CloudRouteClient.parseTextFrame(
             #"{"type":"done","usage":{"input_tokens":100,"output_tokens":200,"speech":{"amount":5000,"unit":"ms"}}}"#

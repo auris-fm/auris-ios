@@ -290,12 +290,6 @@ final class CloudRouteClient {
 
     // MARK: - Text frame parsing
 
-    /// Parse a complete text frame (one JSON event) from the WebSocket.
-    ///
-    /// The server sends one JSON event per text frame — no multi-line
-    /// accumulation needed.
-    /// Parses one text frame into the events it carries. Internal so the
-    /// parser tests can exercise it directly.
     /// True when a `result` frame's payload cannot be a supported discovery
     /// payload: unparseable JSON, no `kind`, or a supported `kind` with a
     /// missing/`scope`/`items` shape. Unknown kinds are *not* malformed — they
@@ -313,6 +307,11 @@ final class CloudRouteClient {
         return object["scope"] is String == false || object["items"] is [[String: Any]] == false
     }
 
+    /// Parses one text frame into the events it carries.
+    ///
+    /// The server sends one JSON event per text frame — no multi-line
+    /// accumulation is needed. Internal so the parser tests can exercise it
+    /// directly.
     static func parseTextFrame(_ text: String) -> [CloudRouteEvent] {
         guard let raw = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
