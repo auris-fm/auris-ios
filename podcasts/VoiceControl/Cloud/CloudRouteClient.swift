@@ -141,9 +141,9 @@ final class CloudRouteClient {
             context: context,
             turn: turn
         ) else {
-            // No credential: fail closed with the same terminal event the SSE
-            // path and `main` yield, so the sink can speak/earcon the failure.
-            // Finishing silently left the user with no error and no outcome.
+            // No credential: fail closed with a terminal event, so the sink can
+            // speak/earcon the failure. Finishing silently would leave the user
+            // with no error and no outcome.
             continuation.yield(.error(code: "unauthorized", message: ""))
             continuation.finish()
             return true
@@ -374,9 +374,9 @@ final class CloudRouteClient {
     }
 
     static func parseDone(json: [String: Any]) -> CloudTurnUsage {
-        // Usage normally arrives nested under `usage`. Older SSE frames put the
-        // two token counts at the top level; accept both so neither transport's
-        // fixtures silently lose their counts.
+        // Usage normally arrives nested under `usage`. The two counts are also
+        // accepted at the top level: a server payload shape change must not turn
+        // into a client that silently loses a turn's cost.
         guard let usage = json["usage"] as? [String: Any] else {
             return CloudTurnUsage(
                 inputTokens: intValue(json["input_tokens"]),
