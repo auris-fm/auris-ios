@@ -7416,22 +7416,28 @@
 		};
 		3F407FBC28EC30B800818E41 /* SwiftLint */ = {
 			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputFileListPaths = (
 			);
+			// SwiftLint declares its inputs and a stamp output so Xcode can skip it
+			// when nothing lint-relevant changed. Without them Xcode cannot prove the
+			// phase is up to date and runs a full `swiftlint lint` on every build,
+			// including builds that changed nothing -- the same reason the L10n phase
+			// below declares its inputs and generated output.
 			inputPaths = (
+				"$(SRCROOT)/.swiftlint.yml",
 			);
 			name = SwiftLint;
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(DERIVED_FILE_DIR)/swiftlint.stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "make lint\n";
+			shellScript = "set -e\nmake lint\nmkdir -p \"$DERIVED_FILE_DIR\"\ntouch \"$DERIVED_FILE_DIR/swiftlint.stamp\"\n";
 			showEnvVarsInLog = 0;
 		};
 		462EE0C527025346003D67DC /* GenerateCredentials */ = {
