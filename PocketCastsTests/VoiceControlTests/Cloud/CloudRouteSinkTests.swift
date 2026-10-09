@@ -534,6 +534,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
         // Analytics records only the winning turn's outcome.
         XCTAssertEqual(analytics.events.count, 1)
+        // The losing turn's socket is closed rather than left running: the client
+        // closes the socket on every exit path, and a superseded turn that kept it
+        // open would bill for a stream nobody reads and hold the connection until
+        // the server's own idle timeout.
+        XCTAssertEqual(
+            heldTurn?.task.sentTextFrames.count, 1,
+            "the held turn sent its auth frame and is the turn these assertions are about"
+        )
+        XCTAssertNotNil(heldTurn?.task.cancelled, "the superseded turn's socket is closed")
     }
 
     func testSupersededTurnDoesNotExecuteLateActions() async {
@@ -600,9 +609,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one resume")
     }
 
-    /// The turn currently held open, if the case stalled one. A stub that answers
-    /// instantly cannot express "A is still in flight when B starts", which is the
-    /// whole premise of these cases.
+    /// The turn held open by `holdNextTurn()`, so a case can assert on the socket
+    /// the superseding turn closed. A stub that answers instantly cannot express
+    /// "A is still in flight when B starts", which is the whole premise of these
+    /// cases; the socket is also where "the losing turn was closed, not left
+    /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
 
     /// Stalls the *next* client's turn until `release()` is called on the returned

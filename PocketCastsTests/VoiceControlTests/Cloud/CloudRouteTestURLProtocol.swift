@@ -244,13 +244,17 @@ final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
 
-    func wait() async {
+    /// Waits for the latch to open. Throws `CancellationError` if the waiting
+    /// task is cancelled — a transport that ignores cancellation cannot be
+    /// superseded, and swallowing the error here would hide that (as well as
+    /// spin a cancelled task forever).
+    func wait() async throws {
         while true {
             lock.lock()
             let open = isOpen
             lock.unlock()
             if open { return }
-            try? await Task.sleep(nanoseconds: 2_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
     }
 
@@ -307,7 +311,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     }
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let gate { await gate.wait() }
+        if let gate { try await gate.wait() }
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
