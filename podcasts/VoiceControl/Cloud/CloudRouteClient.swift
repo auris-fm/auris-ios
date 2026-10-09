@@ -3,8 +3,13 @@ import Foundation
 /// WebSocket client for `GET /api/v1/cloud/route`.
 ///
 /// Sends an authentication frame, then streams binary audio frames and JSON
-/// text events (action, result, done, error) until a terminal event or
-/// connection close.
+/// text events (`connected`, `action`, `token`, `result`, `done`, `error`) until
+/// a terminal event or connection close.
+///
+/// All six are load-bearing here: `connected` names the codec the binary frames
+/// are decoded at, and `token` carries a spoken answer — its absence from this
+/// parser was a silent-drop bug, so the list is kept current with the dispatch
+/// rather than paraphrased.
 ///
 /// WebSocket is the only transport: a failed upgrade is a terminal turn
 /// failure with a visible error, never a silent fallback. (The legacy SSE path
@@ -20,9 +25,6 @@ final class CloudRouteClient {
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
 
-    // The voice turn is **WebSocket-only**: no second transport, no fallback. A
-    // failed upgrade is a terminal turn failure with a visible error. (The legacy
-    // SSE path was retired — no back compatibility is maintained.)
     /// Optional seam for the WebSocket task (see `WebSocketTasking`); `nil`
     /// uses the session's real web socket.
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
