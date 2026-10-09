@@ -39,7 +39,7 @@ final class CloudTurnContractTests: XCTestCase {
         self.pendingFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
 
@@ -225,7 +225,7 @@ final class CloudTurnContractTests: XCTestCase {
         turn: CloudTurnEnvelope,
         token: String? = "test_token"
     ) async throws -> [String: Any] {
-        let task = StubWebSocketTask(textFrames: [#"{"type":"done","input_tokens":1,"output_tokens":0}"#])
+        let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_test",

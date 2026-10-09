@@ -267,7 +267,7 @@ final class CloudTokenProvidingTests: XCTestCase {
             func handleUnauthorized(rejectedToken: String?) async {}
         }
 
-        let task = StubWebSocketTask(textFrames: [#"{"type":"done","input_tokens":1,"output_tokens":0}"#])
+        let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_fallback",

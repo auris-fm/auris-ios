@@ -122,7 +122,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"tool":"playback","action":"stop_quote","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         // No mapping for reference 500s: the client seeks as-is (best effort).

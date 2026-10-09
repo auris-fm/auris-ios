@@ -29,7 +29,7 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"text":" is arguing."}
 
             event: done
-            data: {"input_tokens":500,"output_tokens":80}
+            data: {"usage":{"input_tokens":500,"output_tokens":80}}
 
             """
 
@@ -57,7 +57,7 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"tool":"playback","action":"pause","params":{}}
 
             event: done
-            data: {"input_tokens":10,"output_tokens":0}
+            data: {"usage":{"input_tokens":10,"output_tokens":0}}
 
             """
 
@@ -80,7 +80,7 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"text":" world"}
 
             event: done
-            data: {"input_tokens":20,"output_tokens":5}
+            data: {"usage":{"input_tokens":20,"output_tokens":5}}
 
             """
 
@@ -128,7 +128,7 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"text":"line1\\nline2"}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
 
@@ -390,7 +390,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// binary frames as audio, and closes the socket when the turn ends.
     func testConnectedThenAudioThenDoneOnProductionTransport() async {
         let connected = #"{"type":"connected","codec":"pcm_s16le@24k"}"#
-        let done = #"{"type":"done","input_tokens":3,"output_tokens":4}"#
+        let done = #"{"type":"done","usage":{"input_tokens":3,"output_tokens":4}}"#
         let task = StubWebSocketTask([
             .string(connected),
             .data(Data([0x01, 0x00, 0x02, 0x00])),

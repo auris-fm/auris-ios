@@ -41,7 +41,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"text":" is arguing."}
 
             event: done
-            data: {"input_tokens":10,"output_tokens":4}
+            data: {"usage":{"input_tokens":10,"output_tokens":4}}
 
             """
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
@@ -71,7 +71,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"text":"Answer."}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
 
@@ -98,7 +98,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"text":"Answer."}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
         playback.setPlaying(false)
@@ -142,7 +142,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"tool":"playback","action":"stop_quote","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         mapper.playbackSecondsForReference = [500.0: 510.0]
@@ -171,7 +171,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         playback.positionMs = 120_000
@@ -195,7 +195,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data:{"tool":"playback","action":"seek_relative","params":{"direction":"backward"}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         playback.positionMs = 120_000
@@ -217,7 +217,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data:{"tool":"playback","action":"seek_relative","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         playback.positionMs = 120_000
@@ -242,7 +242,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"tool":"bookmarks","action":"add","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
 
@@ -281,7 +281,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
@@ -303,7 +303,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext())
@@ -317,7 +317,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"tool":"playback","action":"stop_quote","params":{}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         _ = await sink.routeToCloud(request: "stop", tier: .free, context: sampleContext())
@@ -333,7 +333,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"text":"ok"}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
 
@@ -350,7 +350,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         self.pendingFixture = 
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
 
@@ -524,7 +524,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
@@ -559,7 +559,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
 
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         let gate = holdNextTurn()
@@ -571,7 +571,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":0}
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
@@ -605,7 +605,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture =
             """
             event: done
-            data: {"input_tokens":1,"output_tokens":1}
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
