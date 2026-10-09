@@ -174,4 +174,34 @@ final class NativeAudioCaptureTests: XCTestCase {
         }
         XCTAssertTrue(utterances.isEmpty, "The production segmenter emitted on an internal bound")
     }
+
+    /// The loss in the confirmation rule is the *interruption* branch, not the buffering.
+    ///
+    /// Pending frames are appended before `minSpeechFrames` is tested, so energy audio is
+    /// not withheld while unconfirmed. What discards it is one non-energetic frame arriving
+    /// before confirmation: that branch clears the buffer, and the pending audio goes with
+    /// it. This is correct pre-speech rejection — the segmenter declining to treat
+    /// sub-threshold energy as speech — and is **not** the retention defect, which concerns
+    /// audio already accepted as speech. Pinned so it is not loosened while chasing that
+    /// clause, which would trade a correct rejection for false triggers.
+    func test_interruptionBeforeConfirmation_discardsPendingFrames_andIsNotTheRetentionDefect() {
+        let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
+        var utterances: [[Float]] = []
+        segmenter.onUtterance = { utterances.append($0) }
+
+        // Four energetic frames — one below the default minSpeechFrames of 5 — then an
+        // interruption, then a confirmed utterance.
+        for _ in 0..<4 { segmenter.process([Float](repeating: 1.0, count: 320)) }
+        segmenter.process([Float](repeating: 0, count: 320))
+        for _ in 0..<5 { segmenter.process([Float](repeating: 1.0, count: 320)) }
+        segmenter.process([Float](repeating: 0, count: 320))
+
+        XCTAssertEqual(utterances.count, 1)
+        // Exactly the confirmed run plus its endpoint frame: the four unconfirmed frames
+        // were discarded by the interruption branch, as designed.
+        XCTAssertEqual(
+            utterances.first?.count, 5 * 320 + 320,
+            "Expected pre-confirmation frames to be discarded; got \(utterances.first?.count ?? -1) samples"
+        )
+    }
 }
