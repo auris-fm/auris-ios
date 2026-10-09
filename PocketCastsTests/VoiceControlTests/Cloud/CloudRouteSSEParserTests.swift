@@ -215,8 +215,8 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         }
     }
 
-    // No .token event on the WebSocket contract (cloud-assistant.md).
-    // Token events only exist on the SSE path for backward compatibility.
+    // `token` rides the socket (see `testParsesTokenOnTheSocket`); it is not an
+    // SSE-only event.
 
     func testParsesDoneWithUsage() {
         let events = CloudRouteClient.parseTextFrame(

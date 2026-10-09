@@ -180,7 +180,7 @@ class SocketCapturingTestCase: XCTestCase {
 ///
 /// A case sets `pendingFixture` before building its sink; the sink reads it once
 /// per client it makes, so a case exercising several turns assigns again between
-/// them (as the `stubSSE` it replaced did).
+/// them (as the per-case stub it replaced did).
 extension XCTestCase {
     var pendingFixture: String? {
         get { objc_getAssociatedObject(self, &pendingFixtureKey) as? String }
