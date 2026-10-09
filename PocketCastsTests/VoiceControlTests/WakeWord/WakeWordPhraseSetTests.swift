@@ -8,9 +8,11 @@ final class WakeWordPhraseSetTests: XCTestCase {
     /// The owner's exact case: `hey aris` was transcribed, classified `no_match`
     /// and dispatched to the service, which then consumed the window's allowance.
     /// The textual half is deliberately conservative: punctuation and casing are
-    /// normalised, but renderings ASR invents are not enumerated — `WakeTranscriptTrimmer`
-    /// decides those from the detector's timing instead, because no spelling
-    /// tolerance separates `Oace.` from a short real word.
+    /// normalised, but renderings ASR invents are not enumerated, because no
+    /// spelling tolerance separates `Oace.` from a short real word. **Nothing
+    /// currently decides those** — the trimmer's timing rule was removed as a
+    /// contract mismatch, so a phonetically spelled bare wake routes and can
+    /// spend the window's dispatch. That gap is open, not covered.
     func test_textRule_isConservative() {
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("Hey Auris!"))
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("auris"))

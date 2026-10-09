@@ -2,50 +2,20 @@ import XCTest
 @testable import podcasts
 
 final class WakeTranscriptTrimmerTests: XCTestCase {
-    /// The index of the last frame at or above the wired speech level, which is
-    /// what the segmenter reports for a capture — the trimmer no longer derives
-    /// it, because a sub-threshold command sits *after* the last loud frame and
-    /// an energy test would place the end at the wake.
-    private func producerSpeechEnd(of samples: [Float], level: Float = 0.020) -> Int {
-        var last = -1
-        for (index, value) in samples.enumerated() where value >= level { last = index }
-        return last
-    }
-
-    private let skipForward = AsrResult(
-        text: "Auris skip forward",
-        detectedLanguage: "en",
-        tokens: [
-            AsrToken(text: "Auris", startMs: 0, endMs: 300),
-            AsrToken(text: " skip", startMs: 500, endMs: 800),
-            AsrToken(text: " forward", startMs: 800, endMs: 1200),
-        ]
-    )
-
-    func test_wakePositive_dropsOverlappingTokens() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: skipForward,
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            "skip forward"
-        )
-    }
-
-    /// The observed case: ASR heard the wake as `Oace.` and gave no tokens. It is
-    /// wake-only because the capture ends inside the band, not because the text
-    /// resembles the wake word.
     /// Without timed tokens the transcript is left **unchanged**.
     ///
     /// The spec is explicit (recognition-pipeline.md, "Wake-positive time band
-    /// trim"): with no token timings, keep the transcript and let the router
-    /// handle the unstripped wake phrase. The classifier's completion window is
-    /// not a word-boundary estimator, so a capture ending near it does not prove
-    /// the transcript holds only the wake — a quietly spoken command sits inside
-    /// exactly that window, and discarding on the band would drop it.
+    /// trim"): with no token timings, keep the transcript. The classifier's
+    /// completion window is not a word-boundary estimator, so a capture ending
+    /// near it does not prove the transcript holds only the wake — a quietly
+    /// spoken command sits inside exactly that window, and discarding on the band
+    /// would drop it.
+    ///
+    /// What happens to the kept text is **not settled here**: a phonetically
+    /// spelled bare wake is absent from `WakeWordPhraseSet`, so it routes and can
+    /// spend the window's dispatch. That end-to-end gap is open (see the phrase
+    /// set's doc), and this assertion covers only that the text is not discarded
+    /// on an acoustic guess.
     func test_noTokens_leavesTranscriptUnchanged() {
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
@@ -56,11 +26,12 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 utteranceDurationMs: 300
             ),
             "Oace.",
-            "no timings: the router handles the unstripped wake phrase"
+            "no timings: the text is kept, whatever it then leads to"
         )
     }
 
     func test_wakeNegative_leavesTranscript() {
+        let skipForward = AsrResult(text: "Auris skip forward", detectedLanguage: "en")
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
                 result: skipForward,

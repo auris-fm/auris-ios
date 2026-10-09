@@ -11,10 +11,12 @@ enum WakeTranscriptTrimmer {
 
     /// `commandText` for a real capture.
     ///
-    /// The buffer is not consulted: without per-token timestamps the transcript is
-    /// left unchanged (see below), and with them the trim is a *time* band, which
-    /// needs no audio. The parameter is kept so the call site does not have to
-    /// know which backend produced the result.
+    /// The buffer supplies only the capture's length, which clamps the band to the
+    /// utterance: a band end past the end of what the user actually said would
+    /// otherwise be compared against token times that cannot exist. The samples
+    /// themselves are not inspected — no level, energy or boundary is derived from
+    /// them, because the spec's trim is a token-time rule and the buffer cannot
+    /// substitute for missing timings.
     static func commandText(
         result: AsrResult,
         wakePositive: Bool,
@@ -22,13 +24,12 @@ enum WakeTranscriptTrimmer {
         sampleRateHz: Int,
         samples: [Float]
     ) -> String {
-        _ = samples
-        return commandText(
+        commandText(
             result: result,
             wakePositive: wakePositive,
             completionSample: completionSample,
             sampleRateHz: sampleRateHz,
-            utteranceDurationMs: 0
+            utteranceDurationMs: ms(ofSample: samples.count - 1, sampleRateHz: sampleRateHz)
         )
     }
 

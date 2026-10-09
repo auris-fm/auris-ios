@@ -45,6 +45,13 @@ enum WakeWordPhraseSet {
     ///
     /// Equality after normalisation, deliberately **not** `starts-with`: a wake
     /// phrase followed by a real question must still route and escalate.
+    ///
+    /// This matches **literal spellings only**. A wake ASR rendered phonetically
+    /// (`Oace.`) is not recognised here, and nothing else decides it: the
+    /// trimmer's timing rule was removed as a contract mismatch with the
+    /// recognition pipeline. Such a capture routes, and if the router returns
+    /// `no_match` it escalates and spends the window's dispatch — an open
+    /// end-to-end gap, not a covered case.
     static func isWakeOnly(_ transcript: String) -> Bool {
         wakeOnlyVariants.contains(normalize(transcript))
     }
