@@ -289,4 +289,32 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             "ambience below the producer's speech level is not a command"
         )
     }
+
+    /// A soft word after the wake is a command, not silence.
+    ///
+    /// The producer's threshold decides when an utterance *starts and ends*; once
+    /// it is active the segmenter appends every frame regardless of level
+    /// (`NativeVadSegmenter.process`), so a quietly spoken command is in the buffer
+    /// and ASR transcribed it. Reading "no frame above the level after the wake" as
+    /// "the user said nothing" therefore throws away a transcript the pipeline
+    /// already has: no answer, no earcon, and no escalation — the allowance is not
+    /// even spent, because the turn never routes.
+    func test_softWordAfterTheWake_isACommandNotSilence() {
+        var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
+        samples += [Float](repeating: 0.006, count: 400 * 16)      // "skip", spoken softly
+        samples += [Float](repeating: 0.0001, count: 500 * 16)     // segmenter trailing silence
+
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "hey aris skip", detectedLanguage: "en"),
+                wakePositive: true,
+                completionSample: 250 * 16,
+                sampleRateHz: 16000,
+                samples: samples,
+                speechLevel: 0.020
+            ),
+            "hey aris skip",
+            "a transcribed word is a command however quietly it was spoken"
+        )
+    }
 }

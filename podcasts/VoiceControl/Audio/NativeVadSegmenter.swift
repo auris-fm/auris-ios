@@ -24,7 +24,12 @@ class NativeVadSegmenter {
     ///   - maxUtteranceMs: maximum utterance duration in ms (nil = unlimited). Forces end when buffer exceeds this.
     static let defaultThreshold: Float = 0.002
 
-    init(threshold: Float = NativeVadSegmenter.defaultThreshold, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
+    /// How long the segmenter waits after the last speech before emitting, so a
+    /// consumer reasoning about a capture's length can discount the trailing
+    /// silence the producer added rather than reading it as the user's speech.
+    static let defaultSilenceTimeoutMs = 500
+
+    init(threshold: Float = NativeVadSegmenter.defaultThreshold, silenceTimeoutMs: Int = NativeVadSegmenter.defaultSilenceTimeoutMs, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
         self.threshold = threshold
         self.silenceTimeoutMs = silenceTimeoutMs
         self.minSpeechFrames = minSpeechFrames
