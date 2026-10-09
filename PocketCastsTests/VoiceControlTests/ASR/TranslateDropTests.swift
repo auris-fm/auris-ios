@@ -23,18 +23,17 @@ final class TranslateDropTests: XCTestCase {
 
     // MARK: - Engine: a wake-only capture is silent (no ERROR earcon)
 
-    /// A wake-only capture stays silent — decided by the **permitted trim**, not
-    /// by acoustics.
+    /// A wake-only capture keeps its text and routes, matching Android.
     ///
-    /// The spec bounds the wake with timed tokens (the detector's completion plus
-    /// the 120 ms pad) and says to skip routing silently when that trim leaves no
-    /// text. Without timings the transcript is kept and the router handles the
-    /// unstripped wake phrase, so this case carries timings: the whole capture is
-    /// one wake token inside the band, so nothing survives and nothing is routed.
-    func test_wakeOnlyCapture_survivesNoTrim_isSilent() async {
-        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+    /// iOS no longer strips the wake, so there is nothing for the engine to see as
+    /// "nothing left to route" — the capture carries its transcript to the router,
+    /// and a bare wake is bounded by the grace window's single dispatch rather than
+    /// by an acoustic or timing guess. Android behaves the same way: its
+    /// `UtteranceFilter.kt` decides whether to process an utterance, never what the
+    /// text says.
+    func test_wakeOnlyCapture_keepsTextAndRoutes() async {
         let backend = StubAsrBackend(
-            result: AsrResult(text: "Oace", detectedLanguage: "en", tokens: tokens),
+            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
             canTranslate: false
         )
         let grace = GracePeriodSignal()
@@ -50,20 +49,17 @@ final class TranslateDropTests: XCTestCase {
         )
         engine.listeningMode = .continuous
 
-        var routed = 0
+        var routed: [String] = []
         var unroutable = 0
-        var wakeOnly = 0
-        engine.onRoutingInput = { _ in routed += 1 }
+        engine.onRoutingInput = { routed.append($0.routerTranscript) }
         engine.onUnroutable = { unroutable += 1 }
-        engine.onWakeOnly = { wakeOnly += 1 }
 
         var samples = [Float](repeating: 0.05, count: 250 * 16)
         samples += [Float](repeating: 0.0001, count: 500 * 16)
         await engine.processUtterance(samples)
 
-        XCTAssertEqual(routed, 0, "nothing survives the permitted trim, so nothing routes")
+        XCTAssertEqual(routed, ["Oace."], "the transcript reaches the router untrimmed")
         XCTAssertEqual(unroutable, 0, "a bare wake is not an unroutable question — nothing may render ERROR")
-        XCTAssertEqual(wakeOnly, 1, "the wake-only signal is the silent one")
     }
 
     func test_translateFail_dropsAndPlaysErrorEarcon() async {
