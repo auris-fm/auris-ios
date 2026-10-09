@@ -14,8 +14,19 @@ class NativeVadSegmenter {
     private var speechActive = false
     private var silenceStart: Date?
     private var speechFrameCount = 0
+    /// Index into `buffer` of the last frame at or above `threshold`.
+    private var lastSpeechSample = -1
 
-    var onUtterance: (([Float]) -> Void)?
+    /// The emitted capture, plus the index of its last frame at or above the
+    /// threshold — the producer's own answer to "where did speech stop".
+    ///
+    /// A consumer cannot recover this from the buffer: once `speechActive`, a
+    /// sub-threshold frame is appended and starts the silence clock, so the
+    /// capture ends `silenceTimeoutMs` after the *first* quiet frame rather than
+    /// after the last loud one. A consumer reasoning from energy is asking a
+    /// question the producer already answered, and mis-answers it for a quietly
+    /// spoken command.
+    var onUtterance: ((_ samples: [Float], _ lastSpeechSample: Int) -> Void)?
 
     /// - Parameters:
     ///   - threshold: RMS energy threshold above which audio is considered speech
@@ -41,6 +52,7 @@ class NativeVadSegmenter {
 
         if energy >= threshold {
             buffer.append(contentsOf: samples)
+            lastSpeechSample = buffer.count - 1
             speechFrameCount += 1
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
@@ -73,15 +85,18 @@ class NativeVadSegmenter {
         let utterance = buffer
         let durationMs = Int(Float(utterance.count) / 16.0)
         FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
+        let speechEnd = lastSpeechSample
         buffer.removeAll()
+        lastSpeechSample = -1
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0
-        onUtterance?(utterance)
+        onUtterance?(utterance, speechEnd)
     }
 
     func reset() {
         buffer.removeAll()
+        lastSpeechSample = -1
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0

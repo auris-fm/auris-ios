@@ -18,7 +18,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_vadSegmenter_energyBasedDetection() {
         let segmenter = NativeVadSegmenter()
         var utteranceReceived = false
-        segmenter.onUtterance = { _ in utteranceReceived = true }
+        segmenter.onUtterance = { _, _ in utteranceReceived = true }
 
         // Send speech-like samples (high energy)
         let speech: [Float] = (0..<320).map { sin(Float($0) * 0.1) }
@@ -40,7 +40,7 @@ final class NativeAudioCaptureTests: XCTestCase {
             minSpeechFrames: 2
         )
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { samples, _ in utterances.append(samples) }
 
         segmenter.process([1, 1])
         segmenter.process([0, 0])

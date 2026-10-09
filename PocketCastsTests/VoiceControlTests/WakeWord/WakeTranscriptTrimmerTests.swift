@@ -2,6 +2,16 @@ import XCTest
 @testable import podcasts
 
 final class WakeTranscriptTrimmerTests: XCTestCase {
+    /// The index of the last frame at or above the wired speech level, which is
+    /// what the segmenter reports for a capture — the trimmer no longer derives
+    /// it, because a sub-threshold command sits *after* the last loud frame and
+    /// an energy test would place the end at the wake.
+    private func producerSpeechEnd(of samples: [Float], level: Float = 0.020) -> Int {
+        var last = -1
+        for (index, value) in samples.enumerated() where value >= level { last = index }
+        return last
+    }
+
     private let skipForward = AsrResult(
         text: "Auris skip forward",
         detectedLanguage: "en",
@@ -137,8 +147,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 4000,          // 250 ms
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020,
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "",
             "a wake followed only by silence is wake-only, however long the trailing silence"
@@ -157,8 +166,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 4000,
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020,
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "Oace. skip",
             "speech after the wake band is a command"
@@ -166,7 +174,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     }
 
     /// Without samples the previous behaviour is kept.
-    func test_noSamples_usesTotalDuration() {
+    func test_explicitDuration_usesTheBand() {
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
                 result: AsrResult(text: "Oace.", detectedLanguage: "en"),
@@ -189,8 +197,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             wakePositive: true,
             completionSample: 3840,      // 240 ms — the wake's end
             sampleRateHz: 16000,
-            samples: samples,
-            speechLevel: 0.020,
+            lastSpeechSample: producerSpeechEnd(of: samples)
         )
         XCTAssertEqual(text, "", "wake-only is silence, not a command")
     }
@@ -230,35 +237,34 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "auris skip",
             "a frame the producer counted as speech is a command here"
         )
     }
 
-    /// A wake spoken *quietly* is still a bare wake, not a question.
+    /// A bare wake followed by quiet is wake-only, whatever ASR spelled.
     ///
-    /// If nothing in the capture reaches speech level, the wake is the only thing
-    /// that was said. Reading "no speech found" as "cannot tell" escalates and
-    /// spends the window's one dispatch on an utterance that carried no request —
-    /// the exact case this trimmer exists to catch.
-    func test_quietWakeOnlyCapture_isWakeOnlyNotAnEscalation() {
-        let samples = [Float](repeating: 0.0005, count: 250 * 16)  // a soft "auris"
-            + [Float](repeating: 0.0001, count: 500 * 16)
+    /// The wake itself crosses the producer's level — the segmenter only emits a
+    /// capture once it holds speech — so the producer reports where it ended, and
+    /// a capture that runs no further than that is a bare wake. There is no
+    /// "nothing was speech" case to decide: a capture with nothing above the
+    /// threshold is one the producer never emits.
+    func test_wakeThenQuiet_isWakeOnlyNotAnEscalation() {
+        var samples = [Float](repeating: 0.05, count: 250 * 16)     // the wake, above the level
+        samples += [Float](repeating: 0.0005, count: 500 * 16)      // the producer's hangover
 
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "auris", detectedLanguage: "en", tokens: nil),
+                result: AsrResult(text: "auris", detectedLanguage: "en"),
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020,
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "",
-            "nothing in the capture was speech, so nothing was asked"
+            "a capture that runs no further than the wake is a bare wake"
         )
     }
 
@@ -282,8 +288,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "",
             "ambience below the producer's speech level is not a command"
@@ -300,9 +305,20 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     /// already has: no answer, no earcon, and no escalation — the allowance is not
     /// even spent, because the turn never routes.
     func test_softWordAfterTheWake_isACommandNotSilence() {
+        // The capture the segmenter actually EMITS for this input: once
+        // `speechActive`, a sub-threshold frame starts the silence clock on its
+        // first frame (`NativeVadSegmenter.process`), so the utterance ends
+        // `silenceTimeoutMs` after the *word's first frame* — the word is in the
+        // buffer, but the capture is only ~800 ms long. A test using wake + word
+        // + a full 500 ms of trailing silence models a shape the producer never
+        // emits here, and would pass while the wired path drops the command.
+        // A word the producer counted as speech — it is what the segmenter reports,
+        // and the only soft word that can reach this code. A word *below* the
+        // producer's level cannot be distinguished from the hangover by any
+        // consumer, which is why the producer's own index is what decides.
         var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
-        samples += [Float](repeating: 0.006, count: 400 * 16)      // "skip", spoken softly
-        samples += [Float](repeating: 0.0001, count: 500 * 16)     // segmenter trailing silence
+        samples += [Float](repeating: 0.025, count: 400 * 16)      // "skip", below the wake, above the level
+        samples += [Float](repeating: 0.0001, count: 500 * 16)     // the producer's hangover
 
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
@@ -310,8 +326,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples,
-                speechLevel: 0.020
+                lastSpeechSample: producerSpeechEnd(of: samples)
             ),
             "hey aris skip",
             "a transcribed word is a command however quietly it was spoken"

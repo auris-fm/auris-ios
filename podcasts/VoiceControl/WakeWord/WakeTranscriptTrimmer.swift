@@ -22,28 +22,22 @@ enum WakeTranscriptTrimmer {
     /// wake, so a phonetic rendering such as `Oace.` still counts as the wake while
     /// the same words inside a longer capture do not.
     /// Whether the capture ended inside the wake band: the detector's own
-    /// completion plus `padMs`, plus whatever trailing silence the *segmenter*
-    /// added before emitting.
+    /// completion plus `padMs`.
     ///
-    /// The hangover is the producer's latency, not something the user said: the
-    /// segmenter waits `silenceTimeoutMs` after the last speech before it emits,
-    /// so every capture — bare wake or full command — carries it. Without this
-    /// allowance the band can never fire against a buffer length (which is why
-    /// comparing against an energy-derived "speech end" looked necessary), and
-    /// with the allowance a bare wake is legible from the *timing* alone. That
-    /// matters because the alternative — deciding from a level — cannot tell a
-    /// softly spoken word from room noise, and would discard a transcript the
-    /// pipeline already holds.
+    /// `utteranceDurationMs` is the **producer's** last-speech index, so the
+    /// segmenter's trailing silence is already excluded and no hangover allowance
+    /// is needed — measuring a buffer length instead would require one, because
+    /// every capture carries that latency, and getting the allowance wrong by
+    /// even a fraction of it decides the wrong way.
     static func endsWithinWakeBand(
         completionSample: Int,
         sampleRateHz: Int,
-        utteranceDurationMs: Int,
-        hangoverMs: Int = NativeVadSegmenter.defaultSilenceTimeoutMs
+        utteranceDurationMs: Int
     ) -> Bool {
         guard utteranceDurationMs > 0 else { return false }
         let rate = max(sampleRateHz, 1)
         let completionMs = Int((Int64(completionSample) * 1000) / Int64(rate))
-        return utteranceDurationMs <= completionMs + padMs + hangoverMs
+        return utteranceDurationMs <= completionMs + padMs
     }
 
 
@@ -83,44 +77,26 @@ enum WakeTranscriptTrimmer {
 
     /// `commandText` for a real capture.
     ///
-    /// The band test is made against the end of the **buffer**, not against an
-    /// energy-derived "speech end". The producer's threshold decides where an
-    /// utterance starts and stops; it is not a test of whether anything was said.
-    /// Once the segmenter is active it appends every frame regardless of level
-    /// (`NativeVadSegmenter.process`), so a quietly spoken command is in the
-    /// buffer and ASR has already transcribed it. Reading "nothing above the level
-    /// after the wake" as "the user said nothing" therefore discards a transcript
-    /// the pipeline holds — no answer, no earcon, no escalation, and the window's
-    /// allowance not even spent, because the turn never routes.
-    ///
-    /// What bounds a bare wake is that its capture *ends* at the wake: the
-    /// segmenter emits on its own silence timeout, so a real command runs past the
-    /// band however quietly it was spoken. `completionSample` already carries that
-    /// budget (the detector's completion plus `padMs`), so the band is the honest
-    /// test for it, and no energy level can substitute — a level cannot separate a
-    /// soft word from room noise, which is the case it would have to decide.
+    /// The speech end comes from the **producer**, which is the only party that
+    /// knows it: once the segmenter is active it appends sub-threshold frames and
+    /// starts its silence clock on the first one, so the capture ends
+    /// `silenceTimeoutMs` after the *first* quiet frame rather than after the last
+    /// loud one. A consumer re-deriving that from energy would place the speech
+    /// end at the wake for a quietly spoken command and read the capture as a bare
+    /// wake — discarding a transcript the pipeline already holds.
     static func commandText(
         result: AsrResult,
         wakePositive: Bool,
         completionSample: Int,
         sampleRateHz: Int,
-        samples: [Float],
-        speechLevel: Float
+        lastSpeechSample: Int
     ) -> String {
-        _ = samples
-        _ = speechLevel
-        // The capture's own length is the only duration the pipeline can trust:
-        // the segmenter's hangover means the buffer always runs past the user's
-        // last word, and no energy level separates a soft word from room noise.
-        // A bare wake is therefore identified by the *detector*, not by level:
-        // the engine's wake completion already bounds where the wake ended, and
-        // the band is measured from there.
-        return commandText(
+        commandText(
             result: result,
             wakePositive: wakePositive,
             completionSample: completionSample,
             sampleRateHz: sampleRateHz,
-            utteranceDurationMs: ms(ofSample: samples.count - 1, sampleRateHz: sampleRateHz)
+            utteranceDurationMs: ms(ofSample: max(lastSpeechSample, 0), sampleRateHz: sampleRateHz)
         )
     }
 

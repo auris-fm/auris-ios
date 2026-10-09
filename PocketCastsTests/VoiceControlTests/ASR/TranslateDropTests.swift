@@ -2,6 +2,16 @@ import XCTest
 @testable import podcasts
 
 final class TranslateDropTests: XCTestCase {
+    /// The index the segmenter would report for this capture: its last frame at
+    /// or above the wired level. Direct callers of `processUtterance` must supply
+    /// it, since the engine no longer re-derives it from energy.
+    private func producerSpeechEnd(of samples: [Float], level: Float = 0.020) -> Int {
+        var last = -1
+        for (index, value) in samples.enumerated() where value >= level { last = index }
+        return last
+    }
+
+
 
     // MARK: - Note classification (Android isNonEnglishTranslateFailure parity)
 
@@ -58,7 +68,7 @@ final class TranslateDropTests: XCTestCase {
         // assert it, or the test passes for the wrong reason.
         var samples = [Float](repeating: 0.05, count: 250 * 16)
         samples += [Float](repeating: 0.0001, count: 500 * 16)
-        await engine.processUtterance(samples)
+        await engine.processUtterance(samples, lastSpeechSample: producerSpeechEnd(of: samples))
 
         XCTAssertEqual(routed, 0, "a wake-only capture carries no request")
         XCTAssertEqual(unroutable, 0, "a bare wake is not an unroutable question — nothing may render ERROR")
@@ -105,7 +115,7 @@ final class TranslateDropTests: XCTestCase {
         // why it was appended as silence, and above the old default of 0.002.
         var samples = [Float](repeating: 0.05, count: 250 * 16)
         samples += [Float](repeating: 0.006, count: 500 * 16)
-        await engine.processUtterance(samples)
+        await engine.processUtterance(samples, lastSpeechSample: producerSpeechEnd(of: samples))
 
         XCTAssertEqual(unroutable, 0, "ambience below the producer's level is not a question")
         XCTAssertEqual(wakeOnly, 1, "the silence after a bare wake stays a bare wake")
