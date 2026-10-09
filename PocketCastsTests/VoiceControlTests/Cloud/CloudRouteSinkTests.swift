@@ -504,22 +504,24 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     }
 
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async {
-        // Turn A: a slow stream that will still be open when B starts.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
-                chunkDelayNanoseconds: 400_000_000
-            )
-        }
+        // Turn A: held open, so it is still running when B starts. Its fixture is
+        // bound to A's client explicitly, because B's turn is built in between.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
 
-        // Let A start and pause playback.
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
+        gate.release()
 
         // Turn B supersedes A and completes cleanly.
-        self.pendingFixture = 
+        self.nextTurnFixture =
             """
             event: done
             data: {"input_tokens":1,"output_tokens":1}
@@ -535,25 +537,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     }
 
     func testSupersededTurnDoesNotExecuteLateActions() async {
-        // Turn A: an action arrives only after a delay — B supersedes first.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("""
-                event: action
-                data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+        // Turn A: its action arrives only after it has already been superseded.
+        self.nextTurnFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
 
-                event: done
-                data: {"input_tokens":1,"output_tokens":0}
+            event: done
+            data: {"input_tokens":1,"output_tokens":0}
 
-                """.utf8),
-                chunkDelayNanoseconds: 500_000_000
-            )
-        }
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        gate.release()
 
-        self.pendingFixture = 
+        self.nextTurnFixture =
             """
             event: done
             data: {"input_tokens":1,"output_tokens":0}
@@ -572,24 +572,27 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// `pause()` this could not fail — which is why the double now models
     /// playback state faithfully.
     func testBargeInResumesPlaybackHeldByTheSupersededTurn() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("event: token\ndata: {\"text\":\"slow\"}\n\n".utf8),
-                chunkDelayNanoseconds: 400_000_000
-            )
-        }
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let gate = holdNextTurn()
         let sink = makeSink()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
 
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
         XCTAssertFalse(playback.isPlaying, "the hold is in effect while the first turn runs")
+        gate.release()
 
-        self.pendingFixture = """
-        event: done
-        data: {"input_tokens":1,"output_tokens":1}
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"input_tokens":1,"output_tokens":1}
 
-        """
+            """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
         _ = await slow.value
 
@@ -597,14 +600,39 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one resume")
     }
 
+    /// The turn currently held open, if the case stalled one. A stub that answers
+    /// instantly cannot express "A is still in flight when B starts", which is the
+    /// whole premise of these cases.
+    private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
+
+    /// Stalls the *next* client's turn until `release()` is called on the returned
+    /// gate, so another turn can supersede it while it is still running.
+    @discardableResult
+    private func holdNextTurn() -> Gate {
+        let gate = Gate()
+        pendingHeldGate = gate
+        return gate
+    }
+
+    private var pendingHeldGate: Gate?
+    /// Consumed by the next `makeSink()`: the fixture that sink's turn carries.
+    /// Explicit because these cases run two turns at once and the shared
+    /// `pendingFixture` handoff would let the second overwrite the first's.
+    private var nextTurnFixture: String?
+
     private func makeSink() -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                let built = CloudRouteClient.stubbed(
-                    baseURL: cloudConfig.baseUrl,
-                    fixture: self.nextFixture()
-                )
+                let fixture = self.nextTurnFixture ?? self.nextFixture()
+                self.nextTurnFixture = nil
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture)
+                if let gate = self.pendingHeldGate {
+                    // The held turn waits for frames; the test releases it later.
+                    built.task.holdUntilReleased(gate)
+                    self.heldTurn = (built.task, gate)
+                    self.pendingHeldGate = nil
+                }
                 self.capturedTask = built.task
                 return built.client
             },

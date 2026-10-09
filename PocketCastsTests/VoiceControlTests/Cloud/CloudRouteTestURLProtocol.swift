@@ -235,6 +235,32 @@ extension CloudRouteClient {
     }
 }
 
+/// An open/closed latch shared between a test and the stub socket it stalls.
+///
+/// A latch rather than a semaphore: the socket asks before *every* frame, so a
+/// single permit would let the first frame through and stall the second — which
+/// is a hung turn, not a held one. `release()` opens it for the rest of the turn.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+
+    func wait() async {
+        while true {
+            lock.lock()
+            let open = isOpen
+            lock.unlock()
+            if open { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    func release() {
+        lock.lock()
+        isOpen = true
+        lock.unlock()
+    }
+}
+
 extension StubWebSocketTask {
     /// The auth frame the client sent, as a JSON object.
     var sentAuthFrame: [String: Any]? {
@@ -271,7 +297,17 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         sent.append(message)
     }
 
+    /// Holds delivery until `release()`, so a test can keep one turn in flight
+    /// while another supersedes it. Without a way to stall a turn, a stub that
+    /// answers instantly cannot express "A is still open when B starts".
+    private var gate: Gate?
+
+    func holdUntilReleased(_ gate: Gate) {
+        self.gate = gate
+    }
+
     func receive() async throws -> URLSessionWebSocketTask.Message {
+        if let gate { await gate.wait() }
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
