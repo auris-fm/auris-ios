@@ -292,8 +292,8 @@ final class CloudRouteClient {
 
     /// True when a `result` frame's payload cannot be a supported discovery
     /// payload: unparseable JSON, no `kind`, or a supported `kind` with a
-    /// missing/`scope`/`items` shape. Unknown kinds are *not* malformed — they
-    /// are forward-compatible and ignored.
+    /// missing or malformed `scope`/`items` shape. Unknown kinds are *not*
+    /// malformed — they are forward-compatible and ignored.
     private static func isMalformedResultPayload(_ data: String) -> Bool {
         guard let raw = data.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
