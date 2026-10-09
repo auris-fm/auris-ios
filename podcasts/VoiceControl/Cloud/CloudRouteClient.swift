@@ -409,11 +409,12 @@ final class CloudRouteClient {
     }
 }
 
-// MARK: - JSON value decoding (shared with CloudTurnEnvelope)
+// MARK: - JSON value decoding
 
-/// Turns parsed JSON back into `CloudRouteJSONValue`. The *encoding* half lives
-/// in `CloudRouteRequestBuilder`, which is the only caller that needs it, so this
-/// extension is decode-only.
+/// Turns parsed JSON back into `CloudRouteJSONValue`, for the events this file
+/// parses. The *encoding* half lives in `CloudRouteRequestBuilder`, which is the
+/// only caller that needs it, so this extension is decode-only and local to this
+/// file.
 extension CloudRouteJSONValue {
     static func from(_ any: Any?) -> CloudRouteJSONValue {
         switch any {
