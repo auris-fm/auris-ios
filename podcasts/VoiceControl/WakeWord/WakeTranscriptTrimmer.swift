@@ -20,6 +20,8 @@ import Foundation
 /// SenseVoice-Small omits tokens and its config exposes no way to request them,
 /// so the transcript reaches the router intact and the router is the backstop.
 enum WakeTranscriptTrimmer {
+    /// The spec's 120 ms pad, which covers detector hop jitter and a short trailing
+    /// burst of the wake phrase; it is not a second word-boundary search.
     static let padMs = 120
 
     static func ms(ofSample sample: Int, sampleRateHz: Int) -> Int {

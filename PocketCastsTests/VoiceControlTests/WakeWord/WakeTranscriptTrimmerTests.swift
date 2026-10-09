@@ -62,13 +62,20 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         XCTAssertEqual(trim("Oace", tokens: tokens, utteranceDurationMs: 800), "")
     }
 
-    /// The band is clamped to the utterance, so a completion past the capture
-    /// cannot consume a token that exists.
+    /// The band is clamped to the utterance, and this case fails without the
+    /// clamp: a token that starts *after* the capture's own length but *inside*
+    /// the unclamped band must survive.
+    ///
+    /// The clamp only matters when the two differ, so the fixture makes them
+    /// differ — `completionSample` puts the unclamped band end at 5120 ms while
+    /// the utterance is 600 ms.
     func test_bandIsClampedToTheUtterance() {
-        let tokens = [AsrToken(text: "wake skip", startMs: 10, endMs: 600)]
+        let tokens = [AsrToken(text: "wake", startMs: 10, endMs: 400),   // inside either band
+                      AsrToken(text: " sk", startMs: 700, endMs: 900)]   // inside the unclamped band only
         XCTAssertEqual(
-            trim("wake skip", tokens: tokens, completionSample: 16000 * 5, utteranceDurationMs: 600),
-            ""
+            trim("wake sk", tokens: tokens, completionSample: 16000 * 5, utteranceDurationMs: 600),
+            "sk",
+            "the clamp keeps a token that the unclamped band would have eaten"
         )
     }
 
