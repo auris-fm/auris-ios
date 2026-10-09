@@ -16,7 +16,10 @@ final class WakeWordPhraseSetTests: XCTestCase {
     func test_textRule_isConservative() {
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("Hey Auris!"))
         XCTAssertTrue(WakeWordPhraseSet.isWakeOnly("auris"))
-        XCTAssertFalse(WakeWordPhraseSet.isWakeOnly("hey aris。"), "a phonetic rendering is the timing rule's job")
+        XCTAssertFalse(
+            WakeWordPhraseSet.isWakeOnly("hey aris。"),
+            "the text rule does not enumerate phonetic renderings — nothing does, and that gap is open"
+        )
     }
 
     /// `ok` is a prefix of `okay`, so a prefix match would remove the wrong number

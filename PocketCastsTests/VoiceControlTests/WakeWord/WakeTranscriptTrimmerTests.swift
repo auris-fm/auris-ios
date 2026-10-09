@@ -97,12 +97,6 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
 
     // MARK: - Real-capture timing (the segmenter's trailing silence)
 
-    /// A real wake-only capture always carries the segmenter's trailing silence
-    /// (`NativeVadSegmenter` emits only after `silenceTimeoutMs = 500`), so the
-    /// capture's total duration is ~500 ms longer than the wake's end. The band
-    /// test must therefore be made against the last speech, not the buffer end:
-    /// with the buffer end, a real wake-only capture can never be inside a
-    /// 120 ms pad and the `Oace.` bug survives on device.
     /// A quietly spoken command survives: it is in the transcript, so it routes.
     ///
     /// This is the case the band rule got wrong. The word is below the

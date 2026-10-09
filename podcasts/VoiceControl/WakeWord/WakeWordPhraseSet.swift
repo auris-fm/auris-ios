@@ -10,8 +10,9 @@ import Foundation
 ///
 /// This is the **conservative** half of the rule. Phonetic renderings ASR invents
 /// (`Oace.`, `aris`) are deliberately not enumerated here — no spelling tolerance
-/// separates them from short real words — and are handled instead by the trimmer's
-/// timing test, which asks when the wake fired rather than how it was spelled.
+/// separates them from short real words — and **nothing currently decides them**:
+/// the trimmer's timing test was removed as a contract mismatch. See `isWakeOnly`
+/// below for what that leaves open.
 ///
 /// Until now the wake word was only implicit in the trained classifier
 /// (`WakeWordDetector`: "Auris" ONNX model), so this constant is the first place it
