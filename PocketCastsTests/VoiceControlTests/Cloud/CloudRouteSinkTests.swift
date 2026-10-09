@@ -503,7 +503,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         super.tearDown()
     }
 
-    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async {
+    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
         // Turn A: held open, so it is still running when B starts. Its fixture is
         // bound to A's client explicitly, because B's turn is built in between.
         self.nextTurnFixture =
@@ -542,7 +542,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             heldTurn?.task.sentTextFrames.count, 1,
             "the held turn sent its auth frame and is the turn these assertions are about"
         )
-        let closed = await heldTurn?.task.awaitCancellation() ?? false
+        // Asserted on the producer, not on consumer completion: only the client
+        // setting `cancelled` proves the losing turn's socket was closed, and a
+        // bounded wait turns an intermittent miss into a deterministic failure on
+        // that same property rather than making the ordering guaranteed.
+        let heldTask = try XCTUnwrap(heldTurn?.task, "the case held a turn open")
+        let closed = await heldTask.awaitCancellation()
         XCTAssertTrue(closed, "the superseded turn's socket is closed")
     }
 
