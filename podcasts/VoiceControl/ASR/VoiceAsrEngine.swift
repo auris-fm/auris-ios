@@ -205,7 +205,11 @@ class VoiceAsrEngine {
             wakePositive: isWakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
-            samples: utterance
+            samples: utterance,
+            // The producing segmenter's own level, so the two cannot disagree:
+            // a default here would be wrong the moment the wiring overrides it
+            // (the app builds this segmenter at 0.020, not the 0.002 default).
+            speechLevel: segmenter.threshold
         )
         let trimNote: String? = {
             guard isWakePositive, asrResult.text != trimmedText else { return nil }

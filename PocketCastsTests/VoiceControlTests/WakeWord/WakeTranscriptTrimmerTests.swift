@@ -137,7 +137,8 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 4000,          // 250 ms
                 sampleRateHz: 16000,
-                samples: samples
+                samples: samples,
+                speechLevel: 0.020,
             ),
             "",
             "a wake followed only by silence is wake-only, however long the trailing silence"
@@ -156,7 +157,8 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 4000,
                 sampleRateHz: 16000,
-                samples: samples
+                samples: samples,
+                speechLevel: 0.020,
             ),
             "Oace. skip",
             "speech after the wake band is a command"
@@ -187,7 +189,8 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             wakePositive: true,
             completionSample: 3840,      // 240 ms — the wake's end
             sampleRateHz: 16000,
-            samples: samples
+            samples: samples,
+            speechLevel: 0.020,
         )
         XCTAssertEqual(text, "", "wake-only is silence, not a command")
     }
@@ -199,38 +202,39 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         samples += [Float](repeating: 0.05, count: 200 * 16)
         samples += [Float](repeating: 0.0001, count: 400 * 16)
         XCTAssertEqual(
-            WakeTranscriptTrimmer.lastSpeechSample(samples: samples, sampleRateHz: 16000),
+            WakeTranscriptTrimmer.lastSpeechSample(samples: samples, sampleRateHz: 16000, threshold: 0.020),
             200 * 16 + 200 * 16 - 1
         )
     }
 
     // MARK: - the trimmer's notion of speech matches the segmenter's
 
-    /// A command quieter than the wake is still a command.
+    /// A command quieter than the wake is still a command — *when the producer
+    /// counted it as speech*.
     ///
-    /// A person turning away from the mic drops well below the wake's level, and
-    /// the segmenter that produced this capture counts that as speech
-    /// (`NativeVadSegmenter.threshold = 0.002`). A band set higher than the
-    /// segmenter's threshold makes the two disagree at exactly this edge: every
-    /// command frame reads as silence, the capture looks wake-only, and the
-    /// command is dropped with no tone and no execution — while the same capture
-    /// was routed before.
-    func test_quieterCommand_isStillACommand() {
+    /// The level is the segmenter's own (the app wires 0.020). What matters is
+    /// that the trimmer and the producer agree: a frame the segmenter treated as
+    /// speech must be speech here, or a real command is trimmed away as silence.
+    /// A frame the segmenter did *not* treat as speech never reaches this code at
+    /// all — the segmenter emits a buffer only once it holds speech — so the
+    /// trimmer cannot resurrect it, and must not try.
+    func test_quieterCommand_theProducerCalledSpeech_isStillACommand() {
         var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
         samples += [Float](repeating: 0.0001, count: 200 * 16)
-        samples += [Float](repeating: 0.006, count: 400 * 16)     // "skip", spoken softly
-        samples += [Float](repeating: 0.0001, count: 500 * 16)    // segmenter trailing silence
+        samples += [Float](repeating: 0.025, count: 400 * 16)      // "skip", below the wake, above 0.020
+        samples += [Float](repeating: 0.0001, count: 500 * 16)     // segmenter trailing silence
 
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "auris skip", detectedLanguage: "en", tokens: nil),
+                result: AsrResult(text: "auris skip", detectedLanguage: "en"),
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples
+                samples: samples,
+                speechLevel: 0.020
             ),
             "auris skip",
-            "a command at 0.006 RMS is speech to the segmenter, so it is speech here"
+            "a frame the producer counted as speech is a command here"
         )
     }
 
@@ -250,10 +254,39 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                samples: samples
+                samples: samples,
+                speechLevel: 0.020,
             ),
             "",
             "nothing in the capture was speech, so nothing was asked"
+        )
+    }
+
+    /// A bare wake in a room with audible ambience is still a bare wake.
+    ///
+    /// The segmenter appends its 500 ms hangover by construction, so every frame
+    /// it appends sits *below its own threshold* — but room ambience is far above
+    /// -80 dBFS. If the trimmer reasons at a level below the producer's, that
+    /// hangover reads as speech, `speechEnd` moves to the buffer end, the band
+    /// test fails, and the raw rendering of the wake is kept: a phonetic `Oace.`
+    /// then reaches `no_match` and escalates, spending the window's single
+    /// dispatch on nothing. (Level here is the wired one, 0.020.)
+    func test_quietRoomAmbienceInTheHangover_isStillAWakeOnlyCapture() {
+        let ambience: Float = 0.006   // ordinary room noise, ~-44 dBFS
+        var samples = [Float](repeating: 0.05, count: 250 * 16)    // the wake itself
+        samples += [Float](repeating: ambience, count: 500 * 16)   // segmenter hangover
+
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "Oace.", detectedLanguage: "en"),
+                wakePositive: true,
+                completionSample: 250 * 16,
+                sampleRateHz: 16000,
+                samples: samples,
+                speechLevel: 0.020
+            ),
+            "",
+            "ambience below the producer's speech level is not a command"
         )
     }
 }

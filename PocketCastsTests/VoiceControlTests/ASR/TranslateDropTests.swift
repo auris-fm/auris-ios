@@ -65,6 +65,52 @@ final class TranslateDropTests: XCTestCase {
         XCTAssertEqual(wakeOnly, 1, "the wake-only signal is the silent one")
     }
 
+    /// The trimmer reasons at the **producing segmenter's** level, not a default.
+    ///
+    /// Both directions of the disagreement are audible, and only the wired level
+    /// prevents them. The app builds this segmenter at 0.020 (`VoiceControlAssembly`),
+    /// ten times `NativeVadSegmenter.defaultThreshold`, so a trimmer using the
+    /// default would sit *below* the producer: room ambience in the segmenter's
+    /// 500 ms hangover would read as speech, the capture would look like a
+    /// question, and a phonetic rendering of the wake would escalate and spend the
+    /// window's single dispatch. This asserts on the engine's own wiring, which is
+    /// where the level is chosen — a unit test of the trimmer cannot see it.
+    func test_trimmerUsesTheProducingSegmentersLevel_notADefault() async {
+        let backend = StubAsrBackend(
+            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
+            canTranslate: false
+        )
+        let grace = GracePeriodSignal()
+        grace.onCommandRecognized()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            // The wired level, not the default: this is the value under test.
+            segmenter: NativeVadSegmenter(threshold: 0.020),
+            backend: backend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: DetectingWakeStub(),
+            gracePeriodSignal: grace,
+            translationStage: nil
+        )
+        engine.listeningMode = .continuous
+
+        var unroutable = 0
+        var wakeOnly = 0
+        engine.onRoutingInput = { _ in }
+        engine.onUnroutable = { unroutable += 1 }
+        engine.onWakeOnly = { wakeOnly += 1 }
+
+        // A bare wake followed by the segmenter's hangover at a level a real
+        // microphone produces (≈ -44 dBFS) — below the producer's 0.020, which is
+        // why it was appended as silence, and above the old default of 0.002.
+        var samples = [Float](repeating: 0.05, count: 250 * 16)
+        samples += [Float](repeating: 0.006, count: 500 * 16)
+        await engine.processUtterance(samples)
+
+        XCTAssertEqual(unroutable, 0, "ambience below the producer's level is not a question")
+        XCTAssertEqual(wakeOnly, 1, "the silence after a bare wake stays a bare wake")
+    }
+
     // MARK: - Engine: drop + ERROR earcon, no transcript forward
 
     func test_translateFail_dropsAndPlaysErrorEarcon() async {

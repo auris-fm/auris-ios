@@ -3,7 +3,10 @@ import Accelerate
 import PocketCastsUtils
 
 class NativeVadSegmenter {
-    private let threshold: Float
+    /// The level this segmenter treats as speech. Read by the wake trimmer so
+    /// the two agree by construction rather than by a shared default that the
+    /// wiring can override (it does: the app builds this with 0.020).
+    let threshold: Float
     private let silenceTimeoutMs: Int
     private let minSpeechFrames: Int
     private let maxUtteranceSamples: Int?  // nil = unlimited
@@ -19,9 +22,6 @@ class NativeVadSegmenter {
     ///   - silenceTimeoutMs: milliseconds of silence before ending an utterance
     ///   - minSpeechFrames: minimum consecutive speech frames before triggering
     ///   - maxUtteranceMs: maximum utterance duration in ms (nil = unlimited). Forces end when buffer exceeds this.
-    /// The level a frame must reach to count as speech. Exposed so a caller that
-    /// reasons about the same capture (the wake trimmer) uses this level rather
-    /// than restating it.
     static let defaultThreshold: Float = 0.002
 
     init(threshold: Float = NativeVadSegmenter.defaultThreshold, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {

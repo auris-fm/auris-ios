@@ -3,14 +3,16 @@ import Foundation
 enum WakeTranscriptTrimmer {
     static let padMs = 120
 
-    /// The level at which a frame counts as speech.
+    /// The level at which a frame counts as speech, when the caller does not
+    /// supply the producing segmenter's own.
     ///
-    /// Taken from the segmenter that produced the capture rather than restated
-    /// here: two independent constants disagree at the edges, and the disagreement
-    /// is audible both ways — a command quieter than the wake reads as silence and
-    /// is dropped without a tone, while a wake-only capture whose speech sits
-    /// between the two levels reads as "cannot tell" and escalates, spending the
-    /// window's one dispatch on nothing.
+    /// Callers that have the segmenter must pass `segmenter.threshold`: a default
+    /// is only right if the wiring uses it, and the app does not (it builds the
+    /// segmenter with 0.020, ten times this). Sitting *below* the producer is as
+    /// wrong as sitting above it — everything the segmenter appended as hangover
+    /// is below its threshold by construction, so a lower trimmer level reads
+    /// room ambience as speech, pushes `speechEnd` to the buffer end, and lets a
+    /// bare wake escalate.
     static let speechThreshold = NativeVadSegmenter.defaultThreshold
 
     /// Whether the capture ended inside the wake band (the detector's own end
@@ -73,9 +75,10 @@ enum WakeTranscriptTrimmer {
         wakePositive: Bool,
         completionSample: Int,
         sampleRateHz: Int,
-        samples: [Float]
+        samples: [Float],
+        speechLevel: Float
     ) -> String {
-        let speechEnd = lastSpeechSample(samples: samples, sampleRateHz: sampleRateHz)
+        let speechEnd = lastSpeechSample(samples: samples, sampleRateHz: sampleRateHz, threshold: speechLevel)
         // Nothing in the capture reached speech level: the wake is the only thing
         // that was said, whatever ASR spelled it as. Deciding this before the band
         // test covers the capture whose speech sits below the segmenter's own
