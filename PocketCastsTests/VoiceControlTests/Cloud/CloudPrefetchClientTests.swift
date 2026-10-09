@@ -67,6 +67,63 @@ final class CloudPrefetchClientTests: XCTestCase {
         XCTAssertEqual(outcome, .failed)
     }
 
+    /// A rejected credential must be **named**, not merely detected.
+    ///
+    /// This is the only production call site of `handleUnauthorized(rejectedToken:)`
+    /// left in the app, and naming the credential is the whole property: the
+    /// provider refreshes once for the burst that was rejected, rather than
+    /// refreshing per response. Without the argument the provider cannot tell which
+    /// credential to invalidate, and a burst of hints re-exchanges on each one.
+    func testRejectedCredentialIsNamedSoTheProviderRefreshesOnce() async {
+        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+        let provider = RecordingTokenProvider(token: "token-1")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let client = CloudPrefetchClient(
+            baseURL: "https://cloud.test",
+            userId: "user_test",
+            session: URLSession(configuration: config),
+            tokenProvider: provider
+        )
+
+        _ = await client.prefetch(episodeId: "ep-1", podcastId: nil)
+
+        let reported = await provider.awaitRejections(atLeast: 1)
+        XCTAssertTrue(reported, "a 401 must be reported to the provider")
+        let rejections = await provider.rejections
+        XCTAssertEqual(rejections, ["token-1"], "the credential that was rejected is the one named")
+    }
+
+    /// Records what the client reported, and can be awaited rather than raced —
+    /// the report happens off the caller's path.
+    private final class RecordingTokenProvider: CloudTokenProviding, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _rejections: [String?] = []
+        private let tokenValue: String?
+
+        init(token: String?) { tokenValue = token }
+
+        var rejections: [String?] {
+            lock.lock(); defer { lock.unlock() }
+            return _rejections
+        }
+
+        func token() async -> String? { tokenValue }
+
+        func handleUnauthorized(rejectedToken: String?) async {
+            lock.lock(); _rejections.append(rejectedToken); lock.unlock()
+        }
+
+        func awaitRejections(atLeast count: Int, timeout: TimeInterval = 2) async -> Bool {
+            let deadline = Date(timeIntervalSinceNow: timeout)
+            while Date() < deadline {
+                if rejections.count >= count { return true }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return rejections.count >= count
+        }
+    }
+
     func testBadRequestIsAFailure() async {
         CloudRouteTestURLProtocol.stubJSON(status: 400, body: #"{"code":"invalid_request"}"#)
         let outcome = await makeClient().prefetch(episodeId: "ep-1", podcastId: nil)
@@ -200,30 +257,32 @@ final class CloudTokenProvidingTests: XCTestCase {
     }
 
     func testRouteClientPresentsProviderCredential() async throws {
-        CloudRouteTestURLProtocol.stubJSON(status: 202, body: #"{"status":"accepted"}"#)
-        var authHeaders: [String] = []
-        CloudRouteTestURLProtocol.onRequest = { request, _ in
-            authHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
-        }
-
+        // The credential rides the socket's **first frame**, not an HTTP header
+        // (`Authorization` was the SSE-era carrier), so this asserts on the auth
+        // frame the client actually sends — reading a header that is never sent
+        // makes the case pass without exercising anything.
         struct FixedTokenProvider: CloudTokenProviding {
             let value: String
             func token() async -> String? { value }
             func handleUnauthorized(rejectedToken: String?) async {}
         }
 
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let task = StubWebSocketTask(textFrames: [#"{"type":"done","input_tokens":1,"output_tokens":0}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: "user_fallback",
-            session: URLSession(configuration: config),
+            requestTimeoutSeconds: 15,
             tokenProvider: FixedTokenProvider(value: "token_from_issuer"),
+            webSocketTaskFactory: { _ in task }
         )
 
         _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).first { _ in true }
 
-        XCTAssertEqual(authHeaders.first, "Bearer token_from_issuer", "the provider is authoritative once supplied")
+        XCTAssertEqual(
+            task.sentAuthFrame?["access_token"] as? String,
+            "token_from_issuer",
+            "the provider is authoritative once supplied"
+        )
     }
 }
 
