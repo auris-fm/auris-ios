@@ -358,12 +358,10 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// The socket is closed as the transport call returns (it is a `defer`), so
     /// a consumer that has drained the stream can still observe the closure a
     /// moment later. Wait briefly for it rather than racing the assertion.
+    /// Shared with the other suites (`StubWebSocketTask.awaitCancellation`), so
+    /// the cross-task ordering hazard is handled in one place.
     private func waitForCancellation(_ task: StubWebSocketTask) async -> Bool {
-        for _ in 0..<50 {
-            if task.cancelled != nil { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return task.cancelled != nil
+        await task.awaitCancellation()
     }
 
     private func context() -> CloudRouteContext {

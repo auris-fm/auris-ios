@@ -266,6 +266,20 @@ final class Gate: @unchecked Sendable {
 }
 
 extension StubWebSocketTask {
+    /// Waits briefly for the socket to be closed.
+    ///
+    /// The closure happens in the client's producer task, while the consumer that
+    /// drained the stream returns on another — the consumer can win that race, so
+    /// a bare assertion here reads `nil` intermittently. Poll rather than race.
+    func awaitCancellation(timeout: TimeInterval = 1) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if cancelled != nil { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return cancelled != nil
+    }
+
     /// The auth frame the client sent, as a JSON object.
     var sentAuthFrame: [String: Any]? {
         guard let first = sentTextFrames.first,

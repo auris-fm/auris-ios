@@ -542,7 +542,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             heldTurn?.task.sentTextFrames.count, 1,
             "the held turn sent its auth frame and is the turn these assertions are about"
         )
-        XCTAssertNotNil(heldTurn?.task.cancelled, "the superseded turn's socket is closed")
+        let closed = await heldTurn?.task.awaitCancellation() ?? false
+        XCTAssertTrue(closed, "the superseded turn's socket is closed")
     }
 
     func testSupersededTurnDoesNotExecuteLateActions() async {
