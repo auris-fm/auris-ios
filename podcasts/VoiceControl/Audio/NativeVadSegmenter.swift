@@ -3,7 +3,13 @@ import Accelerate
 import PocketCastsUtils
 
 class NativeVadSegmenter {
-    private let threshold: Float
+    /// The level this segmenter treats as speech.
+    ///
+    /// It decides where an utterance starts and ends — not whether a command
+    /// follows the wake. The wake trimmer does not read it: a positive detection
+    /// and its window do not establish that nothing was said after it, so no
+    /// consumer may use this level to discard a transcript.
+    let threshold: Float
     private let silenceTimeoutMs: Int
     private let minSpeechFrames: Int
     private let maxUtteranceSamples: Int?  // nil = unlimited
@@ -19,7 +25,16 @@ class NativeVadSegmenter {
     ///   - silenceTimeoutMs: milliseconds of silence before ending an utterance
     ///   - minSpeechFrames: minimum consecutive speech frames before triggering
     ///   - maxUtteranceMs: maximum utterance duration in ms (nil = unlimited). Forces end when buffer exceeds this.
-    init(threshold: Float = 0.002, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
+    static let defaultThreshold: Float = 0.002
+
+    /// How long the segmenter waits after the last speech before emitting.
+    ///
+    /// Only this segmenter's own timing needs it; nothing outside reads it to
+    /// discount the hangover, because the hangover cannot be separated from a
+    /// quietly spoken word by a consumer that only has the buffer.
+    static let defaultSilenceTimeoutMs = 500
+
+    init(threshold: Float = NativeVadSegmenter.defaultThreshold, silenceTimeoutMs: Int = NativeVadSegmenter.defaultSilenceTimeoutMs, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
         self.threshold = threshold
         self.silenceTimeoutMs = silenceTimeoutMs
         self.minSpeechFrames = minSpeechFrames

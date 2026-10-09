@@ -15,13 +15,13 @@ final class IntentRoutingInputTests: XCTestCase {
         let engine = makeEngine(backend: backend, translation: translation)
 
         var inputs: [IntentRoutingInput] = []
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { inputs.append($0) }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
-        XCTAssertEqual(errors, 0)
+        XCTAssertEqual(unroutable, 0)
         XCTAssertEqual(inputs.count, 1)
         let input = try XCTUnwrap(inputs.first)
         XCTAssertEqual(input.sourceTranscript, "倒回去3分钟。")
@@ -87,14 +87,14 @@ final class IntentRoutingInputTests: XCTestCase {
         let engine = makeEngine(backend: backend, translation: translation)
 
         var inputs: [IntentRoutingInput] = []
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { inputs.append($0) }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertTrue(inputs.isEmpty)
-        XCTAssertEqual(errors, 1)
+        XCTAssertEqual(unroutable, 1)
     }
 
     private func makeEngine(backend: AsrBackend, translation: TranslationStage) -> VoiceAsrEngine {

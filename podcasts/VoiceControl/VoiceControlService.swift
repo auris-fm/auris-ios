@@ -35,8 +35,6 @@ class VoiceControlService: ObservableObject {
     private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
 
     private var cancellables = Set<AnyCancellable>()
-    private var consecutiveNulls = 0
-    private let maxConsecutiveNulls = 3
     /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
     /// race the task-chain pointer. Bumped on `stop()` so earlier chained tasks
     /// (which cancellation does not reach through `await previous?.value`) bail
@@ -194,7 +192,13 @@ class VoiceControlService: ObservableObject {
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
         }
-        asrEngine.onWakeOnly = { [weak self] in
+        // Silent by contract: a wake-only capture is the user opening a session,
+        // not a failed question, so it plays nothing. The "command not understood"
+        // earcon covers what we could not understand — it is not the opening.
+        // (`onWakeOnly` takes no arguments; a listener is registered rather than
+        // left nil so the intent is visible at the call site.)
+        asrEngine.onWakeOnly = {}
+        asrEngine.onUnroutable = { [weak self] in
             self?.audioRenderer.playEarcon(.error)
         }
 
@@ -265,12 +269,48 @@ class VoiceControlService: ObservableObject {
         guard isListening else { return }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
+
+        // A bare wake is not a question: neither routed nor escalated, and it must
+        // not spend the window's one dispatch. Without per-token timestamps ASR
+        // keeps the wake phrase in the transcript, so this is where that case is
+        // caught rather than by the trimmer, which cannot recover the tokens it
+        // never had.
+        switch RouteInputEligibilityPolicy.decide(transcript: transcript) {
+        case .blank, .silentSessionStart:
+            // Silent by contract and *before* classification: a wake-only or blank
+            // capture is the start of a session (or nothing at all), not a failed
+            // question. Letting it reach `.none` would count it as an unclassified
+            // turn and eventually play the error earcon — the outcome the silent
+            // rule forbids.
+            FileLog.shared.addMessage(
+                "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
+            )
+            return
+        case .route:
+            break
+        }
         let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
+        // Snapshot before recording: `recordPipelineLatency` consumes and clears
+        // `latestRouterMetrics`, and the escalation policy must read *this* turn's
+        // reason rather than nil — a cleared reason escalates even the reasons that
+        // must stay local (PR #23 review).
+        let turnMetrics = latestRouterMetrics
         recordPipelineLatency(transcript: transcript)
 
         switch result {
-        case .intent(let intent):
-            consecutiveNulls = 0
+        case .intent(let rawIntent):
+            // Stamp a model-chosen cloud route with the window it runs under, so
+            // its completion can be judged against that window rather than against
+            // whatever is current when the network call returns.
+            var intent = rawIntent
+            if let route = rawIntent as? CloudRouteIntent, route.generation == nil {
+                intent = CloudRouteIntent(
+                    request: route.request,
+                    tier: route.tier,
+                    origin: route.origin,
+                    generation: gracePeriodSignal.currentGeneration()
+                )
+            }
 
             // Debounce: skip if same intent type was executed within the debounce window
             let intentType = String(describing: type(of: intent))
@@ -285,13 +325,23 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent)
-            gracePeriodSignal.onCommandRecognized()
+            // Do not reset the window unconditionally here. A cloud route's
+            // completion is the executor's to attribute — it already does so
+            // against the generation the route was issued under
+            // (`recognizeCommandIfCurrentWindow`), and resetting again from here
+            // re-opened windows that had ended, undoing that guard: a model-chosen
+            // cloud route landing after a privacy close would re-arm a session it
+            // never belonged to, and the gate maps an active window to continuous
+            // capture. Local intents have no window identity of their own, so the
+            // generic reset is right for them.
+            if !(intent is CloudRouteIntent) {
+                gracePeriodSignal.onCommandRecognized()
+            }
             lastIntentType = intentType
             lastExecutionTime = Date()
             audioRenderer.render(response)
 
         case .dialogControl(let action):
-            consecutiveNulls = 0
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
             let dialogResult = dialogManager.handle(action)
 
@@ -307,17 +357,79 @@ class VoiceControlService: ObservableObject {
             // If dialogResult has no intent and no question (e.g., cancel), do nothing
 
         case .none:
-            consecutiveNulls += 1
-            let stage = latestRouterMetrics?.failedStage ?? "?"
-            let reason = latestRouterMetrics?.reason ?? "?"
-            FileLog.shared.addMessage(
-                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reason) (\(consecutiveNulls)/\(maxConsecutiveNulls))"
-            )
-            if consecutiveNulls >= maxConsecutiveNulls {
-                FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
-                audioRenderer.playEarcon(.error)
-                consecutiveNulls = 0
+            let stage = turnMetrics?.failedStage ?? "?"
+            let reason = turnMetrics?.reason
+
+            // A routing failure or a deliberate `no_match` escalates through the
+            // same path a chosen `cloud_route` uses — same intent, same executor —
+            // so the superseded-turn cancellation and the auto-pause obligation
+            // apply to it by construction rather than by a second implementation.
+            // The transcript goes verbatim, the tier is unknown, and no route hint
+            // is sent (hints accompany validated arguments only).
+            // Re-checked here as the `.intent` branch does before executing: the
+            // check at the top of this method happens before the synchronous
+            // classification, and capture can stop while that runs. Without this a
+            // stopped session could still send the transcript. Checked before the
+            // claim so a stopped session does not consume the allowance either.
+            guard isListening else { return }
+            let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
+            // Claimed as a statement, not a multi-line ternary: a continuation
+            // line starting with "?" parses as optional chaining, not as the
+            // ternary operator.
+            var dispatchGeneration: Int?
+            if escalation == .escalate {
+                dispatchGeneration = gracePeriodSignal.claimEscalationBudget()
             }
+            if escalation == .escalate, dispatchGeneration == nil {
+                // Eligible, but this window's allowance is spent. A refused
+                // budget is a local failure and speaks on the *first* refusal:
+                // leaving it to the debounce gave the user silence for their next
+                // attempt, which is the outcome this change exists to remove.
+                // Two different causes reach here: an allowance already spent in
+                // this window, and no open window at all (never woke, expired, or
+                // closed for privacy). Naming them together would report a closed
+                // session as a repeat question, so the log reads the actual state.
+                let cause = gracePeriodSignal.isActive
+                    ? "allowance already spent this window"
+                    : "no open session window"
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] cloud escalation refused (\(cause)) ← '\(transcript)' (reason=\(reason ?? "?"))"
+                )
+                if gracePeriodSignal.claimRefusalTone() {
+                    audioRenderer.playEarcon(.error)
+                }
+                return
+            }
+            if let dispatchGeneration {
+                let reasonText = reason ?? "?"
+                FileLog.shared.addMessage("[VoicePipeline] cloud escalation ← '\(transcript)' (reason=\(reasonText))")
+                // No error earcon here: the user is getting an answer. A dispatch
+                // that itself fails carries its own earcon from the sink.
+                // Marked as a fallback so the executor extends the window without
+                // restoring the allowance that permitted it.
+                let response = await executor.execute(
+                    CloudRouteIntent(
+                        request: transcript,
+                        tier: .unknown,
+                        origin: .routingFailure,
+                        generation: dispatchGeneration
+                    )
+                )
+                audioRenderer.render(response)
+                return
+            }
+
+            FileLog.shared.addMessage(
+                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reason ?? "?")"
+            )
+            // Every turn reaching here is `.stayLocal`: escalation was refused
+            // and already handled above (tone on the window's first refusal),
+            // and a blank transcript never survives classification
+            // (`RouteInputEligibilityPolicy` returns on the same emptiness
+            // test). What is left are the capability failures — reasons where
+            // the router could not do its job — and each speaks: the user asked
+            // a real question and got nothing.
+            audioRenderer.playEarcon(.error)
         }
     }
 

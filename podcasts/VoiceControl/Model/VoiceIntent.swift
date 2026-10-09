@@ -111,6 +111,37 @@ enum StatsQueryIntent: VoiceIntent, Equatable {
 struct CloudRouteIntent: VoiceIntent, Equatable {
     let request: String
     let tier: CloudTier
+    /// Why this dispatch exists. A dispatch from a routing failure is a *fallback*
+    /// rather than a command the user gave, and the two must not be treated alike
+    /// by the grace window: handling a fallback continues the window but must not
+    /// restore the escalation allowance that permitted it, or one window could
+    /// dispatch repeatedly. Mirrors Android's origin marker on the intent.
+    let origin: CloudRouteOrigin
+    /// The grace-window generation this dispatch was issued under.
+    ///
+    /// Set for both origins: a fallback carries the generation whose allowance it
+    /// spent, and a model-chosen route carries the generation it was issued under
+    /// so its completion can be attributed to *that* window rather than to
+    /// whatever is current when the network returns. Its completion may only
+    /// affect the window it belonged to: a request that returns after a privacy
+    /// close and a new wake must not extend the new window or restore its
+    /// allowance. `nil` means "change no grace state at all", so a construction
+    /// site that omits it silently loses the check rather than failing.
+    let generation: Int?
+
+    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall, generation: Int? = nil) {
+        self.request = request
+        self.tier = tier
+        self.origin = origin
+        self.generation = generation
+    }
+}
+
+enum CloudRouteOrigin: Equatable {
+    /// The model chose `cloud_route` itself.
+    case modelCall
+    /// The local router produced no answer, so the client escalated.
+    case routingFailure
 }
 
 enum CloudTier: String, Equatable {

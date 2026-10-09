@@ -1,91 +1,97 @@
 import XCTest
 @testable import podcasts
 
+/// The spec's wake-positive time-band trim, clause by clause.
+///
+/// recognition-pipeline.md, "Wake-positive time band trim": timed tokens present ⇒
+/// drop tokens overlapping the completion band; tokens absent ⇒ leave the
+/// transcript unchanged (the router is the backstop); `NotDetected` ⇒ never apply
+/// the band. The pipeline never strips by spelling.
 final class WakeTranscriptTrimmerTests: XCTestCase {
-    private let skipForward = AsrResult(
-        text: "Auris skip forward",
-        detectedLanguage: "en",
-        tokens: [
-            AsrToken(text: "Auris", startMs: 0, endMs: 300),
-            AsrToken(text: " skip", startMs: 500, endMs: 800),
-            AsrToken(text: " forward", startMs: 800, endMs: 1200),
+    private func trim(
+        _ text: String,
+        wakePositive: Bool = true,
+        tokens: [AsrToken]? = nil,
+        completionSample: Int = 4000,      // 250 ms
+        utteranceDurationMs: Int = 2000
+    ) -> String {
+        WakeTranscriptTrimmer.commandText(
+            result: AsrResult(text: text, detectedLanguage: "en", tokens: tokens),
+            wakePositive: wakePositive,
+            completionSample: completionSample,
+            sampleRateHz: 16000,
+            utteranceDurationMs: utteranceDurationMs
+        )
+    }
+
+    // MARK: - tokens absent ⇒ unchanged
+
+    /// The shipped case: SenseVoice omits tokens, so the transcript is untouched.
+    func test_noTokens_leavesTheTranscriptUnchanged() {
+        XCTAssertEqual(trim("Oace."), "Oace.")
+        XCTAssertEqual(trim("oris skip forward thirty seconds"), "oris skip forward thirty seconds")
+    }
+
+    /// No spelling is guessed at: a phonetic wake is not stripped, because the
+    /// spec says the router is the backstop for an unstripped rendering.
+    func test_noTokens_doesNotStripAPhoneticWake() {
+        XCTAssertEqual(trim("hey aris, what did they say"), "hey aris, what did they say")
+    }
+
+    // MARK: - tokens present ⇒ band trim
+
+    func test_tokensInsideTheBand_areDropped() {
+        let tokens = [
+            AsrToken(text: "Oace", startMs: 20, endMs: 240),     // band ends at 370 ms
+            AsrToken(text: " skip forward", startMs: 520, endMs: 900),
         ]
-    )
+        XCTAssertEqual(trim("Oace skip forward", tokens: tokens), "skip forward")
+    }
 
-    func test_wakePositive_dropsOverlappingTokens() {
+    /// Every token inside the band leaves nothing, and the engine treats that as
+    /// wake-only — the spec's own consequence of the permitted trim.
+    func test_allTokensInsideTheBand_leaveNoText() {
+        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+        XCTAssertEqual(trim("Oace", tokens: tokens), "")
+    }
+
+    /// A token straddling the band edge is dropped, matching the spec's
+    /// `startMs < bandEndMs && endMs > 0`.
+    func test_tokenStraddlingTheBandEnd_isDropped() {
+        let tokens = [AsrToken(text: "Oace", startMs: 100, endMs: 500)]
+        XCTAssertEqual(trim("Oace", tokens: tokens, utteranceDurationMs: 800), "")
+    }
+
+    /// The band is clamped to the utterance, and this case fails without the
+    /// clamp: a token that starts *after* the capture's own length but *inside*
+    /// the unclamped band must survive.
+    ///
+    /// The clamp only matters when the two differ, so the fixture makes them
+    /// differ — `completionSample` puts the unclamped band end at 5120 ms while
+    /// the utterance is 600 ms.
+    func test_bandIsClampedToTheUtterance() {
+        let tokens = [AsrToken(text: "wake", startMs: 10, endMs: 400),   // inside either band
+                      AsrToken(text: " sk", startMs: 700, endMs: 900)]   // inside the unclamped band only
         XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: skipForward,
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            "skip forward"
+            trim("wake sk", tokens: tokens, completionSample: 16000 * 5, utteranceDurationMs: 600),
+            "sk",
+            "the clamp keeps a token that the unclamped band would have eaten"
         )
     }
 
-    func test_wakeNegative_leavesTranscript() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: skipForward,
-                wakePositive: false,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            "Auris skip forward"
-        )
+    // MARK: - NotDetected
+
+    func test_notDetected_neverAppliesTheBand_evenWithTokens() {
+        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+        XCTAssertEqual(trim("Oace", wakePositive: false, tokens: tokens), "Oace")
     }
 
-    func test_missingTokens_leaveUnstripped() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "Auris skip forward", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            "Auris skip forward"
-        )
-    }
+    // MARK: - the property the merge bar rests on
 
-    func test_allOverlappingTokens_areWakeOnly() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(
-                    text: "Auris",
-                    detectedLanguage: "en",
-                    tokens: [AsrToken(text: "Auris", startMs: 0, endMs: 400)]
-                ),
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            ""
-        )
-    }
-
-    func test_zeroGapCommandWordStartingInsidePad_isDropped() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(
-                    text: "Auris skip forward",
-                    detectedLanguage: "en",
-                    tokens: [
-                        AsrToken(text: "Auris", startMs: 0, endMs: 250),
-                        AsrToken(text: " skip", startMs: 300, endMs: 500),
-                        AsrToken(text: " forward", startMs: 500, endMs: 900),
-                    ]
-                ),
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 2000
-            ),
-            "forward"
-        )
+    /// Whatever the input, the trimmer never invents or explains away text: an
+    /// empty result arises only from the permitted trim of timed tokens.
+    func test_onlyThePermittedTrimCanProduceEmpty() {
+        XCTAssertEqual(trim("something"), "something", "no tokens ⇒ never empty")
+        XCTAssertEqual(trim("something", wakePositive: false), "something", "not detected ⇒ never empty")
     }
 }

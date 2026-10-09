@@ -175,6 +175,33 @@ class VoiceIntentExecutor {
         // Start grace period after any successful (non-error) command
         if case .earcon(.error) = response {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
+        } else if let route = intent as? CloudRouteIntent {
+            // A cloud completion may only touch the window it was issued under, so
+            // it must carry that window's identity. One without a generation cannot
+            // be attributed to any window — falling through to the generic reset
+            // would let it reopen a session it never belonged to — so it changes no
+            // grace state at all.
+            guard let generation = route.generation else {
+                FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
+                return response   // analytics already recorded above
+            }
+            switch route.origin {
+            case .modelCall:
+                // Restores the allowance, but only inside its own window. One
+                // atomic operation: checking then resetting separately leaves a gap
+                // in which a privacy close could be undone.
+                if gracePeriodSignal.recognizeCommandIfCurrentWindow(generation) {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud route completed — grace period")
+                } else {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud route completed for an ended window — ignored")
+                }
+            case .routingFailure:
+                // The conversation continues, but only for the window that issued
+                // this dispatch, and without restoring the allowance that permitted
+                // it (shared contract with Android).
+                FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
+                gracePeriodSignal.extendWindowKeepingEscalationSpent(underGeneration: generation)
+            }
         } else {
             FileLog.shared.addMessage("[VoicePipeline] Command succeeded — grace period")
             gracePeriodSignal.onCommandRecognized()

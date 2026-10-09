@@ -3,6 +3,7 @@ import XCTest
 
 final class TranslateDropTests: XCTestCase {
 
+
     // MARK: - Note classification (Android isNonEnglishTranslateFailure parity)
 
     func test_isNonEnglishTranslateFailure_failBlankNoop() {
@@ -20,7 +21,46 @@ final class TranslateDropTests: XCTestCase {
         XCTAssertTrue(VoiceAsrEngine.isNonEnglishTranslateFailure("translate=skip(no stage)"))
     }
 
-    // MARK: - Engine: drop + ERROR earcon, no transcript forward
+    // MARK: - Engine: a wake-only capture is silent (no ERROR earcon)
+
+    /// A wake-only capture keeps its text and routes, matching Android.
+    ///
+    /// iOS no longer strips the wake, so there is nothing for the engine to see as
+    /// "nothing left to route" — the capture carries its transcript to the router,
+    /// and a bare wake is bounded by the grace window's single dispatch rather than
+    /// by an acoustic or timing guess. Android behaves the same way: its
+    /// `UtteranceFilter.kt` decides whether to process an utterance, never what the
+    /// text says.
+    func test_wakeOnlyCapture_keepsTextAndRoutes() async {
+        let backend = StubAsrBackend(
+            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
+            canTranslate: false
+        )
+        let grace = GracePeriodSignal()
+        grace.onCommandRecognized()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(),
+            backend: backend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: DetectingWakeStub(),
+            gracePeriodSignal: grace,
+            translationStage: nil
+        )
+        engine.listeningMode = .continuous
+
+        var routed: [String] = []
+        var unroutable = 0
+        engine.onRoutingInput = { routed.append($0.routerTranscript) }
+        engine.onUnroutable = { unroutable += 1 }
+
+        var samples = [Float](repeating: 0.05, count: 250 * 16)
+        samples += [Float](repeating: 0.0001, count: 500 * 16)
+        await engine.processUtterance(samples)
+
+        XCTAssertEqual(routed, ["Oace."], "the transcript reaches the router untrimmed")
+        XCTAssertEqual(unroutable, 0, "a bare wake is not an unroutable question — nothing may render ERROR")
+    }
 
     func test_translateFail_dropsAndPlaysErrorEarcon() async {
         await assertTranslateCaseDrops(
@@ -62,14 +102,14 @@ final class TranslateDropTests: XCTestCase {
         engine.listeningMode = .continuous
 
         var routed = 0
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { _ in routed += 1 }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertEqual(routed, 0, "must not forward native CJK when translation stage is missing")
-        XCTAssertEqual(errors, 1, "must play ERROR earcon via onWakeOnly")
+        XCTAssertEqual(unroutable, 1, "an unroutable capture is what renders the ERROR earcon")
     }
 
     func test_englishBypassesTranslation_forwardsTranscript() async {
@@ -92,14 +132,14 @@ final class TranslateDropTests: XCTestCase {
         engine.listeningMode = .continuous
 
         var transcripts: [String] = []
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertEqual(transcripts, ["pause"])
-        XCTAssertEqual(errors, 0)
+        XCTAssertEqual(unroutable, 0)
         XCTAssertEqual(translation.ensureReadyCalls, 0)
     }
 
@@ -123,14 +163,14 @@ final class TranslateDropTests: XCTestCase {
         engine.listeningMode = .continuous
 
         var transcripts: [String] = []
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertEqual(transcripts, ["pause"])
-        XCTAssertEqual(errors, 0)
+        XCTAssertEqual(unroutable, 0)
     }
 
     private func assertTranslateCaseDrops(
@@ -159,18 +199,36 @@ final class TranslateDropTests: XCTestCase {
         engine.listeningMode = .continuous
 
         var transcripts: [String] = []
-        var errors = 0
+        var unroutable = 0
         engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
-        engine.onWakeOnly = { errors += 1 }
+        engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertTrue(transcripts.isEmpty, "must not forward native CJK to LFM")
-        XCTAssertEqual(errors, 1, "must play ERROR earcon via onWakeOnly")
+        XCTAssertEqual(unroutable, 1, "an unroutable capture is what renders the ERROR earcon")
     }
 }
 
 // MARK: - Stubs
+
+/// Detects the wake, so the wake-only path is exercised rather than the
+/// grace/continuous path. `completionSample` is where the detector says the wake
+/// *ended* — near the end of the speech in the capture, not at its start, which
+/// is what makes the wake band meaningful.
+private final class DetectingWakeStub: WakeWordDetectorProtocol {
+    let completionSample: Int
+
+    init(completionSample: Int = 250 * 16) {   // 250 ms at 16 kHz
+        self.completionSample = completionSample
+    }
+
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        .detected(confidence: 0.9, completionSample: completionSample)
+    }
+
+    func release() {}
+}
 
 private final class ContinuousWakeStub: WakeWordDetectorProtocol {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {

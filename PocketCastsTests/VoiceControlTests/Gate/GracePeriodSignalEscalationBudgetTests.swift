@@ -1,0 +1,169 @@
+import XCTest
+@testable import podcasts
+
+/// The bound lives in the grace-window signal itself, so it is falsifiable here:
+/// one dispatch per window, restored by a wake or a recognised command.
+final class GracePeriodSignalEscalationBudgetTests: XCTestCase {
+    func testClosedWindowHasNoBudget() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        XCTAssertNil(signal.claimEscalationBudget(), "no user-initiated session ⇒ nothing escalates")
+    }
+
+    func testOneEscalationPerWindow() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+
+        XCTAssertNotNil(signal.claimEscalationBudget(), "first failure in the window escalates")
+        XCTAssertNil(signal.claimEscalationBudget(), "a second failure in the same window does not")
+    }
+
+    /// A fresh wake is a new deliberate act, so a user who says the wake word
+    /// twice gets two attempts rather than one.
+    func testAWakeResetsTheBudget() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget())
+
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget(), "a wake inside the window opens a new act")
+    }
+
+    func testARecognisedCommandResetsTheBudget() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget())
+
+        await MainActor.run { signal.onCommandRecognized() }
+        XCTAssertNotNil(signal.claimEscalationBudget(), "a recognised command is another deliberate act")
+    }
+
+    /// A fallback dispatch is not a command the user gave, so handling it extends
+    /// the window without restoring the allowance that permitted it. The ordinary
+    /// command path is asserted alongside, so the two behaviours are distinguished
+    /// rather than assumed apart.
+    func testFallbackExtendsTheWindowWithoutRestoringItsOwnAllowance() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        let generation = signal.claimEscalationBudget()
+        XCTAssertNotNil(generation)
+
+        await MainActor.run { signal.extendWindowKeepingEscalationSpent(underGeneration: generation!) }
+
+        XCTAssertTrue(signal.isActive, "the conversation window continues")
+        XCTAssertNil(signal.claimEscalationBudget(), "a fallback does not re-arm its own allowance")
+    }
+
+    /// The contrast case: a command the user actually gave does restore it, which
+    /// is what makes the fallback path a distinction rather than a blanket rule.
+    func testAChosenCommandRestoresTheAllowanceUnlikeAFallback() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget())
+
+        await MainActor.run { signal.onCommandRecognized() }
+
+        XCTAssertNotNil(signal.claimEscalationBudget(), "a deliberate command is a new act")
+    }
+
+    /// The case state alone cannot express, and the one where a wrong answer is
+    /// invisible in the budget: a dispatch belonging to a window that has since
+    /// ended must not **extend** whatever window is current. The old completion is
+    /// applied at the moment the new window would otherwise expire, so a guard that
+    /// only checked liveness would keep the session alive past its own timeout.
+    func testAnEndedWindowsCompletionCannotExtendTheCurrentOne() async {
+        let signal = GracePeriodSignal(timeout: 0.3)
+        await MainActor.run { signal.onWakeWordDetected() }
+        let oldGeneration = signal.claimEscalationBudget()
+        XCTAssertNotNil(oldGeneration)
+
+        // The window ends for privacy reasons, then a new one opens.
+        await MainActor.run { signal.onAppBackgrounded() }
+        await MainActor.run { signal.onWakeWordDetected() }
+        let newGeneration = signal.claimEscalationBudget()
+        XCTAssertNotNil(newGeneration)
+        XCTAssertNotEqual(oldGeneration, newGeneration, "a fresh wake is a new generation")
+
+        // The old request lands just before the new window would expire.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        await MainActor.run { signal.extendWindowKeepingEscalationSpent(underGeneration: oldGeneration!) }
+        XCTAssertTrue(signal.isActive, "the old completion is dropped, so the window is still running")
+
+        // It must expire on its own schedule rather than on the old dispatch's.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertFalse(signal.isActive, "an ended window's completion must not extend the current one")
+    }
+
+    /// A recognised command restores the allowance, so a refusal that follows it
+    /// is new information and must be audible. Leaving the tone claim marked from
+    /// the previous allowance makes that first refusal silent.
+    func testARecognisedCommandMakesTheNextRefusalAudibleAgain() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertTrue(signal.claimRefusalTone(), "the first refusal speaks")
+
+        await MainActor.run { signal.onCommandRecognized() }   // restores the allowance
+
+        XCTAssertTrue(signal.claimRefusalTone(), "a refusal against a restored allowance is new information")
+    }
+
+    /// Privacy fail-closed: the window can close without expiring, and a closed
+    /// window has no budget until something opens it again.
+    func testClosingTheWindowWithdrawsTheBudget() async {
+        let signal = GracePeriodSignal(timeout: 5)
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget())
+
+        await MainActor.run { signal.onAppBackgrounded() }
+        XCTAssertNil(signal.claimEscalationBudget(), "a closed session escalates nothing")
+
+        await MainActor.run { signal.onWakeWordDetected() }
+        XCTAssertNotNil(signal.claimEscalationBudget(), "the next wake opens a fresh session")
+    }
+
+    /// A fallback completing must not release the refusal-tone claim.
+    ///
+    /// The fallback keeps the escalation spent (`extendWindowKeepingEscalationSpent`),
+    /// so the allowance that produced the refusal is *still* spent when its own
+    /// answer lands. If the reset clears the tone claim, the next refusal in the
+    /// same window beeps again for that same spent allowance — two tones for one
+    /// fact, which is what the claim exists to prevent.
+    func testFallbackCompletionKeepsTheRefusalToneClaim() async {
+        let signal = GracePeriodSignal(timeout: 30)
+        await MainActor.run { signal.onWakeWordDetected() }
+
+        // Spend the window's allowance, then announce its refusal: the tone claim
+        // is now held for this generation.
+        guard let generation = signal.claimEscalationBudget() else {
+            return XCTFail("the first failure in an open window escalates")
+        }
+        XCTAssertTrue(signal.claimRefusalTone(), "the refusal is announced once")
+        XCTAssertFalse(signal.claimRefusalTone(), "and not twice in the same window")
+
+        // The fallback's own answer lands: the window extends, the allowance stays spent.
+        signal.extendWindowKeepingEscalationSpent(underGeneration: generation)
+
+        XCTAssertFalse(
+            signal.claimRefusalTone(),
+            "the allowance from that refusal is still spent, so a later refusal in the same window is not new information"
+        )
+    }
+
+    /// A recognised command restores the escalation allowance, so the *next*
+    /// refusal is new information again and must speak — even in the same
+    /// generation. (Review round: Q1 escalates, Q2 is refused and beeps, a
+    /// command restores the allowance, Q4 is refused; that Q4 is a fresh spent
+    /// allowance, not a repeat of Q2, so it beeps too.)
+    func testARecognisedCommandRearmsTheRefusalTone() async {
+        let signal = GracePeriodSignal(timeout: 30)
+        await MainActor.run { signal.onWakeWordDetected() }
+
+        guard signal.claimEscalationBudget() != nil else { return XCTFail("Q1 escalates") }
+        XCTAssertTrue(signal.claimRefusalTone(), "Q2's refusal speaks")
+        XCTAssertFalse(signal.claimRefusalTone(), "Q2 again would not — same spent allowance")
+
+        await MainActor.run { signal.onCommandRecognized() }
+
+        guard signal.claimEscalationBudget() != nil else { return XCTFail("the command restored the allowance") }
+        XCTAssertTrue(signal.claimRefusalTone(), "Q4's refusal is a fresh spent allowance, so it speaks")
+    }
+}
