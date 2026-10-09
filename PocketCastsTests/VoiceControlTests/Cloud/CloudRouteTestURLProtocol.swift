@@ -86,18 +86,6 @@ final class CloudRouteTestURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    static func stubSSE(_ body: String) {
-        let data = Data(body.utf8)
-        lock.lock()
-        requestHandler = { _ in
-            .complete(
-                status: 200,
-                headers: ["Content-Type": "text/event-stream"],
-                body: data
-            )
-        }
-        lock.unlock()
-    }
 
     /// Responds with a non-SSE JSON body (e.g. the prefetch 202).
     static func stubJSON(status: Int, body: String) {

@@ -377,10 +377,10 @@ final class CloudRouteClient {
 
     static func parseDone(json: [String: Any]) -> CloudTurnUsage {
         // Usage arrives nested under `usage` (`worker/src/protocol/frames.ts`).
-        // There is no top-level fallback: the counts have exactly one shape on
-        // the wire, and accepting a second could only absorb a format change
-        // silently instead of failing. A missing `usage` therefore means "no
-        // usable record", which is a state the type already models.
+        // The counts have one shape on the wire, so there is no top-level
+        // fallback. Rejecting a second shape is not itself a detection: a frame
+        // without `usage` parses to unknown counts, which the analytics path
+        // then omits — the detection is the regression test, not this parse.
         let usage = json["usage"] as? [String: Any] ?? [:]
         let inputTokens = intValue(usage["input_tokens"])
         let outputTokens = intValue(usage["output_tokens"])

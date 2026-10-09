@@ -152,9 +152,9 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     /// This is the test that pins the *absence* of that fallback: it fails if one
     /// is ever restored, which a fixture-level check cannot do (a fixture using
     /// the nested shape passes either way). The Worker nests the counts
-    /// (`protocol/frames.ts`), and with a single transport an accepted second
-    /// shape could only absorb a format change silently instead of failing —
-    /// which is the detection the removed comment claimed to provide.
+    /// (`protocol/frames.ts`). The detection is this assertion returning the flat
+    /// frame as unknown — not the parse rejecting it, which would only record
+    /// unknown counts in the same silence.
     func testDoneWithoutNestedUsage_recordsNoCost_ratherThanFallingBack() {
         let nested = CloudRouteClient.parseTextFrame(
             #"{"type":"done","usage":{"input_tokens":7,"output_tokens":3}}"#
