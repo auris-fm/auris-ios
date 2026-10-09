@@ -31,7 +31,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
     // MARK: - auth expiry mid-session
 
     func testAuthExpiryMidSessionSurfacesUnauthorizedAndRestores() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture =
             """
             event: token
             data: {"text":"partial"}
@@ -40,7 +40,6 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"code":"unauthorized","message":"token expired"}
 
             """
-        )
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
@@ -50,11 +49,21 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
     }
 
     func testAuthExpiryBeforeStreamIsAnErrorNotASilentTurn() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized","message":"expired"}"#)
+        // On the socket a rejected credential is an **error frame**, not an HTTP
+        // status: the credential rides the first frame, so there is no 401 body
+        // to read. The turn must still fail visibly rather than pass silently.
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"unauthorized","message":""}
+
+            """
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
-        XCTAssertEqual(response, .spoken("expired"))
+        // `unauthorized` has no user-facing template, so the failure signal is
+        // the error earcon — never silence, and never English prose for TTS.
+        XCTAssertEqual(response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.resume))
     }
 
@@ -69,19 +78,18 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
     /// observable there — a harness limitation, documented rather than papered
     /// over.)
     func testInterruptedMixedStreamKeepsEarlierEventsAndReportsConnectionLoss() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data("""
-                event: token
-                data: {"text":"She"}
+        // Frames arrive, then the socket closes with no `done`/`error`: the
+        // stub runs out of frames, which is what a dropped connection looks
+        // like from the client's side.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"She"}
 
-                event: action
-                data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
 
-                """.utf8),
-                chunkDelayNanoseconds: 5_000_000
-            )
-        }
+            """
         mapper.playbackSecondsForReference = [100.0: 110.0]
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
@@ -102,7 +110,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
     // MARK: - unaligned quotes
 
     func testUnalignedQuoteSeeksBestEffortAndStopRestoresPreActionPosition() async {
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
@@ -117,7 +125,6 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"input_tokens":1,"output_tokens":0}
 
             """
-        )
         // No mapping for reference 500s: the client seeks as-is (best effort).
         playback.positionMs = 900_000
 
@@ -166,13 +173,11 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
     // MARK: - helpers
 
     private func makeSink() -> CloudRouteSink {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
+        let fixture = pendingFixture ?? ""
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient(baseURL: cloudConfig.baseUrl, userId: "user_test", session: session, transport: .sse)
+                CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture).client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,

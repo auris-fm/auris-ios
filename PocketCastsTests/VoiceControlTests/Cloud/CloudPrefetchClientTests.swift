@@ -219,7 +219,6 @@ final class CloudTokenProvidingTests: XCTestCase {
             userId: "user_fallback",
             session: URLSession(configuration: config),
             tokenProvider: FixedTokenProvider(value: "token_from_issuer"),
-            transport: .sse
         )
 
         _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).first { _ in true }
@@ -252,7 +251,6 @@ final class CloudTokenFailClosedTests: XCTestCase {
             userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
             tokenProvider: NoTokenProvider(),
-            transport: .sse
         )
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }

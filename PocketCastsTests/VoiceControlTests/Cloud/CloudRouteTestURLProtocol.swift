@@ -1,4 +1,7 @@
 import Foundation
+import XCTest
+import ObjectiveC
+@testable import podcasts
 
 /// Shared URLProtocol stub for cloud route SSE client/sink tests.
 enum CloudRouteTestStub {
@@ -164,5 +167,165 @@ final class CloudRouteTestURLProtocol: URLProtocol {
         let parts = text.components(separatedBy: "\n\n").filter { !$0.isEmpty }
         if parts.count <= 1 { return [data] }
         return parts.map { Data(($0 + "\n\n").utf8) }
+    }
+}
+
+/// Fixed-credential provider: the route client needs *a* token, and these
+/// cases are about the transport rather than the credential.
+struct StubTokenProvider: CloudTokenProviding {
+    let token: String?
+    func token() async -> String? { token }
+    func handleUnauthorized(rejectedToken: String?) async {}
+}
+
+// MARK: - Per-case fixture handoff
+
+/// Lets a case keep its `event:`/`data:` fixture literal while the transport it
+/// is delivered over changes from HTTP to the socket.
+///
+/// A case sets `pendingFixture` before building its sink; the sink reads it once
+/// per client it makes, so a case exercising several turns assigns again between
+/// them (as the `stubSSE` it replaced did).
+extension XCTestCase {
+    var pendingFixture: String? {
+        get { objc_getAssociatedObject(self, &pendingFixtureKey) as? String }
+        set { objc_setAssociatedObject(self, &pendingFixtureKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
+    }
+
+    /// Returning the fixture (rather than `pendingFixture` directly) keeps a
+    /// client built with no fixture from reusing the previous turn's frames.
+    func nextFixture() -> String {
+        let fixture = pendingFixture ?? ""
+        pendingFixture = nil
+        return fixture
+    }
+}
+
+private nonisolated(unsafe) var pendingFixtureKey: UInt8 = 0
+
+// MARK: - WebSocket test client
+
+/// The most recently built stub socket, so a case can assert on the frames the
+/// client *sent* (the auth frame carries `request_id`/`capabilities`/`route_hint`)
+/// the way it used to read the HTTP request body.
+nonisolated(unsafe) var lastStubSocket: StubWebSocketTask?
+
+extension CloudRouteClient {
+    /// A client whose transport is a stub socket carrying `fixture`.
+    ///
+    /// The fixture keeps the `event:`/`data:` shape the cases were written
+    /// against; only the transport under it changed.
+    static func stubbed(
+        baseURL: String = "https://cloud.test",
+        userId: String = "user_test",
+        token: String? = "test_token",
+        fixture: String
+    ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
+        lastStubSocket = task
+        let client = CloudRouteClient(
+            baseURL: baseURL,
+            userId: userId,
+            requestTimeoutSeconds: 15,
+            tokenProvider: StubTokenProvider(token: token),
+            webSocketTaskFactory: { _ in task }
+        )
+        return (client, task)
+    }
+}
+
+extension StubWebSocketTask {
+    /// The auth frame the client sent, as a JSON object.
+    var sentAuthFrame: [String: Any]? {
+        guard let first = sentTextFrames.first,
+              let data = first.data(using: .utf8)
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
+// MARK: - WebSocket transport double
+
+/// Drives the route client's real transport in tests.
+///
+/// `URLProtocol` does not sit in front of `URLSessionWebSocketTask`, so a
+/// URLProtocol stub cannot reach the transport the app ships. These tests drive
+/// the client through `CloudRouteClient.WebSocketTasking` instead — the same
+/// seam, and the same frames the server would send.
+final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
+    private var incoming: [URLSessionWebSocketTask.Message]
+    private(set) var sent: [URLSessionWebSocketTask.Message] = []
+    private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
+    var receiveError: Error?
+
+    init(_ incoming: [URLSessionWebSocketTask.Message]) {
+        self.incoming = incoming
+    }
+
+    convenience init(textFrames: [String]) {
+        self.init(textFrames.map { .string($0) })
+    }
+
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        sent.append(message)
+    }
+
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        if let receiveError { throw receiveError }
+        guard !incoming.isEmpty else {
+            // A closed socket: the server ended the stream without a terminal
+            // event, which the client must surface rather than treat as success.
+            throw URLError(.badServerResponse)
+        }
+        return incoming.removeFirst()
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        cancelled = (closeCode, reason)
+    }
+
+    /// The JSON payloads the client sent, decoded for assertions.
+    var sentTextFrames: [String] {
+        sent.compactMap { message in
+            if case let .string(text) = message { return text }
+            return nil
+        }
+    }
+}
+
+extension StubWebSocketTask {
+    /// Turn a legacy `event:`/`data:` fixture into the text frames the socket
+    /// now carries, so a migrated case keeps its fixture readable.
+    static func frames(fromFixture fixture: String) -> [String] {
+        var frames: [String] = []
+        var eventName: String?
+        for rawLine in fixture.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                eventName = nil
+                continue
+            }
+            if let rest = line.dropPrefix("event: ") ?? line.dropPrefix("event:") {
+                eventName = rest.trimmingCharacters(in: .whitespaces)
+            } else if let rest = line.dropPrefix("data: ") ?? line.dropPrefix("data:"), let eventName {
+                let payload = rest.trimmingCharacters(in: .whitespaces)
+                // The socket frames carry the type inside the JSON. `data:` is
+                // already the full object except for its `type`, so merge it in
+                // rather than rewrite every fixture.
+                if payload.hasPrefix("{"), payload.hasSuffix("}") {
+                    let body = payload.dropFirst().dropLast()
+                    frames.append(#"{"type":"\#(eventName)","# + body + "}")
+                } else {
+                    frames.append(#"{"type":"\#(eventName)","text":"\#(payload)"}"#)
+                }
+            }
+        }
+        return frames
+    }
+}
+
+private extension String {
+    func dropPrefix(_ prefix: String) -> String? {
+        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : nil
     }
 }

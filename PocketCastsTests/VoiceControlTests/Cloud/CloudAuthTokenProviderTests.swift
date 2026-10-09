@@ -625,7 +625,6 @@ final class CloudTokenProviderRouterTests: XCTestCase {
                 appVersionProvider: { "1.0" },
                 session: URLSession(configuration: config)
             ),
-            transport: .sse
         )
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }

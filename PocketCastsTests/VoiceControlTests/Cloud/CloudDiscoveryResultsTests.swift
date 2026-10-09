@@ -64,11 +64,14 @@ final class CloudDiscoveryResultsTests: XCTestCase {
     /// Parity with Android's reviewed payload-failure behavior: a malformed
     /// payload on the *known* `result` event surfaces as `invalid_response`;
     /// an unknown `kind` stays forward-compatible and is ignored.
+    ///
+    /// Driven through the socket text-frame parser rather than the retired SSE
+    /// frame parser: the assertions are about the result-event contract, which
+    /// the socket path also has to honour.
     func testParserSurfacesMalformedResultPayloadAsInvalidResponse() {
-        var parser = CloudRouteSSEParser()
-        _ = parser.consume(line: "event: result")
-        _ = parser.consume(line: #"data: {"kind":"episode_results"}"#)
-        let events = parser.consume(line: "")
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"result","kind":"episode_results"}"#
+        )
         XCTAssertEqual(events.count, 1)
         guard case let .error(code, message) = events.first else {
             return XCTFail("expected invalid_response error, got \(events)")
@@ -80,17 +83,16 @@ final class CloudDiscoveryResultsTests: XCTestCase {
     }
 
     func testParserIgnoresUnknownResultKind() {
-        var parser = CloudRouteSSEParser()
-        _ = parser.consume(line: "event: result")
-        _ = parser.consume(line: #"data: {"kind":"something_else_v9","items":[]}"#)
-        XCTAssertTrue(parser.consume(line: "").isEmpty, "unknown kinds must not break the stream")
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"result","kind":"something_else_v9","items":[]}"#
+        )
+        XCTAssertTrue(events.isEmpty, "unknown kinds must not break the stream")
     }
 
     func testParserEmitsResultEvent() {
-        var parser = CloudRouteSSEParser()
-        XCTAssertTrue(parser.consume(line: "event: result").isEmpty)
-        XCTAssertTrue(parser.consume(line: #"data: {"kind":"episode_results","scope":"library","items":[],"next_cursor":null}"#).isEmpty)
-        let events = parser.consume(line: "") // blank line dispatches the frame
+        let events = CloudRouteClient.parseTextFrame(
+            #"{"type":"result","kind":"episode_results","scope":"library","items":[],"next_cursor":null}"#
+        )
         XCTAssertEqual(events.count, 1)
         guard case let .result(result) = events.first else {
             return XCTFail("expected a result event, got \(events)")

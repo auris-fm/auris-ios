@@ -18,8 +18,7 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testMixedStreamEmitsActionTokensAndDone() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
 
@@ -33,10 +32,6 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"input_tokens":500,"output_tokens":80}
 
             """
-        )
-
-        var capturedBody: Data?
-        CloudRouteTestURLProtocol.onRequest = { _, body in capturedBody = body }
 
         let events = await collect(client().route(request: "What did she mean?", context: sampleContext))
 
@@ -53,12 +48,11 @@ final class CloudRouteClientTests: XCTestCase {
                 .done(usage: CloudTurnUsage(inputTokens: 500, outputTokens: 80)),
             ]
         )
-        assertRouteBody(capturedBody)
+        assertRouteBody(lastStubSocket?.sentTextFrames.first)
     }
 
     func testActionOnlyStream() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"pause","params":{}}
 
@@ -66,7 +60,6 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"input_tokens":10,"output_tokens":0}
 
             """
-        )
 
         let events = await collect(client().route(request: "pause", context: sampleContext))
         XCTAssertEqual(
@@ -79,8 +72,7 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testTokenOnlyStream() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: token
             data: {"text":"Hello"}
 
@@ -91,7 +83,6 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"input_tokens":20,"output_tokens":5}
 
             """
-        )
 
         let events = await collect(client().route(request: "summarize", context: sampleContext))
         XCTAssertEqual(
@@ -104,44 +95,18 @@ final class CloudRouteClientTests: XCTestCase {
         )
     }
 
-    func test400InvalidRequestEmitsErrorBeforeStream() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 400,
-                headers: ["Content-Type": "application/json"],
-                body: Data(#"{"code":"invalid_request","message":"missing request"}"#.utf8)
-            )
-        }
-
-        let events = await collect(client().route(request: "", context: sampleContext))
-        XCTAssertEqual(events, [.error(code: "invalid_request", message: "missing request")])
-    }
-
-    func test401EmitsErrorBeforeStream() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 401,
-                headers: ["Content-Type": "application/json"],
-                body: Data(#"{"message":"unauthorized"}"#.utf8)
-            )
-        }
-
-        let events = await collect(client().route(request: "hello", context: sampleContext))
-        guard case let .error(code, _)? = events.first, events.count == 1 else {
-            XCTFail("Expected single error, got \(events)")
-            return
-        }
-        XCTAssertEqual(code, "unauthorized")
-    }
+    /// The HTTP-era pre-stream cases (400/401 status bodies surfacing as error
+    /// events) retired with the SSE transport: on the socket the credential
+    /// rides the first frame, so a rejected credential is an `unauthorized`
+    /// error *frame* — pinned by `testMissingCredentialYieldsUnauthorizedError`
+    /// and the unauthorized-signal suites — and there is no status code to read.
 
     func testInlineErrorEventLimitExceeded() async {
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: error
             data: {"code":"limit_exceeded","message":"You've used 10/10 free requests today."}
 
             """
-        )
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(
@@ -153,8 +118,7 @@ final class CloudRouteClientTests: XCTestCase {
     func testMultiLineDataFieldIsJoinedBeforeParsing() async {
         // Multi-line `data:` frames are joined with `\n` (SSE). Split where a
         // newline is legal JSON whitespace so Foundation's parser accepts it.
-        CloudRouteTestURLProtocol.stubSSE(
-            """
+        self.pendingFixture = """
             event: token
             data: {"text":
             data: "line1\\nline2"}
@@ -163,7 +127,6 @@ final class CloudRouteClientTests: XCTestCase {
             data: {"input_tokens":1,"output_tokens":1}
 
             """
-        )
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(
@@ -176,22 +139,14 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testMidStreamConnectionDropEmitsConnectionError() async {
-        // Deliver a partial SSE body then cleanly close (no `done`/`error`).
-        // URLSession.bytes does not reliably surface didLoad-before-didFail;
-        // truncated EOF without a terminal event is the portable drop signal.
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(
-                status: 200,
-                headers: ["Content-Type": "text/event-stream"],
-                body: Data(
-                    """
-                    event: token
-                    data: {"text":"partial"}
+        // Frames arrive, then the socket ends with no terminal event — what a
+        // dropped connection looks like from the client's side.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"partial"}
 
-                    """.utf8
-                )
-            )
-        }
+            """
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(events.first, .token("partial"))
@@ -203,21 +158,17 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     func testClientCancellationStopsCollection() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .slowChunks(
-                body: Data(
-                    """
-                    event: token
-                    data: {"text":"first"}
+        // Two tokens are queued; the collector stops after the first and must
+        // never observe the second.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"first"}
 
-                    event: token
-                    data: {"text":"second"}
+            event: token
+            data: {"text":"second"}
 
-                    """.utf8
-                ),
-                chunkDelayNanoseconds: 200_000_000
-            )
-        }
+            """
 
         let stream = client().route(request: "hello", context: sampleContext)
         var received: [CloudRouteEvent] = []
@@ -277,7 +228,6 @@ final class CloudRouteClientTests: XCTestCase {
             userId: userId,
             session: session,
             requestTimeoutSeconds: 15,
-            transport: .sse
         )
     }
 
@@ -289,9 +239,9 @@ final class CloudRouteClientTests: XCTestCase {
         return events
     }
 
-    private func assertRouteBody(_ body: Data?) {
-        guard let body, let text = String(data: body, encoding: .utf8) else {
-            XCTFail("Expected captured request body")
+    private func assertRouteBody(_ text: String?) {
+        guard let text else {
+            XCTFail("Expected a captured auth frame")
             return
         }
         XCTAssertTrue(text.contains("\"request\":\"What did she mean?\""))
@@ -312,20 +262,17 @@ final class CloudRouteClientLocaleTests: XCTestCase {
     }
 
     private func makeClient() -> CloudRouteClient {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        return CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_test",
-            session: URLSession(configuration: config),
-            transport: .sse
-        )
+        CloudRouteClient.stubbed(fixture: nextFixture()).client
     }
 
     func testMidStreamDropWithoutDoneCarriesNoEnglishProse() async {
-        CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(status: 200, headers: ["Content-Type": "text/event-stream"], body: Data("event: token\ndata: {\"text\":\"hi\"}\n\n".utf8))
-        }
+        // Frames arrive, then the socket closes with no terminal event.
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"hi"}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.last else {
@@ -335,8 +282,17 @@ final class CloudRouteClientLocaleTests: XCTestCase {
         XCTAssertTrue(message.isEmpty, "a reachable diagnostic must not be English prose for TTS")
     }
 
-    func testPreStreamErrorWithoutAServerMessageStaysSilent() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 401, body: #"{"code":"unauthorized"}"#)
+    /// A rejected credential arrives as an error **frame** on the socket, not an
+    /// HTTP status — the credential rides the first frame, so there is no 401
+    /// body to read. This replaces an HTTP-era case that asserted the 401 body's
+    /// text; the property it protected (a rejection is never silent) is kept.
+    func testRejectedCredentialFrameStaysSilentWithoutAServerMessage() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"unauthorized","message":""}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.first else {
@@ -347,7 +303,12 @@ final class CloudRouteClientLocaleTests: XCTestCase {
     }
 
     func testServerSuppliedMessageIsPassedThrough() async {
-        CloudRouteTestURLProtocol.stubJSON(status: 429, body: #"{"code":"limit_exceeded","message":"Daily limit reached"}"#)
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"limit_exceeded","message":"Daily limit reached"}
+
+            """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(code, message)? = events.first else {
@@ -418,7 +379,6 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             userId: "user_legacy",
             session: URLSession(configuration: config),
             tokenProvider: provider,
-            transport: .sse
         )
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
@@ -452,7 +412,6 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             userId: "user_legacy",
             session: URLSession(configuration: config),
             tokenProvider: provider,
-            transport: .sse
         )
 
         let stream = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0))
@@ -485,7 +444,7 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
     }
 
     func testSuccessfulStreamDoesNotReportARejection() async {
-        CloudRouteTestURLProtocol.stubSSE("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n")
+        self.pendingFixture = "event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n"
         let provider = RecordingProvider()
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
@@ -494,7 +453,6 @@ final class CloudRouteClientUnauthorizedSignalTests: XCTestCase {
             userId: "user_legacy",
             session: URLSession(configuration: config),
             tokenProvider: provider,
-            transport: .sse
         )
 
         _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
@@ -596,37 +554,6 @@ func waitFor(log: OrderLog, entry: String, timeout: TimeInterval) async -> Bool 
 
 // MARK: - Production transport (WebSocket) through the task seam
 
-/// `URLProtocol` stubs only the URL loading system, which
-/// `URLSessionWebSocketTask` does not go through — so the transport the app
-/// actually uses had no test behind it. These drive it through
-/// `CloudRouteClient.WebSocketTasking`.
-private final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
-    private var incoming: [URLSessionWebSocketTask.Message]
-    private(set) var sent: [URLSessionWebSocketTask.Message] = []
-    private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
-    var receiveError: Error?
-
-    init(_ incoming: [URLSessionWebSocketTask.Message]) {
-        self.incoming = incoming
-    }
-
-    func send(_ message: URLSessionWebSocketTask.Message) async throws {
-        sent.append(message)
-    }
-
-    func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let receiveError { throw receiveError }
-        guard !incoming.isEmpty else {
-            throw URLError(.badServerResponse)
-        }
-        return incoming.removeFirst()
-    }
-
-    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        cancelled = (closeCode, reason)
-    }
-}
-
 final class CloudRouteWebSocketPathTests: XCTestCase {
     private func client(task: StubWebSocketTask, token: String?) -> CloudRouteClient {
         CloudRouteClient(
@@ -634,7 +561,6 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
             userId: "user_test",
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
-            transport: .webSocket,
             webSocketTaskFactory: { _ in task }
         )
     }
@@ -718,10 +644,27 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let closed = await waitForCancellation(task)
         XCTAssertTrue(closed, "the socket is closed on the non-terminal path too")
     }
-}
 
-private struct StubTokenProvider: CloudTokenProviding {
-    let token: String?
-    func token() async -> String? { token }
-    func handleUnauthorized(rejectedToken: String?) async {}
+    /// A failed WebSocket upgrade is terminal: the retired SSE fallback used to
+    /// be reachable here, so this pins the no-fallback property itself — the
+    /// turn reports the failure and sends **no** second request.
+    func testFailedUpgradeIsTerminalAndIssuesNoSecondRequest() async {
+        let task = StubWebSocketTask([])
+        task.receiveError = URLError(.cannotConnectToHost)
+        let client = client(task: task, token: "tok")
+
+        let events = await collect(client.route(request: "hello", context: context()))
+
+        guard case let .error(code, message)? = events.last else {
+            return XCTFail("a failed upgrade must report an error, got \(events)")
+        }
+        XCTAssertEqual(code, "connection_lost")
+        XCTAssertTrue(message.isEmpty, "no English URLSession prose reaches the user")
+
+        // The auth frame is the only thing the client ever sends. A fallback
+        // transport would have posted a second request; there is none.
+        let sent = task.sentTextFrames
+        XCTAssertEqual(sent.count, 1, "exactly one frame — the auth frame — and no fallback request")
+        XCTAssertTrue(sent[0].contains("authenticate"), "the one frame is the authenticate frame")
+    }
 }

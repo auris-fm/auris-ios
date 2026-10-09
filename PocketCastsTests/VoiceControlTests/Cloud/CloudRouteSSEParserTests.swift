@@ -126,74 +126,24 @@ final class CloudRouteEventTests: XCTestCase {
     }
 }
 
-final class CloudRouteSSEParserTests: XCTestCase {
-    func testParsesMixedEvents() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        let lines = """
-            event: action
-            data: {"tool":"playback","action":"pause","params":{}}
-
-            event: token
-            data: {"text":"Hi"}
-
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-            """.components(separatedBy: "\n")
-        for line in lines {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        events.append(contentsOf: parser.finish())
-        XCTAssertEqual(
-            events,
-            [
-                .action(tool: "playback", action: "pause", params: [:]),
-                .token("Hi"),
-                .done(usage: CloudTurnUsage(inputTokens: 1, outputTokens: 1)),
-            ]
-        )
-    }
-
-    func testJoinsMultiLineDataWithNewline() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        for line in ["event: token", "data: {\"text\":", "data: \"ab\"}", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events, [.token("ab")])
-    }
-
-    func testParseError() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        for line in ["event: error", "data: {\"code\":\"limit_exceeded\",\"message\":\"\"}", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events, [.error(code: "limit_exceeded", message: "")])
-    }
-
-    func testParseResult() {
-        var parser = CloudRouteSSEParser()
-        var events: [CloudRouteEvent] = []
-        let json = """
-        {"kind":"episode_results","scope":"current_episode","items":[],"next_cursor":null}
-        """
-        for line in ["event: result", "data: \(json)", ""] {
-            events.append(contentsOf: parser.consume(line: line))
-        }
-        XCTAssertEqual(events.count, 1)
-        if case .result(let result) = events.first {
-            XCTAssertEqual(result.kind, "episode_results")
-            XCTAssertEqual(result.scope, .currentEpisode)
-        } else {
-            XCTFail("expected .result")
-        }
-    }
-}
-
 // MARK: - WebSocket text frame parser tests
 
 final class CloudRouteClientTextParserTests: XCTestCase {
+    /// The socket carries `token` frames, so the socket parser must read them.
+    ///
+    /// This looks like an SSE leftover and is not one: the Worker's
+    /// `lifecycle.ts` `sendVisible("token", { text })` writes them on the live
+    /// WebSocket path. A parser without this case falls to `default: return []`,
+    /// so a turn that answers in text delivers no words — silently, on the
+    /// transport the app actually ships.
+    func testParsesTokenOnTheSocket() {
+        XCTAssertEqual(
+            CloudRouteClient.parseTextFrame(#"{"type":"token","text":"forty-two"}"#),
+            [.token("forty-two")],
+            "token rides the socket; dropping it loses the answer text"
+        )
+    }
+
     func testParsesConnected() {
         // `connected` carries the codec the server negotiated; the player needs
         // it (rate included) to decode the binary frames that follow.

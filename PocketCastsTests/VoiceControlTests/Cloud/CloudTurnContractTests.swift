@@ -49,13 +49,12 @@ final class CloudTurnContractTests: XCTestCase {
             else { return }
             capturedIds.append(requestId)
         }
-        CloudRouteTestURLProtocol.stubSSE(
+        self.pendingFixture =
             """
             event: done
             data: {"input_tokens":1,"output_tokens":0}
 
             """
-        )
 
         let client = makeClient()
         for _ in 0..<2 {
@@ -220,13 +219,6 @@ final class CloudTurnContractTests: XCTestCase {
     }
 
     private func makeClient() -> CloudRouteClient {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        return CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: "user_test",
-            session: URLSession(configuration: config),
-            transport: .sse
-        )
+        CloudRouteClient.stubbed(fixture: nextFixture()).client
     }
 }
