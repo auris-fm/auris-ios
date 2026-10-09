@@ -203,4 +203,57 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             200 * 16 + 200 * 16 - 1
         )
     }
+
+    // MARK: - the trimmer's notion of speech matches the segmenter's
+
+    /// A command quieter than the wake is still a command.
+    ///
+    /// A person turning away from the mic drops well below the wake's level, and
+    /// the segmenter that produced this capture counts that as speech
+    /// (`NativeVadSegmenter.threshold = 0.002`). A band set higher than the
+    /// segmenter's threshold makes the two disagree at exactly this edge: every
+    /// command frame reads as silence, the capture looks wake-only, and the
+    /// command is dropped with no tone and no execution — while the same capture
+    /// was routed before.
+    func test_quieterCommand_isStillACommand() {
+        var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
+        samples += [Float](repeating: 0.0001, count: 200 * 16)
+        samples += [Float](repeating: 0.006, count: 400 * 16)     // "skip", spoken softly
+        samples += [Float](repeating: 0.0001, count: 500 * 16)    // segmenter trailing silence
+
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "auris skip", detectedLanguage: "en", tokens: nil),
+                wakePositive: true,
+                completionSample: 250 * 16,
+                sampleRateHz: 16000,
+                samples: samples
+            ),
+            "auris skip",
+            "a command at 0.006 RMS is speech to the segmenter, so it is speech here"
+        )
+    }
+
+    /// A wake spoken *quietly* is still a bare wake, not a question.
+    ///
+    /// If nothing in the capture reaches speech level, the wake is the only thing
+    /// that was said. Reading "no speech found" as "cannot tell" escalates and
+    /// spends the window's one dispatch on an utterance that carried no request —
+    /// the exact case this trimmer exists to catch.
+    func test_quietWakeOnlyCapture_isWakeOnlyNotAnEscalation() {
+        let samples = [Float](repeating: 0.0005, count: 250 * 16)  // a soft "auris"
+            + [Float](repeating: 0.0001, count: 500 * 16)
+
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "auris", detectedLanguage: "en", tokens: nil),
+                wakePositive: true,
+                completionSample: 250 * 16,
+                sampleRateHz: 16000,
+                samples: samples
+            ),
+            "",
+            "nothing in the capture was speech, so nothing was asked"
+        )
+    }
 }

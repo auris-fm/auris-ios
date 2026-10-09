@@ -19,7 +19,12 @@ class NativeVadSegmenter {
     ///   - silenceTimeoutMs: milliseconds of silence before ending an utterance
     ///   - minSpeechFrames: minimum consecutive speech frames before triggering
     ///   - maxUtteranceMs: maximum utterance duration in ms (nil = unlimited). Forces end when buffer exceeds this.
-    init(threshold: Float = 0.002, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
+    /// The level a frame must reach to count as speech. Exposed so a caller that
+    /// reasons about the same capture (the wake trimmer) uses this level rather
+    /// than restating it.
+    static let defaultThreshold: Float = 0.002
+
+    init(threshold: Float = NativeVadSegmenter.defaultThreshold, silenceTimeoutMs: Int = 500, minSpeechFrames: Int = 5, maxUtteranceMs: Int? = nil) {
         self.threshold = threshold
         self.silenceTimeoutMs = silenceTimeoutMs
         self.minSpeechFrames = minSpeechFrames

@@ -3,6 +3,16 @@ import Foundation
 enum WakeTranscriptTrimmer {
     static let padMs = 120
 
+    /// The level at which a frame counts as speech.
+    ///
+    /// Taken from the segmenter that produced the capture rather than restated
+    /// here: two independent constants disagree at the edges, and the disagreement
+    /// is audible both ways — a command quieter than the wake reads as silence and
+    /// is dropped without a tone, while a wake-only capture whose speech sits
+    /// between the two levels reads as "cannot tell" and escalates, spending the
+    /// window's one dispatch on nothing.
+    static let speechThreshold = NativeVadSegmenter.defaultThreshold
+
     /// Whether the capture ended inside the wake band (the detector's own end
     /// sample plus pad), i.e. the user woke the assistant and said nothing else.
     ///
@@ -32,7 +42,7 @@ enum WakeTranscriptTrimmer {
         samples: [Float],
         sampleRateHz: Int,
         frameMs: Int = 10,
-        threshold: Float = 0.01
+        threshold: Float = speechThreshold
     ) -> Int {
         guard !samples.isEmpty, sampleRateHz > 0 else { return -1 }
         let frame = max(sampleRateHz * frameMs / 1000, 1)
@@ -66,6 +76,13 @@ enum WakeTranscriptTrimmer {
         samples: [Float]
     ) -> String {
         let speechEnd = lastSpeechSample(samples: samples, sampleRateHz: sampleRateHz)
+        // Nothing in the capture reached speech level: the wake is the only thing
+        // that was said, whatever ASR spelled it as. Deciding this before the band
+        // test covers the capture whose speech sits below the segmenter's own
+        // threshold — `lastSpeechSample` finds nothing there, and the band test
+        // would otherwise answer "cannot tell" and escalate, spending the window's
+        // one dispatch on an utterance that asked nothing.
+        if wakePositive, speechEnd < 0 { return "" }
         return commandText(
             result: result,
             wakePositive: wakePositive,
