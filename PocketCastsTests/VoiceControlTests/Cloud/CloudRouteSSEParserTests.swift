@@ -133,9 +133,10 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     ///
     /// This looks like an SSE leftover and is not one: the Worker's
     /// `lifecycle.ts` `sendVisible("token", { text })` writes them on the live
-    /// WebSocket path. A parser without this case falls to `default: return []`,
-    /// so a turn that answers in text delivers no words — silently, on the
-    /// transport the app actually ships.
+    /// WebSocket path. A parser without this case falls to `default: return []`
+    /// and drops a frame the wire defines. That is a fidelity defect rather than
+    /// a user-visible one — `CloudRouteSink` plays answers instead of speaking
+    /// them — and the frame still has to be read for what it is.
     func testParsesTokenOnTheSocket() {
         XCTAssertEqual(
             CloudRouteClient.parseTextFrame(#"{"type":"token","text":"forty-two"}"#),
