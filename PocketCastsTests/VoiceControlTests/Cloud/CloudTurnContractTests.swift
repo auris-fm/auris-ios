@@ -213,10 +213,6 @@ final class CloudTurnContractTests: XCTestCase {
         )
     }
 
-    private func decode(_ data: Data) throws -> [String: Any] {
-        try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    }
-
     /// The authenticate frame the client **actually sends** for a turn.
     ///
     /// Driven through the real transport rather than a parallel builder: these

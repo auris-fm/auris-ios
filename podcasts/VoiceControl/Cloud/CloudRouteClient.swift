@@ -409,26 +409,6 @@ final class CloudRouteClient {
     }
 }
 
-extension CloudRouteClient {
-    /// Encodes typed JSON values into the `[String: Any]` shape
-    /// `JSONSerialization` accepts.
-    static func encodeJSONValues(_ values: [String: CloudRouteJSONValue]) -> [String: Any] {
-        values.mapValues { encodeJSONValue($0) }
-    }
-
-    static func encodeJSONValue(_ value: CloudRouteJSONValue) -> Any {
-        switch value {
-        case .string(let string): return string
-        case .int(let int): return int
-        case .double(let double): return double
-        case .bool(let bool): return bool
-        case .null: return NSNull()
-        case .object(let object): return encodeJSONValues(object)
-        case .array(let array): return array.map { encodeJSONValue($0) }
-        }
-    }
-}
-
 // MARK: - JSON value encoding (shared with CloudTurnEnvelope)
 
 extension CloudRouteJSONValue {
