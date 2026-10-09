@@ -38,29 +38,25 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     /// The observed case: ASR heard the wake as `Oace.` and gave no tokens. It is
     /// wake-only because the capture ends inside the band, not because the text
     /// resembles the wake word.
-    func test_noTokens_captureEndingInWakeBand_isWakeOnlyWhateverASRWrote() {
-        let oace = AsrResult(text: "Oace.", detectedLanguage: "en")
+    /// Without timed tokens the transcript is left **unchanged**.
+    ///
+    /// The spec is explicit (recognition-pipeline.md, "Wake-positive time band
+    /// trim"): with no token timings, keep the transcript and let the router
+    /// handle the unstripped wake phrase. The classifier's completion window is
+    /// not a word-boundary estimator, so a capture ending near it does not prove
+    /// the transcript holds only the wake — a quietly spoken command sits inside
+    /// exactly that window, and discarding on the band would drop it.
+    func test_noTokens_leavesTranscriptUnchanged() {
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
-                result: oace,
-                wakePositive: true,
-                completionSample: 4000,      // 250 ms at 16 kHz
-                sampleRateHz: 16000,
-                utteranceDurationMs: 300     // ends inside the band (250 + 120 pad)
-            ),
-            "",
-            "a capture that ends in the wake band carries no command"
-        )
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: oace,
+                result: AsrResult(text: "Oace.", detectedLanguage: "en"),
                 wakePositive: true,
                 completionSample: 4000,
                 sampleRateHz: 16000,
-                utteranceDurationMs: 1800    // the user kept talking
+                utteranceDurationMs: 300
             ),
             "Oace.",
-            "the same text inside a longer capture is a real utterance"
+            "no timings: the router handles the unstripped wake phrase"
         )
     }
 
@@ -136,200 +132,63 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     /// test must therefore be made against the last speech, not the buffer end:
     /// with the buffer end, a real wake-only capture can never be inside a
     /// 120 ms pad and the `Oace.` bug survives on device.
-    func test_realCapture_wakeThenSilence_isWakeOnly() {
-        // 300 ms of speech (the wake), then 500 ms of silence appended by the
-        // segmenter: 800 ms total, last speech at 300 ms, wake completion 250 ms.
-        var samples = [Float](repeating: 0.05, count: 300 * 16)
-        samples += [Float](repeating: 0.0001, count: 500 * 16)
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "Oace.", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 4000,          // 250 ms
-                sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
-            ),
-            "",
-            "a wake followed only by silence is wake-only, however long the trailing silence"
-        )
-    }
-
-    /// The same capture with real words after the wake is not wake-only.
-    func test_realCapture_wakeThenCommand_isNotWakeOnly() {
-        var samples = [Float](repeating: 0.05, count: 300 * 16)
-        samples += [Float](repeating: 0.0001, count: 200 * 16)
-        samples += [Float](repeating: 0.05, count: 400 * 16)   // "skip"
-        samples += [Float](repeating: 0.0001, count: 500 * 16)
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "Oace. skip", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
-            ),
-            "Oace. skip",
-            "speech after the wake band is a command"
-        )
-    }
-
-    /// Without samples the previous behaviour is kept.
-    func test_explicitDuration_usesTheBand() {
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "Oace.", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 4000,
-                sampleRateHz: 16000,
-                utteranceDurationMs: 300
-            ),
-            ""
-        )
-    }
-
-    /// The negative half of the wake-only rule, asserted where it is observable:
-    /// a wake-only capture carries no command and must not be treated as one.
-    func test_wakeOnlyCapture_producesNoCommandText() {
-        var samples = [Float](repeating: 0.05, count: 250 * 16)   // the wake itself
-        samples += [Float](repeating: 0.0001, count: 500 * 16)    // segmenter trailing silence
-        let text = WakeTranscriptTrimmer.commandText(
-            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
-            wakePositive: true,
-            completionSample: 3840,      // 240 ms — the wake's end
-            sampleRateHz: 16000,
-            lastSpeechSample: producerSpeechEnd(of: samples)
-        )
-        XCTAssertEqual(text, "", "wake-only is silence, not a command")
-    }
-
-    /// Silence before the wake is not speech after it: leading quiet frames must
-    /// not be mistaken for the user continuing.
-    func test_leadingSilence_doesNotExtendSpeechEnd() {
-        var samples = [Float](repeating: 0.0001, count: 200 * 16)
-        samples += [Float](repeating: 0.05, count: 200 * 16)
-        samples += [Float](repeating: 0.0001, count: 400 * 16)
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.lastSpeechSample(samples: samples, sampleRateHz: 16000, threshold: 0.020),
-            200 * 16 + 200 * 16 - 1
-        )
-    }
-
-    // MARK: - the trimmer's notion of speech matches the segmenter's
-
-    /// A command quieter than the wake is still a command — *when the producer
-    /// counted it as speech*.
+    /// A quietly spoken command survives: it is in the transcript, so it routes.
     ///
-    /// The level is the segmenter's own (the app wires 0.020). What matters is
-    /// that the trimmer and the producer agree: a frame the segmenter treated as
-    /// speech must be speech here, or a real command is trimmed away as silence.
-    /// A frame the segmenter did *not* treat as speech never reaches this code at
-    /// all — the segmenter emits a buffer only once it holds speech — so the
-    /// trimmer cannot resurrect it, and must not try.
-    func test_quieterCommand_theProducerCalledSpeech_isStillACommand() {
-        var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
-        samples += [Float](repeating: 0.0001, count: 200 * 16)
-        samples += [Float](repeating: 0.025, count: 400 * 16)      // "skip", below the wake, above 0.020
-        samples += [Float](repeating: 0.0001, count: 500 * 16)     // segmenter trailing silence
-
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "auris skip", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 250 * 16,
-                sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
-            ),
-            "auris skip",
-            "a frame the producer counted as speech is a command here"
-        )
-    }
-
-    /// A bare wake followed by quiet is wake-only, whatever ASR spelled.
-    ///
-    /// The wake itself crosses the producer's level — the segmenter only emits a
-    /// capture once it holds speech — so the producer reports where it ended, and
-    /// a capture that runs no further than that is a bare wake. There is no
-    /// "nothing was speech" case to decide: a capture with nothing above the
-    /// threshold is one the producer never emits.
-    func test_wakeThenQuiet_isWakeOnlyNotAnEscalation() {
-        var samples = [Float](repeating: 0.05, count: 250 * 16)     // the wake, above the level
-        samples += [Float](repeating: 0.0005, count: 500 * 16)      // the producer's hangover
-
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "auris", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 250 * 16,
-                sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
-            ),
-            "",
-            "a capture that runs no further than the wake is a bare wake"
-        )
-    }
-
-    /// A bare wake in a room with audible ambience is still a bare wake.
-    ///
-    /// The segmenter appends its 500 ms hangover by construction, so every frame
-    /// it appends sits *below its own threshold* — but room ambience is far above
-    /// -80 dBFS. If the trimmer reasons at a level below the producer's, that
-    /// hangover reads as speech, `speechEnd` moves to the buffer end, the band
-    /// test fails, and the raw rendering of the wake is kept: a phonetic `Oace.`
-    /// then reaches `no_match` and escalates, spending the window's single
-    /// dispatch on nothing. (Level here is the wired one, 0.020.)
-    func test_quietRoomAmbienceInTheHangover_isStillAWakeOnlyCapture() {
-        let ambience: Float = 0.006   // ordinary room noise, ~-44 dBFS
-        var samples = [Float](repeating: 0.05, count: 250 * 16)    // the wake itself
-        samples += [Float](repeating: ambience, count: 500 * 16)   // segmenter hangover
-
-        XCTAssertEqual(
-            WakeTranscriptTrimmer.commandText(
-                result: AsrResult(text: "Oace.", detectedLanguage: "en"),
-                wakePositive: true,
-                completionSample: 250 * 16,
-                sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
-            ),
-            "",
-            "ambience below the producer's speech level is not a command"
-        )
-    }
-
-    /// A soft word after the wake is a command, not silence.
-    ///
-    /// The producer's threshold decides when an utterance *starts and ends*; once
-    /// it is active the segmenter appends every frame regardless of level
-    /// (`NativeVadSegmenter.process`), so a quietly spoken command is in the buffer
-    /// and ASR transcribed it. Reading "no frame above the level after the wake" as
-    /// "the user said nothing" therefore throws away a transcript the pipeline
-    /// already has: no answer, no earcon, and no escalation — the allowance is not
-    /// even spent, because the turn never routes.
-    func test_softWordAfterTheWake_isACommandNotSilence() {
-        // The capture the segmenter actually EMITS for this input: once
-        // `speechActive`, a sub-threshold frame starts the silence clock on its
-        // first frame (`NativeVadSegmenter.process`), so the utterance ends
-        // `silenceTimeoutMs` after the *word's first frame* — the word is in the
-        // buffer, but the capture is only ~800 ms long. A test using wake + word
-        // + a full 500 ms of trailing silence models a shape the producer never
-        // emits here, and would pass while the wired path drops the command.
-        // A word the producer counted as speech — it is what the segmenter reports,
-        // and the only soft word that can reach this code. A word *below* the
-        // producer's level cannot be distinguished from the hangover by any
-        // consumer, which is why the producer's own index is what decides.
-        var samples = [Float](repeating: 0.05, count: 300 * 16)    // the wake
-        samples += [Float](repeating: 0.025, count: 400 * 16)      // "skip", below the wake, above the level
-        samples += [Float](repeating: 0.0001, count: 500 * 16)     // the producer's hangover
-
+    /// This is the case the band rule got wrong. The word is below the
+    /// segmenter's level, so a capture ending near the classifier's window was
+    /// read as a bare wake and the transcript — which ASR had already produced —
+    /// was discarded: no answer, no earcon, no escalation, allowance unspent.
+    /// The spec bounds a bare wake by the *permitted trim* (timed tokens plus the
+    /// 120 ms pad), not by acoustics, so nothing here discards it.
+    func test_quietCommand_isNotDiscarded() {
         XCTAssertEqual(
             WakeTranscriptTrimmer.commandText(
                 result: AsrResult(text: "hey aris skip", detectedLanguage: "en"),
                 wakePositive: true,
                 completionSample: 250 * 16,
                 sampleRateHz: 16000,
-                lastSpeechSample: producerSpeechEnd(of: samples)
+                utteranceDurationMs: 299
             ),
             "hey aris skip",
-            "a transcribed word is a command however quietly it was spoken"
+            "a transcribed command is not discarded on an acoustic guess"
+        )
+    }
+
+    /// Timed tokens are trimmed by the **time band**: tokens overlapping the
+    /// detector's completion plus 120 ms are the wake and go; the rest stays.
+    /// This is the only trimming the spec permits, and it needs real timings.
+    func test_timedTokens_trimInsideTheBandOnly() {
+        let tokens = [
+            AsrToken(text: "Oace", startMs: 40, endMs: 200),
+            AsrToken(text: " skip", startMs: 520, endMs: 700),
+        ]
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "Oace skip", detectedLanguage: "en", tokens: tokens),
+                wakePositive: true,
+                completionSample: 250 * 16,      // 250 ms; band ends at 370 ms
+                sampleRateHz: 16000,
+                utteranceDurationMs: 700
+            ),
+            "skip",
+            "the wake token is inside the band; the command token survives"
+        )
+    }
+
+    /// Every token inside the band leaves no text, and the spec says skip routing
+    /// silently in that case — it does not say play an error.
+    func test_allTimedTokensInsideTheBand_leaveNoText() {
+        let tokens = [AsrToken(text: "Oace", startMs: 40, endMs: 200)]
+        XCTAssertEqual(
+            WakeTranscriptTrimmer.commandText(
+                result: AsrResult(text: "Oace", detectedLanguage: "en", tokens: tokens),
+                wakePositive: true,
+                completionSample: 250 * 16,
+                sampleRateHz: 16000,
+                utteranceDurationMs: 200
+            ),
+            "",
+            "nothing survives the permitted trim, so nothing is routed"
         )
     }
 }

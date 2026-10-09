@@ -2,15 +2,6 @@ import XCTest
 @testable import podcasts
 
 final class TranslateDropTests: XCTestCase {
-    /// The index the segmenter would report for this capture: its last frame at
-    /// or above the wired level. Direct callers of `processUtterance` must supply
-    /// it, since the engine no longer re-derives it from energy.
-    private func producerSpeechEnd(of samples: [Float], level: Float = 0.020) -> Int {
-        var last = -1
-        for (index, value) in samples.enumerated() where value >= level { last = index }
-        return last
-    }
-
 
 
     // MARK: - Note classification (Android isNonEnglishTranslateFailure parity)
@@ -32,14 +23,18 @@ final class TranslateDropTests: XCTestCase {
 
     // MARK: - Engine: a wake-only capture is silent (no ERROR earcon)
 
-    /// The governing rule, from the recognition pipeline's own acceptance list:
-    /// *"a wake-only capture is silent, so no `ERROR` follows it."* Two producers
-    /// feed the same observable — a trimmer result of `""` (the wake was heard and
-    /// nothing else was said) and the engine's own drop — so the assertion is on
-    /// the observable the user hears: the error path must not fire, on either.
-    func test_wakeOnlyCapture_isSilent_doesNotRenderError() async {
+    /// A wake-only capture stays silent — decided by the **permitted trim**, not
+    /// by acoustics.
+    ///
+    /// The spec bounds the wake with timed tokens (the detector's completion plus
+    /// the 120 ms pad) and says to skip routing silently when that trim leaves no
+    /// text. Without timings the transcript is kept and the router handles the
+    /// unstripped wake phrase, so this case carries timings: the whole capture is
+    /// one wake token inside the band, so nothing survives and nothing is routed.
+    func test_wakeOnlyCapture_survivesNoTrim_isSilent() async {
+        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
         let backend = StubAsrBackend(
-            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
+            result: AsrResult(text: "Oace", detectedLanguage: "en", tokens: tokens),
             canTranslate: false
         )
         let grace = GracePeriodSignal()
@@ -62,66 +57,14 @@ final class TranslateDropTests: XCTestCase {
         engine.onUnroutable = { unroutable += 1 }
         engine.onWakeOnly = { wakeOnly += 1 }
 
-        // The real shape of a bare wake: 250 ms of speech (the wake itself)
-        // followed by the segmenter's trailing silence. A short capture with no
-        // hangover is *not* the case this rule is about — it must not be used to
-        // assert it, or the test passes for the wrong reason.
         var samples = [Float](repeating: 0.05, count: 250 * 16)
         samples += [Float](repeating: 0.0001, count: 500 * 16)
-        await engine.processUtterance(samples, lastSpeechSample: producerSpeechEnd(of: samples))
+        await engine.processUtterance(samples)
 
-        XCTAssertEqual(routed, 0, "a wake-only capture carries no request")
+        XCTAssertEqual(routed, 0, "nothing survives the permitted trim, so nothing routes")
         XCTAssertEqual(unroutable, 0, "a bare wake is not an unroutable question — nothing may render ERROR")
         XCTAssertEqual(wakeOnly, 1, "the wake-only signal is the silent one")
     }
-
-    /// The trimmer reasons at the **producing segmenter's** level, not a default.
-    ///
-    /// Both directions of the disagreement are audible, and only the wired level
-    /// prevents them. The app builds this segmenter at 0.020 (`VoiceControlAssembly`),
-    /// ten times `NativeVadSegmenter.defaultThreshold`, so a trimmer using the
-    /// default would sit *below* the producer: room ambience in the segmenter's
-    /// 500 ms hangover would read as speech, the capture would look like a
-    /// question, and a phonetic rendering of the wake would escalate and spend the
-    /// window's single dispatch. This asserts on the engine's own wiring, which is
-    /// where the level is chosen — a unit test of the trimmer cannot see it.
-    func test_trimmerUsesTheProducingSegmentersLevel_notADefault() async {
-        let backend = StubAsrBackend(
-            result: AsrResult(text: "Oace.", detectedLanguage: "en"),
-            canTranslate: false
-        )
-        let grace = GracePeriodSignal()
-        grace.onCommandRecognized()
-        let engine = VoiceAsrEngine(
-            capture: NativeAudioCapture(),
-            // The wired level, not the default: this is the value under test.
-            segmenter: NativeVadSegmenter(threshold: 0.020),
-            backend: backend,
-            signalFilter: SignalFilter(),
-            wakeWordDetector: DetectingWakeStub(),
-            gracePeriodSignal: grace,
-            translationStage: nil
-        )
-        engine.listeningMode = .continuous
-
-        var unroutable = 0
-        var wakeOnly = 0
-        engine.onRoutingInput = { _ in }
-        engine.onUnroutable = { unroutable += 1 }
-        engine.onWakeOnly = { wakeOnly += 1 }
-
-        // A bare wake followed by the segmenter's hangover at a level a real
-        // microphone produces (≈ -44 dBFS) — below the producer's 0.020, which is
-        // why it was appended as silence, and above the old default of 0.002.
-        var samples = [Float](repeating: 0.05, count: 250 * 16)
-        samples += [Float](repeating: 0.006, count: 500 * 16)
-        await engine.processUtterance(samples, lastSpeechSample: producerSpeechEnd(of: samples))
-
-        XCTAssertEqual(unroutable, 0, "ambience below the producer's level is not a question")
-        XCTAssertEqual(wakeOnly, 1, "the silence after a bare wake stays a bare wake")
-    }
-
-    // MARK: - Engine: drop + ERROR earcon, no transcript forward
 
     func test_translateFail_dropsAndPlaysErrorEarcon() async {
         await assertTranslateCaseDrops(

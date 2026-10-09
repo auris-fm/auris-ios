@@ -109,8 +109,8 @@ class VoiceAsrEngine {
 
     func start() {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        segmenter.onUtterance = { [weak self] utterance, lastSpeechSample in
-            Task { await self?.processUtterance(utterance, lastSpeechSample: lastSpeechSample) }
+        segmenter.onUtterance = { [weak self] utterance in
+            Task { await self?.processUtterance(utterance) }
         }
         capture.onSamples = { [weak self] samples in
             self?.segmenter.process(samples)
@@ -132,7 +132,7 @@ class VoiceAsrEngine {
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float], lastSpeechSample: Int = -1) async {
+    func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
 
         if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
@@ -205,12 +205,7 @@ class VoiceAsrEngine {
             wakePositive: isWakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
-            // The producer's own last-speech index, not one re-derived from
-            // energy: once the segmenter is active it appends sub-threshold
-            // frames, so a quiet command sits in the buffer *after* the last
-            // frame above the level, and an energy test would place the speech
-            // end at the wake and read the capture as a bare wake.
-            lastSpeechSample: lastSpeechSample
+            samples: utterance
         )
         let trimNote: String? = {
             guard isWakePositive, asrResult.text != trimmedText else { return nil }
