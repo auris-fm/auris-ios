@@ -6,10 +6,12 @@ import Foundation
 /// text events (`connected`, `action`, `token`, `result`, `done`, `error`) until
 /// a terminal event or connection close.
 ///
-/// All six are load-bearing here: `connected` names the codec the binary frames
-/// are decoded at, and `token` carries a spoken answer — its absence from this
-/// parser was a silent-drop bug, so the list is kept current with the dispatch
-/// rather than paraphrased.
+/// All six are parsed because the wire defines all six. Two are easy to omit
+/// from a summary and both matter: `connected` names the codec the binary frames
+/// are decoded at, and `token` is the event this PR restored after the parser
+/// dropped it — a wire-fidelity fix rather than a user-visible one, since the
+/// sink plays answers instead of speaking them (`CloudRouteSink`). The list is
+/// kept current with the dispatch rather than paraphrased.
 ///
 /// WebSocket is the only transport: a failed upgrade is a terminal turn
 /// failure with a visible error, never a silent fallback. (The legacy SSE path
