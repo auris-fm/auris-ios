@@ -7419,13 +7419,16 @@
 			buildActionMask = 2147483647;
 			files = (
 			);
+			// The linted sources and the config are declared inputs, with a stamp as the
+			// output, so Xcode skips this phase on unchanged builds but still runs it after
+			// any Swift edit. Declaring only `.swiftlint.yml` would leave the phase
+			// permanently up to date and silently stop a lint violation from failing the
+			// build. Xcode evaluates its own up-to-date check before running the script, so
+			// the sources must appear here rather than being computed by the script.
+			// Regenerate the list with scripts/build-phases/gen-swiftlint-sources.sh.
 			inputFileListPaths = (
+				"$(SRCROOT)/podcasts.xcodeproj/swiftlint-sources.xcfilelist",
 			);
-			// SwiftLint declares its inputs and a stamp output so Xcode can skip it
-			// when nothing lint-relevant changed. Without them Xcode cannot prove the
-			// phase is up to date and runs a full `swiftlint lint` on every build,
-			// including builds that changed nothing -- the same reason the L10n phase
-			// below declares its inputs and generated output.
 			inputPaths = (
 				"$(SRCROOT)/.swiftlint.yml",
 			);

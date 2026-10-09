@@ -1,0 +1,2051 @@
+$(SRCROOT)/BuildTools/Empty.swift
+$(SRCROOT)/BuildTools/Package.swift
+$(SRCROOT)/Modules/Package.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Animations/PlayPauseAnimatableModifier.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/ShareableMetadataProvider.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/StoriesConfiguration.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/StoriesController.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/StoriesProgressModel.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/StoryShareableProvider.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/CircularProgressView.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/ImageView.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/MarqueeTextView.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/StoryIndicator.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/StoryLogoView.swift
+$(SRCROOT)/Modules/Sources/EndOfYear/Views/View+Snapshot.swift
+$(SRCROOT)/Modules/Sources/GRDBMacros/GRDBMacros.swift
+$(SRCROOT)/Modules/Sources/GRDBMacrosPlugin/GRDBRecordMacro.swift
+$(SRCROOT)/Modules/Sources/Modules/Modules.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/GRDB/GRDBDatabase.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/GRDB/GRDBQueue+QueryInterface.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/GRDB/GRDBQueue.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/GRDB/GRDBResultSet.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/PCDBQueue.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/PCDBResultSet.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/DB/PCDatabase.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/AutoAddQueueDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/DataHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/EndOfYearDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/EpisodeDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/FolderDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/FolderHistoryManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/PlaylistDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/PodcastDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/UpNextChangesDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/UpNextDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/UpNextHistoryManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/UserEpisodeDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/Util/DBUtils.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/Util/DatabaseHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Private/Managers/Util/FMDatabaseQueue+Async.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Bookmarks/Bookmark.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Bookmarks/BookmarkDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/DataConstants.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/DataManager+ManualPlaylist.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/DataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Enums.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/FilePathProtocol.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/LocalizableProtocol.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Logger/ErrorLogger.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/BaseEpisode+Chapters.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/BaseEpisode+Encoding.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/BaseEpisode.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Episode+Encoding.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Episode+fromDatabase.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Episode+fromDictionary.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Episode.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/EpisodeFilter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Folder.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/PlaylistEpisode.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Podcast+Settings.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Podcast+fromDatabase.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Podcast+fromDictionary.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/Podcast.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/PodcastSettings.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/UpNextChanges.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/UserEpisode+Encoding.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/UserEpisode.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/Model/UserPodcastRating.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/NetworkDataUsage/NetworkDataUsageManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/NetworkDataUsage/NetworkDataUsageRecord.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/PlaylistQueryBuilder.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/RatingsDataManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/String+Escape.swift
+$(SRCROOT)/Modules/Sources/PocketCastsDataModel/Public/UpNextListComparator.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ApiBaseTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/CancelSubscriptionSurveyTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/CancelSubscriptionTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ChangeEmailTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ChangePasswordTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/DeleteAccountTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/DeviceApproveTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ExchangeSonosTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/MetadataTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/PositionSyncTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/PurchaseReceiptTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RecommendEpisodesTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RedeemPromoCodeTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ReferralGetCodeTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ReferralRedeemTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/ReferralValidateTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveBookmarksTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveCustomFilesTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveEpisodesTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveFileUploadStatus.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveFileUsageTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveLastSyncDateTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrievePlaylistsTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrievePodcastsTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveRatingsTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveStarredTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/RetrieveStatsTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/StarredSyncTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/SubscriptionStatusTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/SuggestedFolderTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/SupportFeedbackTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadFileDeleteTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadFilePlayRequestTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadFileRequestTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadFilesUpdateTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadImageDeleteTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UploadImageRequestTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/UserPodcastRatingTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/API Tasks/WinbackOfferTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/Episode+PlaylistEpisode.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/Episode+Populate.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/Hashing/String+Hashing.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/JsonUtil.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/MimetypeHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/Protobuffer/api.pb.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/Protobuffer/files.pb.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/ServerConverter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/ServerNotificationsHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/TokenHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Private/UserDefaults+DataProtection.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/APIServerHandler+TrialEligibility.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+Account.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+DeviceAuth.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+Referrals.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+SocialAuth.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+Suggestions.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+SupportFeedbackRequest.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+UserFiles.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+UserPodcastRating.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler+Winback.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ApiServerHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ErrorResponse.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/API/ValidatePromoCodeHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ApiSetting+ModifiedDate.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ApiSetting.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/AppSettings.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Cache/CacheServerHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Cache/ShowInfoDataRetriever.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/CodableStore.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/DataConverter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Discover/DiscoverServerHandler+Blaze.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Discover/DiscoverServerHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Gateway/GatewayURLProvider.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Headers/EpisodeHeader.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Headers/PodcastHeader.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/HTMLToAttributedStringConverter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/JSONDecodableURLTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/LocalizationHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/LossyDecodedArray.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/URL+Throwing.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/URLRequest+LocalizationHeaders.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Helpers/URLRequest+RefreshIfNeeded.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/MetadataUpdater.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Models/AuthenticationResponse.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/NSError+Connectivity.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Ratings/PodcastRatingTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/RecommendationHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Refresh/MainServerHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Refresh/PodcastSearchOperation.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Refresh/RefreshManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Refresh/RefreshOperation.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Search/CombinedSearchTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Search/EpisodeSearchResult.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Search/NetworkSearchResult.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Search/PodcastSearchTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Search/PredictiveSearchTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerConfig.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerCredentials.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerEnums.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerNotifications.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerPodcastManager+Update.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerPodcastManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/ServerSettings.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/SettingsStore.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sharing/SharingServerHandler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sharing/Structs/ServerConstants.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sharing/Structs/ServerStructs.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sharing/Structs/UpNextItem.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/StatsManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/SubscriptionHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Supporter Podcasts/BundleSubscription.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Supporter Podcasts/PodcastSubscription.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/Api_AlternateEnclosure+HLS.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/BackgroundSyncManager+URLSession.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/BackgroundSyncManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/Diffable+Logging.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/FolderHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/ServerSyncDelegateProtocol.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncHistoryTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncSettingsTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncTask+FullSync.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncTask+LocalChanges.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncTask+ServerChanges.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/SyncYearListeningHistoryTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Sync/UpNextSyncTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/URLConnection.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/URLResponse+HttpHelpers.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Upload/ServerPlaybackDelegateProtocol.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Upload/UploadManager+URLSessionDelegate.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Upload/UploadManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Upload/UploadProgress.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/Upload/UploadProgressManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewCatalog+Mock.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewCatalog.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewCatalogCache.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewCatalogTask.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewContent.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewMessageFilter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsServer/Public/WhatsNew/WhatsNewReadState.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Array+Extensions.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/ByteSizeExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/CharacterExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/ComparableExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Date+Comparison.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Date+Format.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Date+Offsets.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Double+Extensions.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Double+formatTime.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Equatable+When.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Int+RoundingAbbreviations.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/IntExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/JSONCodable.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/NSNotificationCenterExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Notification.Name+Publisher.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/SafeCollectionExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/Sequence+Extensions.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/String+PreventWidows.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/String+SHA256.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/StringExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/TimeExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/Color+Hex.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/Color+contrast.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/Color+srgb.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/CustomTextView.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/DismissableNestedScrollView.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/GradientView.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/NSLayoutConstraintExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/PagedUIScrollView.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/RadiansExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIApplicationExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIButton+setLetterSpacing.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIColorExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIFontExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIImage+Contrast.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIImage+Tint.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UILabel+Attributed.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIScrollView+Helpers.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UITextView+scrollToRange.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIView+distanceToBottom.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/UIViewExtension.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UI/View+Modify.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Extensions/UIDevice+isIpad.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Feature Flags/FeatureFlag.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Feature Flags/FeatureFlagMock.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Feature Flags/FeatureFlagOverrideStore.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/DateFormatHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/LocalizationHelpers.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/SignificantDigitsFormatStyle.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/SizeFormatter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/TimeFormatter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Formatting/TimePeriodFormatter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/A11y.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/AtomicBool.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/BuildEnvironment.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/ContextUpdateDebouncer.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/DateUtil.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/DeviceUtil.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/DispatchQueueing.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/KPMSearch.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/KeychainHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/ModifiedDate.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/ReloadScheduler.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/SwiftUtils.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/TimedActionHelper.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/UIUtil.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/General/WeakRef.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/FileLog.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/FileRotating.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/LogEntry.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/LogFilePaths.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/PersistentTextWriting.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Logging/TraceManager.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Networking/NetworkUtils.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Sorting/PodcastSorter.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Sorting/Sortable.swift
+$(SRCROOT)/Modules/Sources/PocketCastsUtils/Version.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_NotificationExtension/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_Pocket-Casts-App-Clip/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_Pocket-Casts-TV-App/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_Pocket-Casts-Watch-App/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_PodcastsIntents/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_PodcastsIntentsUI/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_WidgetExtension/Empty.swift
+$(SRCROOT)/Modules/Sources/XcodeSupport/XcodeTarget_podcasts/Empty.swift
+$(SRCROOT)/Modules/Tests/GRDBMacrosTests/GRDBRecordMacroTests.swift
+$(SRCROOT)/Modules/Tests/ModulesTests/ModulesTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/AutoAddCandidatesDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/BaseEpisodeTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/BookmarkDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/DataManager+TestDatabase.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/DataManagerDeleteAllDataTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/DataManagerTestCase.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/DataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeAlternateEnclosuresTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeColumnConsistencyTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeEqualityTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeFilterColumnConsistencyTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeFilterDownloadStatusTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/EpisodeHLSUrlPersistenceTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/FindEpisodesTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/FindMatchingEpisodesTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/FolderColumnConsistencyTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/FolderDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/GRDBResultSetTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/NetworkDataUsageManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/OrphanedEpisodeDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/PlaylistDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/PlaylistEpisodeManipulationTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/PlaylistQueryBuilderTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/Podcast+fixture.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/PodcastColumnConsistencyTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/PodcastDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/SQLiteValidator.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UpNextChangesDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UpNextDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UpNextEpisodeFetchTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UserEpisodeColumnConsistencyTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UserEpisodeDataManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsDataModelTests/UserEpisodeEncodingTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/AlternateEnclosureHLSTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/ApiSettingsTests+ModifiedDate.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/BackgroundSyncManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/CacheServerHandlerBookmarkEnrichTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/CombinedSearchNetworkTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/HTMLToAttributedStringConverterTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/LocalizationHelperTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/MockURLHandler.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/RefreshEpisodeHLSTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/ServerHelperTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SettingsStoreTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/StubURLProtocol.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SubscriptionTierTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SyncTaskManualPlaylistTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SyncTaskPlaylistOrderingTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SyncTaskTests+BookmarkImport.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/SyncTaskTests+Episodes.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/URLRequestTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/UploadProgressTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/WhatsNewCatalogTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/WhatsNewManagerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsServerTests/WhatsNewMessageFilterTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/DateUtilTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/FeatureFlagTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/General/KMPSearchTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/Logging/LogBufferTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/Logging/LogPersistenceSpy.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/Logging/LogPersistenceStub.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/Logging/LogRotationSpy.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/Logging/LogRotatorStub.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/ModifiedDateTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/NotificationMainThreadTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/PodcastSorterTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/ReloadSchedulerTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/SequenceExtensionsTest.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/StringExtensionsTest.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/TimePeriodFormatterTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/UIColorExtensionsTests.swift
+$(SRCROOT)/Modules/Tests/PocketCastsUtilsTests/VersionTests.swift
+$(SRCROOT)/NotificationContent/NotificationViewController.swift
+$(SRCROOT)/NotificationExtension/NotificationService.swift
+$(SRCROOT)/Pocket Casts App Clip/AppClipAppDelegate.swift
+$(SRCROOT)/Pocket Casts App Clip/NowPlayingPlayerItemViewControllerRepresentable.swift
+$(SRCROOT)/Pocket Casts App Clip/NowPlayingView.swift
+$(SRCROOT)/Pocket Casts App Clip/Pocket_Casts_App_ClipApp.swift
+$(SRCROOT)/Pocket Casts TV App/Analytics/AnalyticsSetup.swift
+$(SRCROOT)/Pocket Casts TV App/Analytics/DiscoverAnalytics.swift
+$(SRCROOT)/Pocket Casts TV App/Analytics/SearchAnalytics.swift
+$(SRCROOT)/Pocket Casts TV App/Data/DataLossSimulator.swift
+$(SRCROOT)/Pocket Casts TV App/Data/DiscoverManager.swift
+$(SRCROOT)/Pocket Casts TV App/Data/EpisodesQueryBuilder.swift
+$(SRCROOT)/Pocket Casts TV App/Data/MockData.swift
+$(SRCROOT)/Pocket Casts TV App/Data/ShowNotesLoader.swift
+$(SRCROOT)/Pocket Casts TV App/Data/TVDataManager.swift
+$(SRCROOT)/Pocket Casts TV App/PocketCastsTVApp.swift
+$(SRCROOT)/Pocket Casts TV App/UI/AppCoordinator.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/CreateAccountView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/DataLossResyncView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/PairingSession.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/QRCodeDigits.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/QRCodeView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/RequireAccount.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/SignInView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/SignInViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/SigningInView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/SigningInViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/StepList.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Auth/UserSignedOutView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/BannerRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/BlurredCoverBackground.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/FocusStore.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/PodcastCoverCard.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/ProfileImage.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/RemotePlayPauseModifier.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/RichTextPreviewSamples.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/RoundProgressView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/RowSection.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/ScrollableTextView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/StackPath.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/Toast/ToastManager.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/Toast/ToastView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/Toast/ToastWindow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Common/View+NavigationDetailSync.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/BestFrameSelector.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverAllView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverAllViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverCategoriesModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverCategoriesRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverCategoryCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverCategoryModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverEpisodeCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverEpisodesRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverFeaturedPodcastCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverFeaturedPodcastsRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverPodcastCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverPodcastRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverPodcastsListView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverRetryView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverSectionEpisodesModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverSectionModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverSinglePodcastCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverSinglePodcastRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverVideoEpisodeCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverVideoEpisodeModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/DiscoverVideoEpisodesRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Discover/TVDiscoverRowSection.swift
+$(SRCROOT)/Pocket Casts TV App/UI/History/ListeningHistoryView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/History/ListeningHistoryViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Home/EpisodesHorizontalList.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Home/HomeView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Home/HomeViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Home/VideoEpisodesHorizontalList.swift
+$(SRCROOT)/Pocket Casts TV App/UI/MainTabView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/MainTabViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/BackgroundPlaybackManagement.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/EpisodeArtworkView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/EpisodePlayerButton.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/EpisodeShowNotesView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/MediaOverlayView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/NowPlayingRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/NowPlayingTab.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/NowPlayingView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/NowPlayingViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/NowPlayingWaveformView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Player/PlayerStatusObserver.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/DownloadAppModal.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistCell.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistDetailView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistDetailsViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistItem.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistsView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Playlists/PlaylistsViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/EpisodeRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/EpisodeRowViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/FolderCardView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/FolderCardViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/FolderDetailView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/FolderDetailViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/PodcastDetailView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/PodcastDetailViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/PodcastMoreInfoView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/PodcastsView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Podcasts/PodcastsViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Profile/ProfileMenuView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Profile/SettingsMenuView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Profile/ShowQRLinkView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Profile/SubscriptionInfoView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/RootView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchEpisodeRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchFeaturedEpisodesRow.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchNetworkCard.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchNetworkView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchResultsView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchTopResultsView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Search/SearchViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Starred/StarredEpisodesView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Starred/StarredEpisodesViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Style/CategoryStyle.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Style/Color+Style.swift
+$(SRCROOT)/Pocket Casts TV App/UI/Style/FocusedCardDepth.swift
+$(SRCROOT)/Pocket Casts TV App/UI/UpNext/UpNextView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/UpNext/UpNextViewModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/UserStateModel.swift
+$(SRCROOT)/Pocket Casts TV App/UI/WelcomeView.swift
+$(SRCROOT)/Pocket Casts TV App/UI/WelcomeViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/Complication/ComplicationController.swift
+$(SRCROOT)/Pocket Casts Watch App/Data & Communication/SessionManager+Send.swift
+$(SRCROOT)/Pocket Casts Watch App/Data & Communication/SessionManager.swift
+$(SRCROOT)/Pocket Casts Watch App/Data & Communication/WatchDataManager.swift
+$(SRCROOT)/Pocket Casts Watch App/Data & Communication/WatchImageHelper.swift
+$(SRCROOT)/Pocket Casts Watch App/Data & Communication/WatchPlaylist.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/BaseEpisode+Display.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/Bundle+Helpers.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/Color+Defined.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/Podcast+Display.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/Publishers.swift
+$(SRCROOT)/Pocket Casts Watch App/Extensions/String+prefixSourceUnicode.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Common View Models/EpisodeViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Effects/EffectsView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Effects/EffectsViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Download List/DownloadListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Download List/DownloadListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Episode List/EpisodeListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Episode List/EpisodeRow.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Episode List/EpisodeRowViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Files List/FilesListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Files List/FilesListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Filter EpisodeList/FilterEpisodeListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Filter EpisodeList/FilterEpisodeListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Podcast Episode List/PodcastEpisodeListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Podcast Episode List/PodcastEpisodeListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Up Next/UpNextView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode Lists/Up Next/UpNextViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/Episode Actions/DownloadProgressEpisodeActionView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/Episode Actions/EpisodeAction.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/Episode Actions/EpisodeActionView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/Episode Actions/UpNextEpisodeActionView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/EpisodeDetailsViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Episode/EpisodeView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/ExtensionDelegate.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Filters/PlaylistsListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Filters/PlaylistsListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Folders/FolderView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Folders/FolderViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Main Page/InterfaceView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Main Page/MenuRow.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Main Page/SourceInterfaceModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Main Page/SourceInterfaceNavigationView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Navigation/NavigationManager.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/NotificationController.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Interface/NowPlayingContainerView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Interface/NowPlayingControls.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Interface/NowPlayingEmptyView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Interface/NowPlayingOptions.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Interface/NowPlayingViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Row/NowPlayingImage.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Row/NowPlayingRow.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Now Playing/Row/NowPlayingRowController.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Order Picker/OrderPicker.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Order Picker/OrderPickerToolbar.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Order Picker/SortOption.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Play Source/PhoneSourceViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Play Source/PlaySourceViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Play Source/WatchSourceViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/PocketCastsApp.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Podcasts/PodcastsListView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/Podcasts/PodcastsListViewModel.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SourceManager.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/State Restoration/Restorable.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI+Constants.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/Font+Helpers.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/Image+Helpers.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/ItemListContainer.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/LinearProgressView.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/Preview/PreviewHelpers.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/SwiftUI/VolumeControl.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/WatchInterfaceType.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/WatchSyncManager+Autodownload.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/WatchSyncManager+ServerSyncDelegate.swift
+$(SRCROOT)/Pocket Casts Watch App/UI/WatchSyncManager.swift
+$(SRCROOT)/PocketCastsTests/Extensions/Date+Ext.swift
+$(SRCROOT)/PocketCastsTests/Extensions/Double+Ext.swift
+$(SRCROOT)/PocketCastsTests/Extensions/FMDatabaseQueue+Test.swift
+$(SRCROOT)/PocketCastsTests/Extensions/XCTestCase+WaitForNotification.swift
+$(SRCROOT)/PocketCastsTests/Extensions/XCTestCase+eventually.swift
+$(SRCROOT)/PocketCastsTests/Helpers/DBTestCase.swift
+$(SRCROOT)/PocketCastsTests/Helpers/TestingAppDelegate.swift
+$(SRCROOT)/PocketCastsTests/Helpers/TestingSceneDelegate.swift
+$(SRCROOT)/PocketCastsTests/Helpers/TestingViewController.swift
+$(SRCROOT)/PocketCastsTests/Mocks/DataManagerMock.swift
+$(SRCROOT)/PocketCastsTests/Mocks/EndOfYearManagerMock.swift
+$(SRCROOT)/PocketCastsTests/Mocks/EpisodeBuilder.swift
+$(SRCROOT)/PocketCastsTests/Mocks/FolderBuilder.swift
+$(SRCROOT)/PocketCastsTests/Mocks/MockURLHandler.swift
+$(SRCROOT)/PocketCastsTests/Mocks/PodcastBuilder.swift
+$(SRCROOT)/PocketCastsTests/PlaybackQueueTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/ABTest/ABTestProviderTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AnalyticsAdapterPersistenceTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AnalyticsAppThemeProviderTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AnalyticsPlaybackHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AnalyticsTrackPropertiesTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AnonymousUUIDTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Analytics/AppLifecyleAnalyticsTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/BackgroundSignOutListenerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Bookmarks/BookmarkTranscriptSnippetExtractorTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Common SwiftUI/List View Model/ListViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Common SwiftUI/List View Model/MultiSelectableTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Common SwiftUI/List View Model/SearchableListViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Discover/CategoryPodcastsViewControllerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Discover/DiscoverCoordinatorTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Discover/DiscoverItemObservableTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Discover/NetworkDiscoveryDecodingTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Discover/NetworkNavigatorTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Encourage Account Creation/InformationalBannerViewCoordinatorTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Encourage Account Creation/InformationalBannerViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/End of Year/EndOfYearStoriesBuilderTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/End of Year/StoriesModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/End of Year/YearOverYearCompareTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/CloudFingerprintReferenceFetcherTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/CloudFingerprinterTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintFixtures.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintMappingCacheTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintPreparationTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintResolveTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintTestSupport.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/FingerprintTimingManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/GatewayURLProviderTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/ReferenceFingerprintTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Fingerprint/ServerConstantsGatewayCutoverTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Folders/FolderModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/IAP/IAPHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Kids Profile/KidsProfileBannerViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/ListeningHistoryContentStateTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/New Search/SearchHistoryModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Onboarding/OnboardingFlowTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Playback/AutoplayHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Playback/Chapters/ChapterManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Playback/Chapters/ChaptersTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Playback/Effects/AudioUtilsTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/PlaybackStorageErrorTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/Transcripts/ComposeFilterTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/Transcripts/TranscriptFormatTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/Transcripts/TranscriptManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/Transcripts/TranscriptModelCueLookupTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Player/Transcripts/TranscriptModelFilterTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Playlists/EpisodeFilterChangeTypeTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/PlusUpgradeViewSourceTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Podcasts/Helpers/HomeGridDataHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Podcasts/Helpers/PlaybackTimeHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Podcasts/PodcastHeaderViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Profile/ListeningHeatmapViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/ShowNotesFormatterUtilsTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/ThemeTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/DownloadManagerRetryTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/DownloadManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/EpisodeManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/MediaExporterResourceLoaderDelegateErrorHandlingTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/MediaExporterResourceLoaderDelegateRetryTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/MediaFileHandleTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/PaidFeatureTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/PodcastManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/SettingsTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/SiriShortcutsManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/SleepTimerIntentDurationTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/ThreadSafeDictionaryTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Utilities/TokenHelperTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Watch/WatchSyncManagerTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/BookmarkAnnouncementViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/WhatsNewActionEventTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/WhatsNewFeedViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/WhatsNewImageLayoutTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/WhatsNewMessageViewModelTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Whats New/WhatsNewTests.swift
+$(SRCROOT)/PocketCastsTests/Tests/Zendesk/ZendeskSupportServiceTests.swift
+$(SRCROOT)/PocketCastsTests/UpNextSortOptionTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlIntegrationTests/AsrIntentPipelineTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlIntegrationTests/EndToEndVoiceControlTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlIntegrationTests/InterruptionHandlingTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlIntegrationTests/RouteChangeTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlIntegrationTests/WakeWordPipelineTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/AsrBackendSelectorTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/AsrIntentBenchmarkVariantTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/BackendReadyRetryTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/RecognitionStageTimerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/RepresentationBenchmarkDriverTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/RouterInputFormatGateTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/SenseVoiceLanguageDetectionTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/TranslateDropTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/UtteranceSetLoaderTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ASR/WhisperCppBackendTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Analytics/VoiceAnalyticsTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Audio/CloudAudioPlayerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Audio/NativeAudioCaptureTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Audio/SignalFilterTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/AudioRoute/AudioSessionInterruptionHandlerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/AudioRoute/IOSAudioRouteMonitorTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/AudioSession/AudioSessionDuckerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudAuthTokenProviderTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudCompatibilityMatrixTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudDiscoveryResultsTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudPrefetchClientTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudRouteClientTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudRouteEventInt64BoundaryTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudRouteSSEParserTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudRouteSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudRouteTestURLProtocol.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudTokenSeamContractTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Cloud/CloudTurnContractTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Dialog/VoiceDialogManagerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Executor/VoiceIntentExecutorIntegrationTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Executor/VoiceIntentExecutorTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Feedback/AVSpeechTtsEngineTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Feedback/AudioFeedbackRendererTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Feedback/EarconPlayerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Feedback/SpokenTemplateResolverTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/GateConditionSourcesTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/GracePeriodModeCombineTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/GracePeriodSignalEscalationBudgetTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/GracePeriodSignalTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/ListeningModePolicyTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/RouterReadinessTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Gate/VoiceControlGateTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/ClassifierHeadTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/IntentRoutingInputTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/LfmIntentRouterTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/LfmPromptTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/LfmToolCallParserTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/RouteFailureEscalationPolicyTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/RoutingInputRendererTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/IntentRouter/SlotRepairTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Mapper/ToolCallMapperTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Model/ToolSchemaTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Model/VoiceIntentTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ModelManager/ModelDownloaderTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ModelManager/ModelManagerLfmTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/ModelManager/ModelVerifierTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/BookmarkSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/ChapterSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/EffectsManagerSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/PlaybackManagerSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/QueueSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/SleepTimerSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/VoicePlaybackSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Sinks/VolumeManagerSinkTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/Support/VoiceControlTestDoubles.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/WakeWord/WakeGateTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/WakeWord/WakeTranscriptTrimmerTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/WakeWord/WakeWordDetectorTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/WakeWord/WakeWordPhraseSetTests.swift
+$(SRCROOT)/PocketCastsTests/VoiceControlTests/WakeWord/WakeWordThresholdLoaderTests.swift
+$(SRCROOT)/PodcastsIntents/ChapterIntentHandler.swift
+$(SRCROOT)/PodcastsIntents/ExtendSleepTimerIntentHandler.swift
+$(SRCROOT)/PodcastsIntents/IntentHandler.swift
+$(SRCROOT)/PodcastsIntents/OpenFilterIntentHandler.swift
+$(SRCROOT)/PodcastsIntents/PlayMediaIntentHandler.swift
+$(SRCROOT)/PodcastsIntents/SiriPodcastSearchManager.swift
+$(SRCROOT)/PodcastsIntentsUI/IntentViewController.swift
+$(SRCROOT)/Screenshot Automation Watch/Watch_GenerateScreenshots.swift
+$(SRCROOT)/Screenshot Automation/GenerateScreenshots.swift
+$(SRCROOT)/Screenshot Automation/XCUIElement+Extensions.swift
+$(SRCROOT)/Screenshot Automation/iPad_GenerateScreenshots.swift
+$(SRCROOT)/Screenshot Automation/iPhone_GenerateScreenshots.swift
+$(SRCROOT)/Share Extension/ShareViewController.swift
+$(SRCROOT)/WidgetExtension/App Icon/AppIconWidget.swift
+$(SRCROOT)/WidgetExtension/App Icon/StaticWidgetProvider.swift
+$(SRCROOT)/WidgetExtension/Common/ArtworkViews.swift
+$(SRCROOT)/WidgetExtension/Common/CommonWidgetHelper.swift
+$(SRCROOT)/WidgetExtension/Common/PCWidgetColorScheme.swift
+$(SRCROOT)/WidgetExtension/Common/View+clearBackground.swift
+$(SRCROOT)/WidgetExtension/Common/Widget+Accentable.swift
+$(SRCROOT)/WidgetExtension/Common/Widget+contentMarginsDisabled.swift
+$(SRCROOT)/WidgetExtension/Data/WidgetData.swift
+$(SRCROOT)/WidgetExtension/Data/WidgetEpisode.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingEntry.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingEntryView.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingLockScreenWidget.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingProvider.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingWidget.swift
+$(SRCROOT)/WidgetExtension/Now Playing/NowPlayingWidgetBold.swift
+$(SRCROOT)/WidgetExtension/PocketCastsWidgetBundle.swift
+$(SRCROOT)/WidgetExtension/Sleep Timer/SleepTimerLiveActivityWidget.swift
+$(SRCROOT)/WidgetExtension/Sleep Timer/WidgetExtendSleepTimerLiveActivityIntentExtension.swift
+$(SRCROOT)/WidgetExtension/Up Next/EpisodeView.swift
+$(SRCROOT)/WidgetExtension/Up Next/HungryForMoreView.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextEntry.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextLargeWidgetView.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextLockScreenWidget.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextMediumWidgetView.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextProvider.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextStyles.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextWidget.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextWidgetBold.swift
+$(SRCROOT)/WidgetExtension/Up Next/UpNextWidgetEntryView.swift
+$(SRCROOT)/podcasts/ABTest/ABTest.swift
+$(SRCROOT)/podcasts/ABTest/ABTestProvider.swift
+$(SRCROOT)/podcasts/ABTest/ABTestProviding.swift
+$(SRCROOT)/podcasts/ABTest/Variation+CustomTreatment.swift
+$(SRCROOT)/podcasts/AboutView.swift
+$(SRCROOT)/podcasts/AboutViewLogos.swift
+$(SRCROOT)/podcasts/AboutViewModel.swift
+$(SRCROOT)/podcasts/AccountActionCell.swift
+$(SRCROOT)/podcasts/AccountUpdatedViewController.swift
+$(SRCROOT)/podcasts/AccountViewController+TableView.swift
+$(SRCROOT)/podcasts/AccountViewController.swift
+$(SRCROOT)/podcasts/AddCell.swift
+$(SRCROOT)/podcasts/AddCustomViewController+CollectionView.swift
+$(SRCROOT)/podcasts/AddCustomViewController+ImagePicker.swift
+$(SRCROOT)/podcasts/AddCustomViewController.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/AnalyticsLoggingAdapter.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/AnalyticsOSLogAdapter.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/Crash Logging/CrashLoggingAdapter.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/Crash Logging/CrashLoggingDataProvider.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/LiveAnalyticsStreamer.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/Tracks/TracksAdapter.swift
+$(SRCROOT)/podcasts/Analytics/Adapters/Tracks/TracksSubscriptionData.swift
+$(SRCROOT)/podcasts/Analytics/Analytics.swift
+$(SRCROOT)/podcasts/Analytics/AnalyticsAppThemeProvider.swift
+$(SRCROOT)/podcasts/Analytics/AnalyticsDescribable+Modules.swift
+$(SRCROOT)/podcasts/Analytics/AnalyticsEvent.swift
+$(SRCROOT)/podcasts/Analytics/AnonymousUUID.swift
+$(SRCROOT)/podcasts/Analytics/AppLifecyleAnalytics.swift
+$(SRCROOT)/podcasts/Analytics/Helpers/AnalyticsCoordinator.swift
+$(SRCROOT)/podcasts/Analytics/Helpers/AnalyticsEpisodeHelper.swift
+$(SRCROOT)/podcasts/Analytics/Helpers/AnalyticsPlaybackHelper.swift
+$(SRCROOT)/podcasts/Analytics/String+Analytics.swift
+$(SRCROOT)/podcasts/Analytics/WidgetAnalytics.swift
+$(SRCROOT)/podcasts/AnalyticsHelper.swift
+$(SRCROOT)/podcasts/AppDelegate+Analytics.swift
+$(SRCROOT)/podcasts/AppDelegate+Defaults.swift
+$(SRCROOT)/podcasts/AppDelegate+SiriShortcuts.swift
+$(SRCROOT)/podcasts/AppDelegate+UrlHandling.swift
+$(SRCROOT)/podcasts/AppDelegate.swift
+$(SRCROOT)/podcasts/AppPlayEpisodeIntentExtension.swift
+$(SRCROOT)/podcasts/AppTheme.swift
+$(SRCROOT)/podcasts/AppearanceViewController.swift
+$(SRCROOT)/podcasts/ArchiveHelper.swift
+$(SRCROOT)/podcasts/ArrayExtension.swift
+$(SRCROOT)/podcasts/AudioPlayTask.swift
+$(SRCROOT)/podcasts/AudioReadTask.swift
+$(SRCROOT)/podcasts/AudioUtils.swift
+$(SRCROOT)/podcasts/AuthenticationHelper.swift
+$(SRCROOT)/podcasts/AutoAddToUpNextViewController+PodcastSelect.swift
+$(SRCROOT)/podcasts/AutoAddToUpNextViewController.swift
+$(SRCROOT)/podcasts/AutoArchiveViewController.swift
+$(SRCROOT)/podcasts/AutoplayHelper.swift
+$(SRCROOT)/podcasts/BackgroundShakeObserver.swift
+$(SRCROOT)/podcasts/BackgroundSignOutListener.swift
+$(SRCROOT)/podcasts/BadgeSettingsViewController.swift
+$(SRCROOT)/podcasts/BaseEpisode+Formatting.swift
+$(SRCROOT)/podcasts/BasePlayPauseButton.swift
+$(SRCROOT)/podcasts/Beta/BetaMenu.swift
+$(SRCROOT)/podcasts/BookmarkManager.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarkFoundationModelEnricher.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarkGenerationAnalytics.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarkManager+TitleSuggestion.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarkTranscriptSnippetExtractor.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarkTranscriptTextView.swift
+$(SRCROOT)/podcasts/Bookmarks/Bookmarks+Analytics.swift
+$(SRCROOT)/podcasts/Bookmarks/BookmarksTheme.swift
+$(SRCROOT)/podcasts/Bookmarks/Details/BookmarkDetailsView.swift
+$(SRCROOT)/podcasts/Bookmarks/Details/BookmarkDetailsViewController.swift
+$(SRCROOT)/podcasts/Bookmarks/Details/BookmarkDetailsViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditTitleView.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditTitleViewController.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditTitleViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditView.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkEditing.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkTranscriptEditView.swift
+$(SRCROOT)/podcasts/Bookmarks/Editing/BookmarkTranscriptStyle.swift
+$(SRCROOT)/podcasts/Bookmarks/Episode/BookmarkEpisodeListController.swift
+$(SRCROOT)/podcasts/Bookmarks/Episode/BookmarkEpisodeListView.swift
+$(SRCROOT)/podcasts/Bookmarks/Episode/EpisodeDetailTabView.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkCardTitleView.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkEpisodeListViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkListRouter.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkListViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkPodcastListViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkRow.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarkRowViewModel.swift
+$(SRCROOT)/podcasts/Bookmarks/List/BookmarksListView.swift
+$(SRCROOT)/podcasts/Bookmarks/Player/ActionBarStyles.swift
+$(SRCROOT)/podcasts/Bookmarks/Player/BookmarksPlayerTab.swift
+$(SRCROOT)/podcasts/Bookmarks/Player/BookmarksPlayerTabController.swift
+$(SRCROOT)/podcasts/Bookmarks/Profile/BookmarksProfileListController.swift
+$(SRCROOT)/podcasts/Bookmarks/Profile/BookmarksProfileListView.swift
+$(SRCROOT)/podcasts/Bookmarks/SmartBookmarksPromo.swift
+$(SRCROOT)/podcasts/BufferedAudio.swift
+$(SRCROOT)/podcasts/BundleImageView.swift
+$(SRCROOT)/podcasts/BundlePodcastCell.swift
+$(SRCROOT)/podcasts/ButtonCell.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/CancelSubscriptionView.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/CancelSubscriptionViewRow.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Offer View/CancelSubscriptionOfferSuccessView.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Offer View/CancelSubscriptionWinbackOfferView.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Plans View/CancelSubscriptionPlanRow.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Plans View/CancelSubscriptionPlansView.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Plans View/CancelSubscriptionPlansViewModel.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Survey/CancelSubscriptionSurveyRow.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Survey/CancelSubscriptionSurveyView.swift
+$(SRCROOT)/podcasts/Cancel Subscription/Cancel Subscription/Survey/CancelSubscriptionSurveyViewModel.swift
+$(SRCROOT)/podcasts/Cancel Subscription/CancelSubscriptionOption.swift
+$(SRCROOT)/podcasts/Cancel Subscription/CancelSubscriptionViewModel.swift
+$(SRCROOT)/podcasts/CancelConfirmationView.swift
+$(SRCROOT)/podcasts/CancelConfirmationViewModel.swift
+$(SRCROOT)/podcasts/CancelInfoViewController.swift
+$(SRCROOT)/podcasts/CancelledAcknowledgeViewController.swift
+$(SRCROOT)/podcasts/CarPlay/CPInterfaceController+Helpers.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlayImageHelper.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlayListData.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlaySceneDelegate+Convert.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlaySceneDelegate+Interaction.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlaySceneDelegate+Tabs.swift
+$(SRCROOT)/podcasts/CarPlay/CarPlaySceneDelegate.swift
+$(SRCROOT)/podcasts/Categories/CategoriesModalPicker.swift
+$(SRCROOT)/podcasts/Categories/CategoriesSelectorView.swift
+$(SRCROOT)/podcasts/Categories/CategoriesSelectorViewController.swift
+$(SRCROOT)/podcasts/Categories/CategoryButtonStyle.swift
+$(SRCROOT)/podcasts/CategoryCell.swift
+$(SRCROOT)/podcasts/CategoryPodcastsTable.swift
+$(SRCROOT)/podcasts/CategoryPodcastsViewController.swift
+$(SRCROOT)/podcasts/CategorySponsoredCell.swift
+$(SRCROOT)/podcasts/CategorySummaryViewController.swift
+$(SRCROOT)/podcasts/ChangeEmailViewController.swift
+$(SRCROOT)/podcasts/ChangePasswordViewController.swift
+$(SRCROOT)/podcasts/ChapterInfo.swift
+$(SRCROOT)/podcasts/ChapterManager.swift
+$(SRCROOT)/podcasts/Chapters.swift
+$(SRCROOT)/podcasts/ChaptersHeader.swift
+$(SRCROOT)/podcasts/ChaptersViewController+Table.swift
+$(SRCROOT)/podcasts/ChaptersViewController.swift
+$(SRCROOT)/podcasts/CheckboxCell.swift
+$(SRCROOT)/podcasts/CheckboxSubtitleCell.swift
+$(SRCROOT)/podcasts/ColorManager.swift
+$(SRCROOT)/podcasts/Common Components/ActionIconButton.swift
+$(SRCROOT)/podcasts/Common Components/ActionSheetRootViewController.swift
+$(SRCROOT)/podcasts/Common Components/AngularActivityIndicator.swift
+$(SRCROOT)/podcasts/Common Components/AngularProgressIndicator.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/BackportButtonRole.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/BouncyButton.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/FakeNavBarButton.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/GradientButton.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/HitTargetButton.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/TintableImageButton.swift
+$(SRCROOT)/podcasts/Common Components/Buttons/UpNextButton.swift
+$(SRCROOT)/podcasts/Common Components/CellReorderHandleView.swift
+$(SRCROOT)/podcasts/Common Components/CircleView.swift
+$(SRCROOT)/podcasts/Common Components/CustomRefreshControl.swift
+$(SRCROOT)/podcasts/Common Components/ExpandableLabel.swift
+$(SRCROOT)/podcasts/Common Components/ExplicitBadge.swift
+$(SRCROOT)/podcasts/Common Components/FakeNavViewController.swift
+$(SRCROOT)/podcasts/Common Components/Feature Tour/FeatureTour.swift
+$(SRCROOT)/podcasts/Common Components/Feature Tour/TourSpotlight.swift
+$(SRCROOT)/podcasts/Common Components/Feature Tour/TourStep.swift
+$(SRCROOT)/podcasts/Common Components/Feature Tour/TourView.swift
+$(SRCROOT)/podcasts/Common Components/Feature Tour/TourViewController.swift
+$(SRCROOT)/podcasts/Common Components/FullSyncRefreshController.swift
+$(SRCROOT)/podcasts/Common Components/IndentedTextField.swift
+$(SRCROOT)/podcasts/Common Components/LayerAutoSizingView.swift
+$(SRCROOT)/podcasts/Common Components/Lottie Animation Views/NowPlayingAnimationView.swift
+$(SRCROOT)/podcasts/Common Components/Lottie Animation Views/PlayPauseLabeledButton.swift
+$(SRCROOT)/podcasts/Common Components/MainEpisodeActionView+Pointer.swift
+$(SRCROOT)/podcasts/Common Components/MainEpisodeActionView.swift
+$(SRCROOT)/podcasts/Common Components/MultiSelect/MultiSelectActionCell.swift
+$(SRCROOT)/podcasts/Common Components/MultiSelect/MultiSelectActionController.swift
+$(SRCROOT)/podcasts/Common Components/MultiSelect/MultiSelectActionProtocol.swift
+$(SRCROOT)/podcasts/Common Components/MultiSelect/MultiSelectFooterView.swift
+$(SRCROOT)/podcasts/Common Components/MultiSelect/MultiSelectHelper.swift
+$(SRCROOT)/podcasts/Common Components/PCAlwaysVisibleCastBtn.swift
+$(SRCROOT)/podcasts/Common Components/PlusLockedInfoCell.swift
+$(SRCROOT)/podcasts/Common Components/PlusLockedInfoView.swift
+$(SRCROOT)/podcasts/Common Components/Podcast Selection/PodcastChooserCell.swift
+$(SRCROOT)/podcasts/Common Components/Podcast Selection/PodcastChooserViewController.swift
+$(SRCROOT)/podcasts/Common Components/PodcastFeedRefreshController.swift
+$(SRCROOT)/podcasts/Common Components/PodcastHeartView.swift
+$(SRCROOT)/podcasts/Common Components/ProfileProgressCircleView.swift
+$(SRCROOT)/podcasts/Common Components/Progress Views/ProgressLine.swift
+$(SRCROOT)/podcasts/Common Components/Progress Views/ProgressLineLayer.swift
+$(SRCROOT)/podcasts/Common Components/Progress Views/ProgressPieView.swift
+$(SRCROOT)/podcasts/Common Components/ReorderableFlowLayout.swift
+$(SRCROOT)/podcasts/Common Components/RichExpandableDescriptionView.swift
+$(SRCROOT)/podcasts/Common Components/RoundedBorderView.swift
+$(SRCROOT)/podcasts/Common Components/RoundedLabel.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchBarController+Animation.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchBarController+Scrolling.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchBarController+Search.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchBarController+TextFieldDelegate.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchBarController.swift
+$(SRCROOT)/podcasts/Common Components/Search/PCSearchView.swift
+$(SRCROOT)/podcasts/Common Components/SettingsTableHeader.swift
+$(SRCROOT)/podcasts/Common Components/ShiftyLoadingAlert.swift
+$(SRCROOT)/podcasts/Common Components/SmartInvertImageView.swift
+$(SRCROOT)/podcasts/Common Components/TinyPageControl.swift
+$(SRCROOT)/podcasts/Common Components/TopAlignedLabel.swift
+$(SRCROOT)/podcasts/Common Components/TopShadowView.swift
+$(SRCROOT)/podcasts/Common Components/UploadedFilesRefreshController.swift
+$(SRCROOT)/podcasts/Common Components/View Controllers/InsetAdjuster.swift
+$(SRCROOT)/podcasts/Common Components/View Controllers/PCTableViewController.swift
+$(SRCROOT)/podcasts/Common Components/View Controllers/PCViewController.swift
+$(SRCROOT)/podcasts/Common SwiftUI/BannerAdReporter.swift
+$(SRCROOT)/podcasts/Common SwiftUI/BannerAdView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/BannerView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/BookmarksEmptyStateView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/BookmarksLockedStateView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/EpisodeImage.swift
+$(SRCROOT)/podcasts/Common SwiftUI/HairlineSeparator.swift
+$(SRCROOT)/podcasts/Common SwiftUI/List View/ListViewModel.swift
+$(SRCROOT)/podcasts/Common SwiftUI/List View/MultiSelectRow.swift
+$(SRCROOT)/podcasts/Common SwiftUI/List View/MultiSelectable.swift
+$(SRCROOT)/podcasts/Common SwiftUI/List View/SearchableListViewModel.swift
+$(SRCROOT)/podcasts/Common SwiftUI/ModalView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/NonEditableTextView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/Toast/Toast.swift
+$(SRCROOT)/podcasts/Common SwiftUI/Toast/ToastTheme.swift
+$(SRCROOT)/podcasts/Common SwiftUI/Toast/ToastView.swift
+$(SRCROOT)/podcasts/Common SwiftUI/Toast/ToastViewModel.swift
+$(SRCROOT)/podcasts/CommonUpNextItem.swift
+$(SRCROOT)/podcasts/Constants.swift
+$(SRCROOT)/podcasts/CountryCell.swift
+$(SRCROOT)/podcasts/CountryChooserViewController.swift
+$(SRCROOT)/podcasts/CountrySummaryViewController.swift
+$(SRCROOT)/podcasts/CustomSegmentedControl.swift
+$(SRCROOT)/podcasts/CustomStepper.swift
+$(SRCROOT)/podcasts/CustomStorageColorCell.swift
+$(SRCROOT)/podcasts/CustomTimeStepper.swift
+$(SRCROOT)/podcasts/DataModel+Strings.swift
+$(SRCROOT)/podcasts/Debounce.swift
+$(SRCROOT)/podcasts/DefaultPlayer.swift
+$(SRCROOT)/podcasts/DescriptiveActionAttributedTextView.swift
+$(SRCROOT)/podcasts/DescriptiveActionView.swift
+$(SRCROOT)/podcasts/DescriptiveCollectionCell.swift
+$(SRCROOT)/podcasts/DestructiveButtonCell.swift
+$(SRCROOT)/podcasts/DeveloperMenu.swift
+$(SRCROOT)/podcasts/DeviceApprove/DeviceApproveView.swift
+$(SRCROOT)/podcasts/DisclosureCell.swift
+$(SRCROOT)/podcasts/Discover Previews/DiscoverPreviewData.swift
+$(SRCROOT)/podcasts/Discover Previews/DiscoverSectionPreview.swift
+$(SRCROOT)/podcasts/Discover Previews/PreviewDiscoverServerHandler.swift
+$(SRCROOT)/podcasts/DiscoverCellType.swift
+$(SRCROOT)/podcasts/DiscoverCollectionHeader.swift
+$(SRCROOT)/podcasts/DiscoverCollectionViewController+Categories.swift
+$(SRCROOT)/podcasts/DiscoverCollectionViewController+DiscoverDelegate.swift
+$(SRCROOT)/podcasts/DiscoverCollectionViewController+Search.swift
+$(SRCROOT)/podcasts/DiscoverCollectionViewController.swift
+$(SRCROOT)/podcasts/DiscoverCoordinator.swift
+$(SRCROOT)/podcasts/DiscoverDisclosureCell.swift
+$(SRCROOT)/podcasts/DiscoverEpisodeViewModel.swift
+$(SRCROOT)/podcasts/DiscoverFeaturedView.swift
+$(SRCROOT)/podcasts/DiscoverNetworksGridView.swift
+$(SRCROOT)/podcasts/DiscoverNetworksListModel.swift
+$(SRCROOT)/podcasts/DiscoverNetworksListRowView.swift
+$(SRCROOT)/podcasts/DiscoverNetworksListViewController.swift
+$(SRCROOT)/podcasts/DiscoverPeekViewController.swift
+$(SRCROOT)/podcasts/DiscoverPodcastTableCell.swift
+$(SRCROOT)/podcasts/DiscoverSummaryProtocol.swift
+$(SRCROOT)/podcasts/DiscoveryPageIndicatorView.swift
+$(SRCROOT)/podcasts/DownloadFilterOverlayController.swift
+$(SRCROOT)/podcasts/DownloadManager+Logging.swift
+$(SRCROOT)/podcasts/DownloadManager+SessionManagement.swift
+$(SRCROOT)/podcasts/DownloadManager+URLSessionDelegate.swift
+$(SRCROOT)/podcasts/DownloadManager.swift
+$(SRCROOT)/podcasts/DownloadProgress.swift
+$(SRCROOT)/podcasts/DownloadProgressManager.swift
+$(SRCROOT)/podcasts/DownloadSettingsViewController.swift
+$(SRCROOT)/podcasts/DownloadedFilesViewController.swift
+$(SRCROOT)/podcasts/DownloadsViewController+MultiSelect.swift
+$(SRCROOT)/podcasts/DownloadsViewController+Swipe.swift
+$(SRCROOT)/podcasts/DownloadsViewController+Table.swift
+$(SRCROOT)/podcasts/DownloadsViewController.swift
+$(SRCROOT)/podcasts/EditFilterNameCell.swift
+$(SRCROOT)/podcasts/EffectsButton.swift
+$(SRCROOT)/podcasts/EffectsPlayer.swift
+$(SRCROOT)/podcasts/EffectsViewController.swift
+$(SRCROOT)/podcasts/EmailHelper.swift
+$(SRCROOT)/podcasts/End of Year/Analytics+story.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2023/EndOfYear2023StoriesModel.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2023/EndOfYear2023Story.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2024/EndOfYear2024StoriesModel.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2024/EndOfYear2024Story.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2025/EndOfYear2025StoriesModel.swift
+$(SRCROOT)/podcasts/End of Year/End of Year 2025/EndOfYear2025Story.swift
+$(SRCROOT)/podcasts/End of Year/EndOfYear.swift
+$(SRCROOT)/podcasts/End of Year/EndOfYearStoriesBuilder.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/CompletionRateStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/EpilogueStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/IntroStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/ListenedNumbersStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/ListeningTimeStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/LongestEpisodeStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/TopFivePodcastsStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/TopListenedCategoriesStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/TopOnePodcastStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2023/YearOverYearStory2023.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/CompletionRate2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/EpilogueStory2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/IntroStory2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/ListeningTime2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/LongestEpisode2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/NumberListened2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/PaidStoryWallView2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/Ratings2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/StoryFooter2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/SubscriptionBadge2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/Top5Podcasts2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/TopSpotStory2024.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2024/YearOverYearCompare2024Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/CompletionRate2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/EpilogueStory2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/IntroStory2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/ListeningTime2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/LongestEpisode2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/NumberListened2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/PaidStoryWallView2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/Ratings2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/StoryFooter2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/StoryHeader2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/SubscriptionBadge2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/Top5Podcasts2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/TopSpotStory2025.swift
+$(SRCROOT)/podcasts/End of Year/Stories/2025/YearOverYearCompare2025Story.swift
+$(SRCROOT)/podcasts/End of Year/Stories/EndOfYearStoriesDataSource.swift
+$(SRCROOT)/podcasts/End of Year/Stories/MDCSwiftUIWrapper.swift
+$(SRCROOT)/podcasts/End of Year/Stories/Views/CommonStoryViews.swift
+$(SRCROOT)/podcasts/End of Year/Stories/Views/PaidStoryWallView.swift
+$(SRCROOT)/podcasts/End of Year/Stories/Views/PodcastCover.swift
+$(SRCROOT)/podcasts/End of Year/StoriesDataSource.swift
+$(SRCROOT)/podcasts/End of Year/StoriesModel.swift
+$(SRCROOT)/podcasts/End of Year/StoryShareableText.swift
+$(SRCROOT)/podcasts/End of Year/Views/EndOfYearCard.swift
+$(SRCROOT)/podcasts/End of Year/Views/EndOfYearModal.swift
+$(SRCROOT)/podcasts/End of Year/Views/EndOfYearPromptCell.swift
+$(SRCROOT)/podcasts/End of Year/Views/StoriesView.swift
+$(SRCROOT)/podcasts/EndOfYearDeveloperMenuButton.swift
+$(SRCROOT)/podcasts/Enumerations.swift
+$(SRCROOT)/podcasts/Episode Cells/DateHeadingView.swift
+$(SRCROOT)/podcasts/Episode Cells/EpisodeCell.swift
+$(SRCROOT)/podcasts/Episode Cells/HeadingCell.swift
+$(SRCROOT)/podcasts/Episode Cells/SwipeActionsHelper.swift
+$(SRCROOT)/podcasts/Episode Info Coordinator/ShowInfoCoordinating.swift
+$(SRCROOT)/podcasts/Episode Info Coordinator/ShowInfoCoordinator.swift
+$(SRCROOT)/podcasts/Episode+Formatting.swift
+$(SRCROOT)/podcasts/Episode+Transcript.swift
+$(SRCROOT)/podcasts/Episode/EpisodeDetailViewController+Actions.swift
+$(SRCROOT)/podcasts/Episode/EpisodeDetailViewController+ShowNotes.swift
+$(SRCROOT)/podcasts/Episode/EpisodeDetailViewController.swift
+$(SRCROOT)/podcasts/Episode/EpisodeLoadingController.swift
+$(SRCROOT)/podcasts/EpisodeAIChatEntryPointMockup.swift
+$(SRCROOT)/podcasts/EpisodeArtwork.swift
+$(SRCROOT)/podcasts/EpisodeDateHelper.swift
+$(SRCROOT)/podcasts/EpisodeFileSizeUpdater.swift
+$(SRCROOT)/podcasts/EpisodeFilter+Formatting.swift
+$(SRCROOT)/podcasts/EpisodeFilterOverlayController.swift
+$(SRCROOT)/podcasts/EpisodeListHeaderView.swift
+$(SRCROOT)/podcasts/EpisodeListTableViewCell.swift
+$(SRCROOT)/podcasts/EpisodeManager.swift
+$(SRCROOT)/podcasts/EpisodePreviewCell.swift
+$(SRCROOT)/podcasts/EpisodesDataManager.swift
+$(SRCROOT)/podcasts/ExpandedCollectionViewController+CollectionView.swift
+$(SRCROOT)/podcasts/ExpandedCollectionViewController.swift
+$(SRCROOT)/podcasts/ExpandedEpisodeListViewController.swift
+$(SRCROOT)/podcasts/Extensions/Array+DiscoverItem.swift
+$(SRCROOT)/podcasts/Extensions/CGSize+FittingSize.swift
+$(SRCROOT)/podcasts/Extensions/CMTimeScale+Common.swift
+$(SRCROOT)/podcasts/Extensions/DiscoverItem+Helper.swift
+$(SRCROOT)/podcasts/Extensions/MPFeedbackCommand+Title.swift
+$(SRCROOT)/podcasts/Extensions/NSObject+AppDelegate.swift
+$(SRCROOT)/podcasts/Extensions/NetworkUtils+Helpers.swift
+$(SRCROOT)/podcasts/Extensions/PodcastCollectionColors+Helpers.swift
+$(SRCROOT)/podcasts/Extensions/SFSafariViewController+Creation.swift
+$(SRCROOT)/podcasts/Extensions/Server+Strings.swift
+$(SRCROOT)/podcasts/Extensions/String+Differentiable.swift
+$(SRCROOT)/podcasts/Extensions/String+MD5.swift
+$(SRCROOT)/podcasts/Extensions/String+SanitizedFileName.swift
+$(SRCROOT)/podcasts/Extensions/String+SentenceCase.swift
+$(SRCROOT)/podcasts/Extensions/SubscriptionTier+L10n.swift
+$(SRCROOT)/podcasts/Extensions/UIApplication+OpenSafariVC.swift
+$(SRCROOT)/podcasts/Extensions/UIApplication+OpenStandardURLs.swift
+$(SRCROOT)/podcasts/Extensions/UICollectionViewCell+EditingWiggle.swift
+$(SRCROOT)/podcasts/Extensions/UIImage+Avatar.swift
+$(SRCROOT)/podcasts/Extensions/UIScrollView+MiniPlayer.swift
+$(SRCROOT)/podcasts/Extensions/UISearchBar+TextColor.swift
+$(SRCROOT)/podcasts/Extensions/UITableView+MultiSelect.swift
+$(SRCROOT)/podcasts/Extensions/UIView+Nib.swift
+$(SRCROOT)/podcasts/Extensions/UIViewController+MultiSelectActions.swift
+$(SRCROOT)/podcasts/Extensions/UIViewController+Presenting.swift
+$(SRCROOT)/podcasts/Extensions/UIViewController+TabBar.swift
+$(SRCROOT)/podcasts/Extensions/UIViewController+requestReview.swift
+$(SRCROOT)/podcasts/Extensions/View+CVPixelBuffer.swift
+$(SRCROOT)/podcasts/FadeOutManager.swift
+$(SRCROOT)/podcasts/FeaturedCollectionViewCell.swift
+$(SRCROOT)/podcasts/FeaturedSummaryViewController.swift
+$(SRCROOT)/podcasts/FeaturedTableViewCell.swift
+$(SRCROOT)/podcasts/FileManager+Helper.swift
+$(SRCROOT)/podcasts/FileTypeUtil.swift
+$(SRCROOT)/podcasts/FilterDownloadCell.swift
+$(SRCROOT)/podcasts/FilterDurationViewController.swift
+$(SRCROOT)/podcasts/FilterEditOptionsViewController.swift
+$(SRCROOT)/podcasts/FilterNameCell.swift
+$(SRCROOT)/podcasts/FilterSettingsOverlayController.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudConfig.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudFingerprintParityData.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudFingerprintReferenceFetcher.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudFingerprinter.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudIdentity.swift
+$(SRCROOT)/podcasts/Fingerprint/CloudReferenceMatcher.swift
+$(SRCROOT)/podcasts/Fingerprint/FingerprintConstants.swift
+$(SRCROOT)/podcasts/Fingerprint/FingerprintDebugOverlay.swift
+$(SRCROOT)/podcasts/Fingerprint/FingerprintMappingCache.swift
+$(SRCROOT)/podcasts/Fingerprint/FingerprintReferenceRetriever.swift
+$(SRCROOT)/podcasts/Fingerprint/FingerprintTimingManager.swift
+$(SRCROOT)/podcasts/Fingerprint/GeneratedChapterSeeker.swift
+$(SRCROOT)/podcasts/Fingerprint/ReferenceFingerprint.swift
+$(SRCROOT)/podcasts/FirebaseManager.swift
+$(SRCROOT)/podcasts/FloatingVideoView.swift
+$(SRCROOT)/podcasts/Folder History/FolderHistoryEntryView.swift
+$(SRCROOT)/podcasts/Folder History/FolderHistoryModel.swift
+$(SRCROOT)/podcasts/Folder History/FolderHistoryView.swift
+$(SRCROOT)/podcasts/Folder History/FolderHistoryViewController.swift
+$(SRCROOT)/podcasts/Folder+Formatting.swift
+$(SRCROOT)/podcasts/Folder+Sortable.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Model/ChoosePodcastFolderModel.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Model/FolderModel.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Model/SuggestedFoldersModel.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/ChoosePodcastFolderView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/ColorPreviewFolderView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/ColorSelectCircle.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/ColorSelectRow.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/CreateFolderView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/EditFolderPodcastsView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/EditFolderView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/FolderPreviewWrapper.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/GridFoldersView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/NameFolderView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/PodcastImageViewWrapper.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/SuggestedFolderPodcastView.swift
+$(SRCROOT)/podcasts/Folders/Create & Edit/Views/SuggestedFoldersView.swift
+$(SRCROOT)/podcasts/Folders/FolderViewController+CollectionView.swift
+$(SRCROOT)/podcasts/Folders/FolderViewController+ContextMenu.swift
+$(SRCROOT)/podcasts/Folders/FolderViewController+Edit.swift
+$(SRCROOT)/podcasts/Folders/FolderViewController.swift
+$(SRCROOT)/podcasts/Folders/FoldersCoordinator.swift
+$(SRCROOT)/podcasts/Folders/Podcast Selection/Model/PodcastPickerModel.swift
+$(SRCROOT)/podcasts/Folders/Podcast Selection/Views/PodcastPickerRow.swift
+$(SRCROOT)/podcasts/Folders/Podcast Selection/Views/PodcastPickerView.swift
+$(SRCROOT)/podcasts/FunnyTimeConverter.swift
+$(SRCROOT)/podcasts/GeneralSettingsViewController.swift
+$(SRCROOT)/podcasts/GeneratedEpisodeMetadataRetriever.swift
+$(SRCROOT)/podcasts/GeneratedTranscriptsPremiumOverlay.swift
+$(SRCROOT)/podcasts/Google Cast/CastDevicesManager.swift
+$(SRCROOT)/podcasts/Google Cast/GoogleCastManager.swift
+$(SRCROOT)/podcasts/Google Cast/UI/CastDeviceVolumeView.swift
+$(SRCROOT)/podcasts/Google Cast/UI/CastToViewController+Table.swift
+$(SRCROOT)/podcasts/Google Cast/UI/CastToViewController.swift
+$(SRCROOT)/podcasts/Google Cast/UI/GoogleCastCell.swift
+$(SRCROOT)/podcasts/Google Cast/UI/PCGoogleCastButton.swift
+$(SRCROOT)/podcasts/GravatarSafariViewController.swift
+$(SRCROOT)/podcasts/GridLayout.swift
+$(SRCROOT)/podcasts/HapticsHelper.swift
+$(SRCROOT)/podcasts/HeadphoneSettingsViewController.swift
+$(SRCROOT)/podcasts/HomeGridDataHelper.swift
+$(SRCROOT)/podcasts/HomeGridItem.swift
+$(SRCROOT)/podcasts/HorizontaCollectionModel.swift
+$(SRCROOT)/podcasts/HorizontalCollectionListRowView.swift
+$(SRCROOT)/podcasts/HorizontalCollectionListViewController.swift
+$(SRCROOT)/podcasts/HowToShareActionImageView.swift
+$(SRCROOT)/podcasts/HowToShareMenuImageView.swift
+$(SRCROOT)/podcasts/HowToUploadView.swift
+$(SRCROOT)/podcasts/IconSelectorCell.swift
+$(SRCROOT)/podcasts/ImageManager.swift
+$(SRCROOT)/podcasts/ImportExportViewController.swift
+$(SRCROOT)/podcasts/InAppPurchases/IAPHelper.swift
+$(SRCROOT)/podcasts/InAppPurchases/IAPTypes.swift
+$(SRCROOT)/podcasts/IncomingShareItem.swift
+$(SRCROOT)/podcasts/Interactor.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileBannerTableCell.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileBannerView.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileBannerViewModel.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileSheet.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileSheetHost.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileSheetViewModel.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileSubmitScreen.swift
+$(SRCROOT)/podcasts/Kids Profile/KidsProfileThankYouScreen.swift
+$(SRCROOT)/podcasts/LargeListCell.swift
+$(SRCROOT)/podcasts/LargeListSummaryCellHeaderView.swift
+$(SRCROOT)/podcasts/LargeListSummaryViewController.swift
+$(SRCROOT)/podcasts/LargeNavBarViewController.swift
+$(SRCROOT)/podcasts/LastSupporterPodcastCell.swift
+$(SRCROOT)/podcasts/LeftAlignedFlowLayout.swift
+$(SRCROOT)/podcasts/LegalAndMoreView.swift
+$(SRCROOT)/podcasts/LiquidGlass.swift
+$(SRCROOT)/podcasts/ListeningHistoryViewController+MultiSelect.swift
+$(SRCROOT)/podcasts/ListeningHistoryViewController+Swipe.swift
+$(SRCROOT)/podcasts/ListeningHistoryViewController+Table.swift
+$(SRCROOT)/podcasts/ListeningHistoryViewController.swift
+$(SRCROOT)/podcasts/Lists/AllArchivedPlaceholder.swift
+$(SRCROOT)/podcasts/Lists/EpisodeLimitPlaceholder.swift
+$(SRCROOT)/podcasts/Lists/EpisodeTableHelper.swift
+$(SRCROOT)/podcasts/Lists/HomeGridListItem.swift
+$(SRCROOT)/podcasts/Lists/ListEpisode.swift
+$(SRCROOT)/podcasts/Lists/ListHeader.swift
+$(SRCROOT)/podcasts/Lists/ListItem.swift
+$(SRCROOT)/podcasts/Lists/ListPlaylist.swift
+$(SRCROOT)/podcasts/Lists/ListPodcast.swift
+$(SRCROOT)/podcasts/Lists/NoSearchResultsPlaceholder.swift
+$(SRCROOT)/podcasts/Lists/TableSwipeActions.swift
+$(SRCROOT)/podcasts/LiveActivity/AppExtendSleepTimerLiveActivityIntentExtension.swift
+$(SRCROOT)/podcasts/LiveActivity/ExtendSleepTimerLiveActivityIntent.swift
+$(SRCROOT)/podcasts/LiveActivity/SleepTimerActivityAttributes.swift
+$(SRCROOT)/podcasts/LiveActivity/SleepTimerLiveActivityController.swift
+$(SRCROOT)/podcasts/LocalizationHelpers.swift
+$(SRCROOT)/podcasts/LogsView.swift
+$(SRCROOT)/podcasts/LogsViewController.swift
+$(SRCROOT)/podcasts/Main/MainTabBarController+Alert.swift
+$(SRCROOT)/podcasts/Main/MainTabBarController+Animations.swift
+$(SRCROOT)/podcasts/Main/MainTabBarController+shortcuts.swift
+$(SRCROOT)/podcasts/Main/MainTabBarController.swift
+$(SRCROOT)/podcasts/Main/NavigationManager.swift
+$(SRCROOT)/podcasts/Main/NavigationProtocol.swift
+$(SRCROOT)/podcasts/ManageDownloadsBannerView.swift
+$(SRCROOT)/podcasts/ManageDownloadsCoordinator.swift
+$(SRCROOT)/podcasts/ManageDownloadsModalView.swift
+$(SRCROOT)/podcasts/MediaExporterResourceLoaderDelegate.swift
+$(SRCROOT)/podcasts/MediaFileHandle.swift
+$(SRCROOT)/podcasts/MediaFilterOverlayController.swift
+$(SRCROOT)/podcasts/MigratedSleepTimerIntent.swift
+$(SRCROOT)/podcasts/MiniPlayerGlassProgressView.swift
+$(SRCROOT)/podcasts/MiniPlayerGradientView.swift
+$(SRCROOT)/podcasts/MiniPlayerLongPressPreviewViewController.swift
+$(SRCROOT)/podcasts/MiniPlayerScrollingTitleView.swift
+$(SRCROOT)/podcasts/MiniPlayerShadowView.swift
+$(SRCROOT)/podcasts/MiniPlayerToFullPlayerAnimator.swift
+$(SRCROOT)/podcasts/MiniPlayerViewController+Gestures.swift
+$(SRCROOT)/podcasts/MiniPlayerViewController+Positioning.swift
+$(SRCROOT)/podcasts/MiniPlayerViewController+TransitionDelegate.swift
+$(SRCROOT)/podcasts/MiniPlayerViewController.swift
+$(SRCROOT)/podcasts/ModalCloseButton.swift
+$(SRCROOT)/podcasts/MultipleActionView.swift
+$(SRCROOT)/podcasts/NetworkNavigator.swift
+$(SRCROOT)/podcasts/New Creation/New Playlist/NewPlaylistViewController.swift
+$(SRCROOT)/podcasts/New Creation/New Playlist/SmartPlaylistCreationView.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/PlaylistPreviewViewController.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/PlaylistPreviewViewModel.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/Rules/Episode Preview/PlaylistEpisodePreviewRowView.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/Rules/SmartPlaylistRule.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/Rules/SmartPlaylistRuleInfo.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/Rules/SmartPlaylistRulesSectionView.swift
+$(SRCROOT)/podcasts/New Creation/New Preview/Rules/SmartPlaylistRulesView.swift
+$(SRCROOT)/podcasts/New Detail/Custom Order/PlaylistDetailCustomOrderViewController.swift
+$(SRCROOT)/podcasts/New Detail/Custom Order/PlaylistEpisodePreviewCell.swift
+$(SRCROOT)/podcasts/New Detail/Episode Add/ManualPlaylistsChooserViewController.swift
+$(SRCROOT)/podcasts/New Detail/Operation/PlaylistDetailFetchOperation.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Archive/PlaylistArchiveView.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Archive/PlaylistArchiveViewCell.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Archive/PlaylistArchiveViewCellPlaceholder.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Header/PlaylistBlurHeaderView.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Header/PlaylistHeaderView.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Header/PlaylistHeaderViewCell.swift
+$(SRCROOT)/podcasts/New Detail/Playlist Header/PlaylistHeaderViewCellPlaceholder.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+Analytics.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+EditActions.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+EmptyState.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+MultiSelect.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+Observers.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+PlayAll.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+Search.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+Swipe.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController+TableView.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewController.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewModel/PlaylistDetailViewModel+Archive.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewModel/PlaylistDetailViewModel+PlayAll.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistDetailViewModel/PlaylistDetailViewModel.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistPlayAllHelper/PlaylistPlayAllSheet.swift
+$(SRCROOT)/podcasts/New Detail/PlaylistPlayAllHelper/PlaylistPlayAllSheetHost.swift
+$(SRCROOT)/podcasts/New Search/Helpers/SearchAnalyticsHelper.swift
+$(SRCROOT)/podcasts/New Search/Model/SearchHistoryModel.swift
+$(SRCROOT)/podcasts/New Search/Model/SearchResultsModel.swift
+$(SRCROOT)/podcasts/New Search/SearchResultsViewController.swift
+$(SRCROOT)/podcasts/New Search/Views/History/SearchHistoryCell.swift
+$(SRCROOT)/podcasts/New Search/Views/History/SearchHistoryView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/LocalSearchCoordinator.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/LocalSearchEpisodeResultsView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/LocalSearchPodcastResultsView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/LocalSearchView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/LocalSearchViewModel.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/NetworkSearchResultCell.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/PillSegmentControl.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/PodcastFolderSearchResult+Navigation.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/PredictiveList.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SearchDisplayMode.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SearchListView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SearchResultCell.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SearchResultCellModel.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SearchResultsView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/SubscribeButtonView.swift
+$(SRCROOT)/podcasts/New Search/Views/Results/ThemeableListHeader.swift
+$(SRCROOT)/podcasts/New Search/Views/SearchView.swift
+$(SRCROOT)/podcasts/NewEmailViewController.swift
+$(SRCROOT)/podcasts/NewPlaylistCell.swift
+$(SRCROOT)/podcasts/NewPlaylistCellView.swift
+$(SRCROOT)/podcasts/NewPlaylistCellViewModel.swift
+$(SRCROOT)/podcasts/NewsletterCell.swift
+$(SRCROOT)/podcasts/Notifications.swift
+$(SRCROOT)/podcasts/Notifications/NotificationsCoordinator+AnalyticsAdapter.swift
+$(SRCROOT)/podcasts/Notifications/NotificationsCoordinator.swift
+$(SRCROOT)/podcasts/Notifications/NotificationsPermissionsView.swift
+$(SRCROOT)/podcasts/NotificationsViewController.swift
+$(SRCROOT)/podcasts/NowPlayingHelper.swift
+$(SRCROOT)/podcasts/NowPlayingPlayerItemViewController+Seek.swift
+$(SRCROOT)/podcasts/NowPlayingPlayerItemViewController+Shelf.swift
+$(SRCROOT)/podcasts/NowPlayingPlayerItemViewController+UpNextPan.swift
+$(SRCROOT)/podcasts/NowPlayingPlayerItemViewController+Update.swift
+$(SRCROOT)/podcasts/NowPlayingPlayerItemViewController.swift
+$(SRCROOT)/podcasts/Onboarding/DiscoverPodcastsGridView.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Banner/InformationalBannerType.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Banner/InformationalBannerViewCoordinator.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Banner/InformationalBannerViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Banner/InformationalProfileBannerCell.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Modal/InformationalFeatureCardItem.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Modal/InformationalModalView.swift
+$(SRCROOT)/podcasts/Onboarding/Encourage Account Creation/Modal/InformationalModalViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/FadeGradientModifier.swift
+$(SRCROOT)/podcasts/Onboarding/Import/ImportDetailsView.swift
+$(SRCROOT)/podcasts/Onboarding/Import/ImportHostingController.swift
+$(SRCROOT)/podcasts/Onboarding/Import/ImportLandingView.swift
+$(SRCROOT)/podcasts/Onboarding/Import/ImportViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/InterestButton.swift
+$(SRCROOT)/podcasts/Onboarding/InterestsView.swift
+$(SRCROOT)/podcasts/Onboarding/Intro Carousel/IntroCarouselDataSource.swift
+$(SRCROOT)/podcasts/Onboarding/Intro Carousel/IntroCarouselStory.swift
+$(SRCROOT)/podcasts/Onboarding/Intro Carousel/IntroCarouselView.swift
+$(SRCROOT)/podcasts/Onboarding/Login/LoginButtonStyles.swift
+$(SRCROOT)/podcasts/Onboarding/Login/LoginLandingCoverImage.swift
+$(SRCROOT)/podcasts/Onboarding/Login/LoginLandingHostingController.swift
+$(SRCROOT)/podcasts/Onboarding/Login/LoginLandingView.swift
+$(SRCROOT)/podcasts/Onboarding/Login/SyncLoadingAlert.swift
+$(SRCROOT)/podcasts/Onboarding/LoginCoordinator.swift
+$(SRCROOT)/podcasts/Onboarding/Models/PlusAccountPromptViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Models/PlusPricingInfoModel.swift
+$(SRCROOT)/podcasts/Onboarding/Models/PlusPurchaseModel.swift
+$(SRCROOT)/podcasts/Onboarding/OnboardingFlow.swift
+$(SRCROOT)/podcasts/Onboarding/OnboardingHostingViewController.swift
+$(SRCROOT)/podcasts/Onboarding/OnboardingModel.swift
+$(SRCROOT)/podcasts/Onboarding/OnboardingRecommendationsView.swift
+$(SRCROOT)/podcasts/Onboarding/Patron/PatronAppIconUnlock.swift
+$(SRCROOT)/podcasts/Onboarding/Patron/PatronUnlockButton.swift
+$(SRCROOT)/podcasts/Onboarding/Patron/PatronWelcomeViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Patron/UnlockHaptic.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/Account Prompt/PlusAccountPromptTableCell.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/Account Prompt/PlusAccountUpgradePrompt.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/Account Prompt/UpgradePrompt.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/FeaturesCarousel.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/Animations/BookmarksAnimationView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/Animations/FoldersAnimationView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/Animations/PreSelectChaptersAnimationView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/Animations/UpNextShuffleAnimationView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/SubscriptionPurchaseButton.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeAccountView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeAccountViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeBannerView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeFeaturesView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeProductsView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/NewUpgrade/UpgradeTimelineView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/PlusButtonStyles.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/PlusHostingViewController.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/PlusLabel.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/PlusLandingViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/PlusPurchaseModal.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/SubscriptionPriceAndOfferView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/Theme+Plus.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeCard.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Features/PlusPaywallFeatureCard.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Features/PlusPaywallFeaturesCarousell.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/PlusPaywallContainer.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/AppStoreInfo.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/PlusPaywallReviewCard.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/PlusPaywallReviews.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/PlusPaywallReviewsPlusFeatures.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/PlusPaywallReviewsStars.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeExperiment/Reviews/PlusPaywallReviewsViewModel.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeLandingView.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeRoundedSegmentedControl.swift
+$(SRCROOT)/podcasts/Onboarding/Plus/UpgradeTier.swift
+$(SRCROOT)/podcasts/Onboarding/PodcastSubscribeButton.swift
+$(SRCROOT)/podcasts/Onboarding/Welcome/WelcomeView.swift
+$(SRCROOT)/podcasts/Onboarding/Welcome/WelcomeViewModel.swift
+$(SRCROOT)/podcasts/OnlineSupportController.swift
+$(SRCROOT)/podcasts/OpmlImporter.swift
+$(SRCROOT)/podcasts/OptionAction.swift
+$(SRCROOT)/podcasts/OptionsPicker.swift
+$(SRCROOT)/podcasts/OptionsPickerRootController.swift
+$(SRCROOT)/podcasts/OrphanedEpisodesListView.swift
+$(SRCROOT)/podcasts/PCHostingController.swift
+$(SRCROOT)/podcasts/PCMessageSupportViewModel.swift
+$(SRCROOT)/podcasts/PCNavigationController.swift
+$(SRCROOT)/podcasts/PCRoutePickerView.swift
+$(SRCROOT)/podcasts/PaidFeature.swift
+$(SRCROOT)/podcasts/PlayBufferManager.swift
+$(SRCROOT)/podcasts/PlayEpisodeIntent.swift
+$(SRCROOT)/podcasts/PlayPauseButton.swift
+$(SRCROOT)/podcasts/Playback/Players/Google Cast/GoogleCastPlayer.swift
+$(SRCROOT)/podcasts/PlaybackActionHelper.swift
+$(SRCROOT)/podcasts/PlaybackCatchUpHelper.swift
+$(SRCROOT)/podcasts/PlaybackEffects.swift
+$(SRCROOT)/podcasts/PlaybackItem.swift
+$(SRCROOT)/podcasts/PlaybackManager.swift
+$(SRCROOT)/podcasts/PlaybackProtocol.swift
+$(SRCROOT)/podcasts/PlaybackQueue.swift
+$(SRCROOT)/podcasts/PlaybackTimeHelper.swift
+$(SRCROOT)/podcasts/PlayerCell.swift
+$(SRCROOT)/podcasts/PlayerChapterCell.swift
+$(SRCROOT)/podcasts/PlayerColorHelper.swift
+$(SRCROOT)/podcasts/PlayerContainerViewController+Gestures.swift
+$(SRCROOT)/podcasts/PlayerContainerViewController+Scroll.swift
+$(SRCROOT)/podcasts/PlayerContainerViewController+Update.swift
+$(SRCROOT)/podcasts/PlayerContainerViewController.swift
+$(SRCROOT)/podcasts/PlayerItemViewController.swift
+$(SRCROOT)/podcasts/PlayerTabsView.swift
+$(SRCROOT)/podcasts/PlayerZoomAnimator.swift
+$(SRCROOT)/podcasts/PlaylistArtworkView.swift
+$(SRCROOT)/podcasts/PlaylistCell.swift
+$(SRCROOT)/podcasts/PlaylistCellView.swift
+$(SRCROOT)/podcasts/PlaylistCellViewModel.swift
+$(SRCROOT)/podcasts/PlaylistEpisode+Formatting.swift
+$(SRCROOT)/podcasts/PlaylistManager.swift
+$(SRCROOT)/podcasts/PlaylistMetadataLoader/EpisodeChangeType.swift
+$(SRCROOT)/podcasts/PlaylistMetadataLoader/EpisodeFilter+ChangeType.swift
+$(SRCROOT)/podcasts/PlaylistMetadataLoader/PlaylistCacheInvalidationCoordinator.swift
+$(SRCROOT)/podcasts/PlaylistMetadataLoader/PlaylistMetadataLoader.swift
+$(SRCROOT)/podcasts/PlaylistRefreshOperation.swift
+$(SRCROOT)/podcasts/PlaylistSelectionViewController.swift
+$(SRCROOT)/podcasts/PlaylistShortcutsViewController.swift
+$(SRCROOT)/podcasts/Playlists Onboarding/PlaylistsOnboardingCardView.swift
+$(SRCROOT)/podcasts/Playlists Onboarding/PlaylistsOnboardingView.swift
+$(SRCROOT)/podcasts/PlaylistsShortcutsViewController.swift
+$(SRCROOT)/podcasts/PlaylistsViewController+Table.swift
+$(SRCROOT)/podcasts/PlaylistsViewController.swift
+$(SRCROOT)/podcasts/PocketCastsAppShortcutsProvider.swift
+$(SRCROOT)/podcasts/Podcast+Formatting.swift
+$(SRCROOT)/podcasts/Podcast+Sortable.swift
+$(SRCROOT)/podcasts/PodcastBundleCountView.swift
+$(SRCROOT)/podcasts/PodcastChapterParser.swift
+$(SRCROOT)/podcasts/PodcastDisclosureCell.swift
+$(SRCROOT)/podcasts/PodcastFilterOverlayController.swift
+$(SRCROOT)/podcasts/PodcastFilterSelectionCell.swift
+$(SRCROOT)/podcasts/PodcastHeaderListViewController.swift
+$(SRCROOT)/podcasts/PodcastImage.swift
+$(SRCROOT)/podcasts/PodcastImageView.swift
+$(SRCROOT)/podcasts/PodcastIndexChapterDataRetriever.swift
+$(SRCROOT)/podcasts/PodcastInfo+DiscoverPodcast.swift
+$(SRCROOT)/podcasts/PodcastManager+Cleanup.swift
+$(SRCROOT)/podcasts/PodcastManager+Delete.swift
+$(SRCROOT)/podcasts/PodcastManager.swift
+$(SRCROOT)/podcasts/PodcastShortcutsViewController.swift
+$(SRCROOT)/podcasts/PodcastSupporterCell.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/EmptyHeaderView.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/FolderGridCell.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/FolderListCell.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/FolderPreviewView.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/GridBadgeView.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/PodcastGridCell.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/PodcastListCell.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Cells/UnplayedBadge.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/FolderPreviewViewController.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/ListHeaderDelegate.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController+CollectionView.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController+ContextMenu.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController+Edit.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController+Search.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController+Tip.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastListViewController.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/PodcastPreviewViewController.swift
+$(SRCROOT)/podcasts/Podcasts/All Podcasts/Search/PodcastSearchCell.swift
+$(SRCROOT)/podcasts/Podcasts/Helpers/GridHelper.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/BookmarkListController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/CreateSiriShortcutCell.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/EpisodeLimitCell.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastHeaderCell.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastHeaderDescriptionView.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastHeaderModel.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastHeaderView.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastTableCellView.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Cells/PodcastTableViewCell.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/CreatorPickModalView.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/EpisodeListSearchController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastArchiveViewController+Table.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastArchiveViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastEffectsViewController+Table.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastEffectsViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastSettingsViewController+Table.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastSettingsViewController+VoiceShortcuts.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/Podcast Settings/PodcastSettingsViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastDetailsTabView.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastEpisodesRefreshOperation.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastFeedViewModel.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+Bookmarks.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+MultiSelect.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+NetworkLoad.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+Options.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+Search.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+Swipe.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController+TableData.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/PodcastViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/SubscribeButton.swift
+$(SRCROOT)/podcasts/Podcasts/Podcast Page/YouMightLikeSectionHeaderView.swift
+$(SRCROOT)/podcasts/Podcasts/Share Podcast List/Collection View Cells/SelectPodcastCell.swift
+$(SRCROOT)/podcasts/Podcasts/Share Podcast List/Collection View Cells/SelectedPodcastCell.swift
+$(SRCROOT)/podcasts/Podcasts/Share Podcast List/IncomingShareListViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Share Podcast List/SharePodcastsViewController.swift
+$(SRCROOT)/podcasts/Podcasts/Share Podcast List/SharePublishViewController.swift
+$(SRCROOT)/podcasts/PressableLottieButtonStyle.swift
+$(SRCROOT)/podcasts/PrivacySettings/PrivacySettingsDataSource.swift
+$(SRCROOT)/podcasts/PrivacySettings/PrivacySettingsViewController.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Account/AccountHeaderView.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Account/AccountHeaderViewModel.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Account/ChampionView.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Account/ListeningHeatmapView.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Account/ListeningHeatmapViewModel.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Common Views/ProfileImage.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Common Views/ProfileInfoLabels.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Common Views/SubscriptionBadge.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Common Views/SubscriptionProfileImage.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Profile/ProfileHeaderView.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/Profile/ProfileRefreshButton.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/View Models/ProfileDataViewModel.swift
+$(SRCROOT)/podcasts/Profile - SwiftUI/View Models/ProfileHeaderViewModel.swift
+$(SRCROOT)/podcasts/ProfileViewController+Promotion.swift
+$(SRCROOT)/podcasts/ProfileViewController.swift
+$(SRCROOT)/podcasts/ProgressCircleView.swift
+$(SRCROOT)/podcasts/PromotionAcknowledgementViewController.swift
+$(SRCROOT)/podcasts/PromotionFinishedViewController.swift
+$(SRCROOT)/podcasts/PromotionViewController.swift
+$(SRCROOT)/podcasts/Queue.swift
+$(SRCROOT)/podcasts/RadioButtonCell.swift
+$(SRCROOT)/podcasts/Ratings/PodcastRatingViewModel.swift
+$(SRCROOT)/podcasts/Ratings/RatePodcastView.swift
+$(SRCROOT)/podcasts/Ratings/RatePodcastViewModel.swift
+$(SRCROOT)/podcasts/Ratings/StarRatingView.swift
+$(SRCROOT)/podcasts/ReadOnlyTextView.swift
+$(SRCROOT)/podcasts/Referrals/Banner/ReferralsClaimBannerTableCell.swift
+$(SRCROOT)/podcasts/Referrals/Banner/ReferralsClaimBannerView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralCardAnimatedGradientView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralCardMiniView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralCardView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralClaimPassVC.swift
+$(SRCROOT)/podcasts/Referrals/ReferralSendPassVC.swift
+$(SRCROOT)/podcasts/Referrals/ReferralSendPassView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralsClaimPass.swift
+$(SRCROOT)/podcasts/Referrals/ReferralsCoordinator.swift
+$(SRCROOT)/podcasts/Referrals/ReferralsMessageView.swift
+$(SRCROOT)/podcasts/Referrals/ReferralsOfferInfo.swift
+$(SRCROOT)/podcasts/RegionCancellingScrollView.swift
+$(SRCROOT)/podcasts/ReleaseDateFilterOverlayController.swift
+$(SRCROOT)/podcasts/SJUIUtils.swift
+$(SRCROOT)/podcasts/SceneDelegate.swift
+$(SRCROOT)/podcasts/SearchInfoCell.swift
+$(SRCROOT)/podcasts/SearchLoadingCell.swift
+$(SRCROOT)/podcasts/ServerPodcastManager+Subscription.swift
+$(SRCROOT)/podcasts/ServerSyncManager.swift
+$(SRCROOT)/podcasts/SetSleepTimerIntent.swift
+$(SRCROOT)/podcasts/Settings.swift
+$(SRCROOT)/podcasts/SettingsOptionsViewController.swift
+$(SRCROOT)/podcasts/SettingsViewController.swift
+$(SRCROOT)/podcasts/Share Profile/CameraPicker.swift
+$(SRCROOT)/podcasts/Share Profile/ProfilePhotoMenu.swift
+$(SRCROOT)/podcasts/Share Profile/ShareProfileCardView.swift
+$(SRCROOT)/podcasts/Share Profile/ShareProfileView.swift
+$(SRCROOT)/podcasts/Share Profile/ShareProfileViewModel.swift
+$(SRCROOT)/podcasts/Shared/BookmarkActionFactory.swift
+$(SRCROOT)/podcasts/SharedConstants.swift
+$(SRCROOT)/podcasts/SharedItemImporter.swift
+$(SRCROOT)/podcasts/Sharing/ActivityItemSourceItem.swift
+$(SRCROOT)/podcasts/Sharing/AnimatedShareImageView.swift
+$(SRCROOT)/podcasts/Sharing/AudioWaveformView.swift
+$(SRCROOT)/podcasts/Sharing/Clip/AudioClipExporter.swift
+$(SRCROOT)/podcasts/Sharing/Clip/ClipPlaybackManager.swift
+$(SRCROOT)/podcasts/Sharing/Clip/MediaTrimBar.swift
+$(SRCROOT)/podcasts/Sharing/Clip/MediaTrimView.swift
+$(SRCROOT)/podcasts/Sharing/Clip/PlayButton.swift
+$(SRCROOT)/podcasts/Sharing/Clip/PlayheadView.swift
+$(SRCROOT)/podcasts/Sharing/Clip/ScrollableScrollView.swift
+$(SRCROOT)/podcasts/Sharing/Clip/TrimHandle.swift
+$(SRCROOT)/podcasts/Sharing/Clip/TrimSelectionView.swift
+$(SRCROOT)/podcasts/Sharing/Clip/VideoExporter.swift
+$(SRCROOT)/podcasts/Sharing/PocketCastsLogoPill.swift
+$(SRCROOT)/podcasts/Sharing/ShareButton.swift
+$(SRCROOT)/podcasts/Sharing/ShareDestination.swift
+$(SRCROOT)/podcasts/Sharing/ShareImageView.swift
+$(SRCROOT)/podcasts/Sharing/SharingFooterView.swift
+$(SRCROOT)/podcasts/Sharing/SharingModal.swift
+$(SRCROOT)/podcasts/Sharing/SharingView.swift
+$(SRCROOT)/podcasts/SharingHelper+swipeButton.swift
+$(SRCROOT)/podcasts/SharingHelper.swift
+$(SRCROOT)/podcasts/SharingItemProvider.swift
+$(SRCROOT)/podcasts/ShelfActionsViewController+Table.swift
+$(SRCROOT)/podcasts/ShelfActionsViewController.swift
+$(SRCROOT)/podcasts/ShelfCell.swift
+$(SRCROOT)/podcasts/ShelfLoadState.swift
+$(SRCROOT)/podcasts/ShiftyRoundButton.swift
+$(SRCROOT)/podcasts/ShortcutManager.swift
+$(SRCROOT)/podcasts/ShowNotesFormatter.swift
+$(SRCROOT)/podcasts/ShowNotesFormatterUtils.swift
+$(SRCROOT)/podcasts/ShowNotesPlayerItemViewController.swift
+$(SRCROOT)/podcasts/ShowNotesUpdater.swift
+$(SRCROOT)/podcasts/SignOutHelper.swift
+$(SRCROOT)/podcasts/SimpleActionView.swift
+$(SRCROOT)/podcasts/SimpleNotificationsViewController.swift
+$(SRCROOT)/podcasts/SingleEpisodeViewController.swift
+$(SRCROOT)/podcasts/SinglePodcastViewController.swift
+$(SRCROOT)/podcasts/SiriPodcastItem.swift
+$(SRCROOT)/podcasts/SiriSettingsViewController.swift
+$(SRCROOT)/podcasts/SiriShortcutAddCell.swift
+$(SRCROOT)/podcasts/SiriShortcutDisclosureCell.swift
+$(SRCROOT)/podcasts/SiriShortcutEnabledCell.swift
+$(SRCROOT)/podcasts/SiriShortcutSuggestedCell.swift
+$(SRCROOT)/podcasts/SiriShortcutsManager.swift
+$(SRCROOT)/podcasts/SkipButton.swift
+$(SRCROOT)/podcasts/SleepTimerButton.swift
+$(SRCROOT)/podcasts/SleepTimerIntentDuration.swift
+$(SRCROOT)/podcasts/SleepTimerManager.swift
+$(SRCROOT)/podcasts/SleepTimerViewController.swift
+$(SRCROOT)/podcasts/SmallListCell.swift
+$(SRCROOT)/podcasts/SmallPagedListSummaryViewController.swift
+$(SRCROOT)/podcasts/SmartRuleToggleHeaderView.swift
+$(SRCROOT)/podcasts/SocialsHelper.swift
+$(SRCROOT)/podcasts/Sonos/SonosLinkController.swift
+$(SRCROOT)/podcasts/StarredFilterOverlayController.swift
+$(SRCROOT)/podcasts/StarredViewController+Multiselect.swift
+$(SRCROOT)/podcasts/StarredViewController+Swipe.swift
+$(SRCROOT)/podcasts/StarredViewController+Table.swift
+$(SRCROOT)/podcasts/StarredViewController.swift
+$(SRCROOT)/podcasts/StatsCell.swift
+$(SRCROOT)/podcasts/StatsTopCell.swift
+$(SRCROOT)/podcasts/StatsViewController.swift
+$(SRCROOT)/podcasts/StatusPageView.swift
+$(SRCROOT)/podcasts/StatusPageViewModel.swift
+$(SRCROOT)/podcasts/StorageAndDataUseViewController.swift
+$(SRCROOT)/podcasts/StorageManager.swift
+$(SRCROOT)/podcasts/StreamingCellularTracker.swift
+$(SRCROOT)/podcasts/Strings+L10n.swift
+$(SRCROOT)/podcasts/Styles.swift
+$(SRCROOT)/podcasts/SupportConfig.swift
+$(SRCROOT)/podcasts/SupporterContributionsViewController.swift
+$(SRCROOT)/podcasts/SupporterGratitudeViewController.swift
+$(SRCROOT)/podcasts/SupporterPodcastViewController.swift
+$(SRCROOT)/podcasts/SurveyDebugInfoView.swift
+$(SRCROOT)/podcasts/SwiftUI+Previews.swift
+$(SRCROOT)/podcasts/SwitchCell.swift
+$(SRCROOT)/podcasts/SynchronizedAudioStack.swift
+$(SRCROOT)/podcasts/Syncing/ForgotPasswordViewController.swift
+$(SRCROOT)/podcasts/Syncing/SyncSigninView.swift
+$(SRCROOT)/podcasts/Syncing/SyncSigninViewController.swift
+$(SRCROOT)/podcasts/Theme+AppColors.swift
+$(SRCROOT)/podcasts/Theme+Color.swift
+$(SRCROOT)/podcasts/Theme.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/SecondaryLabel.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableButton.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableCell.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableCollectionCell.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableCollectionView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableImageView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableRoundedButton.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableSelectionView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableSwipeCell.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableTable.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableTextField.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/ThemeableTextView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/Themed but not configurable/ThemeAwareScrollView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/Themed but not configurable/ThemeDividerView.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/Themed but not configurable/ThemeLoadingIndicator.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/Themed but not configurable/ThemeSecondaryButton.swift
+$(SRCROOT)/podcasts/Theme/Themable Views/Themed but not configurable/ThemeSecondaryIcon.swift
+$(SRCROOT)/podcasts/Theme/Theme Specific Components/LenticularFilter.swift
+$(SRCROOT)/podcasts/Theme/Theme Specific Components/LenticularOverlayView.swift
+$(SRCROOT)/podcasts/Theme/Theme Specific Components/LenticularViewController.swift
+$(SRCROOT)/podcasts/ThemeAbstractCell.swift
+$(SRCROOT)/podcasts/ThemeSelectorView.swift
+$(SRCROOT)/podcasts/Themeable+SwiftUI.swift
+$(SRCROOT)/podcasts/ThemeableAccessibilityCollectionView.swift
+$(SRCROOT)/podcasts/ThemeableLabel.swift
+$(SRCROOT)/podcasts/ThemeableSwitch.swift
+$(SRCROOT)/podcasts/ThemeableUIButton.swift
+$(SRCROOT)/podcasts/ThemeableView.swift
+$(SRCROOT)/podcasts/ThemedSwitchToggleStyle.swift
+$(SRCROOT)/podcasts/Third Party Libraries/AEXML.swift
+$(SRCROOT)/podcasts/ThreadSafeDictionary.swift
+$(SRCROOT)/podcasts/TimeSlider.swift
+$(SRCROOT)/podcasts/TimeSliderDelegate.swift
+$(SRCROOT)/podcasts/TimeSliderLayer.swift
+$(SRCROOT)/podcasts/TimeStepperCell.swift
+$(SRCROOT)/podcasts/TintableImageView.swift
+$(SRCROOT)/podcasts/TipView.swift
+$(SRCROOT)/podcasts/TopLevelSettingsCell.swift
+$(SRCROOT)/podcasts/TranscriptContainerViewController.swift
+$(SRCROOT)/podcasts/TranscriptErrorView.swift
+$(SRCROOT)/podcasts/TranscriptExcerptView.swift
+$(SRCROOT)/podcasts/TranscriptFilter.swift
+$(SRCROOT)/podcasts/TranscriptFormat.swift
+$(SRCROOT)/podcasts/TranscriptManager.swift
+$(SRCROOT)/podcasts/TranscriptModel.swift
+$(SRCROOT)/podcasts/TranscriptPlaybackManaging.swift
+$(SRCROOT)/podcasts/TranscriptSearchAccessoryView.swift
+$(SRCROOT)/podcasts/TranscriptShelfButton.swift
+$(SRCROOT)/podcasts/TranscriptViewController.swift
+$(SRCROOT)/podcasts/TranscriptsDataRetriever.swift
+$(SRCROOT)/podcasts/TroubleshootingView.swift
+$(SRCROOT)/podcasts/TroubleshootingViewModel.swift
+$(SRCROOT)/podcasts/UIColor+SwiftUI.swift
+$(SRCROOT)/podcasts/UIFont+FontStyle.swift
+$(SRCROOT)/podcasts/UIScreen+Sizes.swift
+$(SRCROOT)/podcasts/UIViewControllerContentConfiguration.swift
+$(SRCROOT)/podcasts/URLSession+Episode.swift
+$(SRCROOT)/podcasts/UnknownDiscoverItemAlert.swift
+$(SRCROOT)/podcasts/Unlockable/Settings+Unlockable.swift
+$(SRCROOT)/podcasts/Unlockable/Unlockable+Bookmarks.swift
+$(SRCROOT)/podcasts/Unlockable/Unlockable.swift
+$(SRCROOT)/podcasts/Up Next History/UpNextEntryView.swift
+$(SRCROOT)/podcasts/Up Next History/UpNextHistoryModel.swift
+$(SRCROOT)/podcasts/Up Next History/UpNextHistoryView.swift
+$(SRCROOT)/podcasts/Up Next History/UpNextHistoryViewController.swift
+$(SRCROOT)/podcasts/UpNextAnnouncementView.swift
+$(SRCROOT)/podcasts/UpNextNowPlayingCell.swift
+$(SRCROOT)/podcasts/UpNextViewController+MultiSelectActions.swift
+$(SRCROOT)/podcasts/UpNextViewController+Swipe.swift
+$(SRCROOT)/podcasts/UpNextViewController+Table.swift
+$(SRCROOT)/podcasts/UpNextViewController+UserEpisode.swift
+$(SRCROOT)/podcasts/UpNextViewController.swift
+$(SRCROOT)/podcasts/UploadedSettingsViewController.swift
+$(SRCROOT)/podcasts/UploadedStorageHeaderView.swift
+$(SRCROOT)/podcasts/UploadedViewController+Swipe.swift
+$(SRCROOT)/podcasts/UploadedViewController+Table.swift
+$(SRCROOT)/podcasts/UploadedViewController.+MultiSelect.swift
+$(SRCROOT)/podcasts/UploadedViewController.swift
+$(SRCROOT)/podcasts/UrlHelper.swift
+$(SRCROOT)/podcasts/UserEpisode+Formatting.swift
+$(SRCROOT)/podcasts/UserEpisodeActionCell.swift
+$(SRCROOT)/podcasts/UserEpisodeDetailViewController+Table.swift
+$(SRCROOT)/podcasts/UserEpisodeDetailViewController.swift
+$(SRCROOT)/podcasts/UserEpisodeManager.swift
+$(SRCROOT)/podcasts/UserInfo.swift
+$(SRCROOT)/podcasts/UserSatisfactionSurveyManager.swift
+$(SRCROOT)/podcasts/UserSatisfactionSurveyView.swift
+$(SRCROOT)/podcasts/Utilities/AVFileUtil.swift
+$(SRCROOT)/podcasts/Utilities/BadgeHelper.swift
+$(SRCROOT)/podcasts/Utilities/BlurEffectView.swift
+$(SRCROOT)/podcasts/Utilities/CarPlayHelper.swift
+$(SRCROOT)/podcasts/Utilities/ContentUnavailableConfiguration.swift
+$(SRCROOT)/podcasts/Utilities/CustomObserver.swift
+$(SRCROOT)/podcasts/Utilities/DatabaseExport.swift
+$(SRCROOT)/podcasts/Utilities/DebugInfo.swift
+$(SRCROOT)/podcasts/Utilities/EmptyStateCell.swift
+$(SRCROOT)/podcasts/Utilities/HostingConfiguration.swift
+$(SRCROOT)/podcasts/Utilities/LoadingCell.swift
+$(SRCROOT)/podcasts/Utilities/Login/AppleSocialLogin.swift
+$(SRCROOT)/podcasts/Utilities/Login/GoogleSocialLogin.swift
+$(SRCROOT)/podcasts/Utilities/Login/SocialLogin.swift
+$(SRCROOT)/podcasts/Utilities/Login/SocialLoginFactory.swift
+$(SRCROOT)/podcasts/Utilities/ModalMessageViewController.swift
+$(SRCROOT)/podcasts/Utilities/NotificationsHelper.swift
+$(SRCROOT)/podcasts/Utilities/Optional+ThrowOnNil.swift
+$(SRCROOT)/podcasts/Utilities/PCBundleDoc.swift
+$(SRCROOT)/podcasts/Utilities/ProgressiveFadeView.swift
+$(SRCROOT)/podcasts/Utilities/SceneHelper.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ActionBarOverlayView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ActionView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/AsyncImageView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/Confetti.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ContentSizeGeometryReader.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ContentSizeReader.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/DismissKeyboardOnScroll.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/EmptyStateView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/EnclosingTabBarHiddenModifier.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HTMLTextView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HighlightedText.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HolographicEffect.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HorizontalCarousel.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HorizontalCarouselCard.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HorizontalCarouselCardViewContainer.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HorizontalCarouselItemRepresentable.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HorizontalScrollView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/HostControllerResolver.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/MiniPlayerPaddingModifier.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ModalMessage.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/Motion.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/NavigationContainer.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/PageIndicatorView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/PositionModifier.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ProportionalValue.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/SFSafariView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ScrollViewIfNeeded.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/ScrollViewWithContentOffset.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/SearchField.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/SelectCircleButtonStyle.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/SwiftUI+Accessibility.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/UnderlineLinkTextView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/View+Buttonize.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/View+ScaleFactor.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/View+UIView.swift
+$(SRCROOT)/podcasts/Utilities/SwiftUI/View+if.swift
+$(SRCROOT)/podcasts/Utilities/TraceHelper.swift
+$(SRCROOT)/podcasts/Utilities/UIViewController+ContentUnavailableConfiguration.swift
+$(SRCROOT)/podcasts/Utilities/UnsafeTransfer.swift
+$(SRCROOT)/podcasts/Utilities/UnsafeWait.swift
+$(SRCROOT)/podcasts/Utilities/UserDefaults+Helpers.swift
+$(SRCROOT)/podcasts/Utilities/UserDefaults+Tracking.swift
+$(SRCROOT)/podcasts/VideoPlayerView.swift
+$(SRCROOT)/podcasts/VideoViewController+Controls.swift
+$(SRCROOT)/podcasts/VideoViewController+Seek.swift
+$(SRCROOT)/podcasts/VideoViewController.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/AppleTranslationTranslator.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/AsrBackendProtocol.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/AsrBackendSelector.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/CanaryFlashBackend.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/SenseVoiceBackend.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/TranslationStage.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/Vendor/SherpaOnnx.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/VoiceAsrEngine.swift
+$(SRCROOT)/podcasts/VoiceControl/ASR/WhisperCppBackend.swift
+$(SRCROOT)/podcasts/VoiceControl/Analytics/PerformanceMetrics.swift
+$(SRCROOT)/podcasts/VoiceControl/Analytics/PipelineStageTiming.swift
+$(SRCROOT)/podcasts/VoiceControl/Analytics/VoiceAnalytics.swift
+$(SRCROOT)/podcasts/VoiceControl/Audio/CloudAudioPlayer.swift
+$(SRCROOT)/podcasts/VoiceControl/Audio/NativeAudioCapture.swift
+$(SRCROOT)/podcasts/VoiceControl/Audio/NativeVadSegmenter.swift
+$(SRCROOT)/podcasts/VoiceControl/Audio/SignalFilter.swift
+$(SRCROOT)/podcasts/VoiceControl/AudioRoute/AudioSessionInterruptionHandler.swift
+$(SRCROOT)/podcasts/VoiceControl/AudioRoute/IOSAudioRouteMonitor.swift
+$(SRCROOT)/podcasts/VoiceControl/AudioSession/AudioSessionDucker.swift
+$(SRCROOT)/podcasts/VoiceControl/Benchmark/AsrIntentBenchmarkHarness.swift
+$(SRCROOT)/podcasts/VoiceControl/Benchmark/AsrIntentBenchmarkRunner.swift
+$(SRCROOT)/podcasts/VoiceControl/Benchmark/RepresentationBenchmarkDriver.swift
+$(SRCROOT)/podcasts/VoiceControl/Benchmark/UtteranceSetLoader.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudAccountSessionCredentialProvider.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudAuthTokenProvider.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudPrefetchClient.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudPrefetchHook.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudRouteClient.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudRouteEvent.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudTokenProviderRouter.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudTokenProviding.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/CloudTurnEnvelope.swift
+$(SRCROOT)/podcasts/VoiceControl/Cloud/DiscoveryResults.swift
+$(SRCROOT)/podcasts/VoiceControl/Dialog/PendingVoiceDialog.swift
+$(SRCROOT)/podcasts/VoiceControl/Dialog/VoiceDialogManager.swift
+$(SRCROOT)/podcasts/VoiceControl/Executor/VoiceIntentExecutor.swift
+$(SRCROOT)/podcasts/VoiceControl/Feedback/AVSpeechTtsEngine.swift
+$(SRCROOT)/podcasts/VoiceControl/Feedback/AudioFeedbackRenderer.swift
+$(SRCROOT)/podcasts/VoiceControl/Feedback/EarconPlayer.swift
+$(SRCROOT)/podcasts/VoiceControl/Feedback/SpokenTemplateResolver.swift
+$(SRCROOT)/podcasts/VoiceControl/Feedback/TtsEngineProtocol.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/GateCondition.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/GateConditionSources.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/GateState.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/GateStateResult.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/GracePeriodSignal.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/ListeningMode.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/MicExposure.swift
+$(SRCROOT)/podcasts/VoiceControl/Gate/VoiceControlGate.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/IntentRoutingInput.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmCallPrefill.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmInference.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmIntentRouter.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmPrompt.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmToolCallParser.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/LfmcClassifier.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/RouteFailureEscalationPolicy.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/RouteInputEligibility.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/RouterStageDiagnostic.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/RoutingInputRenderer.swift
+$(SRCROOT)/podcasts/VoiceControl/IntentRouter/SlotRepair.swift
+$(SRCROOT)/podcasts/VoiceControl/Mapper/ToolCall.swift
+$(SRCROOT)/podcasts/VoiceControl/Mapper/ToolCallMapper.swift
+$(SRCROOT)/podcasts/VoiceControl/Model/EarconId.swift
+$(SRCROOT)/podcasts/VoiceControl/Model/ToolSchema.swift
+$(SRCROOT)/podcasts/VoiceControl/Model/VoiceIntent.swift
+$(SRCROOT)/podcasts/VoiceControl/Model/VoiceResponse.swift
+$(SRCROOT)/podcasts/VoiceControl/ModelManager/ModelDownloader.swift
+$(SRCROOT)/podcasts/VoiceControl/ModelManager/ModelManager.swift
+$(SRCROOT)/podcasts/VoiceControl/ModelManager/ModelVerifier.swift
+$(SRCROOT)/podcasts/VoiceControl/Settings/VoiceControlSettingsView.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/BookmarkSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/ChapterSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/CloudRouteSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/EffectsManagerSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/PlaybackManagerSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/PlaybackQuerySink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/QueueSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/SleepTimerSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/StatsQuerySink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceBookmarkSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceChapterSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceCloudRouteSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceEffectsSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoicePlaybackQuerySink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoicePlaybackSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceQueueSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceSleepSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceStatsQuerySink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VoiceVolumeSink.swift
+$(SRCROOT)/podcasts/VoiceControl/Sinks/VolumeManagerSink.swift
+$(SRCROOT)/podcasts/VoiceControl/VoiceControlAssembly.swift
+$(SRCROOT)/podcasts/VoiceControl/VoiceControlService.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeGate.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeTranscriptTrimmer.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeWordDetector.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeWordDetectorProtocol.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeWordPhraseSet.swift
+$(SRCROOT)/podcasts/VoiceControl/WakeWord/WakeWordThresholdLoader.swift
+$(SRCROOT)/podcasts/Watch Communication/WatchManager+Send.swift
+$(SRCROOT)/podcasts/Watch Communication/WatchManager.swift
+$(SRCROOT)/podcasts/WatchConstants.swift
+$(SRCROOT)/podcasts/WatchNowPlayingHelper.swift
+$(SRCROOT)/podcasts/WatchSettingsViewController.swift
+$(SRCROOT)/podcasts/Whats New/Announcements.swift
+$(SRCROOT)/podcasts/Whats New/AutoplayWhatsNewHeader.swift
+$(SRCROOT)/podcasts/Whats New/BookmarksAnnouncement.swift
+$(SRCROOT)/podcasts/Whats New/ClipsWhatsNewView.swift
+$(SRCROOT)/podcasts/Whats New/DeselectChaptersAnnouncementViewModel.swift
+$(SRCROOT)/podcasts/Whats New/Feed/WhatsNewFeedView.swift
+$(SRCROOT)/podcasts/Whats New/Feed/WhatsNewFeedViewController.swift
+$(SRCROOT)/podcasts/Whats New/Feed/WhatsNewFeedViewModel.swift
+$(SRCROOT)/podcasts/Whats New/Feed/WhatsNewManager+Feed.swift
+$(SRCROOT)/podcasts/Whats New/GiveRatingsWhatsNewHeader.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewActionEvent.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewImageView.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewMessageView.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewMessageViewController.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewMessageViewModel.swift
+$(SRCROOT)/podcasts/Whats New/Message/WhatsNewPollView.swift
+$(SRCROOT)/podcasts/Whats New/SlumberViews.swift
+$(SRCROOT)/podcasts/Whats New/TranscriptAnnouncementViewModel.swift
+$(SRCROOT)/podcasts/Whats New/WhatsNew.swift
+$(SRCROOT)/podcasts/Whats New/WhatsNewFullView.swift
+$(SRCROOT)/podcasts/Whats New/WhatsNewMessageType+Feed.swift
+$(SRCROOT)/podcasts/Whats New/WhatsNewView.swift
+$(SRCROOT)/podcasts/WhatsNewDetailViewController.swift
+$(SRCROOT)/podcasts/WhatsNewHelper.swift
+$(SRCROOT)/podcasts/WhatsNewLinkButton.swift
+$(SRCROOT)/podcasts/WhatsNewPageView.swift
+$(SRCROOT)/podcasts/WhatsNewStructs.swift
+$(SRCROOT)/podcasts/WhatsNewThemeableImageView.swift
+$(SRCROOT)/podcasts/WhatsNewViewController.swift
+$(SRCROOT)/podcasts/WidgetHelper.swift
+$(SRCROOT)/podcasts/WidgetPlayEpisodeIntentExtension.swift
+$(SRCROOT)/podcasts/Zendesk/ActivityDialog.swift
+$(SRCROOT)/podcasts/Zendesk/FileLog+FileUpload.swift
+$(SRCROOT)/podcasts/Zendesk/MessageSupportView.swift
+$(SRCROOT)/podcasts/Zendesk/MessageSupportViewModel.swift
+$(SRCROOT)/podcasts/Zendesk/SupportLogsView.swift
+$(SRCROOT)/podcasts/Zendesk/SupportLogsViewModel.swift
+$(SRCROOT)/podcasts/Zendesk/ZenDeskHelpers.swift
+$(SRCROOT)/podcasts/Zendesk/ZendeskSupportService.swift
+$(SRCROOT)/podcasts/main.swift
