@@ -35,8 +35,6 @@ class VoiceControlService: ObservableObject {
     private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
 
     private var cancellables = Set<AnyCancellable>()
-    private var consecutiveNulls = 0
-    private let maxConsecutiveNulls = 3
     /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
     /// race the task-chain pointer. Bumped on `stop()` so earlier chained tasks
     /// (which cancellation does not reach through `await previous?.value`) bail
@@ -301,7 +299,6 @@ class VoiceControlService: ObservableObject {
 
         switch result {
         case .intent(let rawIntent):
-            consecutiveNulls = 0
             // Stamp a model-chosen cloud route with the window it runs under, so
             // its completion can be judged against that window rather than against
             // whatever is current when the network call returns.
@@ -345,7 +342,6 @@ class VoiceControlService: ObservableObject {
             audioRenderer.render(response)
 
         case .dialogControl(let action):
-            consecutiveNulls = 0
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
             let dialogResult = dialogManager.handle(action)
 
@@ -402,13 +398,11 @@ class VoiceControlService: ObservableObject {
                 if gracePeriodSignal.claimRefusalTone() {
                     audioRenderer.playEarcon(.error)
                 }
-                consecutiveNulls = 0
                 return
             }
             if let dispatchGeneration {
                 let reasonText = reason ?? "?"
                 FileLog.shared.addMessage("[VoicePipeline] cloud escalation ← '\(transcript)' (reason=\(reasonText))")
-                consecutiveNulls = 0
                 // No error earcon here: the user is getting an answer. A dispatch
                 // that itself fails carries its own earcon from the sink.
                 // Marked as a fallback so the executor extends the window without
@@ -425,26 +419,17 @@ class VoiceControlService: ObservableObject {
                 return
             }
 
-            consecutiveNulls += 1
-            let reasonText = reason ?? "?"
             FileLog.shared.addMessage(
-                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reasonText) (\(consecutiveNulls)/\(maxConsecutiveNulls))"
+                "[VoicePipeline] intent none ← '\(transcript)' stage=\(stage) reason=\(reason ?? "?")"
             )
-            // Local cases speak rather than stay silent. A `blank_transcript`
-            // already played the wake-only tone upstream, so this covers the
-            // capability failures. A refused escalation budget speaks above, on
-            // the first refusal; what reaches the debounce here is the
-            // non-escalating `blank_transcript` case, which is exactly what the
-            // debounce exists for.
-            if escalation == .stayLocal,
-               reason != RouterStageDiagnostic.reasonBlankTranscript {
-                audioRenderer.playEarcon(.error)
-                consecutiveNulls = 0
-            } else if consecutiveNulls >= maxConsecutiveNulls {
-                FileLog.shared.addMessage("[VoicePipeline] too many unclassified — error earcon")
-                audioRenderer.playEarcon(.error)
-                consecutiveNulls = 0
-            }
+            // Every turn reaching here is `.stayLocal`: escalation was refused
+            // and already handled above (tone on the window's first refusal),
+            // and a blank transcript never survives classification
+            // (`RouteInputEligibilityPolicy` returns on the same emptiness
+            // test). What is left are the capability failures — reasons where
+            // the router could not do its job — and each speaks: the user asked
+            // a real question and got nothing.
+            audioRenderer.playEarcon(.error)
         }
     }
 

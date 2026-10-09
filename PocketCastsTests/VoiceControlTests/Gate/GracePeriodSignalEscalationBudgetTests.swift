@@ -147,4 +147,23 @@ final class GracePeriodSignalEscalationBudgetTests: XCTestCase {
             "the allowance from that refusal is still spent, so a later refusal in the same window is not new information"
         )
     }
+
+    /// A recognised command restores the escalation allowance, so the *next*
+    /// refusal is new information again and must speak — even in the same
+    /// generation. (Review round: Q1 escalates, Q2 is refused and beeps, a
+    /// command restores the allowance, Q4 is refused; that Q4 is a fresh spent
+    /// allowance, not a repeat of Q2, so it beeps too.)
+    func testARecognisedCommandRearmsTheRefusalTone() async {
+        let signal = GracePeriodSignal(timeout: 30)
+        await MainActor.run { signal.onWakeWordDetected() }
+
+        guard signal.claimEscalationBudget() != nil else { return XCTFail("Q1 escalates") }
+        XCTAssertTrue(signal.claimRefusalTone(), "Q2's refusal speaks")
+        XCTAssertFalse(signal.claimRefusalTone(), "Q2 again would not — same spent allowance")
+
+        await MainActor.run { signal.onCommandRecognized() }
+
+        guard signal.claimEscalationBudget() != nil else { return XCTFail("the command restored the allowance") }
+        XCTAssertTrue(signal.claimRefusalTone(), "Q4's refusal is a fresh spent allowance, so it speaks")
+    }
 }
