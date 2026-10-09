@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-final class CloudRouteSinkTests: XCTestCase {
+final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
     private var contextState: CloudPlaybackContextState!
@@ -339,7 +339,7 @@ final class CloudRouteSinkTests: XCTestCase {
 
         _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext())
 
-        let body = try XCTUnwrap(lastStubSocket?.sentAuthFrame)
+        let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         let requestId = try XCTUnwrap(body["request_id"] as? String)
         XCTAssertNotNil(UUID(uuidString: requestId), "request_id must be a client-assigned UUID")
         XCTAssertNil(body["capabilities"], "no renderer yet: capabilities must be omitted so the server uses token+done")
@@ -359,7 +359,7 @@ final class CloudRouteSinkTests: XCTestCase {
             arguments: ["query": .string("climate")]
         )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext())
 
-        let body = try XCTUnwrap(lastStubSocket?.sentAuthFrame)
+        let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         XCTAssertEqual(body["capabilities"] as? [String], ["search_results_v1"])
         let hint = try XCTUnwrap(body["route_hint"] as? [String: Any])
         XCTAssertEqual(hint["operation"] as? String, "search_spoken_content")
@@ -374,10 +374,12 @@ final class CloudRouteSinkTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient.stubbed(
+                let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl,
                     fixture: self.nextFixture()
-                ).client
+                )
+                self.capturedTask = built.task
+                return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -478,7 +480,7 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
-final class CloudRouteSupersedeTests: XCTestCase {
+final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
     private var analytics: RecordingAnalytics!
@@ -599,10 +601,12 @@ final class CloudRouteSupersedeTests: XCTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient.stubbed(
+                let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl,
                     fixture: self.nextFixture()
-                ).client
+                )
+                self.capturedTask = built.task
+                return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
@@ -628,7 +632,7 @@ final class CloudRouteSupersedeTests: XCTestCase {
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
 /// empty message maps to a localized template when one exists, and to the error
 /// earcon when it doesn't — both branches exercised, so neither is inert.
-final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
+final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -677,7 +681,11 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
         let session = URLSession(configuration: config)
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture()).client },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -694,7 +702,7 @@ final class CloudRouteSinkErrorLocalizationTests: XCTestCase {
 /// Spec ruling (2026-09-24): a client-authored message is spoken **only** in the
 /// user's own locale; an untranslated key falls back to the error earcon rather
 /// than to base-language English.
-final class CloudRouteSinkLocaleRuleTests: XCTestCase {
+final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -718,7 +726,11 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
-            clientFactory: { CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture()).client },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),
@@ -774,7 +786,7 @@ final class CloudRouteSinkLocaleRuleTests: XCTestCase {
 /// A whitespace-only server message is treated as absent (PR #19 review): it must
 /// not be spoken as silence, and it follows the same localized-template/earcon
 /// route as a missing message.
-final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
+final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
     private var defaults: UserDefaults!
@@ -804,7 +816,11 @@ final class CloudRouteSinkWhitespaceMessageTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let cloudConfig = CloudConfig(defaults: defaults)
         let sink = CloudRouteSink(
-            clientFactory: { CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture()).client },
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: RecordingFingerprintMapper(),

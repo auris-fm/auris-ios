@@ -41,14 +41,6 @@ final class CloudTurnContractTests: XCTestCase {
     /// never be auto-retried at all — there is no client retry loop.)
     func testDuplicateTransportAttemptsReuseTheSameRequestId() async throws {
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        var capturedIds: [String] = []
-        CloudRouteTestURLProtocol.onRequest = { _, body in
-            guard let body,
-                  let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-                  let requestId = object["request_id"] as? String
-            else { return }
-            capturedIds.append(requestId)
-        }
         self.pendingFixture =
             """
             event: done
@@ -56,19 +48,31 @@ final class CloudTurnContractTests: XCTestCase {
 
             """
 
-        let client = makeClient()
-        for _ in 0..<2 {
-            for await _ in client.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
-        }
+        // One client per attempt: each carries the envelope it was given, so the
+        // id on the wire is readable per attempt.
+        let firstAttempt = makeClient()
+        for await _ in firstAttempt.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
+        let sameTask = capturedTasks.removeLast()
 
-        XCTAssertEqual(capturedIds.count, 2, "both transport attempts reached the server")
-        XCTAssertEqual(Set(capturedIds), [turn.requestId], "duplicate attempts carry one request_id (one admitted turn)")
-
-        // A genuinely new logical turn gets its own id.
-        capturedIds.removeAll()
+        // The same *envelope* re-driven and a fresh envelope: the id belongs to
+        // the logical turn, not to the attempt.
+        capturedTasks.removeAll()
+        let retry = makeClient()
+        for await _ in retry.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
         let secondTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        for await _ in client.route(request: "next turn", context: sampleContext(), turn: secondTurn) {}
-        XCTAssertEqual(capturedIds, [secondTurn.requestId])
+        let fresh = makeClient()
+        for await _ in fresh.route(request: "next turn", context: sampleContext(), turn: secondTurn) {}
+
+        // The first attempt, the retry of the same envelope, then a fresh turn.
+        XCTAssertEqual(
+            sameTask.sentAuthFrame?["request_id"] as? String,
+            turn.requestId,
+            "the attempt carries the envelope's own id"
+        )
+        let retriedId = capturedTasks[0].sentAuthFrame?["request_id"] as? String
+        XCTAssertEqual(retriedId, turn.requestId, "a re-driven envelope reuses its id (one admitted turn)")
+        let freshId = capturedTasks[1].sentAuthFrame?["request_id"] as? String
+        XCTAssertEqual(freshId, secondTurn.requestId, "a genuinely new turn gets its own id")
         XCTAssertNotEqual(secondTurn.requestId, turn.requestId)
     }
 
@@ -218,7 +222,13 @@ final class CloudTurnContractTests: XCTestCase {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    /// One entry per client built, so a case can assert the id the client *sent*
+    /// on each attempt (the auth frame carries `request_id`).
+    private var capturedTasks: [StubWebSocketTask] = []
+
     private func makeClient() -> CloudRouteClient {
-        CloudRouteClient.stubbed(fixture: nextFixture()).client
+        let built = CloudRouteClient.stubbed(fixture: nextFixture())
+        capturedTasks.append(built.task)
+        return built.client
     }
 }

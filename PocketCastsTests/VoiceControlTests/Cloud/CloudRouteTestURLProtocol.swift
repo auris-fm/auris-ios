@@ -178,6 +178,13 @@ struct StubTokenProvider: CloudTokenProviding {
     func handleUnauthorized(rejectedToken: String?) async {}
 }
 
+/// A test case whose sut builds its client through `CloudRouteClient.stubbed`,
+/// so the case can assert on the frames the client *sent*. Held per instance
+/// rather than in a process-wide global, which would leak between tests.
+class SocketCapturingTestCase: XCTestCase {
+    var capturedTask: StubWebSocketTask?
+}
+
 // MARK: - Per-case fixture handoff
 
 /// Lets a case keep its `event:`/`data:` fixture literal while the transport it
@@ -205,11 +212,6 @@ private nonisolated(unsafe) var pendingFixtureKey: UInt8 = 0
 
 // MARK: - WebSocket test client
 
-/// The most recently built stub socket, so a case can assert on the frames the
-/// client *sent* (the auth frame carries `request_id`/`capabilities`/`route_hint`)
-/// the way it used to read the HTTP request body.
-nonisolated(unsafe) var lastStubSocket: StubWebSocketTask?
-
 extension CloudRouteClient {
     /// A client whose transport is a stub socket carrying `fixture`.
     ///
@@ -222,7 +224,6 @@ extension CloudRouteClient {
         fixture: String
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
-        lastStubSocket = task
         let client = CloudRouteClient(
             baseURL: baseURL,
             userId: userId,
