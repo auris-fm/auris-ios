@@ -1,62 +1,90 @@
 import XCTest
 @testable import podcasts
 
-/// The trimmer keeps the transcript, matching Android.
+/// The spec's wake-positive time-band trim, clause by clause.
+///
+/// recognition-pipeline.md, "Wake-positive time band trim": timed tokens present ⇒
+/// drop tokens overlapping the completion band; tokens absent ⇒ leave the
+/// transcript unchanged (the router is the backstop); `NotDetected` ⇒ never apply
+/// the band. The pipeline never strips by spelling.
 final class WakeTranscriptTrimmerTests: XCTestCase {
     private func trim(
         _ text: String,
         wakePositive: Bool = true,
         tokens: [AsrToken]? = nil,
-        completionSample: Int = 4000
+        completionSample: Int = 4000,      // 250 ms
+        utteranceDurationMs: Int = 2000
     ) -> String {
         WakeTranscriptTrimmer.commandText(
             result: AsrResult(text: text, detectedLanguage: "en", tokens: tokens),
             wakePositive: wakePositive,
             completionSample: completionSample,
             sampleRateHz: 16000,
-            utteranceDurationMs: 2000
+            utteranceDurationMs: utteranceDurationMs
         )
     }
 
-    /// The property the sync is defined by: **no input loses text.**
-    ///
-    /// This is what makes "in sync with Android" checkable by reading one file —
-    /// Android never strips the wake (`UtteranceFilter.kt` decides whether to
-    /// process an utterance, not what the text says), so iOS must not either.
-    func test_noInputIsDiscarded() {
-        let wakeOnly = "Oace."
-        let wakeThenCommand = "oris skip forward thirty seconds"
-        let commandOnly = "skip forward"
-        let phonetic = "hey aris, what did they say"
+    // MARK: - tokens absent ⇒ unchanged
 
-        for text in [wakeOnly, wakeThenCommand, commandOnly, phonetic] {
-            XCTAssertEqual(
-                trim(text), text,
-                "'\(text)' must survive the trimmer — a client that discards text diverges from Android"
-            )
-        }
-    }
-
-    /// A bare wake keeps its text. It is bounded by the grace window's single
-    /// dispatch, not by the trimmer guessing where the wake ended.
-    func test_bareWakeKeepsItsText() {
+    /// The shipped case: SenseVoice omits tokens, so the transcript is untouched.
+    func test_noTokens_leavesTheTranscriptUnchanged() {
         XCTAssertEqual(trim("Oace."), "Oace.")
+        XCTAssertEqual(trim("oris skip forward thirty seconds"), "oris skip forward thirty seconds")
     }
 
-    /// The former timed-token branch was the only code that could delete text.
-    /// Supplying timings that would have fallen inside the old band must change
-    /// nothing: the tokens are not consulted at all.
-    func test_timingsDoNotTrimAnything() {
-        let inBand = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+    /// No spelling is guessed at: a phonetic wake is not stripped, because the
+    /// spec says the router is the backstop for an unstripped rendering.
+    func test_noTokens_doesNotStripAPhoneticWake() {
+        XCTAssertEqual(trim("hey aris, what did they say"), "hey aris, what did they say")
+    }
+
+    // MARK: - tokens present ⇒ band trim
+
+    func test_tokensInsideTheBand_areDropped() {
+        let tokens = [
+            AsrToken(text: "Oace", startMs: 20, endMs: 240),     // band ends at 370 ms
+            AsrToken(text: " skip forward", startMs: 520, endMs: 900),
+        ]
+        XCTAssertEqual(trim("Oace skip forward", tokens: tokens), "skip forward")
+    }
+
+    /// Every token inside the band leaves nothing, and the engine treats that as
+    /// wake-only — the spec's own consequence of the permitted trim.
+    func test_allTokensInsideTheBand_leaveNoText() {
+        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+        XCTAssertEqual(trim("Oace", tokens: tokens), "")
+    }
+
+    /// A token straddling the band edge is dropped, matching the spec's
+    /// `startMs < bandEndMs && endMs > 0`.
+    func test_tokenStraddlingTheBandEnd_isDropped() {
+        let tokens = [AsrToken(text: "Oace", startMs: 100, endMs: 500)]
+        XCTAssertEqual(trim("Oace", tokens: tokens, utteranceDurationMs: 800), "")
+    }
+
+    /// The band is clamped to the utterance, so a completion past the capture
+    /// cannot consume a token that exists.
+    func test_bandIsClampedToTheUtterance() {
+        let tokens = [AsrToken(text: "wake skip", startMs: 10, endMs: 600)]
         XCTAssertEqual(
-            trim("Oace skip", tokens: inBand), "Oace skip",
-            "timings inside the old band must not delete text either"
+            trim("wake skip", tokens: tokens, completionSample: 16000 * 5, utteranceDurationMs: 600),
+            ""
         )
     }
 
-    /// Whitespace is normalised, which is the one transformation left. It is not
-    /// a discard, and Android's router sees the same text shape.
-    func test_whitespaceIsNormalised() {
-        XCTAssertEqual(trim("  skip forward  "), "skip forward")
+    // MARK: - NotDetected
+
+    func test_notDetected_neverAppliesTheBand_evenWithTokens() {
+        let tokens = [AsrToken(text: "Oace", startMs: 20, endMs: 240)]
+        XCTAssertEqual(trim("Oace", wakePositive: false, tokens: tokens), "Oace")
+    }
+
+    // MARK: - the property the merge bar rests on
+
+    /// Whatever the input, the trimmer never invents or explains away text: an
+    /// empty result arises only from the permitted trim of timed tokens.
+    func test_onlyThePermittedTrimCanProduceEmpty() {
+        XCTAssertEqual(trim("something"), "something", "no tokens ⇒ never empty")
+        XCTAssertEqual(trim("something", wakePositive: false), "something", "not detected ⇒ never empty")
     }
 }
