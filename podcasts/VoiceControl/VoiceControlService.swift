@@ -27,6 +27,10 @@ class VoiceControlService: ObservableObject {
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
+
+    /// The grace signal this service drives, so a test can observe a route change's effect
+    /// through the service rather than through the assembly that built it.
+    var gracePeriodSignalForTesting: GracePeriodSignal { gracePeriodSignal }
     private let analytics: VoiceAnalytics
 
     private var latestStageTiming: PipelineStageTiming?
