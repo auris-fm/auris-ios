@@ -23,6 +23,13 @@
 
 name: Guard workflow structure
 
+# **The trigger set is wider than the review workflow's and the asymmetry is deliberate.**
+# The review workflow was narrowed to `ready_for_review` because running a model on every push
+# is the cost this change set exists to remove. A guard must fire whenever the file it guards
+# could have changed, so it keeps `synchronize` and `reopened` — a push that breaks the
+# workflow's structure must fail here rather than wait for a review that will not be requested.
+# Reading the narrower trigger set next door and treating this one as a regression is the
+# mistake this comment exists to prevent.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
