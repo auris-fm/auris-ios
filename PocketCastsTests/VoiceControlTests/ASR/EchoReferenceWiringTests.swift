@@ -1254,6 +1254,62 @@ final class EchoReferenceWiringTests: XCTestCase {
             "stale filter state survived route invalidation and kept dropping audio"
         )
     }
+
+    // MARK: - Lock contention on the handoff
+
+    /// Concurrent producers must not lose a block.
+    ///
+    /// The handoff is where the audio thread, the capture path and the renderer meet, and
+    /// every mutation of `pending`/`droppedBlocks` happens under its lock. That is a claim
+    /// about behaviour under contention, and no other case in this suite could fail if the
+    /// lock were wrong: they drive one producer at a time, so a missing or mis-scoped lock
+    /// leaves every one of them green.
+    ///
+    /// Frame COUNT is deliberately not asserted. Resampling 24 kHz into the 16 kHz
+    /// pipeline turns each 4-frame block into a partial one, so a per-block frame count is
+    /// a resampler property and says nothing about the lock. The claim here is conservation
+    /// instead: with capacity above the number of blocks submitted, no marker may be absent
+    /// from the reference. A lost append shows as a missing marker, and that is the
+    /// corruption the lock exists to prevent.
+    func test_concurrentSubmissions_conserveEveryBlock() {
+        let producers = 8
+        let perProducer = 64
+        let total = producers * perProducer
+
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: total * 2)
+
+        let group = DispatchGroup()
+        let start = DispatchSemaphore(value: 0)
+        for producer in 0..<producers {
+            DispatchQueue.global().async(group: group) {
+                start.wait()
+                for index in 0..<perProducer {
+                    let marker = Float(producer * perProducer + index)
+                    handoff.submit(Array(repeating: marker, count: 4), sampleRate: 24_000)
+                }
+            }
+        }
+
+        start.signal()
+        for _ in 0..<(producers - 1) { start.signal() }
+        XCTAssertEqual(group.wait(timeout: .now() + 30), .success, "producers did not finish")
+
+        handoff.drain()
+
+        XCTAssertEqual(handoff.droppedBlockCount, 0,
+                       "capacity was not exceeded, so nothing may be dropped")
+
+        let delivered = reference.snapshot()
+        let present = Set(delivered)
+        for producer in 0..<producers {
+            for index in 0..<perProducer {
+                let marker = Float(producer * perProducer + index)
+                XCTAssertTrue(present.contains(marker),
+                              "a submitted block never reached the reference (marker \(marker))")
+            }
+        }
+    }
 }
 
 // MARK: - Harness
