@@ -112,13 +112,18 @@ class SignalFilter {
         // statement about lengths rather than about match.
         //
         // **Limits, stated rather than assumed absent.** This is a correlation over a
-        // sliding window, so it inherits the usual caveats: a periodic or self-similar
-        // segment has several equally good alignments and any of them may win, which is
-        // harmless here because each such alignment is genuinely the same audio. I probed
-        // for a region where the true lag still loses after normalisation — very short
-        // echo spans, tails comparable in length to the echo, loud tails up to 60x — and
-        // did not find one; that is "not found", not "proved absent". The search was over
-        // synthetic signals, so real audio may expose a region these did not.
+        // sliding window, so it inherits the usual caveats.
+        //
+        // A periodic or self-similar segment has several equally good alignments and any of
+        // them may win; that is harmless here because each such alignment is genuinely the
+        // same audio.
+        //
+        // One region is **known** and survives this normalisation: an anti-correlated span
+        // scores at the negative end of the normalised range rather than the positive end,
+        // so it is not rejected. That is the intended outcome rather than a gap — a span
+        // that is our output *inverted* is not our emitted audio, so declining to reject it
+        // is correct. It is recorded because the negative side of the range is reachable,
+        // and a future rule that judged on magnitude alone would treat it as a match.
         let pbRms = rms(playback)
         guard pbRms > 0 else { return false }
 
