@@ -1464,6 +1464,70 @@ final class EchoReferenceWiringTests: XCTestCase {
             "an absolute anchor also failed, so this case does not discriminate on origin"
         )
     }
+
+    /// A block's anchor must be its own range plus what the producer actually rendered.
+    ///
+    /// Two things this pins that the arithmetic cases cannot, because they drive one
+    /// producer at a time and supply the anchor themselves:
+    ///
+    ///   * a producer whose blocks are separated by ANOTHER producer's appends occupies no
+    ///     contiguous reference range, so its anchor must follow the append points rather
+    ///     than a fixed origin. Here the earcon appends between every cloud block, and a
+    ///     per-producer offset would drift by the interleaved amount each round.
+    ///   * the anchor must reflect the producer's RENDERED position, not the block's length
+    ///     and not the append tail. A producer that has rendered less than it has queued
+    ///     must place its audio earlier than the stream's submitted end.
+    func test_interleavedProducersPlaceEachAnchorInItsOwnReferenceRange() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 64)
+
+        // Cloud renders 1 000 frames per round and reports the position it has reached in
+        // its OWN count. Earcon appends between rounds, so the cloud's blocks are not
+        // adjacent in the reference.
+        let perRound = 1_000
+        let rounds = 6
+        for round in 0..<rounds {
+            handoff.submit(
+                [Float](repeating: 0.2, count: perRound),
+                sampleRate: PlaybackEchoReference.pipelineSampleRate,
+                renderedAt: MonotonicTime(round),
+                renderedFramesInProducer: Double((round + 1) * perRound)
+            )
+            handoff.drain()
+
+            // Another producer's audio lands between this producer's blocks.
+            handoff.submit(
+                [Float](repeating: 0.1, count: 300),
+                sampleRate: PlaybackEchoReference.pipelineSampleRate,
+                renderedAt: MonotonicTime(round)
+            )
+            handoff.drain()
+        }
+
+        // The cloud's last block ends at the position it reported, expressed in the
+        // reference: 6 rounds of its own 1 000 frames, plus 5 interleaved 300-frame earcon
+        // blocks that precede it. The sixth earcon follows, so it is not added.
+        let cloudFrames = rounds * perRound
+        let earconBefore = (rounds - 1) * 300
+        let expected = cloudFrames + earconBefore
+
+        let offset = reference.audibleEndOffsetInRetainedWindow()
+        let appended = rounds * (perRound + 300)
+        XCTAssertNotNil(offset, "the anchor could not be placed at all")
+
+        // The offset is measured from the start of the retained window, which here is the
+        // start of the stream: nothing has been trimmed at this size.
+        XCTAssertEqual(
+            offset, expected,
+            """
+            the anchor is at \(String(describing: offset)) rather than \(expected). \
+            The cloud's position was mapped into the wrong reference range — an interleaved \
+            producer's appends sit between its blocks, so a per-producer offset drifts by \
+            the interleaved amount, and the append tail (\(appended)) would place it past \
+            audio it has not rendered.
+            """
+        )
+    }
 }
 
 // MARK: - Harness

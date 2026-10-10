@@ -48,6 +48,14 @@ final class EchoReferenceHandoff {
         /// segment against the consumer's arrival time would place it later than the audio
         /// was audible.
         let renderedAt: MonotonicTime?
+        /// How far the producer's node had rendered, in ITS OWN frames, when it produced
+        /// this block.
+        ///
+        /// This is the producer's own clock, and it is deliberately not a position in the
+        /// reference: a node restarts between turns and counts from zero again, and two
+        /// producers count independently. It is meaningful only against the reference range
+        /// this block lands in, which is why the handoff records both rather than either.
+        let renderedFramesInProducer: Double?
     }
 
     private let reference: PlaybackEchoReference
@@ -90,7 +98,12 @@ final class EchoReferenceHandoff {
     /// while the reference is updated.
     ///
     /// - Parameter renderedAt: the instant the producer rendered this audio.
-    func submit(_ samples: [Float], sampleRate: Double, renderedAt: MonotonicTime? = nil) {
+    func submit(
+        _ samples: [Float],
+        sampleRate: Double,
+        renderedAt: MonotonicTime? = nil,
+        renderedFramesInProducer: Double? = nil
+    ) {
         guard !samples.isEmpty else { return }
 
         lock.lock()
@@ -102,7 +115,14 @@ final class EchoReferenceHandoff {
             logDropOnce()
             return
         }
-        pending.append(Block(samples: samples, sampleRate: sampleRate, renderedAt: renderedAt))
+        pending.append(
+            Block(
+                samples: samples,
+                sampleRate: sampleRate,
+                renderedAt: renderedAt,
+                renderedFramesInProducer: renderedFramesInProducer
+            )
+        )
         lock.unlock()
 
         queue.async { [weak self] in
@@ -188,13 +208,36 @@ final class EchoReferenceHandoff {
             block.samples,
             sourceRate: block.sampleRate
         )
+        // Where this block will land in the reference, read before the append moves the
+        // stream on. This is the producer's own range within the shared timeline, and it is
+        // the only correct origin for a position inside the block: an interleaved producer's
+        // appends sit between this producer's blocks, so no single per-producer offset maps
+        // them and the append tail would be another producer's audio.
+        let rangeStart = reference.streamIndex
+
         reference.append(resampled)
-        // The producer's render instant is carried through, so the reference is placed on
-        // the timeline the audio was actually emitted on rather than the consumer's.
+
+        // The anchor is the block's reference range plus how far the producer had actually
+        // rendered within it. Two things are deliberately not used here:
+        //
+        //   * the block's own length, which is a duration rather than a position and was the
+        //     original defect — as an offset it falls below a sliding window and the filter
+        //     then declines every segment;
+        //   * the append tail, which is the newest SUBMITTED sample and runs ahead of what
+        //     has been heard by however much audio is still queued in the output node.
+        //
+        // When the producer reports no position, the block's start is recorded rather than
+        // its end: the start is a fact about where the audio is, while the end would claim
+        // progress the producer has not reported.
+        let played = block.renderedFramesInProducer.map {
+            Int($0 / block.sampleRate * PlaybackEchoReference.pipelineSampleRate)
+        } ?? 0
+        let anchoredEnd = rangeStart + min(max(played, 0), resampled.count)
+
         reference.recordRenderPosition(
             block.renderedAt.map {
                 PlaybackRenderAnchor(
-                    renderedFrames: Double(resampled.count),
+                    renderedFrames: Double(anchoredEnd),
                     sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
                     hostTime: $0
                 )
