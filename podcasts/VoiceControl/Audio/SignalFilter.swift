@@ -80,7 +80,15 @@ class SignalFilter {
     }
 
     /// Returns true if the mic signal is likely playback bleed.
-    /// Only applied on the built-in speaker route (Exposed, mic-to-playback alignment reliable).
+    ///
+    /// Compares arbitrary lengths, and takes both energies over the winning lag's paired
+    /// samples so the score describes the match rather than the lengths. **That pairing is
+    /// currently latent: the only production caller passes an equal-length window, where
+    /// the correlation has one entry, `lag` is always zero and `paired` is the whole
+    /// segment.** It is kept because taking the energies over the same support is correct
+    /// for any caller, and a future caller comparing unequal spans would otherwise get an
+    /// energy over audio the numerator did not examine. The aligned path does not depend on
+    /// it. Only applied on the built-in speaker route (mic-to-playback alignment reliable).
     func isPlaybackBleed(mic: [Float], playback: [Float]) -> Bool {
         guard mic.count >= playback.count else { return false }
         var correlation = [Float](repeating: 0, count: mic.count - playback.count + 1)
