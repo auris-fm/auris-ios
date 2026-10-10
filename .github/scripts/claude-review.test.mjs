@@ -214,9 +214,12 @@ test('a commented-out status call does not count as a status writer', async () =
 // red. The two results below are identical, and that pair is the whole argument:
 //   plain scalar, correct filter   ->  suite passes
 //   plain scalar, loose filter     ->  suite passes     <- cannot tell the filters apart
-// So a tidy-up that harmonised this fixture with an Android-style one would remove the
-// case's power and leave the suite GREEN. The block form is REQUIRED for a parsing checker
-// and merely sufficient here, where the reader sees raw bytes and the '#' survives:
+// The harm runs ONE WAY, and the direction is worth getting right because it decides which
+// file a reader should not edit. This fixture is already plain and belongs to a raw reader,
+// so making it a block scalar changes nothing: measured, the suite is 16/16 either way. The
+// cost falls on a PARSING checker that harmonises its BLOCK fixture down to a plain scalar
+// to match this one — there the '#' is stripped, the case loses its power, and the suite
+// stays green. In that checker the block form is REQUIRED; here it is merely sufficient:
 //   raw bytes   run: cmd # note  -> contains '#': true
 //   parsed      run: cmd # note  -> contains '#': false   (plain scalar, comment stripped)
 //   parsed      run: |           -> contains '#': true     (block scalar, survives as text)
