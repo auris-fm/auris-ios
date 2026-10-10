@@ -193,33 +193,49 @@ test('a commented-out status call does not count as a status writer', async () =
     'a live call without the permission was not caught');
 });
 
-// **The over-scoping guard.** The fix excludes comment LINES; it must not exclude a command
-// that merely follows one. A naive version could reasonably have been written to skip any
-// block containing a comment — or to drop everything after the first comment — and either
-// would leave a live call unrecognised, which is the same silence in a new direction.
+// **The over-scoping guard, in the form that actually exercises the difference.**
 //
-// Without this case the suite would confirm only that comments are excluded, not that
-// commands are still found, which is the difference between a fix and a narrowing that
-// looks like one.
-test('a live call after a comment is still a writer', async () => {
+// An earlier version of this case put a comment ABOVE the live call. That does not
+// distinguish the right filter from a wrong one: the invocation line itself contains no
+// `#`, so `^\s*#` and a looser `#` both keep it and the case passes either way — verified
+// by loosening the anchor and watching the suite still report 15/15. A case that cannot
+// fail on the defect it names is not evidence about that defect.
+//
+// The discriminating input is a command that CONTAINS a `#`, because the two filters
+// disagree only there: a trailing comment belongs to a live command, so the line must be
+// kept, while a loose filter drops it and the writer disappears.
+test('a live call with a trailing comment is still a writer', async () => {
   const {check} = await import('./check-workflow-structure.mjs');
   const {readFileSync} = await import('node:fs');
   const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
 
-  // The real invocation, preceded by a comment line at the same indent.
-  const withCommentAbove = src.replace(
+  const withTrailingComment = src.replace(
     '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
-    '        # this comment sits above the live call and must not hide it\n' +
-    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish # records the reviewed head'
   );
-  assert.notEqual(withCommentAbove, src, 'the fixture did not apply');
+  assert.notEqual(withTrailingComment, src, 'the fixture did not apply');
 
-  // The writer must still be recognised: with the permission present the check passes,
-  // and with it removed the check must complain about the permission rather than about
-  // finding no writer at all.
-  assert.equal(check(withCommentAbove), true, 'a live call after a comment was not recognised');
+  // The line is a command, so the writer is found: with the permission present the check
+  // passes, and without it the check complains about the permission rather than about
+  // finding no writer — the same "found, then judged" discriminator as the other cases.
+  assert.equal(check(withTrailingComment), true, 'a live call with a trailing comment was not recognised');
 
-  const withoutPermission = withCommentAbove.replace('      statuses: write\n      # Unused', '      # Unused');
+  const withoutPermission = withTrailingComment.replace('      statuses: write\n      # Unused', '      # Unused');
   assert.throws(() => check(withoutPermission), /does not declare statuses: write/,
-    'the writer after a comment was not recognised, so the check reported no writer');
+    'the writer was dropped because its line contained a #, so the check reported no writer');
+});
+
+// And the comment-only case from the other direction, so both filters are pinned by input
+// rather than by the shape of one line: a `#`-prefixed line IS a comment and must be dropped.
+test('a comment line containing the invocation is not a writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  const commented = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        # run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+  ).replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(commented), /detector did not match/,
+    'a commented line was treated as a live writer');
 });
