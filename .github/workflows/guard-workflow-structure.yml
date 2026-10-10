@@ -36,6 +36,14 @@ jobs:
       # Produces the file the next step reads. Named here because the dependency is real and
       # invisible: without this checkout the check fails with "no such file", which reads as a
       # broken check rather than a missing file.
+      #
+      # **This is the only checkout in the workflow, and it comes first. A second one added
+      # later would break the steps above it**, because an `actions/checkout` with no `path:`
+      # lands at the workspace root with `clean` defaulting to true and runs `git clean -ffdx`
+      # there. That would remove nothing today — `.github/scripts/` is tracked — but the same
+      # default removes any untracked path a guard creates, and **a step that then finds no
+      # files reports a missing file rather than a bug.** Declared here rather than at the
+      # place it would bite, because the place it would bite is a step nobody has written yet.
       - name: Checkout repository (produces .github/scripts/ for the step below)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
