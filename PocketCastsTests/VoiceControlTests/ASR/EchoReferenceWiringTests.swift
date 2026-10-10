@@ -1310,6 +1310,55 @@ final class EchoReferenceWiringTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Render position ordering
+
+    /// A submitted render position must land on the reference *after* the block it belongs
+    /// to, and must be refused when its session has ended.
+    ///
+    /// `submitRenderPosition` exists because a producer can learn where a block was rendered
+    /// only after handing the samples over. The comment on it names the hazard: recording the
+    /// anchor directly from the producer while its samples are still queued here would place
+    /// the audio at a position it has not reached. So the anchor is routed through the same
+    /// serial queue as the blocks, and the claim is that the two cannot cross.
+    ///
+    /// Neither half of that was covered — the method had no case at all, so the ordering it
+    /// exists to provide was asserted in prose and nowhere else.
+    func test_renderPositionIsAppliedAfterItsBlockAndRefusedAcrossAReset() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        // Ordered case: the anchor is submitted while the block is still queued, and must
+        // land on the reference once the queue drains.
+        let anchor = PlaybackRenderAnchor(
+            renderedFrames: 4800,
+            sourceSampleRate: 48_000,
+            hostTime: 1_000
+        )
+        handoff.submit([Float](repeating: 0.25, count: 1600), sampleRate: 16_000)
+        handoff.submitRenderPosition(anchor)
+        handoff.drain()
+
+        XCTAssertEqual(reference.currentRenderAnchor, anchor,
+                       "a render position submitted behind its block never reached the reference")
+
+        // Boundary case: a position submitted before a reset belongs to a session that has
+        // ended, so it must not appear in the new session's reference. This is the same
+        // boundary `record(_:generation:)` guards for blocks, and it is asserted separately
+        // because a stale anchor would let the filter align a segment against audio that is
+        // no longer playing.
+        let stale = PlaybackRenderAnchor(
+            renderedFrames: 9600,
+            sourceSampleRate: 48_000,
+            hostTime: 2_000
+        )
+        handoff.submitRenderPosition(stale)
+        handoff.reset()
+        handoff.drain()
+
+        XCTAssertEqual(reference.currentRenderAnchor, anchor,
+                       "a render position from an ended session landed in the new one")
+    }
 }
 
 // MARK: - Harness
