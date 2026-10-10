@@ -55,10 +55,21 @@ class VoiceAsrEngine {
     }
 
     private(set) var echoFilterRoute: EchoFilterRoute = .external
-    /// The shared emitted-PCM reference the echo filter correlates against. Populated
-    /// from the episode, local-feedback and cloud-answer renderers before accepted
-    /// speech, wake or ASR.
-    private var playbackBuffer: [Float] = []
+    /// The shared emitted-PCM reference the echo filter correlates against. Producers
+    /// append what they send to the output; the filter reads it on the segment path.
+    /// When no reference is attached the filter has nothing to correlate and cannot
+    /// reject anything, so the scope alone is not sufficient wiring.
+    private var echoReference: PlaybackEchoReference?
+
+    /// The emitted audio currently retained, or empty when no reference is attached.
+    private var playbackBuffer: [Float] {
+        echoReference?.snapshot() ?? []
+    }
+
+    /// Attaches the shared emitted-PCM reference.
+    func setEchoReference(_ reference: PlaybackEchoReference) {
+        echoReference = reference
+    }
     var listeningMode: ListeningMode = .wakeWord
 
     /// Forwards the immutable routing envelope (source + English router text).
@@ -181,7 +192,7 @@ class VoiceAsrEngine {
         stageTimer.mark() // VAD segment ready
 
         if echoFilterRoute.appliesCorrelationWindow,
-           signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
+           signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {  // snapshot per segment
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -405,8 +416,15 @@ class VoiceAsrEngine {
         return "high"
     }
 
+    /// Test seam: replaces the retained reference contents.
+    ///
+    /// Production code does not call this — producers append through the shared
+    /// reference — so a test that relies on it is exercising the filter's logic, not
+    /// the wiring. The wiring cases drive the real producers instead.
     func updatePlaybackBuffer(_ samples: [Float]) {
-        playbackBuffer = samples
+        guard let echoReference else { return }
+        echoReference.invalidate()
+        echoReference.append(samples)
     }
 
     /// Sets the echo-filter scope for the current output route and retires the
@@ -419,7 +437,7 @@ class VoiceAsrEngine {
         if !route.appliesCorrelationWindow {
             // Route invalidation: nothing may be correlated against a reference that
             // belonged to a different output path.
-            playbackBuffer = []
+            echoReference?.invalidate()
         }
     }
 
