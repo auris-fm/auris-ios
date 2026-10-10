@@ -64,8 +64,18 @@ class SignalFilter {
                           &correlation, 1, vDSP_Length(correlation.count), vDSP_Length(playback.count))
             }
         }
-        guard let maxCorr = correlation.max() else { return false }
-        let micRms = rms(mic)
+        // Compare the three quantities over the SAME sample pairs: the numerator comes
+        // from the winning lag, so the energies must be taken over that lag's overlapping
+        // span rather than over the full microphone segment and the full window. Mixing
+        // supports lets the score depend on how much audio sits outside the overlap —
+        // energy in the segment beyond the window raises `micRms` without appearing in the
+        // numerator, and the result is then a statement about lengths rather than about
+        // match.
+        guard let maxCorr = correlation.max(),
+              let lag = correlation.firstIndex(of: maxCorr) else { return false }
+
+        let paired = Array(mic[lag..<(lag + playback.count)])
+        let micRms = rms(paired)
         let pbRms = rms(playback)
         guard micRms > 0, pbRms > 0 else { return false }
         let normalizedCorr = maxCorr / (micRms * pbRms * Float(playback.count))
