@@ -15,11 +15,11 @@ class NavigationManager {
     static let episodeUuidKey = "episode"
     static let episodeTimestamp = "episodeTimestamp"
 
-    private static let homePageKey = "homePage"
     static let podcastListPageKey = "podcastList"
     static let discoverPageKey = "discoverPage"
     static let discoverCategoryKey = "discoverCategory"
     static let discoverListKey = "discoverList"
+    static let discoverNetworksPageKey = "discoverNetworksPage"
 
     static let filterPageKey = "filterPage"
     static let filterUuidKey = "filterUuid"
@@ -78,7 +78,6 @@ class NavigationManager {
 
     static let upNextPageKey = "upNextPage"
     static let signUpPageKey = "signUpPage"
-    static let importPageKey = "importPage"
 
     static let featurePageKey = "featurePageKey"
     static let featureKey = "featureKey"
@@ -88,13 +87,12 @@ class NavigationManager {
     static let manualPlaylistsChooserRootKey = "manualPlaylistsChooserRootKey"
     static let manualPlaylistsChooserSourceKey = "manualPlaylistsChooserSourceKey"
 
-    static let sharedManager = NavigationManager()
+    static let shared = NavigationManager()
 
     private weak var mainController: NavigationProtocol?
     var dimmingView: UIView?
     var miniPlayer: MiniPlayerViewController?
 
-    private var firstSetupCompleted = false
     var isPhone = false
 
     private var lastNavKey = ""
@@ -129,7 +127,7 @@ class NavigationManager {
                 mainController?.navigateToPodcast(podcast)
             }
             if let podcastUuid = data[NavigationManager.podcastKey] as? String {
-                if let podcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid, includeUnsubscribed: true) {
+                if let podcast = DataManager.shared.findPodcast(uuid: podcastUuid, includeUnsubscribed: true) {
                     mainController?.navigateToPodcast(podcast)
                 }
             } else if let podcastInfo = data[NavigationManager.podcastKey] as? PodcastInfo {
@@ -161,8 +159,10 @@ class NavigationManager {
             mainController?.navigateToPodcastList(animated)
         } else if place == NavigationManager.discoverPageKey {
             navigateToDiscover(data: data, animated: animated)
+        } else if place == NavigationManager.discoverNetworksPageKey {
+            mainController?.navigateToDiscoverNetworks(animated)
         } else if place == NavigationManager.filterPageKey {
-            if let data, let filterUuid = data[NavigationManager.filterUuidKey] as? String, let filter = DataManager.sharedManager.findPlaylist(uuid: filterUuid) {
+            if let data, let filterUuid = data[NavigationManager.filterUuidKey] as? String, let filter = DataManager.shared.findPlaylist(uuid: filterUuid) {
                 mainController?.navigateToFilter(filter, animated: animated)
             } else {
                 mainController?.navigateToFilter(nil, animated: animated)

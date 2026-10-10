@@ -76,9 +76,9 @@ class VoiceControlAssembly {
             sleepSink: SleepTimerSink(playbackManager: playbackManager),
             chapterSink: ChapterSink(playbackManager: playbackManager),
             bookmarkSink: BookmarkSink(playbackManager: playbackManager),
-            queueSink: QueueSink(playbackManager: playbackManager, dataManager: .sharedManager),
+            queueSink: QueueSink(playbackManager: playbackManager, dataManager: .shared),
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
-            statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
+            statsQuerySink: StatsQuerySink(dataManager: .shared),
             cloudRouteSink: CloudRouteSink(
                 audioPlayer: CloudAudioPlayer(),
                 playbackManager: playbackManager,

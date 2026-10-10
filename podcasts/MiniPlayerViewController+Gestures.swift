@@ -1,9 +1,8 @@
 import Foundation
 import PocketCastsUtils
+import UIKit
 
 extension MiniPlayerViewController: UIGestureRecognizerDelegate {
-    private static let minMoveAmount = 80 as CGFloat
-
     func addGestureRecognizers() {
         panUpRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePullingUpGesture(_:)))
         panUpRecognizer.delegate = self
@@ -94,14 +93,26 @@ extension MiniPlayerViewController: UIGestureRecognizerDelegate {
             guard let self else { return }
             Analytics.track(.miniPlayerLongPressMenuOptionTapped, properties: ["option": "close_and_clear_up_next"])
             FileLog.shared.addMessage("Close and Clear Up Next pressed from the mini player")
-            self.removeAllCustomObservers()
-            self.hideMiniPlayer(true)
-            PlaybackManager.shared.endPlayback()
-            self.addUINotificationObservers()
+            let queueCount = PlaybackManager.shared.queue.upNextCount()
+            guard queueCount > 0 else {
+                self.closeAndClearUpNext()
+                return
+            }
+            let alert = UpNextViewController.clearQueueAlert(queueCount: queueCount) { [weak self] in
+                self?.closeAndClearUpNext()
+            }
+            self.present(alert, animated: true)
         }
         close.destructive = true
 
         return [markAsPlayed, close]
+    }
+
+    private func closeAndClearUpNext() {
+        removeAllCustomObservers()
+        hideMiniPlayer(true)
+        PlaybackManager.shared.endPlayback()
+        addUINotificationObservers()
     }
 }
 

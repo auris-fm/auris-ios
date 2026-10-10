@@ -1,6 +1,26 @@
-8.22
+8.23
 -----
 
+
+8.22
+-----
+- Make it easier to watch a video full screen: a button over the video in the player zooms it into the full screen player, rotating to landscape for landscape videos on iPhone, and a matching button brings it back [#4988](https://github.com/Automattic/pocket-casts-ios/pull/4988)
+- Fix the in-app support form failing with "Oops something went wrong" for some customers [#5266](https://github.com/Automattic/pocket-casts-ios/pull/5266)
+- Fix a bookmark disappearing from the list before the deletion confirmation appears when you swipe to delete it [#5273](https://github.com/Automattic/pocket-casts-ios/pull/5273)
+- Fix the app never compacting its database, so storage freed by removing podcasts and episodes is now reclaimed [#5233](https://github.com/Automattic/pocket-casts-ios/pull/5233)
+- The network header artwork now extends under the navigation bar on iOS 26 [#5066](https://github.com/Automattic/pocket-casts-ios/pull/5066)
+- Fix a crash when resuming some downloaded episodes partway through [#5279](https://github.com/Automattic/pocket-casts-ios/pull/5279)
+- Fix the message on the empty Podcasts tab being cut off after one line [#5176](https://github.com/Automattic/pocket-casts-ios/pull/5176)
+- Fix long episode titles running past the edges of the Now Playing row on the Apple Watch [#5139](https://github.com/Automattic/pocket-casts-ios/pull/5139)
+- Fix VoiceOver reading image names instead of labels for the podcast Follow button, the Cast button, the player's chapter and Effects buttons, the Profile banner's close button, and the notifications permission checkbox [#5178](https://github.com/Automattic/pocket-casts-ios/pull/5178)
+- Fix episode downloads still using the old file link after the podcast replaced it with a new one, which could make the download fail [#5274](https://github.com/Automattic/pocket-casts-ios/pull/5274)
+- Add a What's New feed with announcements from the Pocket Casts team, opened from the Profile tab [#5077](https://github.com/Automattic/pocket-casts-ios/pull/5077) [#5294](https://github.com/Automattic/pocket-casts-ios/pull/5294) [#5300](https://github.com/Automattic/pocket-casts-ios/pull/5300)
+- Fix memory leaks when leaving empty playlists, empty folders, the Files screen and the Add to Playlist sheet [#5284](https://github.com/Automattic/pocket-casts-ios/pull/5284)
+- Reduce the memory the app uses for artwork [#5291](https://github.com/Automattic/pocket-casts-ios/pull/5291)
+- Fix Auto Download not downloading episodes added to a manual playlist until the next sync [#5080](https://github.com/Automattic/pocket-casts-ios/pull/5080)
+- Fix a possible crash with Voice Boost on when switching episodes [#5296](https://github.com/Automattic/pocket-casts-ios/pull/5296)
+- Ask for confirmation before Close and Clear Up Next in the mini player menu clears the queue [#5261](https://github.com/Automattic/pocket-casts-ios/pull/5261)
+- Fix a possible crash with Voice Boost on when switching episodes [#5296](https://github.com/Automattic/pocket-casts-ios/pull/5296) [#5280](https://github.com/Automattic/pocket-casts-ios/pull/5280)
 
 8.21
 -----
@@ -15,6 +35,8 @@
 - Add networks to search: a matching network now shows up in Top Results, and a "Networks" filter appears when the term matches one [#5036](https://github.com/Automattic/pocket-casts-ios/pull/5036)
 - Open a podcast's network from the podcast page, either from the author in the header or from the author row in the details below it [#5040](https://github.com/Automattic/pocket-casts-ios/pull/5040) [#5075](https://github.com/Automattic/pocket-casts-ios/pull/5075)
 - [tvOS] Add networks to search, in Combined Results and in a tab of their own [#5037](https://github.com/Automattic/pocket-casts-ios/pull/5037)
+- Fix a Smart Bookmark's captured passage not syncing when signing in on a new device [#5103](https://github.com/Automattic/pocket-casts-ios/pull/5103)
+- Fix a crash when tapping the link in a Discover collection or network header [#5160](https://github.com/Automattic/pocket-casts-ios/pull/5160)
 
 8.20
 -----

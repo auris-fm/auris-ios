@@ -1,6 +1,7 @@
 import PocketCastsServer
 import PocketCastsDataModel
 import EndOfYear
+import UIKit
 
 extension DiscoverCollectionViewController: DiscoverDelegate {
     func navigateTo(category: String) {
@@ -23,6 +24,29 @@ extension DiscoverCollectionViewController: DiscoverDelegate {
                 self?.showItemWith(identifier: listID)
             }
         }
+    }
+
+    /// Opens every network, as "Show all" on the networks row does.
+    func navigateToNetworks() {
+        if isViewLoaded {
+            showNetworks()
+        } else {
+            loadViewIfNeeded()
+            reloadData { [weak self] in
+                self?.showNetworks()
+            }
+        }
+    }
+
+    private func showNetworks() {
+        guard let discoverLayout, let items = discoverLayout.layout else { return }
+
+        let currentRegion = Settings.discoverRegion(discoverLayout: discoverLayout)
+        guard let item = items.first(where: { $0.type == "lists_list" && $0.regions.contains(currentRegion) && $0.cellType() == .networksList }) else { return }
+
+        let model = DiscoverNetworksListModel()
+        model.registerDiscoverDelegate(self)
+        model.showAll(item: item)
     }
 
     func invalidate(item: PocketCastsServer.DiscoverItem) {
@@ -166,7 +190,7 @@ extension DiscoverCollectionViewController: DiscoverDelegate {
 
     func isSubscribed(podcast: DiscoverPodcast) -> Bool {
         if let uuid = podcast.uuid {
-            if let _ = DataManager.sharedManager.findPodcast(uuid: uuid) {
+            if let _ = DataManager.shared.findPodcast(uuid: uuid) {
                 return true
             }
         }

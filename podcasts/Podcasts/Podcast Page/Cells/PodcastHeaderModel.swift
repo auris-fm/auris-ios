@@ -51,7 +51,7 @@ class PodcastHeaderViewModel: NSObject, ObservableObject {
         .sink { [unowned self] notification in
             guard let podcastUuid = notification.object as? String,
                   podcastUuid == podcast.uuid,
-                  let podcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid, includeUnsubscribed: true)
+                  let podcast = DataManager.shared.findPodcast(uuid: podcastUuid, includeUnsubscribed: true)
             else {
                 return
             }
@@ -146,10 +146,6 @@ class PodcastHeaderViewModel: NSObject, ObservableObject {
         return L10n.paidPodcastNextEpisodeFormat(estimatedDate)
     }
 
-    var isPodcastSubscribed: Bool {
-        return podcast.isSubscribed()
-    }
-
     func subscribeButtonTapped() {
         guard let delegate else { return }
 
@@ -206,7 +202,6 @@ extension PodcastHeaderViewModel: ExpandableLabelDelegate {
 
     func didExpandLabel(_ label: UIView) {
         delegate?.tableView().endUpdates()
-        delegate?.setDescriptionExpanded(expanded: true)
     }
 
     func willCollapseLabel(_ label: UIView) {
@@ -216,7 +211,6 @@ extension PodcastHeaderViewModel: ExpandableLabelDelegate {
 
     func didCollapseLabel(_ label: UIView) {
         delegate?.tableView().endUpdates()
-        delegate?.setDescriptionExpanded(expanded: false)
     }
 
     func linkTapped(url: URL) {
