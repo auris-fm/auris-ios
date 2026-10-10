@@ -792,6 +792,32 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// **An old-session block must not contaminate the new reference, including when it is
+    /// already in flight.**
+    ///
+    /// A delivery removes its block from `pending` and then appends it. If a reset happens
+    /// between those two steps, clearing `pending` cannot recall the block: it is no longer
+    /// queued, and its append lands after the reset. So "each block is applied exactly once"
+    /// does not establish ownership — the block is applied once, to the wrong session. That
+    /// is the boundary that needs its own protection, and the case below drives it by
+    /// interleaving the reset inside the delivery rather than before it.
+    func testABlockInFlightAcrossAResetDoesNotReachTheReference() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+
+        // Removes the block from pending, then the reset runs, then the append happens.
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.onDeliveryDequeued = { [weak handoff] in
+            handoff?.reset()
+        }
+        handoff.drain()
+
+        XCTAssertEqual(
+            reference.snapshot().count, 0,
+            "a block from the previous session landed in the new reference"
+        )
+    }
+
     /// **Ownership across stop/restart: a reset discards what was pending**, so audio from
     /// before the stop is not delivered after the restart, and a block submitted after the
     /// reset is still delivered exactly once.

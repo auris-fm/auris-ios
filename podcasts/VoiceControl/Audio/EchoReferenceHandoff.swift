@@ -54,9 +54,18 @@ final class EchoReferenceHandoff {
     private let capacity: Int
     private let queue: DispatchQueue
 
+    /// Called after a delivery dequeues its block and before it appends, so a test can run
+    /// a reset in that window. The window is the one that matters: clearing `pending` cannot
+    /// recall a block that has already been removed from it.
+    var onDeliveryDequeued: (() -> Void)?
+
     private let lock = NSLock()
     private var pending: [Block] = []
     private var droppedBlocks = 0
+    /// Incremented by `reset`. A delivery records this when it dequeues and compares it
+    /// before appending, so a block whose session ended while it was in flight is dropped
+    /// instead of landing in the new session's reference.
+    private var generation = 0
 
     init(
         reference: PlaybackEchoReference,
@@ -111,6 +120,7 @@ final class EchoReferenceHandoff {
     /// reset are refused.
     func reset() {
         lock.lock()
+        generation += 1
         pending.removeAll()
         lock.unlock()
     }
@@ -132,7 +142,19 @@ final class EchoReferenceHandoff {
             return
         }
         let block = pending.removeFirst()
+        let blockGeneration = generation
         lock.unlock()
+
+        // A reset that happened while this block was in flight means it belongs to a
+        // session that has ended. Dequeuing removed it from `pending`, so the reset could
+        // not discard it — and appending it now would put a previous session's audio into
+        // the new reference. Applying each block exactly once is satisfied either way; that
+        // is why this boundary needs checking separately from the counting argument.
+        onDeliveryDequeued?()
+        lock.lock()
+        let stillCurrent = blockGeneration == generation
+        lock.unlock()
+        guard stillCurrent else { return }
 
         let resampled = PlaybackResampler.toPipelineRate(
             block.samples,
