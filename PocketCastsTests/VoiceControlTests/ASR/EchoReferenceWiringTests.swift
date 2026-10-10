@@ -1454,6 +1454,44 @@ final class EchoReferenceWiringTests: XCTestCase {
             "an absolute anchor also failed, so this case does not discriminate on origin"
         )
     }
+
+
+    /// The anchor the handoff records must be in the reference's own index space.
+    ///
+    /// This goes through `submit` → `drain` → `deliver`, which is the path that actually
+    /// records a position for the episode producer. A case that calls `recordRenderPosition`
+    /// directly cannot see this: the handoff is where the number was being written as one
+    /// block's length rather than the stream index the block ends at, so the repair is
+    /// invisible to any test that supplies the anchor itself.
+    ///
+    /// The window is pushed past its retention so it slides. With a block-length anchor the
+    /// offset goes negative and the method returns nil — the filter then declines every
+    /// segment, which is the silent no-op this whole seam exists to remove.
+    func test_handoffRecordsAnAnchorInTheReferencesIndexSpace() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 64)
+
+        // Enough audio, submitted through the production path, to slide the retained window
+        // well past a single block.
+        let rounds = 12
+        for round in 0..<rounds {
+            handoff.submit(
+                [Float](repeating: 0.3, count: 8_000),
+                sampleRate: PlaybackEchoReference.pipelineSampleRate,
+                renderedAt: MonotonicTime(round)
+            )
+            handoff.drain()
+        }
+
+        XCTAssertNotNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            """
+            the handoff recorded an anchor the consumer cannot place. A per-block frame count \
+            falls below the sliding window's start, so the offset is negative and every \
+            segment is declined.
+            """
+        )
+    }
 }
 
 // MARK: - Harness
