@@ -12,7 +12,34 @@ class VoiceAsrEngine {
     private let wakeThreshold: Float
     private let translationStage: TranslationStage?
 
-    private var isExposedSpeakerRoute = false
+    /// Which echo-filter scope applies to the current output route.
+    ///
+    /// `recognition-pipeline.md` "Signal Filter" distinguishes route classes rather
+    /// than treating "exposed" as a single flag: the built-in loudspeaker uses aligned
+    /// playback cross-correlation against the shared reference, external routes must
+    /// use delay tracking instead of that window, and an isolated route reduces
+    /// exposure without proving echo is absent.
+    enum EchoFilterRoute {
+        /// Built-in loudspeaker: cross-correlation against the reference applies.
+        case builtInSpeaker
+        /// External output: codec latency is large and variable, so the built-in
+        /// correlation window's alignment assumption does not hold.
+        case external
+        /// Headset/earbud. Reduced acoustic exposure, but **not** proof of no echo.
+        case isolated
+
+        /// Whether the built-in-speaker correlation window may be applied.
+        var appliesCorrelationWindow: Bool { self == .builtInSpeaker }
+
+        /// Whether this route is evidence that echo cannot occur. It never is: the
+        /// owning clause says an isolated route reduces exposure, not that it removes it.
+        var provesEchoImpossible: Bool { false }
+    }
+
+    private(set) var echoFilterRoute: EchoFilterRoute = .external
+    /// The shared emitted-PCM reference the echo filter correlates against. Populated
+    /// from the episode, local-feedback and cloud-answer renderers before accepted
+    /// speech, wake or ASR.
     private var playbackBuffer: [Float] = []
     var listeningMode: ListeningMode = .wakeWord
 
@@ -135,7 +162,8 @@ class VoiceAsrEngine {
     func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
 
-        if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
+        if echoFilterRoute.appliesCorrelationWindow,
+           signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -363,10 +391,23 @@ class VoiceAsrEngine {
         playbackBuffer = samples
     }
 
-    func setExposedSpeakerRoute(_ exposed: Bool) {
-        if isExposedSpeakerRoute != exposed {
-            FileLog.shared.addMessage("[VoicePipeline] exposedSpeaker=\(exposed)")
+    /// Sets the echo-filter scope for the current output route and retires the
+    /// reference when the filter no longer applies, so stale state from a previous
+    /// route cannot keep dropping audio after the route changes.
+    func setEchoFilterRoute(_ route: EchoFilterRoute) {
+        guard echoFilterRoute != route else { return }
+        FileLog.shared.addMessage("[VoicePipeline] echoFilterRoute=\(route)")
+        echoFilterRoute = route
+        if !route.appliesCorrelationWindow {
+            // Route invalidation: nothing may be correlated against a reference that
+            // belonged to a different output path.
+            playbackBuffer = []
         }
-        isExposedSpeakerRoute = exposed
+    }
+
+    /// Whether the current route is being treated as proof that echo cannot occur.
+    /// Always `false`: no route proves that, and an isolated route only reduces exposure.
+    var echoFilterRouteConsidersEchoImpossible: Bool {
+        echoFilterRoute.provesEchoImpossible
     }
 }
