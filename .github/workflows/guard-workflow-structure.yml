@@ -50,6 +50,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # **Both `run:` steps here are bare commands, and that is load-bearing.** A step's status
+      # is the status of its last command, so with no pipe or redirect the job reports the
+      # check's own exit code. Add `| tee` or a redirect to either one and the status becomes
+      # the pipeline's instead: the check would still print its failure and the step would still
+      # report success, which is worse than printing nothing, because the line a reader stops on
+      # is the one that agrees with what they expected. Verified: the check exits 1 with the
+      # permission stripped, and reading `$?` from a `tail` pipe reports 0 for the same run.
       - name: Assert the review workflow's structure
         run: node .github/scripts/check-workflow-structure.mjs
 
