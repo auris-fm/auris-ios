@@ -35,6 +35,17 @@ final class PlaybackEchoReference {
     /// index space drift away from the emission stream and the render position no longer
     /// addresses the right samples.
     private var totalAppended = 0
+
+    /// Stream index one past the last appended sample.
+    ///
+    /// Read before an append, this is the reference range a submitted block is about to
+    /// occupy. It is an origin, not a position: it says where a block's audio sits in the
+    /// shared timeline, not how much of it has been heard.
+    var streamIndex: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return totalAppended
+    }
     /// Last observed position of the output node, used to place a captured segment
     /// against the retained audio. Cleared when the node stops rendering.
     private var renderAnchor: PlaybackRenderAnchor?
