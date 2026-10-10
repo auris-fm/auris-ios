@@ -35,6 +35,17 @@ final class PlaybackEchoReference {
     /// index space drift away from the emission stream and the render position no longer
     /// addresses the right samples.
     private var totalAppended = 0
+
+    /// Stream index one past the last appended sample.
+    ///
+    /// The anchor recorded against the reference is expressed in this space, so a producer
+    /// that wants to say "the audio I just emitted ends here" needs it rather than its own
+    /// block length.
+    var streamIndex: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return totalAppended
+    }
     /// Last observed position of the output node, used to place a captured segment
     /// against the retained audio. Cleared when the node stops rendering.
     private var renderAnchor: PlaybackRenderAnchor?
