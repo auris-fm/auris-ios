@@ -65,12 +65,14 @@ build_staging: ensure_llama_ios ## Builds using the StagingDebug configuration
        -scheme "Pocket Casts Staging" \
        -configuration StagingDebug \
        -destination 'generic/platform=iOS Simulator' \
+       ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
        build
 
 test_staging: ensure_llama_ios ## Build and run Unit Tests using the StagingDebug configuration
 	xcodebuild test -project podcasts.xcodeproj \
 	    -scheme "Pocket Casts Staging" \
         -only-testing:$(ONLY_TESTING) \
+        ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
 
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
