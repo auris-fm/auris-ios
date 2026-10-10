@@ -253,6 +253,36 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// The aligned window must be a span of the segment's own length ending at the
+    /// segment's end. Anchoring it at the segment's start and running forward collapses
+    /// the window when the segment sits at the end of the reference, and because the
+    /// normalised correlation divides by the window length, a one-sample window scores
+    /// ~1.0 for unrelated signals — genuine speech is then rejected as bleed.
+    func test_alignedWindowKeepsTheSegmentLengthSoSpeechIsNotFalselyRejected() {
+        let filter = SignalFilter()
+        // Reference is constant playback; the "segment" alternates sign, so it does not
+        // correlate with it and must not be treated as bleed.
+        let reference = [Float](repeating: 0.5, count: 320)
+        let speech = (0..<320).map { $0 % 2 == 0 ? Float(0.5) : Float(-0.5) }
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: speech, reference: reference, segmentEndOffset: reference.count),
+            "genuine speech was rejected because the aligned window collapsed to a few samples"
+        )
+    }
+
+    /// The same construction with a true echo must still be rejected, so the fix above
+    /// has not simply disabled the filter.
+    func test_alignedWindowStillRejectsActualEcho() {
+        let filter = SignalFilter()
+        let playback = (0..<320).map { Float(sin(Double($0) * 0.3)) }
+
+        XCTAssertTrue(
+            filter.isPlaybackBleed(mic: playback, reference: playback, segmentEndOffset: playback.count),
+            "an exact copy of playback was not rejected as echo"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
