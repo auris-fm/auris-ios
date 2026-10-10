@@ -110,3 +110,26 @@ test('the status payload carries only documented fields', async () => {
   assert.ok(!payload.includes('...'), 'the status payload spreads an object rather than naming fields');
   for (const field of ['state', 'description', 'context', 'target_url']) assert.ok(payload.includes(field), `missing ${field}`);
 });
+
+// The status `description` is the text a reader sees in the checks tab, so it is a real
+// output and not just a diagnostic. It had no assertion while the comment — the channel
+// added second — was pinned for both SHAs, which is the wrong way round: the channel that
+// existed first should not be the one nothing checks.
+test('the status description names the state that produced it', () => {
+  assert.equal(completion(pr, pr.head.sha, 'success', 'success').description,
+    'Review completed; findings still require disposition');
+  assert.match(completion(pr, 'old', 'success', 'success').description, /head changed/i);
+  assert.match(completion(pr, pr.head.sha, 'failure', '').description, /failed/i);
+  // A draft PR is not fresh either, and its description must send the reader to /review
+  // rather than reporting a completed review on a head nobody will merge.
+  assert.match(completion({...pr, draft: true}, pr.head.sha, 'success', 'success').description, /head changed/i);
+});
+
+// The pending description is written before any model call, so it must exist for every
+// state — including one where the review later fails — and must not claim a result.
+test('the pending description claims no outcome', async () => {
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('./claude-review.mjs', import.meta.url), 'utf8');
+  const pending = src.slice(src.indexOf("description: 'Reviewing"));
+  assert.match(pending.slice(0, 60), /Reviewing this head/);
+});
