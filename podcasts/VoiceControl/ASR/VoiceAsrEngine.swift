@@ -96,17 +96,21 @@ class VoiceAsrEngine {
     /// segment instant is required before this closes. It is written this way rather
     /// than guessing a precise value from the render anchor alone, because a precise
     /// wrong offset is worse than an honest coarse one.
-    /// **The end offset is deliberately the retained end while the capture side carries
-    /// no segment instant.** A segment arriving now is the newest audio, so the window
-    /// ends where the retained reference does; that is correct under steady playback and
-    /// is not correct across a queue lead or a restart, which is why the segment instant
-    /// is required before this closes. A negative value means the segment cannot be
-    /// placed and the filter declines to align rather than aligning against the wrong
-    /// instant.
+    /// Where the audible end of the emitted stream sits in the retained window.
+    ///
+    /// Placed from the output node's **rendered** position, not from the retained end: the
+    /// retained end is the newest *submitted* sample, which is ahead of what has been
+    /// heard by however much audio is still queued. Using it is misaligned whenever the
+    /// queue is non-empty, which is most of streaming playback — not only across a
+    /// restart. A negative value means the position is unknown and the filter declines to
+    /// align rather than aligning against the wrong instant.
+    ///
+    /// **Still coarse:** the segment instant is not carried yet, so a segment is assumed
+    /// to end at the current audible position. That holds when the segment arrives as it
+    /// is captured and not when capture buffering delays it, which is why the capture-side
+    /// timestamp is required before alignment acceptance can close.
     private func playbackEndOffsetForCurrentSegment() -> Int {
-        guard let reference = echoReference,
-              reference.currentRenderAnchor != nil else { return -1 }
-        return reference.snapshot().count
+        echoReference?.audibleEndOffsetInRetainedWindow() ?? -1
     }
     var listeningMode: ListeningMode = .wakeWord
 
