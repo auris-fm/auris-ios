@@ -495,6 +495,50 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - Paired normalization, isolated
+
+    /// **The isolating case for the denominator, and it must bypass the aligned caller.**
+    ///
+    /// On the aligned path the coverage guard (`window >= mic`) and the positional
+    /// overload's own guard (`mic >= playback`, called with `playback = window`) together
+    /// force `mic == window`. At equal lengths the correlation has exactly one entry, `lag`
+    /// is always zero, and `paired` is the whole segment — so `rms(paired)` and `rms(mic)`
+    /// are the *same array* and the pairing is unobservable there.
+    ///
+    /// This case therefore calls the positional overload directly with **differing** lengths,
+    /// where `paired` is a strict sub-span of the segment: it passes on the pairing and fails
+    /// when the energy is taken over the whole segment.
+    func test_pairedNormalizationIsObservableOnlyWithDifferingLengths() {
+        let filter = SignalFilter()
+        // The compared span is quiet; the remainder of the segment is loud and not compared.
+        let quietEcho = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+        let loudTail = [Float](repeating: 0.9, count: 800)
+        let segment = quietEcho + loudTail          // 1600 samples, mic.count > playback.count
+        let playback = quietEcho                     // 800 samples
+
+        XCTAssertTrue(
+            filter.isPlaybackBleed(mic: segment, playback: playback),
+            "the compared span is an exact echo match and must be rejected"
+        )
+    }
+
+    /// Control for the case above: changing only the audio *outside* the compared span must
+    /// not change the decision, which is what pairing the energies establishes.
+    func test_audioOutsideTheComparedSpanDoesNotChangeTheDecision() {
+        let filter = SignalFilter()
+        let quietEcho = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+        let playback = quietEcho
+
+        let quietTail = quietEcho + [Float](repeating: 0.01, count: 800)
+        let loudTail = quietEcho + [Float](repeating: 0.9, count: 800)
+
+        XCTAssertEqual(
+            filter.isPlaybackBleed(mic: quietTail, playback: playback),
+            filter.isPlaybackBleed(mic: loudTail, playback: playback),
+            "the decision changed with audio outside the compared span"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
