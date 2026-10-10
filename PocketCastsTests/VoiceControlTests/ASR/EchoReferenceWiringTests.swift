@@ -1402,6 +1402,16 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// a per-block-sized anchor falls below `windowStart`, the offset goes negative, and the
     /// method returns nil — at which point `playbackEndOffsetForSegment` yields -1 and the
     /// filter declines every segment rather than mis-aligning.
+    ///
+    /// **Scope, so this is not read as more than it is:** the case supplies the anchor
+    /// itself, so it states the CONSUMER's requirement — what index space an anchor must be
+    /// in — and cannot see which producer violates it. Coverage of a producer has to go
+    /// through that producer's path (`test_handoffRecordsAnAnchor...` did, and was withdrawn
+    /// with the fix it was written for). A future fix needs its own case on the real path.
+    ///
+    /// Note also that the control below is what makes this discriminating: the same
+    /// reference, after the same appends, still yields an offset when handed an absolute
+    /// anchor. Without it, a nil here would be equally consistent with an empty window.
     func test_alignmentOriginMismatch_returnsNoOffsetOnceTheWindowSlides() {
         let reference = PlaybackEchoReference()
         let capacity = Int(PlaybackEchoReference.pipelineSampleRate * PlaybackEchoReference.retainedSeconds)
