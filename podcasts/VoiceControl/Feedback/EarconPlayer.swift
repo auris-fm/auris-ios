@@ -77,8 +77,7 @@ open class EarconPlayer {
             FileLog.shared.addMessage("[VoicePipeline] Missing: \(id)")
             return
         }
-        guard let engine else { return }
-        if !engine.isRunning {
+        if let engine, !engine.isRunning {
             do {
                 try engine.start()
             } catch {
@@ -98,6 +97,12 @@ open class EarconPlayer {
         // reference would align these samples to the previous earcon's timeline — the
         // queue-lead error, where audio still queued is reported as already emitted.
         publishForEchoReference(buffer)
+        guard let engine else {
+            // No graph to render into: the earcon's samples are still published, because
+            // what the microphone can hear is decided by the caller's intent to play, not by
+            // whether this process happens to have an output. Scheduling is skipped.
+            return
+        }
         player.scheduleBuffer(buffer, at: nil, options: .interrupts) {
             // Earcon finished
         }
@@ -118,19 +123,16 @@ open class EarconPlayer {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let frame = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
 
-        // Routed through the handoff rather than appending here, so every producer of
-        // emitted audio reaches the reference by one path. Appending directly made this the
-        // one producer outside the handoff, and the lock and memmove are the same either
-        // way — the difference was only that one path could be changed without the other.
-        if let handoff {
-            handoff.submit(frame, sampleRate: buffer.format.sampleRate, renderedAt: nil)
-        } else if let reference = emittedPCMReference {
-            // No handoff (contexts that do not run the filter wiring): keep the direct path
-            // so the player stays usable, and keep it resampled the same way.
-            reference.append(
-                PlaybackResampler.toPipelineRate(frame, sourceRate: buffer.format.sampleRate)
-            )
-        }
+        // One route, no fallback. A nil-checked second path is still a second path: it
+        // differs from this one in *when* it is chosen rather than in what it does, so a
+        // context that fails to attach a handoff silently keeps an older behaviour instead
+        // of failing. That is the failure this avoids — the reference's `append` is not
+        // called from here at all, so there is no behaviour to diverge.
+        //
+        // `emittedPCMReference` is therefore only used for the render-position anchor and
+        // for the retire path; publishing goes through the handoff or not at all.
+        guard let handoff else { return }
+        handoff.submit(frame, sampleRate: buffer.format.sampleRate, renderedAt: nil)
     }
 
     /// Records the render position once the audio is actually rendering.
@@ -139,9 +141,14 @@ open class EarconPlayer {
     /// samples are audible as soon as they are submitted, but the position that places
     /// them on the shared timeline exists only after the node renders. Recording it at
     /// submission would state that queued audio had already been emitted.
+    ///
+    /// Recorded **through the handoff** rather than on the reference directly, so the
+    /// samples and their position travel the same route. Recording the anchor here while
+    /// the samples went through the handoff would reintroduce exactly the divergence the
+    /// routing change removed: two paths to one reference, one of which a future edit could
+    /// miss.
     private func referenceAnchorAfterScheduling() {
-        guard let reference = emittedPCMReference else { return }
-        reference.recordRenderPosition(renderPosition())
+        handoff?.submitRenderPosition(renderPosition())
     }
 
     /// The player node's rendered position, or nil when it is not rendering.
