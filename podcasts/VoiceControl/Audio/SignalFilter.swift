@@ -50,6 +50,14 @@ class SignalFilter {
         let minimumOverlap = Int(Double(mic.count) * Self.minimumOverlapFraction)
         guard window.count >= minimumOverlap, minimumOverlap > 0 else { return false }
 
+        // A match inside the overlap cannot license rejecting the WHOLE segment. The score
+        // establishes that the compared portion matches; audio the comparison never saw —
+        // samples beyond the window — could be the user speaking, and dropping them on the
+        // strength of a match elsewhere discards genuine speech. Only a segment fully
+        // covered by the reference can be rejected as echo, because only then does every
+        // sample have evidence against it.
+        guard window.count >= mic.count else { return false }
+
         return isPlaybackBleed(mic: mic, playback: window)
     }
 
