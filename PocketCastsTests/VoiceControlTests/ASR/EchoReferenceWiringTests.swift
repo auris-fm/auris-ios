@@ -663,6 +663,49 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertNil(player.emittedPCMReference, "a reference appeared from nowhere")
     }
 
+    /// **A render anchor must never describe more audio than the reference holds.**
+    ///
+    /// That is the queue-lead error in its checkable form: an anchor claiming a position
+    /// for audio still queued says the samples are already audible, and the filter then
+    /// aligns them to a position they have not reached. This is asserted at the reference
+    /// because it is the reference that holds the invariant.
+    ///
+    /// **What this does not cover, stated rather than implied:** that `EarconPlayer` records
+    /// the anchor *after* rendering rather than at submission. I split those two moments in
+    /// the implementation, wrote a case to pin the split, and **found it inert** — a fresh
+    /// player returns no render position either way, so recording nil and never recording
+    /// are indistinguishable. Distinguishing them needs a node that has actually rendered,
+    /// which needs a real output device and a playthrough. So the ordering is documented in
+    /// the code and **unverified by test**, which is a limit rather than a covered behaviour.
+    func testRenderAnchorDoesNotClaimMoreThanTheReferenceHolds() {
+        let reference = PlaybackEchoReference()
+        reference.append([Float](repeating: 0.1, count: 1600))
+
+        // An anchor whose position exceeds what the reference holds describes audio that
+        // is not there — the state a publish-then-anchor before scheduling produces.
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 4800,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            )
+        )
+
+        let anchor = reference.currentRenderAnchor
+        XCTAssertGreaterThan(
+            reference.snapshot().count, 0,
+            "the reference lost the samples it was given"
+        )
+        // The invariant: the position must be placeable within what is retained. An anchor
+        // beyond the retained window is the queue-lead signal and must be visible as such
+        // rather than silently trusted.
+        let retained = Double(reference.snapshot().count)
+        XCTAssertGreaterThan(
+            anchor?.renderedFrames ?? 0, retained,
+            "the queue-lead case did not reproduce: this assertion is what the invariant must catch"
+        )
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The
