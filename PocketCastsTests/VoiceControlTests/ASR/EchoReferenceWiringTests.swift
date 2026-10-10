@@ -607,6 +607,35 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// An anti-correlated segment scores at the negative end of the normalised range, so
+    /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
+    /// at the lowest representable value makes the verdict depend only on the loop. The
+    /// verdict is the same either way — a negative score fails a positive threshold — but
+    /// the function no longer relies on the threshold's sign to be correct.
+    func testAntiCorrelatedSegmentIsNotTreatedAsEcho() {
+        let filter = SignalFilter()
+        let echoSpan = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+        // Our output, inverted: not our emitted audio, so not echo.
+        let inverted = echoSpan.map { -$0 }
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: inverted, playback: echoSpan),
+            "an inverted copy of our output was treated as echo"
+        )
+    }
+
+    /// And the ordinary case still holds next to it, so the negative end of the range has
+    /// not been bought at the cost of the positive one.
+    func testAlignedEchoStillRejectedAlongsideTheNegativeCase() {
+        let filter = SignalFilter()
+        let echoSpan = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+
+        XCTAssertTrue(
+            filter.isPlaybackBleed(mic: echoSpan, playback: echoSpan),
+            "an exact echo was not rejected"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
