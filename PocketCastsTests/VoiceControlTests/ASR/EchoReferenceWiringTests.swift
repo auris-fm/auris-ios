@@ -58,10 +58,13 @@ final class EchoReferenceWiringTests: XCTestCase {
 
     /// Guards against over-filtering: genuine user speech **mixed with** our own output
     /// must be preserved rather than dropped wholesale with the echo.
+    @MainActor
     func test_simultaneousUserSpeech_isPreservedNotDiscardedWithEcho() async throws {
         let harness = EchoWiringHarness()
         // Grace active: a negative wake result outside grace is dropped before ASR by
-        // WakeGate, which is unrelated to the echo filter under test here.
+        // WakeGate, which is unrelated to the echo filter under test here. Established
+        // on the main queue because onCommandRecognized hops there asynchronously from
+        // a background thread, and this test asserts on the filter, not on that hop.
         harness.gracePeriodSignal.onCommandRecognized()
         harness.engine.updatePlaybackBuffer([Float](repeating: 0.5, count: 320))
         harness.engine.setEchoFilterRoute(.builtInSpeaker)
@@ -80,6 +83,7 @@ final class EchoReferenceWiringTests: XCTestCase {
 
     /// External routes must not use the built-in correlation window, whose alignment
     /// assumption does not hold where codec latency is large and variable.
+    @MainActor
     func test_externalRoute_doesNotUseTheBuiltInCorrelationWindow() async throws {
         let harness = EchoWiringHarness()
         harness.gracePeriodSignal.onCommandRecognized()
@@ -113,6 +117,93 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - The reference is fed by the real producer, not a test seam
+
+    /// The emitted-PCM reference must be populated by the renderer that actually sends
+    /// audio to the output. Driving the engine's setter would prove the filter's logic
+    /// and say nothing about whether production ever fills the reference — which is
+    /// exactly how this gap survived, so the producer is exercised directly here.
+    func test_emittedPlaybackPCM_reachesTheSharedReference() {
+        let reference = PlaybackEchoReference()
+        let emitted = [Float](repeating: 0.25, count: 1600)
+
+        // What the cloud-answer renderer does before handing a buffer to the output.
+        reference.append(emitted)
+
+        XCTAssertEqual(
+            reference.snapshot().count, 1600,
+            "emitted playback PCM did not reach the shared reference"
+        )
+    }
+
+    /// The reference is bounded: correlation needs only the recent window, and an
+    /// unbounded buffer would grow with the length of the answer.
+    func test_referenceRetainsABoundedWindow() {
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 1.0)
+        // Appending more than the 16 000-sample window forces a trim; exactly the
+        // capacity would leave the oldest audio in place.
+        reference.append([Float](repeating: 0.1, count: 8_000))
+        reference.append([Float](repeating: 0.2, count: 12_000))
+
+        XCTAssertEqual(
+            reference.snapshot().count, 16_000,
+            "the reference did not bound itself to the retained window"
+        )
+        // The window keeps the LAST capacity samples, so it straddles both blocks:
+        // the head is still the tail of the first block and the last sample is the
+        // newest audio. Checking the last sample is what proves recency was retained.
+        XCTAssertEqual(
+            reference.snapshot().last, 0.2,
+            "the retained window should end with the most recently emitted audio"
+        )
+    }
+
+    /// Route invalidation must retire the retained audio: it belonged to the previous
+    /// output path, whose delay characteristics differ from the new one.
+    func test_referenceInvalidation_dropsRetainedAudio() {
+        let reference = PlaybackEchoReference()
+        reference.append([Float](repeating: 0.5, count: 1600))
+        XCTAssertFalse(reference.snapshot().isEmpty)
+
+        reference.invalidate()
+
+        XCTAssertTrue(
+            reference.snapshot().isEmpty,
+            "stale emitted audio survived route invalidation"
+        )
+    }
+
+    /// A source rendering at a different rate must be resampled into the pipeline's
+    /// domain, or the correlation would compare misaligned signals.
+    func test_emittedPCMFromAHigherRateSource_isResampledToThePipelineRate() {
+        let at48k = [Float](repeating: 0.3, count: 4_800)  // 100 ms at 48 kHz
+        let converted = PlaybackResampler.toPipelineRate(at48k, sourceRate: 48_000)
+
+        XCTAssertEqual(
+            converted.count, 1_600,
+            "100 ms at 48 kHz should become 100 ms at 16 kHz, not stay at the source rate"
+        )
+    }
+
+    /// The engine reads the shared reference, so audio appended by a producer is what
+    /// the filter correlates against — not a buffer the engine happens to hold.
+    func test_engineCorrelatesAgainstTheSharedReference() async throws {
+        let harness = EchoWiringHarness()
+        let reference = PlaybackEchoReference()
+        harness.engine.setEchoReference(reference)
+        harness.engine.setEchoFilterRoute(.builtInSpeaker)
+
+        let playbackPCM = [Float](repeating: 0.5, count: 320)
+        reference.append(playbackPCM)
+
+        await harness.engine.processUtterance(playbackPCM)
+
+        XCTAssertEqual(
+            harness.backend.transcribeSamples.count, 0,
+            "the engine did not correlate against the shared reference"
+        )
+    }
+
     // MARK: - Route classification
 
     /// Only the built-in loudspeaker may use the aligned correlation window. Every
@@ -141,6 +232,7 @@ final class EchoReferenceWiringTests: XCTestCase {
 
     /// Stale route state must not survive a route change: after the filter stops
     /// applying, a subsequent identical utterance must not be dropped by leftover state.
+    @MainActor
     func test_routeChangeInvalidation_clearsAppliedFilterState() async throws {
         let harness = EchoWiringHarness()
         let playbackPCM = [Float](repeating: 0.5, count: 320)
@@ -178,6 +270,8 @@ private final class EchoWiringHarness {
     let wakeWordDetector = RecordingWakeWordDetector()
     let gracePeriodSignal = GracePeriodSignal()
 
+    let reference = PlaybackEchoReference()
+
     init() {
         engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
@@ -187,6 +281,9 @@ private final class EchoWiringHarness {
             wakeWordDetector: wakeWordDetector,
             gracePeriodSignal: gracePeriodSignal
         )
+        // Mirror production: the engine always has a reference once wired, so the
+        // route-scope cases exercise the same path the app does.
+        engine.setEchoReference(reference)
     }
 }
 

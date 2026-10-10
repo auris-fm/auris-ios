@@ -51,6 +51,8 @@ class VoiceControlAssembly {
             threshold: threshold
         )
 
+        let cloudAudioPlayer = CloudAudioPlayer()
+
         let asrEngine = VoiceAsrEngine(
             capture: capture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
             segmenter: NativeVadSegmenter(threshold: 0.020),
@@ -62,6 +64,13 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // One emitted-PCM reference for the whole session: the cloud-answer renderer
+        // feeds it, and the engine correlates against it. Without a producer the
+        // reference stays empty and the filter cannot fire.
+        let echoReference = PlaybackEchoReference()
+        cloudAudioPlayer.emittedPCMReference = echoReference
+        asrEngine.setEchoReference(echoReference)
+
         // Echo-filter scope follows the observed output route. Without this the
         // filter's classification never changes from its default and the correlation
         // window is never applied on the route it exists for. The monitor already
@@ -99,7 +108,7 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
-                audioPlayer: CloudAudioPlayer(),
+                audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
                 playbackSink: playbackSink,
                 fingerprintMapper: FingerprintTimingManager.shared,

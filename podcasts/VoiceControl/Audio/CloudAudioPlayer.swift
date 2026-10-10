@@ -165,6 +165,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     // MARK: - Init / Deinit
 
+    /// Receives the PCM this player emits, so the echo filter can reference what was
+    /// actually sent to the output. Set by the assembly; nil when nothing is listening.
+    var emittedPCMReference: PlaybackEchoReference?
+
     init() {
         runnerThread = Thread(target: self, selector: #selector(runnerLoop), object: nil)
         runnerThread?.name = "CloudAudioPlayer"
@@ -402,6 +406,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // unreliable, and on a 48 kHz device it played 24 kHz PCM at double speed.
         guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: negotiatedSampleRate) else {
             return
+        }
+
+        // Publish what is about to be emitted before it reaches the output, so the
+        // reference is populated for the same audio the microphone can hear. Resampled
+        // into the pipeline's rate because the filter correlates in that domain.
+        if let reference = emittedPCMReference,
+           let channel = pcmBuffer.floatChannelData?[0] {
+            let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
+            reference.append(PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate))
         }
 
         node.play()
