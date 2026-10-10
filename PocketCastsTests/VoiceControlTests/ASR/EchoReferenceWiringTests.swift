@@ -339,6 +339,49 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// Insufficient overlap must decline rather than decide. Asking for a segment-length
+    /// span does not guarantee one exists: with the segment near the window's start, the
+    /// span clamps and the overlap is a fraction of the segment. A short overlap can score
+    /// high on a partial match, so a decision made on it can be wrong in either direction.
+    func test_insufficientOverlapIsDeclinedRatherThanDecided() {
+        let filter = SignalFilter()
+        let speech = (0..<320).map { $0 % 2 == 0 ? Float(0.5) : Float(-0.5) }
+
+        // Only 40 samples exist before the segment's end: far less than its 320.
+        let shortReference = [Float](repeating: 0.5, count: 40)
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: speech, reference: shortReference, segmentEndOffset: 40),
+            "a 40-sample overlap against a 320-sample segment was treated as decision-bearing"
+        )
+    }
+
+    /// The same shape with an exact echo in the short overlap must also decline, so the
+    /// guard is not merely suppressing positive results.
+    func test_insufficientOverlapDeclinesEvenWhenTheOverlapMatches() {
+        let filter = SignalFilter()
+        let playback = (0..<320).map { Float(sin(Double($0) * 0.3)) }
+        let shortReference = Array(playback.prefix(40))
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: playback, reference: shortReference, segmentEndOffset: 40),
+            "a partial overlap was allowed to decide, however promising it looked"
+        )
+    }
+
+    /// A segment longer than the whole reference cannot be placed at all, so it declines
+    /// rather than correlating against whatever is there.
+    func test_segmentLongerThanTheReferenceIsDeclined() {
+        let filter = SignalFilter()
+        let longSegment = [Float](repeating: 0.4, count: 4_000)
+        let reference = [Float](repeating: 0.4, count: 320)
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: longSegment, reference: reference, segmentEndOffset: reference.count),
+            "a segment longer than the available reference was accepted as aligned"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {

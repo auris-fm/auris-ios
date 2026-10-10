@@ -3,6 +3,12 @@ import Accelerate
 class SignalFilter {
     private let threshold: Float = 0.7
 
+    /// Fraction of the segment that must be present in the reference before the
+    /// correlation is treated as decision-bearing. Three quarters keeps genuine overlap
+    /// usable while rejecting the clamped, partial windows that a segment sitting near the
+    /// window's start produces.
+    static let minimumOverlapFraction: Double = 0.75
+
     /// Returns true if the mic signal is likely playback bleed, using the segment's
     /// known position against the reference.
     ///
@@ -32,7 +38,18 @@ class SignalFilter {
         guard segmentEndOffset >= 0, segmentEndOffset <= reference.count else { return false }
         let start = max(0, segmentEndOffset - mic.count)
         let window = Array(reference[start..<segmentEndOffset])
-        guard !window.isEmpty else { return false }
+
+        // Require a substantial overlap before deciding. Asking for a segment-length span
+        // does not guarantee one exists: with the segment near the window's start, `start`
+        // clamps to zero and the overlap is a fraction of the segment. A short overlap can
+        // produce a high normalised score on a partial match — the score divides by the
+        // window length, so it stays in range on far fewer samples than the segment has —
+        // and the decision is then made on too little evidence to be right either way.
+        // Declining here is the honest outcome: it is "not enough reference to decide",
+        // not "not bleed".
+        let minimumOverlap = Int(Double(mic.count) * Self.minimumOverlapFraction)
+        guard window.count >= minimumOverlap, minimumOverlap > 0 else { return false }
+
         return isPlaybackBleed(mic: mic, playback: window)
     }
 
