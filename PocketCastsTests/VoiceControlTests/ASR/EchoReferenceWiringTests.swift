@@ -1528,6 +1528,61 @@ final class EchoReferenceWiringTests: XCTestCase {
             """
         )
     }
+
+    /// The episode tap must report both the render instant and the node's position.
+    ///
+    /// `capture(_:renderedAt:)` receives the tap's `AVAudioTime` and used to discard it, so
+    /// the block reached the handoff with no position at all and the anchor fell back to the
+    /// block's start. That places the audio correctly and says nothing about how much of it
+    /// has played, which is the fact the alignment needs.
+    ///
+    /// This drives `publish` directly with a time whose sample position is known, so the
+    /// assertion is about what the tap hands over rather than about `installTap` — a case
+    /// built on a real tap would depend on the node actually rendering.
+    func test_episodeTapPublishesTheNodesFramePosition() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let tap = EpisodeOutputTap(engine: nil)
+        tap.handoff = handoff
+
+        let frames = 1_600
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
+            XCTFail("could not build a buffer")
+            return
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        if let channel = buffer.floatChannelData?[0] {
+            for index in 0..<frames { channel[index] = 0.5 }
+        }
+
+        // The node reports it has rendered this much in total, which is more than this one
+        // buffer: the position is cumulative, not an offset within the buffer.
+        let nodePosition: AVAudioFramePosition = 8_000
+        // Both fields are needed: the handoff only records an anchor when it has a host
+        // instant, and the position comes from the sample time. A tap's real AVAudioTime
+        // carries both; a synthetic one must be given both.
+        tap.publish(
+            buffer,
+            renderedAt: AVAudioTime(
+                hostTime: AVAudioTime.hostTime(forSeconds: 12),
+                sampleTime: nodePosition,
+                atRate: 16_000
+            )
+        )
+        handoff.drain()
+
+        let offset = reference.audibleEndOffsetInRetainedWindow()
+        XCTAssertNotNil(offset, "no anchor was recorded at all")
+        XCTAssertEqual(
+            offset, frames,
+            """
+            the anchor is at \(String(describing: offset)) rather than \(frames). The tap \
+            either discarded the node's position, in which case the anchor falls back to the \
+            block's start, or converted it as if it were a per-buffer offset.
+            """
+        )
+    }
 }
 
 // MARK: - Harness

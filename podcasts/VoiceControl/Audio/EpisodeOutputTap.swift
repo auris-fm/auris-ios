@@ -84,7 +84,7 @@ final class EpisodeOutputTap {
     ///
     /// Exposed so the placement and the publishing rule can be exercised without running an
     /// engine, which cannot be made to render deterministically under test.
-    func publish(_ buffer: AVAudioPCMBuffer) {
+    func publish(_ buffer: AVAudioPCMBuffer, renderedAt: AVAudioTime? = nil) {
         guard let handoff, let channels = buffer.floatChannelData else { return }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
@@ -116,16 +116,30 @@ final class EpisodeOutputTap {
         let peak = mono.reduce(Float(0)) { Swift.max($0, Swift.abs($1)) }
         guard peak > Self.silenceFloor else { return }
 
+        // Both facts are carried, because they are different: the host instant places the
+        // block on the monotonic basis, and the node's cumulative sample position says how
+        // far it had rendered. Only the second can say where within the block this audio
+        // sits, and it is the producer's own count — the handoff maps it into the reference
+        // range the block lands in. `installTap`'s time is the node's running position
+        // rather than a buffer-local offset, which is what makes it usable here.
+        let hostInstant = renderedAt.flatMap { time -> MonotonicTime? in
+            time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil
+        }
+        let producerFrames = renderedAt.flatMap { time -> Double? in
+            time.isSampleTimeValid ? Double(time.sampleTime) : nil
+        }
+
         handoff.submit(
             mono,
             sampleRate: buffer.format.sampleRate,
-            renderedAt: nil
+            renderedAt: hostInstant,
+            renderedFramesInProducer: producerFrames
         )
     }
 
     private static let silenceFloor: Float = 1e-5
 
     private func capture(_ buffer: AVAudioPCMBuffer, renderedAt: AVAudioTime) {
-        publish(buffer)
+        publish(buffer, renderedAt: renderedAt)
     }
 }
