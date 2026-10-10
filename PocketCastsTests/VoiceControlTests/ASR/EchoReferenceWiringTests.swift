@@ -1492,6 +1492,53 @@ final class EchoReferenceWiringTests: XCTestCase {
             """
         )
     }
+
+    /// A node-local render position is not a stream index, and the difference shows on turn 2.
+    ///
+    /// `CloudAudioPlayer.renderPosition` reports `playerTime.sampleTime`, which its own
+    /// comment describes as "the position in the played audio's own sample frames". That is
+    /// a position inside the *node*, not in the accumulated emitted stream the reference
+    /// indexes. On the first turn the two coincide, because both start near zero; on a
+    /// second turn the node restarts while the stream keeps growing, so the same anchor
+    /// value means something else.
+    ///
+    /// This submits an interleaved sequence — earcon, cloud, episode — across two turns and
+    /// records the cloud anchor as the node reports it. It is the origin mapping, not the
+    /// arithmetic, that is under test.
+    func test_nodeLocalRenderPositionDoesNotSurviveASecondTurn() {
+        let reference = PlaybackEchoReference()
+
+        // Turn 1: the node renders a long answer. Stream and node positions agree so far.
+        reference.append([Float](repeating: 0.2, count: 32_000))          // cloud
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: 32_000, sourceSampleRate: 16_000, hostTime: 1)
+        )
+        XCTAssertNotNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "turn 1 should place: node and stream positions coincide there"
+        )
+
+        // Interleave the other producers between turns, so the stream advances independently
+        // of the cloud node.
+        reference.append([Float](repeating: 0.1, count: 4_000))           // earcon
+        reference.append([Float](repeating: 0.3, count: 6_000))           // episode
+
+        // Turn 2: the node restarts, so it reports a position near the start of ITS OWN
+        // played audio while the stream is already tens of thousands of samples in.
+        reference.append([Float](repeating: 0.2, count: 8_000))
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: 500, sourceSampleRate: 16_000, hostTime: 2)
+        )
+
+        XCTAssertNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            """
+            a node-local position still placed on turn 2. If this now returns an offset, \
+            either the origin is being mapped somewhere this case does not exercise, or the \
+            window is small enough that node and stream positions still coincide.
+            """
+        )
+    }
 }
 
 // MARK: - Harness
