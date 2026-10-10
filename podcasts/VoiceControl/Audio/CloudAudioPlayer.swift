@@ -395,6 +395,46 @@ final class CloudAudioPlayer: @unchecked Sendable {
         self.engine = nil
     }
 
+    /// Appends this frame's audio to the emitted reference and records where the node had
+    /// reached, mapped into the reference's own timeline.
+    ///
+    /// Extracted from `playFrame` so the mapping is reachable by a test: the conversion is
+    /// the part that can be wrong, and it was — the node reports a position in its own
+    /// played audio, which restarts each turn while the reference keeps growing, so writing
+    /// it through unmapped placed second-turn audio against the wrong origin.
+    ///
+    /// This is the one producer that does not hand off, so it performs the same
+    /// range-plus-position conversion the handoff performs for the others.
+    func appendToEmittedReference(_ pcmBuffer: AVAudioPCMBuffer, node: AVAudioPlayerNode) {
+        guard let reference = emittedPCMReference,
+              let channel = pcmBuffer.floatChannelData?[0] else { return }
+
+        let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
+        let resampled = PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate)
+
+        // Read the range BEFORE the append: this is where the block will land, and it is the
+        // only correct origin for a position inside it. An interleaved producer's appends sit
+        // between this producer's frames, so no per-producer offset maps them.
+        let rangeStart = reference.streamIndex
+        reference.append(resampled)
+
+        let anchor = renderPosition(of: node).map { position -> PlaybackRenderAnchor in
+            PlaybackRenderAnchor(
+                renderedFrames: Double(
+                    referenceIndexForProducerPosition(
+                        rangeStart: rangeStart,
+                        producerFrames: position.renderedFrames,
+                        producerRate: position.sourceSampleRate,
+                        blockLength: resampled.count
+                    )
+                ),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: position.hostTime
+            )
+        }
+        reference.recordRenderPosition(anchor)
+    }
+
     private func playFrame(_ frame: CloudAudioFrame) {
         guard let node = playerNode, let engine = engine else { return }
 
@@ -426,14 +466,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // this path has none — the drain loop yields. So this is the one producer that
         // legitimately does not hand off, and it is not an oversight. The producers that do
         // run on a deadline callback (the episode tap and the earcon) both submit instead.
-        if let reference = emittedPCMReference,
-           let channel = pcmBuffer.floatChannelData?[0] {
-            let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
-            let resampled = PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate)
-            reference.append(resampled)
-            reference.recordRenderPosition(renderPosition(of: node))
-        }
-
+        appendToEmittedReference(pcmBuffer, node: node)
         node.play()
         node.scheduleBuffer(pcmBuffer)
     }
