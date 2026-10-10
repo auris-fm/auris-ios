@@ -17,9 +17,14 @@ import XCTest
 ///   * external routes — delay tracking, *not* the built-in correlation window;
 ///   * isolated route — reduced exposure, but **not** proof that echo is absent.
 ///
-/// These cases drive the engine's production seam, never `SignalFilter` directly, so
-/// they fail while nothing feeds the reference. A test that constructs `SignalFilter`
-/// and calls `isPlaybackBleed` would pass forever over a filter the app never runs.
+/// These cases drive the engine's consumed seam, never `SignalFilter` directly: a test
+/// that constructs `SignalFilter` and calls `isPlaybackBleed` passes forever over a
+/// filter the app never reaches, which is why the gap this closes survived.
+///
+/// What the route-scope cases in this file establish is **filter behaviour given
+/// emitted PCM**. Whether production actually fills the reference is a separate
+/// property, covered by the producer cases further down; supplying PCM here would
+/// otherwise leave a passing suite that says nothing about the renderer.
 final class EchoReferenceWiringTests: XCTestCase {
 
     // MARK: - Built-in loudspeaker: echo-only must be rejected
@@ -28,8 +33,12 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// an exact copy of our own playback must be dropped **before** it can reset grace,
     /// spend a dispatch allowance or reach wake/ASR.
     ///
-    /// This is the case that cannot be faked: a never-firing filter — the shipped state,
-    /// where both setters have no callers — routes this utterance and fails here.
+    /// Before this change the filter could not fire at all: the route flag and the
+    /// emitted-PCM reference each had setters with no callers, so the flag stayed
+    /// `false` and the buffer stayed empty. This case drives the route scope, and the
+    /// reference is supplied by the harness, so it verifies filter behaviour **given**
+    /// PCM — not that production fills the reference. The producer is covered
+    /// separately below.
     func test_echoOnlyPlayback_onBuiltInSpeaker_producesNoAcceptedSpeechOrReset() async throws {
         let harness = EchoWiringHarness()
         let before = harness.gracePeriodSignal.isActive
