@@ -191,19 +191,10 @@ final class EchoReferenceHandoff {
         reference.append(resampled)
         // The producer's render instant is carried through, so the reference is placed on
         // the timeline the audio was actually emitted on rather than the consumer's.
-        //
-        // The frame count is the STREAM index this block ends at, not the block's own
-        // length. `audibleEndOffsetInRetainedWindow()` subtracts `windowStart`, the stream
-        // index of the first retained sample, so an anchor carrying a per-block count is
-        // below that window as soon as it slides — the offset goes negative, the method
-        // returns nil, and the filter declines every segment. Recording the block length
-        // here made the anchor's units disagree with its reader's, which is what made the
-        // episode producer's positions unusable once playback had been running for longer
-        // than the retained window.
         reference.recordRenderPosition(
             block.renderedAt.map {
                 PlaybackRenderAnchor(
-                    renderedFrames: Double(reference.streamIndex),
+                    renderedFrames: Double(resampled.count),
                     sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
                     hostTime: $0
                 )
