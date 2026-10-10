@@ -418,6 +418,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // been handed to it. `playerTime(forNodeTime:)` reports that, and using it means
         // a queue lead or a restart shows up as a position jump instead of the reference
         // silently claiming audio is audible before it is.
+        // Appends to the reference directly, rather than through `EchoReferenceHandoff`.
+        //
+        // Checked rather than assumed: this is called from the bounded drain loop above
+        // (`for _ in 0..<framesToProcess { dequeueFrame(); playFrame(frame) }`), not from an
+        // `AVAudioEngine` tap callback. The handoff's reason is a real-time deadline, and
+        // this path has none — the drain loop yields. So this is the one producer that
+        // legitimately does not hand off, and it is not an oversight. The producers that do
+        // run on a deadline callback (the episode tap and the earcon) both submit instead.
         if let reference = emittedPCMReference,
            let channel = pcmBuffer.floatChannelData?[0] {
             let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
