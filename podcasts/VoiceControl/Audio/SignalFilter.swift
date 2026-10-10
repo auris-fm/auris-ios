@@ -98,22 +98,39 @@ class SignalFilter {
                           &correlation, 1, vDSP_Length(correlation.count), vDSP_Length(playback.count))
             }
         }
-        // Compare the three quantities over the SAME sample pairs: the numerator comes
-        // from the winning lag, so the energies must be taken over that lag's overlapping
-        // span rather than over the full microphone segment and the full window. Mixing
-        // supports lets the score depend on how much audio sits outside the overlap —
-        // energy in the segment beyond the window raises `micRms` without appearing in the
-        // numerator, and the result is then a statement about lengths rather than about
-        // match.
-        guard let maxCorr = correlation.max(),
-              let lag = correlation.firstIndex(of: maxCorr) else { return false }
-
-        let paired = Array(mic[lag..<(lag + playback.count)])
-        let micRms = rms(paired)
+        // Normalise EACH candidate lag by its own paired energies, then take the maximum
+        // of those scores. Raw correlation is the right quantity to maximise and the wrong
+        // one to select with: a loud portion of the segment can produce a larger raw sum at
+        // a spurious alignment than the true match produces at lag 0, so selecting on the
+        // raw value picks the wrong span and then judges that span. Scoring every lag on
+        // the same criterion the decision uses removes that mismatch — one criterion for
+        // choosing and judging.
+        //
+        // Energies are taken over the lag's own overlapping samples, so the score does not
+        // depend on audio outside the overlap: energy beyond the window would raise the
+        // microphone's energy without appearing in the numerator, making the result a
+        // statement about lengths rather than about match.
+        //
+        // **Limits, stated rather than assumed absent.** This is a correlation over a
+        // sliding window, so it inherits the usual caveats: a periodic or self-similar
+        // segment has several equally good alignments and any of them may win, which is
+        // harmless here because each such alignment is genuinely the same audio. I probed
+        // for a region where the true lag still loses after normalisation — very short
+        // echo spans, tails comparable in length to the echo, loud tails up to 60x — and
+        // did not find one; that is "not found", not "proved absent". The search was over
+        // synthetic signals, so real audio may expose a region these did not.
         let pbRms = rms(playback)
-        guard micRms > 0, pbRms > 0 else { return false }
-        let normalizedCorr = maxCorr / (micRms * pbRms * Float(playback.count))
-        return normalizedCorr > threshold
+        guard pbRms > 0 else { return false }
+
+        var bestScore: Float = 0
+        for (lag, corr) in correlation.enumerated() {
+            let paired = mic[lag..<(lag + playback.count)]
+            let micRms = rms(Array(paired))
+            guard micRms > 0 else { continue }
+            let score = corr / (micRms * pbRms * Float(playback.count))
+            if score > bestScore { bestScore = score }
+        }
+        return bestScore > threshold
     }
 
     private func rms(_ samples: [Float]) -> Float {

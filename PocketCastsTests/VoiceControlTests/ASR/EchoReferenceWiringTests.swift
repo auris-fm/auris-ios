@@ -539,6 +539,74 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - Lag selection must use the same criterion as the decision
+
+    /// Selecting the lag on raw correlation picks the wrong span once a loud portion of the
+    /// segment outweighs the echo by enough that a spurious alignment wins on magnitude.
+    /// The energies then describe that wrong span and a true echo match at lag 0 is missed.
+    /// Scoring every lag by its own paired normalisation and taking the maximum fixes it,
+    /// because choosing and judging then use one criterion.
+    ///
+    /// Separation must hold across amplitudes and length ratios; a fix verified only at a
+    /// quiet tail would pass while the defect it exists for is still present.
+    func test_loudTailDoesNotDefeatLagSelection() {
+        let filter = SignalFilter()
+
+        for amplitude: Float in [0.9, 1.5, 3.0] {
+            let echoSpan = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+            let segment = echoSpan + [Float](repeating: amplitude, count: 800)
+
+            XCTAssertTrue(
+                filter.isPlaybackBleed(mic: segment, playback: echoSpan),
+                "amplitude \(amplitude): a true echo at the aligned lag was missed because a spurious lag won on raw magnitude"
+            )
+        }
+    }
+
+    /// The same property across length ratios: the echo must be found whatever proportion
+    /// of the segment it occupies, so the fix is not tuned to one fixture.
+    func test_lagSelectionHoldsAcrossLengthRatios() {
+        let filter = SignalFilter()
+
+        for (segmentLength, echoLength) in [(1_600, 800), (1_200, 900), (2_400, 600)] {
+            let echoSpan = (0..<echoLength).map { Float(sin(Double($0) * 0.25) * 0.05) }
+            let segment = echoSpan + [Float](repeating: 2.0, count: segmentLength - echoLength)
+
+            XCTAssertTrue(
+                filter.isPlaybackBleed(mic: segment, playback: echoSpan),
+                "segment \(segmentLength) / echo \(echoLength): a true echo was missed"
+            )
+        }
+    }
+
+    /// Unrelated speech with a loud tail must still be preserved, so normalised selection
+    /// has not simply made everything look like echo.
+    func testLoudTailWithUnrelatedSpeechIsStillPreserved() {
+        let filter = SignalFilter()
+        let echoSpan = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+        // Orthogonal to the echo, then a loud tail.
+        let speech = (0..<800).map { $0 % 2 == 0 ? Float(0.6) : Float(-0.6) }
+            + [Float](repeating: 2.0, count: 800)
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: speech, playback: echoSpan),
+            "unrelated speech was rejected as echo"
+        )
+    }
+
+    /// A quiet tail must still behave as before, so the change does not only help the loud
+    /// case at the cost of the ordinary one.
+    func testQuietTailStillRejectsEcho() {
+        let filter = SignalFilter()
+        let echoSpan = (0..<800).map { Float(sin(Double($0) * 0.25) * 0.05) }
+        let segment = echoSpan + [Float](repeating: 0.001, count: 800)
+
+        XCTAssertTrue(
+            filter.isPlaybackBleed(mic: segment, playback: echoSpan),
+            "a quiet tail broke the ordinary echo case"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
