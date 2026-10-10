@@ -120,6 +120,12 @@ class VoiceControlAssembly {
 
         let audioEngine = AVAudioEngine()
         let earconPlayer = EarconPlayer(engine: audioEngine)
+        // The earcon player is the second producer of emitted audio, after the cloud
+        // renderer. An earcon is audible to the microphone, so it belongs in the same
+        // reference; without it, a chime played while the user speaks forms a segment the
+        // filter cannot recognise as our output and the utterance is transcribed as if
+        // the user had said it.
+        earconPlayer.emittedPCMReference = echoReference
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 

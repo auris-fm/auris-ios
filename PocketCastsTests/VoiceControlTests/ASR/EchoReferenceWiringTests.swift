@@ -607,6 +607,62 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// An earcon is audio the microphone can hear, so it belongs in the echo reference
+    /// exactly like the cloud answer. Without it, a chime played while the user is
+    /// speaking is attributed to the user: the segment forms, nothing knows it was our
+    /// output, and the utterance is transcribed as if the user had said it.
+    ///
+    /// **Driven through `play`, the production entry point**, with the buffer injected
+    /// because the earcon assets belong to the app target and do not load under test.
+    /// This is what makes the case cover the *call site* rather than only the publisher:
+    /// removing the publish from `play` fails it.
+    func testEarconSamplesReachTheEchoReferenceAtThePipelineRate() throws {
+        let reference = PlaybackEchoReference()
+        let player = EarconPlayer(engine: AVAudioEngine())
+        player.emittedPCMReference = reference
+
+        // A tone standing in for the chime, at a device-like rate so the resampling path
+        // is the one exercised.
+        let sourceRate = 24_000.0
+        let frameCount = 1600
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: EarconPlayer.earconFormat(sampleRate: sourceRate),
+                frameCapacity: AVAudioFrameCount(frameCount)
+            )
+        )
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        for i in 0..<frameCount { channel[i] = Float(sin(Double(i) * 0.3) * 0.4) }
+
+        player.loadForTesting(.listeningStart, buffer: buffer)
+        player.play(.listeningStart)
+
+        let expected = frameCount * Int(PlaybackEchoReference.pipelineSampleRate) / Int(sourceRate)
+        XCTAssertEqual(
+            reference.snapshot().count, expected,
+            "playing an earcon did not reach the reference at the pipeline rate"
+        )
+    }
+
+    /// With no reference attached nothing is published, so the player stays usable in
+    /// contexts that do not run the echo filter.
+    func testEarconPublishIsInertWithoutAReference() throws {
+        let player = EarconPlayer(engine: AVAudioEngine())
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: EarconPlayer.earconFormat(sampleRate: 24_000),
+                frameCapacity: 800
+            )
+        )
+        buffer.frameLength = 800
+
+        player.loadForTesting(.listeningStart, buffer: buffer)
+        player.play(.listeningStart)
+
+        XCTAssertNil(player.emittedPCMReference, "a reference appeared from nowhere")
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The
