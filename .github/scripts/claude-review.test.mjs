@@ -159,3 +159,36 @@ test('an inline status call is detected, not skipped', async () => {
   assert.throws(() => check(inline), /statuses: write/,
     'an inline status writer without the permission was not caught');
 });
+
+// **A guard must not be satisfiable by disabled code.** Both clauses of the detector match
+// text anywhere in the job body, and a commented-out line is text: commenting out the
+// invocation and removing the permission still demanded `statuses: write`, so the guard
+// was satisfied by a call that would never run. That is the shape of the defect the guard
+// exists to catch, one level down — a declaration whose justification has been switched off
+// reads exactly like one whose justification is live.
+//
+// The requirement is to key on the step that would EXECUTE, not on matching text anywhere.
+test('a commented-out status call does not count as a status writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  // The line that runs the script, prefixed so it is a comment rather than a command.
+  const commented = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        # run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+  );
+  assert.notEqual(commented, src, 'the fixture did not apply — the invocation line was not found');
+
+  // With the permission removed there is nothing left that writes a status, so the check
+  // must fail on the missing writer rather than demanding the permission.
+  const withoutPermission = commented.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(withoutPermission), /detector did not match/,
+    'a commented-out call was treated as a live status writer');
+
+  // And the live form must still be recognised, or the fix would be a narrower detector
+  // rather than a correct one.
+  const liveWithoutPermission = src.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(liveWithoutPermission), /does not declare statuses: write/,
+    'a live call without the permission was not caught');
+});
