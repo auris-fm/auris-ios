@@ -205,10 +205,14 @@ test('a commented-out status call does not count as a status writer', async () =
 // disagree only there: a trailing comment belongs to a live command, so the line must be
 // kept, while a loose filter drops it and the writer disappears.
 //
-// This fixture is NOT portable to a checker that parses YAML, and copying it there would
-// make it inert silently. This check reads raw bytes, so the `#` reaches the filter; a
-// parser treats the trailing comment as YAML syntax and removes it first, leaving a run
-// body with no `#` for either filter to disagree about:
+// This fixture is NOT portable to a checker that parses YAML. This check reads raw bytes,
+// so the `#` reaches the filter; a parser treats the trailing comment as YAML syntax and
+// removes it first, leaving a run body with no `#` for either filter to disagree about.
+//
+// The cost is that it stops DISCRIMINATING, which is milder than it sounds and worth stating
+// exactly: copied to a parsing checker using a plain scalar it still PASSES — it does not
+// assert falsely, and nothing goes red. Both of its assertions continue to hold, and it
+// collapses into the same check as the inline case, so the suite is unchanged either way:
 //   raw bytes   run: cmd # note  -> contains '#': true
 //   parsed      run: cmd # note  -> contains '#': false   (plain scalar, comment stripped)
 //   parsed      run: |           -> contains '#': true     (block scalar, survives as text)
