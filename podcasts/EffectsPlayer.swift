@@ -10,6 +10,25 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
 
+    #if !APPCLIP
+    /// Handoff the capture publishes into, set once by assembly before playback starts.
+    static var echoReferenceHandoff: EchoReferenceHandoff?
+
+    /// Captures this renderer's output as an echo-reference source.
+    ///
+    /// Installed on the output node once the engine starts, so it sees post-effects and
+    /// post-rate audio under both volume-boost configurations, and removed before the engine
+    /// stops so no callback arrives during teardown.
+    ///
+    /// **Inside `#if !APPCLIP` because this file compiles into two targets.** The App Clip
+    /// builds `EffectsPlayer` and does **not** compile the voice layer — its file list has no
+    /// `VoiceControl/` source at all — so an ungated reference fails that build with "cannot
+    /// find in scope". The App Clip has no echo-filter consumer, so gating loses nothing
+    /// there. **If this gate is removed, build both targets:** the `podcasts` target alone
+    /// will not show the failure.
+    private var emittedAudioTap: EpisodeOutputTap?
+    #endif
+
     private var timePitch: AVAudioUnitTimePitch?
     private var playbackSpeed = 0 as Double // AVAudioUnitTimePitch seems to not like us querying the rate sometimes, so store that as a separate variable
 
@@ -162,6 +181,14 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             do {
                 strongSelf.engine?.prepare()
                 try strongSelf.engine?.start()
+                #if !APPCLIP
+                if let engine = strongSelf.engine {
+                    let tap = EpisodeOutputTap(engine: engine)
+                    tap.handoff = EffectsPlayer.echoReferenceHandoff
+                    tap.install()
+                    strongSelf.emittedAudioTap = tap
+                }
+                #endif
             } catch {
                 strongSelf.playerLock.unlock()
                 PlaybackManager.shared.playbackDidFail(error: .fileCorrupted(logMessage: error.localizedDescription))
@@ -302,6 +329,13 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         }
 
         player?.stop()
+
+        #if !APPCLIP
+        // Removed before the engine stops, so no callback is delivered into a graph being
+        // torn down.
+        emittedAudioTap?.remove()
+        emittedAudioTap = nil
+        #endif
 
         engine?.stop()
     }
