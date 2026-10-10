@@ -1383,6 +1383,77 @@ final class EchoReferenceWiringTests: XCTestCase {
                        "a render position from an ended session landed in the new one")
     }
 
+
+    // MARK: - Alignment origin: the producer's index space vs the consumer's
+
+    /// Reproduces the alignment-origin mismatch across two successive turns.
+    ///
+    /// `PlaybackEchoReference.audibleEndOffsetInRetainedWindow()` computes
+    /// `renderedIndex - windowStart`, where `windowStart = totalAppended - samples.count` is
+    /// the stream index of the first retained sample. So the anchor's number must be an
+    /// **absolute position in the emitted stream**.
+    ///
+    /// `CloudAudioPlayer` supplies one: `playerTime.sampleTime`, the node's cumulative
+    /// position. The episode tap does not — and this case pins the consequence without
+    /// asserting which fix is right.
+    ///
+    /// Two turns, with the earcon and cloud producers interleaved so the reference is not
+    /// trivially empty. After the retained window starts sliding (2 s at the pipeline rate),
+    /// a per-block-sized anchor falls below `windowStart`, the offset goes negative, and the
+    /// method returns nil — at which point `playbackEndOffsetForSegment` yields -1 and the
+    /// filter declines every segment rather than mis-aligning.
+    func test_alignmentOriginMismatch_returnsNoOffsetOnceTheWindowSlides() {
+        let reference = PlaybackEchoReference()
+        let capacity = Int(PlaybackEchoReference.pipelineSampleRate * PlaybackEchoReference.retainedSeconds)
+
+        // Turn 1: a block of episode audio, then the anchor for it.
+        let block = 3_200   // one 0.2 s block at the pipeline rate, the tap's own granularity
+        reference.append([Float](repeating: 0.3, count: block))
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: Double(block), sourceSampleRate: 16_000, hostTime: 10)
+        )
+
+        // Early on the window has not slid, so even a block-sized anchor yields an offset.
+        XCTAssertNotNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "with the window at its start, no offset at all — the mapping never worked"
+        )
+
+        // Interleave the other producers and push past the retained window so it slides.
+        for turn in 0..<8 {
+            reference.append([Float](repeating: 0.2, count: 8_000))              // cloud answer
+            reference.append([Float](repeating: 0.1, count: 1_600))              // earcon
+            reference.recordRenderPosition(
+                PlaybackRenderAnchor(renderedFrames: Double(block), sourceSampleRate: 16_000, hostTime: Double(turn + 11))
+            )
+        }
+        _ = capacity
+
+        // The window now starts well beyond one block, so a block-sized anchor is below it.
+        XCTAssertNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "the mismatch did not reproduce: a block-sized anchor still produced an offset"
+        )
+
+        // Control: the same reference, the same window, but an anchor in the stream's own
+        // index space rather than a per-block count. If this also returned nil, the nil above
+        // would be about the window rather than about the origin.
+        // The test knows the total because it appended every block itself: one 3 200-frame
+        // block, then eight rounds of 8 000 + 1 600. `renderedFrames` is convertible at the
+        // same 16 kHz the producers declared.
+        let appendedTotal = 3_200 + 8 * (8_000 + 1_600)
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(appendedTotal),
+                sourceSampleRate: 16_000,
+                hostTime: 99
+            )
+        )
+        XCTAssertNotNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "an absolute anchor also failed, so this case does not discriminate on origin"
+        )
+    }
 }
 
 // MARK: - Harness
