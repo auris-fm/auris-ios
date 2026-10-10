@@ -47,7 +47,16 @@ export function check(text) {
   // core call `gh api .../statuses/` inline while iOS and core invoke the script, and I
   // measured this detector against Android's workflow: keying on the script alone silently
   // skipped the file it exists to guard.
-  const writesAStatus = /statuses\//.test(body) || /claude-review\.mjs"?\s+finish/.test(body);
+  //
+  // **Commands, not comments.** An earlier version matched the text anywhere in the job, so
+  // commenting out the invocation and removing the permission still demanded `statuses: write`
+  // — the guard was satisfied by a call that would never run, which is the shape of the defect
+  // it exists to catch. Only lines that would execute count, so a commented `# run:` line is not
+  // a writer while a live `run:` line is.
+  const commandLines = body.split('\n')
+    .filter(line => !/^\s*#/.test(line))
+    .join('\n');
+  const writesAStatus = /statuses\//.test(commandLines) || /claude-review\.mjs"?\s+finish/.test(commandLines);
 
   // **The detector must prove it matched.** A text-keyed detector is exactly as strong as
   // the stability of the text it keys on, so a workflow whose invocation is reflowed or

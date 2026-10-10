@@ -159,3 +159,83 @@ test('an inline status call is detected, not skipped', async () => {
   assert.throws(() => check(inline), /statuses: write/,
     'an inline status writer without the permission was not caught');
 });
+
+// **A guard must not be satisfiable by disabled code.** Both clauses of the detector match
+// text anywhere in the job body, and a commented-out line is text: commenting out the
+// invocation and removing the permission still demanded `statuses: write`, so the guard
+// was satisfied by a call that would never run. That is the shape of the defect the guard
+// exists to catch, one level down — a declaration whose justification has been switched off
+// reads exactly like one whose justification is live.
+//
+// The requirement is to key on the step that would EXECUTE, not on matching text anywhere.
+test('a commented-out status call does not count as a status writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  // The line that runs the script, prefixed so it is a comment rather than a command.
+  const commented = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        # run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+  );
+  assert.notEqual(commented, src, 'the fixture did not apply — the invocation line was not found');
+
+  // With the permission removed there is nothing left that writes a status, so the check
+  // must fail on the missing writer rather than demanding the permission.
+  const withoutPermission = commented.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(withoutPermission), /detector did not match/,
+    'a commented-out call was treated as a live status writer');
+
+  // And the live form must still be recognised, or the fix would be a narrower detector
+  // rather than a correct one.
+  const liveWithoutPermission = src.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(liveWithoutPermission), /does not declare statuses: write/,
+    'a live call without the permission was not caught');
+});
+
+// **The over-scoping guard, in the form that actually exercises the difference.**
+//
+// An earlier version of this case put a comment ABOVE the live call. That does not
+// distinguish the right filter from a wrong one: the invocation line itself contains no
+// `#`, so `^\s*#` and a looser `#` both keep it and the case passes either way — verified
+// by loosening the anchor and watching the suite still report 15/15. A case that cannot
+// fail on the defect it names is not evidence about that defect.
+//
+// The discriminating input is a command that CONTAINS a `#`, because the two filters
+// disagree only there: a trailing comment belongs to a live command, so the line must be
+// kept, while a loose filter drops it and the writer disappears.
+test('a live call with a trailing comment is still a writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  const withTrailingComment = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish # records the reviewed head'
+  );
+  assert.notEqual(withTrailingComment, src, 'the fixture did not apply');
+
+  // The line is a command, so the writer is found: with the permission present the check
+  // passes, and without it the check complains about the permission rather than about
+  // finding no writer — the same "found, then judged" discriminator as the other cases.
+  assert.equal(check(withTrailingComment), true, 'a live call with a trailing comment was not recognised');
+
+  const withoutPermission = withTrailingComment.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(withoutPermission), /does not declare statuses: write/,
+    'the writer was dropped because its line contained a #, so the check reported no writer');
+});
+
+// And the comment-only case from the other direction, so both filters are pinned by input
+// rather than by the shape of one line: a `#`-prefixed line IS a comment and must be dropped.
+test('a comment line containing the invocation is not a writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  const commented = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        # run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+  ).replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(commented), /detector did not match/,
+    'a commented line was treated as a live writer');
+});
