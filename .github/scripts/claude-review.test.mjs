@@ -204,6 +204,17 @@ test('a commented-out status call does not count as a status writer', async () =
 // The discriminating input is a command that CONTAINS a `#`, because the two filters
 // disagree only there: a trailing comment belongs to a live command, so the line must be
 // kept, while a loose filter drops it and the writer disappears.
+//
+// This fixture is NOT portable to a checker that parses YAML, and copying it there would
+// make it inert silently. This check reads raw bytes, so the `#` reaches the filter; a
+// parser treats the trailing comment as YAML syntax and removes it first, leaving a run
+// body with no `#` for either filter to disagree about:
+//   raw bytes   run: cmd # note  -> contains '#': true
+//   parsed      run: cmd # note  -> contains '#': false   (plain scalar, comment stripped)
+//   parsed      run: |           -> contains '#': true     (block scalar, survives as text)
+// So the block-scalar form is REQUIRED for a parsing checker and merely sufficient for a
+// raw reader. An equivalent case there must use it, or the suite still passes while
+// testing nothing.
 test('a live call with a trailing comment is still a writer', async () => {
   const {check} = await import('./check-workflow-structure.mjs');
   const {readFileSync} = await import('node:fs');
