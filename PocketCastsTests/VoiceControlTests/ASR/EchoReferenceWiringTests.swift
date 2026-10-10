@@ -47,7 +47,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         harness.engine.updatePlaybackBuffer(playbackPCM)
         harness.engine.setEchoFilterRoute(.builtInSpeaker)
 
-        await harness.engine.processUtterance(playbackPCM)
+        await harness.engine.processUtterance(playbackPCM, capturedAt: 0)
 
         XCTAssertEqual(
             harness.backend.transcribeSamples.count, 0,
@@ -379,6 +379,51 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertFalse(
             filter.isPlaybackBleed(mic: longSegment, reference: reference, segmentEndOffset: reference.count),
             "a segment longer than the available reference was accepted as aligned"
+        )
+    }
+
+    /// A segment with no capture instant must not be aligned. Callback arrival is the only
+    /// other clock available, and it is not a substitute: the tap runs on a processing
+    /// queue, so arrival lags capture by an indeterminate amount and would place the
+    /// segment later than it was spoken.
+    func test_segmentWithoutACaptureInstantIsNotAligned() async throws {
+        let harness = EchoWiringHarness()
+        harness.engine.setEchoFilterRoute(.builtInSpeaker)
+        harness.gracePeriodSignal.onCommandRecognized()
+
+        let playbackPCM = [Float](repeating: 0.5, count: 320)
+        harness.engine.updatePlaybackBuffer(playbackPCM)
+
+        // No capture instant: the position is unknown, so the filter must decline rather
+        // than fall back to arrival time.
+        await harness.engine.processUtterance(playbackPCM)
+
+        XCTAssertEqual(
+            harness.backend.transcribeSamples.count, 1,
+            "a segment with no capture instant was aligned anyway"
+        )
+    }
+
+    /// The segmenter must carry the instant of its FIRST retained sample, not the buffer
+    /// that completed the utterance. A multi-buffer utterance spans its own length, so
+    /// using the completing buffer's time would shift the segment later by that much.
+    func test_segmenterCarriesTheFirstSamplesCaptureInstant() {
+        let segmenter = NativeVadSegmenter(threshold: 0.002, silenceTimeoutMs: -1, minSpeechFrames: 2)
+        var received: (samples: [Float], capturedAt: MonotonicTime?)?
+        segmenter.onUtterance = { samples, capturedAt in
+            received = (samples, capturedAt)
+        }
+
+        let speech = [Float](repeating: 1.0, count: 320)
+        // Three speech buffers arriving at different instants, then the endpoint.
+        segmenter.process(speech, capturedAt: 100)
+        segmenter.process(speech, capturedAt: 200)
+        segmenter.process(speech, capturedAt: 300)
+        segmenter.process([Float](repeating: 0, count: 320), capturedAt: 400)
+
+        XCTAssertEqual(
+            received?.capturedAt, 100,
+            "the utterance should carry the first retained sample's instant, not the last buffer's"
         )
     }
 

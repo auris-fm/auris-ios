@@ -109,8 +109,22 @@ class VoiceAsrEngine {
     /// to end at the current audible position. That holds when the segment arrives as it
     /// is captured and not when capture buffering delays it, which is why the capture-side
     /// timestamp is required before alignment acceptance can close.
-    private func playbackEndOffsetForCurrentSegment() -> Int {
-        echoReference?.audibleEndOffsetInRetainedWindow() ?? -1
+    private func playbackEndOffsetForSegment(capturedAt: MonotonicTime?) -> Int {
+        guard let reference = echoReference,
+              let anchor = reference.currentRenderAnchor else { return -1 }
+        // Without the segment's own instant the position is unknown, so no alignment
+        // claim is made. The callback's arrival time is not a substitute: the tap runs on
+        // a processing queue, so arrival lags capture by an indeterminate amount and would
+        // place the segment later than it was spoken.
+        guard let capturedAt else { return -1 }
+        // How far the render position in the reference window is *behind* the segment's
+        // capture: emitted audio keeps playing while the segment is being captured, so the
+        // audible position at capture is earlier than the audible position now.
+        let latency = max(0, anchor.hostTime - capturedAt)
+        let latencySamples = Int(latency * PlaybackEchoReference.pipelineSampleRate)
+        let nowOffset = reference.audibleEndOffsetInRetainedWindow() ?? -1
+        guard nowOffset >= 0 else { return -1 }
+        return max(0, nowOffset - latencySamples)
     }
     var listeningMode: ListeningMode = .wakeWord
 
@@ -207,11 +221,11 @@ class VoiceAsrEngine {
 
     func start() {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        segmenter.onUtterance = { [weak self] utterance in
-            Task { await self?.processUtterance(utterance) }
+        segmenter.onUtterance = { [weak self] utterance, capturedAt in
+            Task { await self?.processUtterance(utterance, capturedAt: capturedAt) }
         }
-        capture.onSamples = { [weak self] samples in
-            self?.segmenter.process(samples)
+        capture.onCapturedSamples = { [weak self] samples, capturedAt in
+            self?.segmenter.process(samples, capturedAt: capturedAt)
         }
 
         preloadBackend()
@@ -230,14 +244,14 @@ class VoiceAsrEngine {
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float]) async {
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
         stageTimer.mark() // VAD segment ready
 
         if echoFilterRoute.appliesCorrelationWindow,
            signalFilter.isPlaybackBleed(
                mic: utterance,
                reference: playbackBuffer,
-               segmentEndOffset: playbackEndOffsetForCurrentSegment()
+               segmentEndOffset: playbackEndOffsetForSegment(capturedAt: capturedAt)
            ) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
