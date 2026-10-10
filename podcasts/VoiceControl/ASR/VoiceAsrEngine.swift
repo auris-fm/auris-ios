@@ -55,8 +55,15 @@ class VoiceAsrEngine {
     }
 
     private(set) var echoFilterRoute: EchoFilterRoute = .external
-    /// How long emitted audio remains audible after a route change or stop, so the
-    /// reference survives the handover instead of dropping the echo still in the air.
+    /// How long the reference survives a route change so the handover is still filtered.
+    ///
+    /// **This is a chosen software limit, not a measurement of audibility.** It bounds
+    /// how much emitted audio is kept after the output path changes; it does not claim
+    /// that sound stops reaching the microphone at 0.25 s. Output latency, route delay
+    /// and the device's own buffering all contribute to the real figure, and none of
+    /// them is measured here. The value exists so the handover window is filtered at
+    /// all rather than cleared instantly, and it is expected to be revised if a
+    /// measured acoustic figure becomes available.
     static let acousticTailSeconds: Double = 0.25
     /// The shared emitted-PCM reference the echo filter correlates against. Producers
     /// append what they send to the output; the filter reads it on the segment path.
@@ -437,14 +444,14 @@ class VoiceAsrEngine {
         guard echoFilterRoute != route else { return }
         FileLog.shared.addMessage("[VoicePipeline] echoFilterRoute=\(route)")
         echoFilterRoute = route
-        if !route.appliesCorrelationWindow {
-            // Route invalidation: the reference belonged to a different output path and
-            // is not a valid aligned reference for the new one. Audio already submitted
-            // is still audible while the old path drains, so the acoustic tail is kept
-            // rather than discarded — otherwise the echo the filter exists to reject
-            // would go unfiltered during exactly the handover.
-            echoReference?.retire(retainingAcousticTail: Self.acousticTailSeconds)
-        }
+        // Retire on EVERY transition, in both directions. The retained audio belongs to
+        // the outgoing route and is not an aligned reference for the incoming one —
+        // including built-in → external *and* external → built-in, where audio captured
+        // on the old path would otherwise be correlated against the new path's window.
+        // The acoustic tail is kept rather than discarded, because audio already
+        // submitted is still audible while the old path drains; clearing outright would
+        // leave exactly that echo unfiltered during the handover.
+        echoReference?.retire(retainingAcousticTail: Self.acousticTailSeconds)
     }
 
     /// Whether the current route is being treated as proof that echo cannot occur.

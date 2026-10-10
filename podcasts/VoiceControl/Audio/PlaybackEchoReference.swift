@@ -149,3 +149,31 @@ enum PlaybackResampler {
         return result
     }
 }
+
+/// Maps the output node's render position onto the reference's timeline.
+///
+/// The node reports what it has rendered, not what was submitted, so the reference has
+/// to know which of its retained samples correspond to that position. The node's
+/// `playerTime` advances in the audio's own sample frames while the reference is held at
+/// the pipeline rate, so the conversion is a frame-count mapping rather than a wall-clock
+/// subtraction: converting seconds first would lose the frame alignment the correlation
+/// depends on.
+struct PlaybackRenderAnchor: Equatable {
+    /// Frames the node has rendered, in the source audio's rate.
+    let renderedFrames: Double
+    /// The rate those frames were rendered at.
+    let sourceSampleRate: Double
+    /// Instant the render position corresponds to, on the shared monotonic basis.
+    let hostTime: MonotonicTime
+
+    /// The rendered position expressed in pipeline-rate samples.
+    ///
+    /// Derived from `renderedFrames`, which is what the node reports, rather than from
+    /// elapsed host time: the two can disagree when the node underruns or restarts, and
+    /// using the clock would then silently misplace the reference instead of showing the
+    /// discontinuity. `sourceSampleRate` converts frames across the two rates.
+    var renderedPipelineSamples: Double {
+        guard sourceSampleRate > 0 else { return 0 }
+        return renderedFrames / sourceSampleRate * PlaybackEchoReference.pipelineSampleRate
+    }
+}

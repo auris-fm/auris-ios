@@ -214,6 +214,45 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(converted[319], frame[957], accuracy: 0.0001)
     }
 
+    /// The spec also offers `pcm_s16le@24k`, where 24 -> 16 kHz is **3:2** rather than
+    /// 3:1. An integer ratio can be right by construction; this one is right by
+    /// arithmetic, which is exactly the case worth pinning: the step is 1.5, the last
+    /// output reads source 478.5, and the frame covers [0, 480) so the next begins at
+    /// 480 without a gap.
+    func test_resamplingHandlesANonIntegerRateRatio() {
+        // 20 ms at 24 kHz = 480 frames -> 320 at 16 kHz.
+        let frame = (0..<480).map { Float($0) }
+        let converted = PlaybackResampler.toPipelineRate(frame, sourceRate: 24_000)
+
+        XCTAssertEqual(converted.count, 320, "a 20 ms frame at 24 kHz must remain 20 ms")
+        // Step 1.5: output i reads source 1.5i.
+        XCTAssertEqual(converted[1], frame[1] + (frame[2] - frame[1]) * 0.5, accuracy: 0.0001)
+        XCTAssertEqual(converted[2], frame[3], accuracy: 0.0001)
+        // Coverage reaches source 478.5 and stops short of 480, leaving the join contiguous.
+        XCTAssertEqual(converted[319], frame[478] + (frame[479] - frame[478]) * 0.5, accuracy: 0.0001)
+    }
+
+    /// Both route-change directions must retire the reference. Retiring only when the
+    /// incoming route stops correlating leaves external -> built-in reusing audio from
+    /// the old output path as though it were an aligned reference for the new one.
+    func test_routeRetirementHappensInBothDirections() async throws {
+        let harness = EchoWiringHarness()
+        let playbackPCM = [Float](repeating: 0.5, count: 320)
+
+        // Start on the external route, with a full reference retained.
+        harness.engine.setEchoFilterRoute(.external)
+        harness.engine.updatePlaybackBuffer([Float](repeating: 0.5, count: 16_000))
+        XCTAssertEqual(harness.reference.snapshot().count, 16_000)
+
+        // external -> built-in: this is the direction the previous guard skipped.
+        harness.engine.setEchoFilterRoute(.builtInSpeaker)
+
+        XCTAssertLessThanOrEqual(
+            harness.reference.snapshot().count, Int(VoiceAsrEngine.acousticTailSeconds * 16_000),
+            "moving onto the built-in route kept the whole old-path reference instead of retiring it"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
