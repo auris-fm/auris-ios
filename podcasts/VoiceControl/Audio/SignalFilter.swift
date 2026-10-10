@@ -6,11 +6,13 @@ class SignalFilter {
     /// Fraction of the segment that must be present in the reference before the correlation
     /// is treated as decision-bearing.
     ///
-    /// **This is a chosen policy, not a measured cutoff.** It is **dominated by the
-    /// whole-segment coverage requirement** wherever that applies (coverage implies this
-    /// fraction), so it is not a second safeguard on the aligned path; its role is to bound
-    /// the positional overload, which has no coverage requirement of its own. No score
-    /// threshold is derived from it, and it must not be relaxed to widen coverage.
+    /// **A chosen policy, not a measured cutoff, and not a second safeguard.** The guard is
+    /// `window >= Int(0.75 * mic) && Int(0.75 * mic) > 0`; the truncation makes the first
+    /// term zero at `mic == 1`, where the second declines a segment that whole-segment
+    /// coverage would accept. Verified in Swift: for every other length the fraction passes
+    /// whenever coverage does. **Its only effect is on a single-sample segment**, which
+    /// cannot be a VAD segment. No score threshold is derived from it, and it must not be
+    /// relaxed to widen coverage.
     static let minimumOverlapFraction: Double = 0.75
 
     /// Returns true if the mic signal is likely playback bleed, using the segment's
@@ -60,12 +62,17 @@ class SignalFilter {
         // could be the user speaking. Only a segment fully covered by the reference can be
         // rejected as echo, because only then does every sample have evidence against it.
         //
-        // Note for readers: this requirement strictly implies the overlap-fraction check
-        // above (`window.count >= mic.count` implies `>= 0.75 * mic.count`), so the fraction
-        // guard is **dominated on this path** and is not a second, independent safeguard. It
-        // is kept because it also bounds the positional overload, which has no coverage
-        // requirement; on the aligned path the binding constraint is this one. Neither guard
-        // may be relaxed to widen coverage.
+        // Note for readers: the overlap-fraction check above is **not a second, independent
+        // safeguard on this path**. It is not simply `window >= 0.75 * mic` either — it is
+        // `window >= Int(0.75 * mic) && Int(0.75 * mic) > 0`, and the truncation makes
+        // `Int(0.75 * mic)` zero at `mic == 1`, where the `> 0` clause declines a segment
+        // coverage would accept. Verified in Swift: for every other length the fraction
+        // passes whenever coverage does, and for `mic >= 2` it never binds. The fraction
+        // guard therefore changes the outcome only for a **single-sample** segment, which
+        // cannot be a VAD segment and so never occurs on a real input.
+        //
+        // It is kept because removing it would widen nothing and its `> 0` clause still
+        // guards the degenerate case; neither guard may be relaxed to widen coverage.
         guard window.count >= mic.count else { return false }
 
         return isPlaybackBleed(mic: mic, playback: window)
