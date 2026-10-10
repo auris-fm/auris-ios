@@ -192,3 +192,34 @@ test('a commented-out status call does not count as a status writer', async () =
   assert.throws(() => check(liveWithoutPermission), /does not declare statuses: write/,
     'a live call without the permission was not caught');
 });
+
+// **The over-scoping guard.** The fix excludes comment LINES; it must not exclude a command
+// that merely follows one. A naive version could reasonably have been written to skip any
+// block containing a comment — or to drop everything after the first comment — and either
+// would leave a live call unrecognised, which is the same silence in a new direction.
+//
+// Without this case the suite would confirm only that comments are excluded, not that
+// commands are still found, which is the difference between a fix and a narrowing that
+// looks like one.
+test('a live call after a comment is still a writer', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+
+  // The real invocation, preceded by a comment line at the same indent.
+  const withCommentAbove = src.replace(
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+    '        # this comment sits above the live call and must not hide it\n' +
+    '        run: node "$RUNNER_TEMP/claude-review.mjs" finish'
+  );
+  assert.notEqual(withCommentAbove, src, 'the fixture did not apply');
+
+  // The writer must still be recognised: with the permission present the check passes,
+  // and with it removed the check must complain about the permission rather than about
+  // finding no writer at all.
+  assert.equal(check(withCommentAbove), true, 'a live call after a comment was not recognised');
+
+  const withoutPermission = withCommentAbove.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(withoutPermission), /does not declare statuses: write/,
+    'the writer after a comment was not recognised, so the check reported no writer');
+});
