@@ -30,6 +30,11 @@ final class PlaybackEchoReference {
     /// `MonotonicClock` the recognition stages use, so playback and capture share one
     /// basis and are unaffected by wall-clock changes.
     private var startTime: MonotonicTime = 0
+    /// Total pipeline-rate samples ever appended, so a position in the emitted stream can
+    /// be mapped into the trimmed window. Without it, trimming makes the retained window's
+    /// index space drift away from the emission stream and the render position no longer
+    /// addresses the right samples.
+    private var totalAppended = 0
     /// Last observed position of the output node, used to place a captured segment
     /// against the retained audio. Cleared when the node stops rendering.
     private var renderAnchor: PlaybackRenderAnchor?
@@ -56,6 +61,7 @@ final class PlaybackEchoReference {
             startTime = clock.now()
         }
         samples.append(contentsOf: frame)
+        totalAppended += frame.count
         if samples.count > capacity {
             let dropped = samples.count - capacity
             samples.removeFirst(dropped)
@@ -69,6 +75,29 @@ final class PlaybackEchoReference {
         lock.lock()
         defer { lock.unlock() }
         return samples
+    }
+
+    /// Where the audible end of the emitted stream sits within the retained window.
+    ///
+    /// The retained end is the newest **submitted** sample, which is ahead of what has
+    /// actually been heard by however much audio is still queued in the output node. So
+    /// the retained end is not an alignment reference even during steady playback — it is
+    /// simply less wrong when nothing is queued. This maps the node's **rendered**
+    /// position into the window's index space so a segment is placed against what was
+    /// audible when it was captured.
+    ///
+    /// Returns nil when the node is not rendering: the position is then unknown, and no
+    /// alignment claim can be made.
+    func audibleEndOffsetInRetainedWindow() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let anchor = renderAnchor, !samples.isEmpty else { return nil }
+        // Index of the first retained sample within the emitted stream.
+        let windowStart = totalAppended - samples.count
+        let renderedIndex = Int(anchor.renderedPipelineSamples)
+        let offset = renderedIndex - windowStart
+        guard offset >= 0 else { return nil }
+        return min(offset, samples.count)
     }
 
     /// The retained audio with the monotonic instant its first sample was emitted.
@@ -90,6 +119,7 @@ final class PlaybackEchoReference {
         defer { lock.unlock() }
         samples.removeAll(keepingCapacity: true)
         renderAnchor = nil
+        totalAppended = 0
     }
 
     /// Records where the output node has actually rendered to.

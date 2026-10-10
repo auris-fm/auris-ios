@@ -283,6 +283,62 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// The audible end must come from the node's rendered position, not from the end of
+    /// the retained audio. The retained end is the newest *submitted* sample, which is
+    /// ahead of what has been heard by however much audio is still queued, so using it is
+    /// misaligned whenever the queue is non-empty — which is most of streaming playback,
+    /// not only across a restart.
+    func test_audibleEndComesFromRenderedPositionNotTheRetainedEnd() throws {
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 2.0)
+        // 1 s of audio submitted, but the node has only rendered half of it.
+        reference.append([Float](repeating: 0.2, count: 16_000))
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: 8_000, sourceSampleRate: 16_000, hostTime: 0)
+        )
+
+        let offset = try XCTUnwrap(reference.audibleEndOffsetInRetainedWindow())
+        XCTAssertEqual(
+            offset, 8_000,
+            "the offset should mark where playback has actually reached, not where submission ended"
+        )
+        XCTAssertNotEqual(
+            offset, reference.snapshot().count,
+            "the offset must not be the retained end while audio is still queued"
+        )
+    }
+
+    /// Trimming must not shift the mapping: the render position lives in the emitted
+    /// stream's index space, so the window's start has to be accounted for or the offset
+    /// addresses the wrong samples once the window has removed audio from its front.
+    func test_audibleEndOffsetSurvivesWindowTrimming() throws {
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 1.0)
+        // 2 s submitted into a 1 s window: the first second is dropped.
+        reference.append([Float](repeating: 0.1, count: 16_000))
+        reference.append([Float](repeating: 0.2, count: 16_000))
+        // The node has rendered 1.5 s of the emitted stream.
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: 24_000, sourceSampleRate: 16_000, hostTime: 0)
+        )
+
+        let offset = try XCTUnwrap(reference.audibleEndOffsetInRetainedWindow())
+        XCTAssertEqual(
+            offset, 8_000,
+            "1.5 s rendered with a window starting at 1.0 s leaves 0.5 s inside the window"
+        )
+    }
+
+    /// A node that is not rendering has no position, so no alignment claim is made rather
+    /// than falling back to the retained end.
+    func test_noAudibleOffsetWithoutARenderedPosition() {
+        let reference = PlaybackEchoReference()
+        reference.append([Float](repeating: 0.5, count: 1_600))
+
+        XCTAssertNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "an unrendered reference must not offer an alignment offset"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
