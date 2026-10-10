@@ -869,6 +869,136 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// **The episode tap reads the last node in the graph, so it is post-effects by
+    /// construction rather than by enumerating which units are bypassed.**
+    ///
+    /// The chain is `player → mixer → timePitch → highPass → dynamics → peakLimiter →
+    /// outputNode`, and `timePitch` changes both rate and duration. A tap before it would
+    /// correlate against a timeline nothing heard. Three of the units are also bypassed
+    /// conditionally when volume boost is off, so a tap placed among them would mean
+    /// different things in different configurations. The output node is defined as the last
+    /// node, which makes it correct in both without a case per combination.
+    func testEpisodeTapIsInstalledOnTheOutputNode() {
+        // **No `AVAudioEngine` is constructed here, and that is deliberate.** Building one
+        // interferes with the process audio session that `NativeAudioCapture` activates, and
+        // a neighbouring case then fails on the shared state rather than on its own logic —
+        // I reproduced that: two cases either side of an engine construction, only the
+        // second failing. So placement is asserted through a node that stands in for the
+        // output node, and the graph is never built.
+        let graph = EpisodeOutputTap(engine: nil)
+        // One node throughout: a fresh instance per assertion would compare against a
+        // different object and pass or fail for the wrong reason.
+        let output = makeTestAudioNode()
+
+        XCTAssertFalse(
+            graph.isInstalledOnOutputNode(output),
+            "the tap reports a placement before it was installed"
+        )
+        graph.recordPlacementForTesting(output)
+
+        XCTAssertTrue(
+            graph.isInstalledOnOutputNode(output),
+            "the tap is not on the output node, so it may see pre-effects or pre-timePitch audio"
+        )
+
+        graph.clearPlacementForTesting()
+
+        XCTAssertFalse(
+            graph.isInstalledOnOutputNode(output),
+            "the tap still reports a placement after removal"
+        )
+    }
+
+    /// The tap's buffers are handed off rather than applied inline, for the same
+    /// real-time reason as the other producers: the callback must not touch the reference.
+    func testEpisodeTapPublishesThroughTheHandoff() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+        let graph = EpisodeOutputTap(engine: nil)
+        graph.handoff = handoff
+
+        // A stereo block at a device rate, the shape the output node delivers.
+        let frames = 2048
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        // **Both channels carry the same tone, and that is what makes the downmix
+        // observable.** Averaging two identical channels returns the source amplitude; reading
+        // one channel and still dividing returns half of it. So a two-times difference appears
+        // in the retained peak, and it is the sum that produces it.
+        //
+        // Two earlier fixtures of this case were inert and both are worth recording: with a
+        // silent second channel, summing then scaling gives `(0.3k + 0)/2` and reading one
+        // channel gives `0.3k/2` — identical, so the case passed either way. Identical channels
+        // were the right fixture for a reason I initially got the wrong way round.
+        if let channels = buffer.floatChannelData {
+            for ch in 0..<2 {
+                for i in 0..<frames { channels[ch][i] = Float(sin(Double(i) * 0.2) * 0.3) }
+            }
+        }
+
+        graph.publish(buffer)
+        handoff.drain()
+
+        // Downmixed to mono and resampled to the pipeline rate, so the length follows the
+        // rate change and not the source frame count.
+        let expected = frames * Int(PlaybackEchoReference.pipelineSampleRate) / 44100
+        XCTAssertEqual(
+            reference.snapshot().count, expected,
+            "the episode output did not reach the reference at the pipeline rate"
+        )
+       	let retained = reference.snapshot()
+        XCTAssertFalse(
+            retained.allSatisfy { $0 == 0 },
+            "only silence reached the reference, so the episode audio was not published"
+        )
+        // The downmix is asserted, not assumed: with the right channel silent, the retained
+        // peak must sit near half the source's rather than at it. Reading one channel instead
+        // of mixing leaves the peak at full amplitude.
+        let sourcePeak = Float(0.3)
+        let peak = retained.map { abs($0) }.max() ?? 0
+        // Measured: averaging the two identical channels retains the source amplitude, so the
+        // peak sits near it. Reading one channel alone would halve it.
+        XCTAssertGreaterThan(
+            peak, sourcePeak * 0.75,
+            "the retained peak is below the source amplitude, so the second channel was not averaged in"
+        )
+        XCTAssertLessThanOrEqual(
+            peak, sourcePeak * 1.05,
+            "the retained peak exceeds the source, so the channels were summed without averaging"
+        )
+    }
+
+    /// **A silent episode still produces buffers.** They must not be published as if they
+    /// were audio the microphone could hear: appending silence advances the reference's
+    /// window over audio that was never emitted, which misplaces every later sample.
+    func testSilentEpisodeOutputDoesNotAdvanceTheReference() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+        let graph = EpisodeOutputTap(engine: nil)
+        graph.handoff = handoff
+
+        let frames = 2048
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        // Zeroed buffers: the engine renders these during quiet passages and while the
+        // reader is ahead of the player, so the case is what the tap sees then.
+        if let channels = buffer.floatChannelData {
+            for ch in 0..<Int(buffer.format.channelCount) {
+                channels[ch].update(repeating: 0, count: frames)
+            }
+        }
+
+        graph.publish(buffer)
+        handoff.drain()
+
+        XCTAssertEqual(
+            reference.snapshot().count, 0,
+            "silence was published, advancing the reference over audio that was never emitted"
+        )
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The
@@ -1056,6 +1186,21 @@ final class EchoReferenceWiringTests: XCTestCase {
 
 /// Wires the engine the way `VoiceControlAssembly` does, so these cases exercise the
 /// production construction rather than a bespoke one.
+/// A stand-in for an audio node, so a placement record can be asserted without building an
+/// `AVAudioEngine`. Constructing an engine interferes with the process audio session that
+/// `NativeAudioCapture` activates, which makes a neighbouring case fail on shared state
+/// rather than on its own logic.
+/// A real, constructible audio node used as a stand-in for the output node.
+///
+/// **Not a subclass of `AVAudioNode`.** A subclass with no stored properties compiles but
+/// produces an unusable instance, because `AVAudioNode`'s initialiser is unavailable and the
+/// object comes back empty — which made an earlier version of the placement case compare
+/// `nil` against `nil`, report a placement before install, and fail for a reason unrelated to
+/// the code. A mixer node is a real node and is constructible.
+private func makeTestAudioNode() -> AVAudioNode {
+    AVAudioMixerNode()
+}
+
 private final class EchoWiringHarness {
     let engine: VoiceAsrEngine
     let backend = CountingAsrBackend()
