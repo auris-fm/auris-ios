@@ -210,15 +210,16 @@ test('a commented-out status call does not count as a status writer', async () =
 // removes it first, leaving a run body with no `#` for either filter to disagree about.
 //
 // The cost is that it stops DISCRIMINATING, which is milder than it sounds and worth stating
-// exactly: copied to a parsing checker using a plain scalar it still PASSES — it does not
-// assert falsely, and nothing goes red. Both of its assertions continue to hold, and it
-// collapses into the same check as the inline case, so the suite is unchanged either way:
+// exactly. In a parsing checker with a plain scalar, this case still passes; nothing goes
+// red. The two results below are identical, and that pair is the whole argument:
+//   plain scalar, correct filter   ->  suite passes
+//   plain scalar, loose filter     ->  suite passes     <- cannot tell the filters apart
+// So a tidy-up that harmonised this fixture with an Android-style one would remove the
+// case's power and leave the suite GREEN. The block form is REQUIRED for a parsing checker
+// and merely sufficient here, where the reader sees raw bytes and the '#' survives:
 //   raw bytes   run: cmd # note  -> contains '#': true
 //   parsed      run: cmd # note  -> contains '#': false   (plain scalar, comment stripped)
 //   parsed      run: |           -> contains '#': true     (block scalar, survives as text)
-// So the block-scalar form is REQUIRED for a parsing checker and merely sufficient for a
-// raw reader. An equivalent case there must use it, or the suite still passes while
-// testing nothing.
 test('a live call with a trailing comment is still a writer', async () => {
   const {check} = await import('./check-workflow-structure.mjs');
   const {readFileSync} = await import('node:fs');
