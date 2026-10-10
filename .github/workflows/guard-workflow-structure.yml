@@ -1,0 +1,52 @@
+# Guards the review workflow's structure, from outside it.
+#
+# **Why this is a separate workflow rather than a step in the file it checks.** The check
+# asserts the job set, `runs-on`, `steps` and the absence of a duplicate `permissions:` key.
+# All of those fail *closed* only if something runs: if a change breaks the review workflow's
+# YAML, that workflow never starts, so a step inside it can never report the break. **A guard
+# embedded in the artifact it guards cannot detect a fault that stops the artifact running.**
+# That is the reason for the separate file, and it is not satisfied by placing a step
+# carefully inside the other workflow.
+#
+# **Requirement 1 — ordering.** The checkout below precedes the check, so
+# `.github/scripts/check-workflow-structure.mjs` exists on the runner before it is read. The
+# Android guard failed on every run after its merge because its step ran before its checkout;
+# no local run could see that, because a local run has the files on disk.
+#
+# **Requirement 2 — not behind a skip.** This workflow has no `paths:` filter and no internal
+# skip, so it runs on the PRs that change `.github/**`, which are the only ones that can break
+# the file it guards. A guard that stands down on exactly those PRs protects nothing.
+#
+# **Requirement 3 — the dependency is declared at the point of use.** The step below names the
+# checkout it depends on. A step that reads a file depends on the step that put it there, and
+# nothing in the YAML says so unless it is written down.
+
+name: Guard workflow structure
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  guard-structure:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Produces the file the next step reads. Named here because the dependency is real and
+      # invisible: without this checkout the check fails with "no such file", which reads as a
+      # broken check rather than a missing file.
+      - name: Checkout repository (produces .github/scripts/ for the step below)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert the review workflow's structure
+        run: node .github/scripts/check-workflow-structure.mjs
+
+      # The checks themselves. They cover the structure assertions and the review-control
+      # logic, and they are run here because no other workflow invokes them: a check with no
+      # execution path is an assertion nobody has made.
+      - name: Run the review-control checks
+        run: node --test .github/scripts/claude-review.test.mjs
