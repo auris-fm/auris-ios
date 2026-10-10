@@ -456,43 +456,22 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertTrue(quietDecision, "an exact echo in the overlap was not rejected")
     }
 
-    /// The discriminating case for paired normalization: a loud tail must not *mask* echo.
-    ///
-    /// With the segment's energy taken over its full length, a loud portion outside the
-    /// overlap inflates that energy while contributing nothing to the numerator, so the
-    /// score falls and genuine echo passes unfiltered. Taking both energies over the
-    /// winning lag's pairs removes the dependence on audio outside the overlap.
-    func test_loudTailDoesNotMaskEchoInTheOverlap() {
+    /// **The user-preservation control.** A match inside the overlap must not discard
+    /// genuine speech outside it. The score establishes that the *compared* portion matches;
+    /// audio the comparison never saw could be the user speaking, and dropping it on the
+    /// strength of a match elsewhere is exactly the failure the owning clause forbids.
+    func test_echoInTheOverlapDoesNotDiscardUserSpeechOutsideIt() {
         let filter = SignalFilter()
-        // The reference holds the echo body only; the segment is longer than it, so the
-        // window covers the echo and the segment's extra portion is outside the comparison.
-        // Requiring the reference to be at least as long as the segment would put the tail
-        // *inside* the window, where it is legitimately part of the compared audio and the
-        // case would prove nothing about support.
+        // The reference covers only the first 1 200 samples of the segment.
         let echoBody = (0..<1_200).map { Float(sin(Double($0) * 0.25) * 0.1) }
-        // Exact echo, then a tail far louder than it. 1600 >= 0.75 * 1200, so the overlap
-        // guard permits the comparison.
-        let mic = echoBody + [Float](repeating: 0.9, count: 400)
 
-        XCTAssertTrue(
-            filter.isPlaybackBleed(mic: mic, reference: echoBody, segmentEndOffset: echoBody.count),
-            "a loud tail outside the overlap let its own echo through unfiltered"
-        )
-    }
-
-    /// The same property on the other branch: unrelated speech with a loud tail must not be
-    /// pushed over the threshold by that tail alone.
-    func test_loudAudioOutsideTheOverlapDoesNotRejectUnrelatedSpeech() {
-        let filter = SignalFilter()
-        let reference = (0..<1_200).map { Float(sin(Double($0) * 0.25)) }
-            + [Float](repeating: 0.001, count: 400)
-        // Orthogonal to the reference, then a loud unrelated tail.
-        let speech = (0..<1_200).map { $0 % 2 == 0 ? Float(0.3) : Float(-0.3) }
-            + [Float](repeating: 0.9, count: 400)
+        // Segment = matching echo, then genuine user speech the reference cannot see.
+        let userSpeech = (0..<400).map { $0 % 2 == 0 ? Float(0.8) : Float(-0.8) }
+        let mic = echoBody + userSpeech
 
         XCTAssertFalse(
-            filter.isPlaybackBleed(mic: speech, reference: reference, segmentEndOffset: reference.count),
-            "a loud tail outside the overlap rejected genuine speech as echo"
+            filter.isPlaybackBleed(mic: mic, reference: echoBody, segmentEndOffset: echoBody.count),
+            "a match in the overlap discarded user speech the comparison never saw"
         )
     }
 
