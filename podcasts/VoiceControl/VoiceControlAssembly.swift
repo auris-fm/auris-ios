@@ -66,6 +66,13 @@ class VoiceControlAssembly {
         cloudAudioPlayer.emittedPCMReference = echoReference
         asrEngine.setEchoReference(echoReference)
 
+        // One handoff serves every producer whose audio the microphone can hear. It exists
+        // because the reference's append drops old samples with a memmove inside its lock,
+        // and a producer that appends from a deadline-bound callback can wait on that. The
+        // capacity is in blocks: at this size a saturated handoff drops rather than blocks,
+        // which leaves a visible gap in the reference instead of stalling the producer.
+        let echoHandoff = EchoReferenceHandoff(reference: echoReference, capacity: 8)
+
         // Echo-filter scope follows the observed output route. Without this the
         // filter's classification never changes from its default and the correlation
         // window is never applied on the route it exists for. The monitor already
@@ -126,6 +133,7 @@ class VoiceControlAssembly {
         // filter cannot recognise as our output and the utterance is transcribed as if
         // the user had said it.
         earconPlayer.emittedPCMReference = echoReference
+        earconPlayer.handoff = echoHandoff
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 

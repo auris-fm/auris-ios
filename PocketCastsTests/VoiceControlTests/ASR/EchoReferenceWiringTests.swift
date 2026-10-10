@@ -999,6 +999,48 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// **Every producer of emitted audio reaches the reference by one path.**
+    ///
+    /// The earcon player appended directly while the tap producers handed off, so there were
+    /// two routes into the reference: a change to the publishing rules could be applied to
+    /// one and missed in the other, and the direct route took the same lock and memmove from
+    /// a thread that can contend with the callback that does hand off.
+    ///
+    /// This asserts the routing rather than the result: the samples must arrive through the
+    /// handoff, so a producer that hands off and one that does not cannot silently diverge.
+    func testEarconPublishesThroughTheHandoffRatherThanAppendingDirectly() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+        let player = EarconPlayer(engine: nil)
+        player.emittedPCMReference = reference
+        player.handoff = handoff
+
+        let buffer = AVAudioPCMBuffer(
+            pcmFormat: EarconPlayer.earconFormat(sampleRate: PlaybackEchoReference.pipelineSampleRate),
+            frameCapacity: 400
+        )!
+        buffer.frameLength = 400
+        if let channel = buffer.floatChannelData?[0] {
+            for i in 0..<400 { channel[i] = 0.4 }
+        }
+
+        player.publishForEchoReference(buffer)
+
+        // Not yet in the reference: the block is queued, which is only true on the handoff
+        // route. A direct append would have made this non-empty here.
+        XCTAssertEqual(
+            reference.snapshot().count, 0,
+            "the earcon bypassed the handoff and appended to the reference directly"
+        )
+
+        handoff.drain()
+
+        XCTAssertEqual(
+            reference.snapshot().count, 400,
+            "the earcon's samples did not arrive through the handoff"
+        )
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The

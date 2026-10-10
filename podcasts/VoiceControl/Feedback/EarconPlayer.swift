@@ -2,7 +2,7 @@ import AVFoundation
 import PocketCastsUtils
 
 open class EarconPlayer {
-    private let engine: AVAudioEngine
+    private let engine: AVAudioEngine?
     private let player = AVAudioPlayerNode()
     private var cachedEarcons: [EarconId: AVAudioPCMBuffer] = [:]
 
@@ -14,8 +14,22 @@ open class EarconPlayer {
     /// output, and the utterance is transcribed as if the user had said it.
     var emittedPCMReference: PlaybackEchoReference?
 
-    init(engine: AVAudioEngine) {
+    /// The bounded handoff used to publish earcon audio.
+    ///
+    /// Earcons do not need it for the deadline reason the tap producers do — `play` runs on
+    /// a `Task`, not the real-time audio thread. They use it because the alternative is a
+    /// **second path** that appends directly, and the reference's `append` takes the same
+    /// lock and does the same memmove regardless of which thread calls it. One route for
+    /// every producer is easier to reason about than two, and it means a change to the
+    /// publishing rules cannot be applied to one path and missed in the other.
+    var handoff: EchoReferenceHandoff?
+
+    /// - Parameter engine: the playback engine. Optional so the publishing route can be
+    ///   exercised without building an `AVAudioEngine`, which interferes with the process
+    ///   audio session that capture activates — a test-side hazard, not a production one.
+    init(engine: AVAudioEngine?) {
         self.engine = engine
+        guard let engine else { return }
         preloadAll()
         engine.attach(player)
         // Connected with an explicit format rather than `cachedEarcons.values.first?.format`.
@@ -63,6 +77,7 @@ open class EarconPlayer {
             FileLog.shared.addMessage("[VoicePipeline] Missing: \(id)")
             return
         }
+        guard let engine else { return }
         if !engine.isRunning {
             do {
                 try engine.start()
@@ -100,14 +115,22 @@ open class EarconPlayer {
     /// are loaded at that rate, and resampling would shift the timing the reference
     /// claims was rendered.
     func publishForEchoReference(_ buffer: AVAudioPCMBuffer) {
-        guard let reference = emittedPCMReference,
-              let channel = buffer.floatChannelData?[0] else { return }
+        guard let channel = buffer.floatChannelData?[0] else { return }
         let frame = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
-        let resampled = PlaybackResampler.toPipelineRate(
-            frame,
-            sourceRate: buffer.format.sampleRate
-        )
-        reference.append(resampled)
+
+        // Routed through the handoff rather than appending here, so every producer of
+        // emitted audio reaches the reference by one path. Appending directly made this the
+        // one producer outside the handoff, and the lock and memmove are the same either
+        // way — the difference was only that one path could be changed without the other.
+        if let handoff {
+            handoff.submit(frame, sampleRate: buffer.format.sampleRate, renderedAt: nil)
+        } else if let reference = emittedPCMReference {
+            // No handoff (contexts that do not run the filter wiring): keep the direct path
+            // so the player stays usable, and keep it resampled the same way.
+            reference.append(
+                PlaybackResampler.toPipelineRate(frame, sourceRate: buffer.format.sampleRate)
+            )
+        }
     }
 
     /// Records the render position once the audio is actually rendering.
@@ -156,7 +179,7 @@ open class EarconPlayer {
 
     func release() {
         player.stop()
-        engine.detach(player)
+        engine?.detach(player)
         cachedEarcons.removeAll()
     }
 
