@@ -71,15 +71,23 @@ open class EarconPlayer {
                 return
             }
         }
-        // Publish before scheduling, at the submission point: the reference holds what
-        // the microphone can hear. Doing this inside `play` rather than at each call site
-        // means a new caller cannot forget it — the failure that matters here is an
-        // earcon the filter never knew about, and that failure is silent.
+        // Two facts, recorded at the two moments they become true.
+        //
+        // The samples go in first, so there is no window where the earcon is audible and
+        // the filter does not know about it — an utterance formed in that window would be
+        // attributed to the user. Doing this inside `play` rather than at each call site
+        // means a new caller cannot forget it, and that failure is silent.
+        //
+        // The position is recorded only after the audio is rendering. Read before
+        // `scheduleBuffer`, `lastRenderTime` describes whatever played earlier, so the
+        // reference would align these samples to the previous earcon's timeline — the
+        // queue-lead error, where audio still queued is reported as already emitted.
         publishForEchoReference(buffer)
         player.scheduleBuffer(buffer, at: nil, options: .interrupts) {
             // Earcon finished
         }
         if !player.isPlaying { player.play() }
+        referenceAnchorAfterScheduling()
     }
 
     /// Publishes an earcon's samples as audio about to be emitted.
@@ -100,6 +108,16 @@ open class EarconPlayer {
             sourceRate: buffer.format.sampleRate
         )
         reference.append(resampled)
+    }
+
+    /// Records the render position once the audio is actually rendering.
+    ///
+    /// Separate from publishing because the two become true at different moments: the
+    /// samples are audible as soon as they are submitted, but the position that places
+    /// them on the shared timeline exists only after the node renders. Recording it at
+    /// submission would state that queued audio had already been emitted.
+    private func referenceAnchorAfterScheduling() {
+        guard let reference = emittedPCMReference else { return }
         reference.recordRenderPosition(renderPosition())
     }
 
