@@ -3,10 +3,14 @@ import Accelerate
 class SignalFilter {
     private let threshold: Float = 0.7
 
-    /// Fraction of the segment that must be present in the reference before the
-    /// correlation is treated as decision-bearing. Three quarters keeps genuine overlap
-    /// usable while rejecting the clamped, partial windows that a segment sitting near the
-    /// window's start produces.
+    /// Fraction of the segment that must be present in the reference before the correlation
+    /// is treated as decision-bearing.
+    ///
+    /// **This is a chosen policy, not a measured cutoff.** It is **dominated by the
+    /// whole-segment coverage requirement** wherever that applies (coverage implies this
+    /// fraction), so it is not a second safeguard on the aligned path; its role is to bound
+    /// the positional overload, which has no coverage requirement of its own. No score
+    /// threshold is derived from it, and it must not be relaxed to widen coverage.
     static let minimumOverlapFraction: Double = 0.75
 
     /// Returns true if the mic signal is likely playback bleed, using the segment's
@@ -50,12 +54,18 @@ class SignalFilter {
         let minimumOverlap = Int(Double(mic.count) * Self.minimumOverlapFraction)
         guard window.count >= minimumOverlap, minimumOverlap > 0 else { return false }
 
-        // A match inside the overlap cannot license rejecting the WHOLE segment. The score
-        // establishes that the compared portion matches; audio the comparison never saw —
-        // samples beyond the window — could be the user speaking, and dropping them on the
-        // strength of a match elsewhere discards genuine speech. Only a segment fully
-        // covered by the reference can be rejected as echo, because only then does every
-        // sample have evidence against it.
+        // **This is the guard that constrains rejection.** A match inside the overlap cannot
+        // license rejecting the WHOLE segment: the score establishes that the compared
+        // portion matches, and audio the comparison never saw — samples beyond the window —
+        // could be the user speaking. Only a segment fully covered by the reference can be
+        // rejected as echo, because only then does every sample have evidence against it.
+        //
+        // Note for readers: this requirement strictly implies the overlap-fraction check
+        // above (`window.count >= mic.count` implies `>= 0.75 * mic.count`), so the fraction
+        // guard is **dominated on this path** and is not a second, independent safeguard. It
+        // is kept because it also bounds the positional overload, which has no coverage
+        // requirement; on the aligned path the binding constraint is this one. Neither guard
+        // may be relaxed to widen coverage.
         guard window.count >= mic.count else { return false }
 
         return isPlaybackBleed(mic: mic, playback: window)
