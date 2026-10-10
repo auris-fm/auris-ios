@@ -79,6 +79,17 @@ test('the workflow declares one job, and every status writer declares the permis
   assert.throws(() => check(src.replace('  claude-review:', '')), /exactly one job/);
   // A second permissions block silently overrides.
   assert.throws(() => check(src.replace('    steps:', '    permissions:\n      contents: read\n    steps:')), /one permissions block/);
-  // A status writer without the permission fails invisibly under `if: always()`.
+  // A status writer without the permission fails the step, so the job goes red.
   assert.throws(() => check(src.replace('      statuses: write\n', '')), /statuses: write/);
+  // And the permission must belong to the job that writes the status. Extracting the
+  // first `permissions:` block in the file reads a different job's block as soon as one
+  // exists, so removing the real job's permission would still pass. The check relates the
+  // job to its own block rather than matching the nearest one.
+  // The masking case keeps one job (so the job-set assertion is satisfied) and puts an
+  // earlier `permissions:` block in the file, which a first-match extractor would read.
+  const withEarlierBlock = src.replace(/^    steps:\n/m,
+    '    permissions:\n      statuses: write\n    steps:\n');
+  const permissionRemoved = withEarlierBlock.replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(permissionRemoved), /statuses: write/,
+    "a preceding permissions block masked the defect");
 });

@@ -36,7 +36,12 @@ export function check(text) {
   // plausible mechanism offered without checking the exit path, which is the exact error
   // this workflow exists to reduce. What the check buys is that the defect is caught
   // before a run at all, rather than by reading a red job's logs.
-  const permissions = text.split(/\n    permissions:\n/)[1]?.split(/\n    [a-z]/)[0] ?? '';
+  // Extracted by OWNING JOB, not by first match. The first `permissions:` block in the
+  // file belongs to whichever job appears first, so reading it by position reports the
+  // wrong job's block as soon as a second job exists — and the requirement is the
+  // relationship between a job and its own permissions, not the presence of a block.
+  const jobBlock = text.split(/\n  claude-review:\n/)[1]?.split(/\n  [a-zA-Z0-9_-]+:\s*$/m)[0] ?? '';
+  const permissions = jobBlock.split(/\n    permissions:\n/)[1]?.split(/\n    [a-z]/)[0] ?? '';
   // The status is written by the review-control script, which the job invokes, so the
   // workflow itself need not contain the word. What identifies a status-writing job is
   // that it runs the script's `finish` phase — an earlier version of this check looked for
@@ -48,9 +53,11 @@ export function check(text) {
       'the job writes a status but does not declare statuses: write');
   }
 
-  // Duplicate keys in a permissions block silently override, so there must be one.
-  const blocks = [...text.matchAll(/^    permissions:/gm)].length;
-  assert.equal(blocks, 1, `expected one permissions block, found ${blocks}`);
+  // Within the job, a duplicate `permissions:` key silently overrides, so assert one.
+  const blocks = [...jobBlock.matchAll(/^    permissions:/gm)].length;
+  assert.equal(blocks, 1, `expected one permissions block in claude-review, found ${blocks}`);
+  assert.ok(permissions.includes('contents:'),
+    'claude-review declares no permissions block (defaults apply — verify)');
   return true;
 }
 
