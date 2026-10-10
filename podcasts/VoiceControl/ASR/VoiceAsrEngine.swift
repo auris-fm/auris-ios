@@ -34,6 +34,24 @@ class VoiceAsrEngine {
         /// Whether this route is evidence that echo cannot occur. It never is: the
         /// owning clause says an isolated route reduces exposure, not that it removes it.
         var provesEchoImpossible: Bool { false }
+
+        /// Maps an observed output port to the filter scope it implies.
+        ///
+        /// Only the built-in loudspeaker allows the aligned correlation window: its
+        /// local latency is bounded and the emitted buffer matches what leaves the
+        /// device. Every other output — wired, Bluetooth, AirPlay — has large and
+        /// variable codec latency, so alignment is unreliable and the window is not
+        /// applied. A headset input does not change the output's alignment properties.
+        static func forOutput(_ output: AudioRouteOutput) -> EchoFilterRoute {
+            switch output {
+            case .builtInSpeaker:
+                return .builtInSpeaker
+            case .headphones, .bluetoothLE:
+                return .isolated
+            case .bluetoothHFP, .bluetoothA2DP, .airPlay, .unknown:
+                return .external
+            }
+        }
     }
 
     private(set) var echoFilterRoute: EchoFilterRoute = .external
