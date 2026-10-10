@@ -113,6 +113,30 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - Route classification
+
+    /// Only the built-in loudspeaker may use the aligned correlation window. Every
+    /// other output has large or variable codec latency, so the window's alignment
+    /// assumption does not hold and a wired/Bluetooth route must not be treated as
+    /// though it were the built-in speaker.
+    func test_routeClassification_mapsOutputsToFilterScopes() {
+        let buildIn = VoiceAsrEngine.EchoFilterRoute.forOutput(.builtInSpeaker)
+        XCTAssertTrue(buildIn.appliesCorrelationWindow)
+        XCTAssertFalse(buildIn.provesEchoImpossible)
+
+        for output: AudioRouteOutput in [.headphones, .bluetoothHFP, .bluetoothA2DP, .bluetoothLE, .airPlay, .unknown] {
+            let route = VoiceAsrEngine.EchoFilterRoute.forOutput(output)
+            XCTAssertFalse(
+                route.appliesCorrelationWindow,
+                "\(output) must not apply the built-in-speaker correlation window"
+            )
+            XCTAssertFalse(
+                route.provesEchoImpossible,
+                "\(output) must not be recorded as proof that echo is impossible"
+            )
+        }
+    }
+
     // MARK: - Invalidation
 
     /// Stale route state must not survive a route change: after the filter stops

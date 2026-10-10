@@ -1,8 +1,12 @@
 import AVFoundation
+import Combine
 import PocketCastsDataModel
 import PocketCastsUtils
 
 class VoiceControlAssembly {
+    /// Retains the route-scope subscription for the lifetime of the assembly. The
+    /// service holds the engine, so the binding must live at least as long.
+    private var cancellables = Set<AnyCancellable>()
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -53,6 +57,16 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // Echo-filter scope follows the observed output route. Without this the
+        // filter's classification never changes from its default and the correlation
+        // window is never applied on the route it exists for. The monitor already
+        // republishes on route changes, so invalidation is driven from the same signal.
+        routeMonitor.$currentRoute
+            .map { VoiceAsrEngine.EchoFilterRoute.forOutput($0.output) }
+            .removeDuplicates()
+            .sink { [weak asrEngine] route in asrEngine?.setEchoFilterRoute(route) }
+            .store(in: &cancellables)
+
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).
