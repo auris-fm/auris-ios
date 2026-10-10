@@ -142,7 +142,7 @@ test('the detector fails loudly when it matches nothing', async () => {
   const {readFileSync} = await import('node:fs');
   const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
   assert.throws(() => check(src.replace(/claude-review\.mjs/g, 'renamed-review.mjs')),
-    /detector matched nothing/);
+    /detector did not match/);
 });
 
 // Both shapes count, and neither covers the other: Android and core call

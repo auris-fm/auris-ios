@@ -55,7 +55,7 @@ export function check(text) {
   // of this check became inert. Failing closed here turns an unmatched pattern into a loud
   // failure rather than a silent pass.
   assert.ok(writesAStatus,
-    'no status-writing job detected — the detector matched nothing, so this check proved nothing');
+    'the detector did not match: no status-writing job detected, so this check proved nothing');
 
   assert.match(permissions, /^      statuses: write$/m,
     'the job writes a status but does not declare statuses: write');
