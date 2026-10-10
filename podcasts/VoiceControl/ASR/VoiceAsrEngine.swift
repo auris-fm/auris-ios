@@ -55,6 +55,9 @@ class VoiceAsrEngine {
     }
 
     private(set) var echoFilterRoute: EchoFilterRoute = .external
+    /// How long emitted audio remains audible after a route change or stop, so the
+    /// reference survives the handover instead of dropping the echo still in the air.
+    static let acousticTailSeconds: Double = 0.25
     /// The shared emitted-PCM reference the echo filter correlates against. Producers
     /// append what they send to the output; the filter reads it on the segment path.
     /// When no reference is attached the filter has nothing to correlate and cannot
@@ -435,9 +438,12 @@ class VoiceAsrEngine {
         FileLog.shared.addMessage("[VoicePipeline] echoFilterRoute=\(route)")
         echoFilterRoute = route
         if !route.appliesCorrelationWindow {
-            // Route invalidation: nothing may be correlated against a reference that
-            // belonged to a different output path.
-            echoReference?.invalidate()
+            // Route invalidation: the reference belonged to a different output path and
+            // is not a valid aligned reference for the new one. Audio already submitted
+            // is still audible while the old path drains, so the acoustic tail is kept
+            // rather than discarded — otherwise the echo the filter exists to reject
+            // would go unfiltered during exactly the handover.
+            echoReference?.retire(retainingAcousticTail: Self.acousticTailSeconds)
         }
     }
 

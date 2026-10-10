@@ -194,6 +194,26 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// A 20 ms frame at the baseline codec rate must map to exactly 20 ms, and successive
+    /// frames must join on one timeline. Stretching a frame end-to-end instead anchors
+    /// both endpoints and makes the last source sample land on the last output sample,
+    /// so the step becomes 3.00627 rather than 3.0 and each frame boundary carries a
+    /// phase discontinuity. Correlation is alignment-sensitive, so that distortion is
+    /// the failure this case exists to catch.
+    func test_resamplingPreservesFrameDurationAndKeepsFramesContiguous() {
+        // Baseline codec: 48 kHz mono, 20 ms frames (cloud-assistant.md).
+        let frame = (0..<960).map { Float($0) }
+        let converted = PlaybackResampler.toPipelineRate(frame, sourceRate: 48_000)
+
+        XCTAssertEqual(converted.count, 320, "a 20 ms frame must remain 20 ms at the pipeline rate")
+        // The true ratio is exactly 3: output sample i reads source sample 3i.
+        XCTAssertEqual(converted[1], frame[3], accuracy: 0.0001)
+        XCTAssertEqual(converted[100], frame[300], accuracy: 0.0001)
+        // The last output reads source 957, not 959: the frame covers [0, 960) so the
+        // following frame continues from 960 without a gap or an overlap.
+        XCTAssertEqual(converted[319], frame[957], accuracy: 0.0001)
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
@@ -211,6 +231,85 @@ final class EchoReferenceWiringTests: XCTestCase {
             harness.backend.transcribeSamples.count, 0,
             "the engine did not correlate against the shared reference"
         )
+    }
+
+    // MARK: - Alignment is timely, not merely equal-rate
+
+    /// A common sample rate is not alignment. Two producers resampled to the pipeline
+    /// rate still have to be placed in time relative to each other, so the reference
+    /// carries the monotonic instant its window began.
+    func test_referenceSpan_carriesAMonotonicStartTime() {
+        let clock = FixedMonotonicClock(time: 1_000)
+        let reference = PlaybackEchoReference(clock: clock)
+        reference.append([Float](repeating: 0.1, count: 1_600))
+
+        let span = reference.span()
+        XCTAssertNotNil(span, "a populated reference should expose a span")
+        XCTAssertEqual(span?.startedAt, 1_000, "the span did not carry the emission instant")
+    }
+
+    /// Trimming the retained window must move its start time forward by exactly the
+    /// audio dropped, or the window would claim to begin earlier than the audio it holds.
+    func test_trimmingAdvancesTheStartTimeByTheDroppedAudio() throws {
+        let clock = FixedMonotonicClock(time: 500)
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 1.0, clock: clock)
+        reference.append([Float](repeating: 0.1, count: 8_000))
+        // 0.5 s of audio forces 4 000 samples to be dropped.
+        reference.append([Float](repeating: 0.2, count: 12_000))
+
+        let span = reference.span()
+        XCTAssertEqual(span?.samples.count, 16_000)
+        let startedAt = try XCTUnwrap(span?.startedAt, "the span should carry a start time")
+        XCTAssertEqual(
+            startedAt, 500 + 4_000.0 / 16_000.0, accuracy: 0.0001,
+            "the window start did not advance by the dropped audio"
+        )
+    }
+
+    /// Retiring for a route change must keep the acoustic tail: audio already submitted
+    /// is still audible while the old path drains, so clearing it outright would leave
+    /// exactly that echo unfiltered during the handover.
+    func test_routeRetirementRetainsTheAcousticTail() {
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 2.0)
+        reference.append([Float](repeating: 0.1, count: 16_000))
+        reference.append([Float](repeating: 0.2, count: 16_000))
+
+        reference.retire(retainingAcousticTail: 0.25)
+
+        let span = reference.span()
+        XCTAssertEqual(
+            span?.samples.count, 4_000,
+            "retirement should keep 0.25 s of emitted audio for the acoustic tail"
+        )
+        XCTAssertEqual(
+            span?.samples.last, 0.2,
+            "the retained tail should be the most recent audio, which is what is still audible"
+        )
+    }
+
+    /// A reference with nothing in it has no tail to keep and must not claim one.
+    func test_routeRetirementOnAnEmptyReferenceStaysEmpty() {
+        let reference = PlaybackEchoReference()
+        reference.retire(retainingAcousticTail: 0.25)
+        XCTAssertNil(reference.span())
+    }
+
+    /// Nothing retained means no alignment claim at all, rather than a stale instant.
+    func test_emptyReferenceExposesNoSpan() {
+        let reference = PlaybackEchoReference()
+        XCTAssertNil(reference.span(), "an empty reference must not claim a span")
+    }
+
+    /// Retiring the reference on stop/drain and route change must clear the span too,
+    /// so a later segment cannot be aligned against audio that is no longer emitting.
+    func test_invalidationClearsTheSpan() {
+        let reference = PlaybackEchoReference()
+        reference.append([Float](repeating: 0.5, count: 1_600))
+        XCTAssertNotNil(reference.span())
+
+        reference.invalidate()
+
+        XCTAssertNil(reference.span(), "a retired reference still claimed an alignment span")
     }
 
     // MARK: - Route classification
@@ -319,4 +418,12 @@ private final class RecordingWakeWordDetector: WakeWordDetectorProtocol {
         detectCount += 1
         return .notDetected(confidence: 0)
     }
+}
+
+
+/// A determinate clock, so alignment cases assert an instant rather than observe one.
+private final class FixedMonotonicClock: MonotonicClock {
+    private var time: MonotonicTime
+    init(time: MonotonicTime) { self.time = time }
+    func now() -> MonotonicTime { time }
 }
