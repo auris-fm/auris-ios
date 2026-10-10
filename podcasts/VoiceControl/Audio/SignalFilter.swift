@@ -122,6 +122,12 @@ class SignalFilter {
         let pbRms = rms(playback)
         guard pbRms > 0 else { return false }
 
+        // A normalised score can be negative: a lag that sees anti-correlated audio scores
+        // -1 — maximally wrong rather than merely unmatched. Starting the running maximum at
+        // zero therefore cannot change the decision while the threshold is positive, since
+        // any negative score also fails `> threshold`. It would matter if the rule ever
+        // wanted the maximising lag rather than a verdict, because a clamped maximum would
+        // report "none" instead of the true (negative) maximiser.
         var bestScore: Float = 0
         for (lag, corr) in correlation.enumerated() {
             let paired = mic[lag..<(lag + playback.count)]
