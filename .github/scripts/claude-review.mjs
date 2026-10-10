@@ -93,12 +93,16 @@ async function main() {
     const statuses = api(`repos/${repo}/commits/${process.env.REVIEW_HEAD}/statuses?per_page=100`, true);
     // A canceled request must not overwrite the record claimed by its successor.
     if (statuses.find(s => s.context === contextName)?.target_url !== url) return;
-    const record = completion(pr, process.env.REVIEW_HEAD, process.env.REVIEW_OUTCOME, process.env.MODEL_CONCLUSION);
+    const {state, description, comment} = completion(pr, process.env.REVIEW_HEAD, process.env.REVIEW_OUTCOME, process.env.MODEL_CONCLUSION);
+    // Fields named rather than spread. `completion` also returns `comment`, which the
+    // statuses API does not document accepting; the API currently ignores it rather than
+    // rejecting it, but a payload sent for a documented set should not carry an
+    // undocumented extra and depend on that tolerance.
     api(`repos/${repo}/statuses/${process.env.REVIEW_HEAD}`, false,
-      {...record, context: contextName, target_url: url});
+      {state, description, context: contextName, target_url: url});
     // The comment is what makes a non-success visible; the status alone reaches only
     // whoever is looking at the checks list.
-    if (record.comment) api(`repos/${repo}/issues/${process.env.REVIEW_NUMBER}/comments`, false, {body: record.comment});
+    if (comment) api(`repos/${repo}/issues/${process.env.REVIEW_NUMBER}/comments`, false, {body: comment});
   } else throw new Error('Expected prepare or finish');
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

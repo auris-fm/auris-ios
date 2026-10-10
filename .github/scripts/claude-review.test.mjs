@@ -93,3 +93,20 @@ test('the workflow declares one job, and every status writer declares the permis
   assert.throws(() => check(permissionRemoved), /statuses: write/,
     "a preceding permissions block masked the defect");
 });
+
+// The status payload must carry only fields the statuses API documents. `completion`
+// also returns `comment` for the issue-comment channel, and spreading the whole object
+// sent it to the statuses endpoint too — harmless only because the API tolerates the
+// extra field, which is not something to depend on.
+test('the status payload carries only documented fields', async () => {
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('./claude-review.mjs', import.meta.url), 'utf8');
+  // The LAST statuses call, which is the `finish` phase's. Slicing from the FIRST
+  // occurrence inspected `prepare`'s pending call instead — a different site with
+  // different fields — so the case passed while the `finish` payload still spread an
+  // object. The search has to name the call it means.
+  const call = src.slice(src.lastIndexOf('repos/${repo}/statuses/'));
+  const payload = call.slice(call.indexOf('{'), call.indexOf('});') + 1);
+  assert.ok(!payload.includes('...'), 'the status payload spreads an object rather than naming fields');
+  for (const field of ['state', 'description', 'context', 'target_url']) assert.ok(payload.includes(field), `missing ${field}`);
+});
