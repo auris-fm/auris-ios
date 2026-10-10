@@ -133,3 +133,29 @@ test('the pending description claims no outcome', async () => {
   const pending = src.slice(src.indexOf("description: 'Reviewing"));
   assert.match(pending.slice(0, 60), /Reviewing this head/);
 });
+
+// The detector keys on text, so it is only as strong as the stability of that text. If a
+// rename or reflow stops it matching, the assertion below it would be skipped and the
+// check would report OK having proved nothing. It must fail closed instead.
+test('the detector fails loudly when it matches nothing', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+  assert.throws(() => check(src.replace(/claude-review\.mjs/g, 'renamed-review.mjs')),
+    /detector matched nothing/);
+});
+
+// Both shapes count, and neither covers the other: Android and core call
+// `gh api .../statuses/` inline, iOS and core invoke the script. Keying on the script alone
+// silently skipped Android's file, which is a live shape rather than a hypothetical one.
+test('an inline status call is detected, not skipped', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+  const inline = src
+    .replace('        run: node "$RUNNER_TEMP/claude-review.mjs" finish',
+      '        run: gh api "repos/x/statuses/y" -f state=success')
+    .replace('      statuses: write\n      # Unused', '      # Unused');
+  assert.throws(() => check(inline), /statuses: write/,
+    'an inline status writer without the permission was not caught');
+});

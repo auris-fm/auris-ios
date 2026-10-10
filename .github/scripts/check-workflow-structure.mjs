@@ -42,16 +42,23 @@ export function check(text) {
   // relationship between a job and its own permissions, not the presence of a block.
   const jobBlock = text.split(/\n  claude-review:\n/)[1]?.split(/\n  [a-zA-Z0-9_-]+:\s*$/m)[0] ?? '';
   const permissions = jobBlock.split(/\n    permissions:\n/)[1]?.split(/\n    [a-z]/)[0] ?? '';
-  // The status is written by the review-control script, which the job invokes, so the
-  // workflow itself need not contain the word. What identifies a status-writing job is
-  // that it runs the script's `finish` phase — an earlier version of this check looked for
-  // `statuses/` or `contextName` in the workflow, found neither, and silently skipped the
-  // assertion, so removing the permission still reported success.
-  const writesAStatus = /claude-review\.mjs"?\s+finish/.test(body);
-  if (writesAStatus) {
-    assert.match(permissions, /^      statuses: write$/m,
-      'the job writes a status but does not declare statuses: write');
-  }
+  // Which shapes write a status: an inline statuses call, or invoking the review-control
+  // script's `finish` phase. **Both are needed and neither covers the other** — Android and
+  // core call `gh api .../statuses/` inline while iOS and core invoke the script, and I
+  // measured this detector against Android's workflow: keying on the script alone silently
+  // skipped the file it exists to guard.
+  const writesAStatus = /statuses\//.test(body) || /claude-review\.mjs"?\s+finish/.test(body);
+
+  // **The detector must prove it matched.** A text-keyed detector is exactly as strong as
+  // the stability of the text it keys on, so a workflow whose invocation is reflowed or
+  // renamed would skip the assertion below and report OK — which is how the first version
+  // of this check became inert. Failing closed here turns an unmatched pattern into a loud
+  // failure rather than a silent pass.
+  assert.ok(writesAStatus,
+    'no status-writing job detected — the detector matched nothing, so this check proved nothing');
+
+  assert.match(permissions, /^      statuses: write$/m,
+    'the job writes a status but does not declare statuses: write');
 
   // Within the job, a duplicate `permissions:` key silently overrides, so assert one.
   const blocks = [...jobBlock.matchAll(/^    permissions:/gm)].length;
