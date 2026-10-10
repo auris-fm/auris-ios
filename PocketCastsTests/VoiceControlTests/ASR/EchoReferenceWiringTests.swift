@@ -618,8 +618,11 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// removing the publish from `play` fails it.
     func testEarconSamplesReachTheEchoReferenceAtThePipelineRate() throws {
         let reference = PlaybackEchoReference()
-        let player = EarconPlayer(engine: AVAudioEngine())
-        player.emittedPCMReference = reference
+        // No engine: building one interferes with the process audio session, which makes a
+        // neighbouring case fail on shared state. The publish route is what this covers.
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+        let player = EarconPlayer(engine: nil)
+        player.handoff = handoff
 
         // A tone standing in for the chime, at a device-like rate so the resampling path
         // is the one exercised.
@@ -635,8 +638,14 @@ final class EchoReferenceWiringTests: XCTestCase {
         let channel = try XCTUnwrap(buffer.floatChannelData?[0])
         for i in 0..<frameCount { channel[i] = Float(sin(Double(i) * 0.3) * 0.4) }
 
+        // Driven through `play`, the production entry point. It publishes before it schedules,
+        // and returns after publishing when there is no engine graph, so no `AVAudioEngine`
+        // is needed here — which matters because building one interferes with the process
+        // audio session. Driving `play` is what keeps the call site under test: calling
+        // `publishForEchoReference` directly passes with the publish removed from `play`.
         player.loadForTesting(.listeningStart, buffer: buffer)
         player.play(.listeningStart)
+        handoff.drain()
 
         let expected = frameCount * Int(PlaybackEchoReference.pipelineSampleRate) / Int(sourceRate)
         let retained = reference.snapshot()

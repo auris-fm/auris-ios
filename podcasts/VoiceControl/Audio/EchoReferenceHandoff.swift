@@ -110,6 +110,24 @@ final class EchoReferenceHandoff {
         }
     }
 
+    /// Submits a render position to be recorded on the reference, in order with the blocks.
+    ///
+    /// Producers that learn their position after submitting their samples need both to
+    /// travel the same route, or the anchor and the audio can cross: recording the anchor
+    /// directly on the reference from the producer while its samples are still queued here
+    /// would place the audio at a position it has not reached. Ordered through the same
+    /// serial queue so the anchor lands after the block it belongs to.
+    ///
+    /// - Parameter anchor: the position, or nil when the node is not rendering.
+    func submitRenderPosition(_ anchor: PlaybackRenderAnchor?) {
+        lock.lock()
+        let session = generation
+        lock.unlock()
+        queue.async { [weak self] in
+            self?.record(anchor, generation: session)
+        }
+    }
+
     /// Applies every pending block to the reference. Exposed so a test can drive the
     /// handoff deterministically rather than waiting on the queue.
     func drain() {
@@ -135,6 +153,16 @@ final class EchoReferenceHandoff {
     /// result (both orderings apply each surviving block exactly once, only which delivery
     /// applies it differs), so it was removed rather than kept as protection that cannot be
     /// demonstrated.
+    private func record(_ anchor: PlaybackRenderAnchor?, generation submittedGeneration: Int) {
+        lock.lock()
+        // Same boundary as a block: a position from an ended session must not land in the
+        // new session's reference.
+        let stillCurrent = submittedGeneration == generation
+        lock.unlock()
+        guard stillCurrent else { return }
+        reference.recordRenderPosition(anchor)
+    }
+
     private func deliver() {
         lock.lock()
         guard !pending.isEmpty else {
