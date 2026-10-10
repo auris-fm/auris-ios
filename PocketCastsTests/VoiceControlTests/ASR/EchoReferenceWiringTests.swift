@@ -1583,6 +1583,74 @@ final class EchoReferenceWiringTests: XCTestCase {
             """
         )
     }
+
+    /// The producer-to-reference conversion, which both direct producers share.
+    ///
+    /// This is the arithmetic that was wrong twice: a producer's own rendered position is
+    /// not a reference position, and the conversion is a single pure step that the handoff
+    /// and the cloud player both call. Testing it here rather than only through a producer
+    /// means a change to one caller cannot silently diverge from the other.
+    ///
+    /// The cases fix the two mistakes that were actually made:
+    ///   * treating the producer's count as if it were already a reference index, which
+    ///     places second-turn audio at the wrong origin;
+    ///   * using the block's length rather than the producer's progress, which claims the
+    ///     block has played when it has only been submitted.
+    func test_producerPositionIsConvertedIntoTheBlocksReferenceRange() {
+        let rangeStart = 40_000
+
+        // Half the block rendered, at a rate that needs converting: 800 of 1 600 source
+        // frames at 8 kHz is 0.1 s, which is 1 600 samples at the 16 kHz pipeline rate.
+        XCTAssertEqual(
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerFrames: 800,
+                producerRate: 8_000,
+                blockLength: 3_200
+            ),
+            rangeStart + 1_600,
+            "the producer's own count was not converted into reference samples"
+        )
+
+        // A node that reports nothing beyond the block cannot claim more than the block:
+        // clamped rather than allowed to run past the audio it describes.
+        XCTAssertEqual(
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerFrames: 100_000,
+                producerRate: 16_000,
+                blockLength: 3_200
+            ),
+            rangeStart + 3_200,
+            "a position past the block's end was not clamped to the block"
+        )
+
+        // A node that has rendered nothing places the block at its own start, not its end.
+        XCTAssertEqual(
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerFrames: 0,
+                producerRate: 16_000,
+                blockLength: 3_200
+            ),
+            rangeStart,
+            "zero progress must place the block at its start, not its end"
+        )
+
+        // A restart reports a position inside its own new session, so the same value must
+        // land in a LATER range rather than at the same absolute index.
+        let afterRestart = referenceIndexForProducerPosition(
+            rangeStart: 120_000,
+            producerFrames: 800,
+            producerRate: 8_000,
+            blockLength: 3_200
+        )
+        XCTAssertEqual(afterRestart, 120_000 + 1_600)
+        XCTAssertGreaterThan(
+            afterRestart, rangeStart,
+            "a restarted node's position must move with the range, not stay on the old one"
+        )
+    }
 }
 
 // MARK: - Harness

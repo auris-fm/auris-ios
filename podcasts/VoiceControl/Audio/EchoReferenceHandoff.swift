@@ -229,10 +229,14 @@ final class EchoReferenceHandoff {
         // When the producer reports no position, the block's start is recorded rather than
         // its end: the start is a fact about where the audio is, while the end would claim
         // progress the producer has not reported.
-        let played = block.renderedFramesInProducer.map {
-            Int($0 / block.sampleRate * PlaybackEchoReference.pipelineSampleRate)
-        } ?? 0
-        let anchoredEnd = rangeStart + min(max(played, 0), resampled.count)
+        let anchoredEnd = block.renderedFramesInProducer.map {
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerFrames: $0,
+                producerRate: block.sampleRate,
+                blockLength: resampled.count
+            )
+        } ?? rangeStart
 
         reference.recordRenderPosition(
             block.renderedAt.map {

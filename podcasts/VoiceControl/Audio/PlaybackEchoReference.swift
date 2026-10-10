@@ -88,6 +88,7 @@ final class PlaybackEchoReference {
         return samples
     }
 
+
     /// Where the audible end of the emitted stream sits within the retained window.
     ///
     /// The retained end is the newest **submitted** sample, which is ahead of what has
@@ -174,6 +175,36 @@ final class PlaybackEchoReference {
         samples.removeFirst(dropped)
         startTime += Double(dropped) / PlaybackEchoReference.pipelineSampleRate
     }
+}
+
+
+/// Places a producer's own rendered position into the reference's stream index space.
+///
+/// A producer reports where ITS node had rendered, in its own frames and at its own rate.
+/// That is not a position in the reference: the reference accumulates every producer's
+/// appends, a node restarts between turns and counts from zero again, and an interleaved
+/// producer's appends sit between this one's blocks. So the producer's position only means
+/// something against the range its block occupies, which is `rangeStart`.
+///
+/// `rangeStart` must be read before the block is appended. Reading it after would include the
+/// block itself and place the anchor past the audio it describes; the position is clamped to
+/// the block because a node cannot have rendered more of it than the block contains.
+///
+/// - Parameters:
+///   - rangeStart: reference index where this block begins.
+///   - producerFrames: how far the producer's node had rendered, in its own frames.
+///   - producerRate: the rate those frames were rendered at.
+///   - blockLength: the block's length in reference samples, used to clamp.
+/// - Returns: the reference index of the block's audible end.
+func referenceIndexForProducerPosition(
+rangeStart: Int,
+producerFrames: Double,
+producerRate: Double,
+blockLength: Int
+) -> Int {
+guard producerRate > 0, blockLength > 0 else { return rangeStart }
+let played = Int(producerFrames / producerRate * PlaybackEchoReference.pipelineSampleRate)
+return rangeStart + min(max(played, 0), blockLength)
 }
 
 /// Resamples emitted audio into the pipeline's rate.
