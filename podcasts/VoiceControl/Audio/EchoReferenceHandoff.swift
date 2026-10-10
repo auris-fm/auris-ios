@@ -4,10 +4,24 @@ import PocketCastsUtils
 /// Bounded handoff between a real-time audio producer and the echo reference.
 ///
 /// The producer is an `AVAudioEngine` tap, which runs on a real-time thread with a
-/// deadline. It must not touch the reference directly: `PlaybackEchoReference.snapshot`
-/// copies the whole retained window inside its lock and `append` does a memmove there, so
-/// a callback that waits on that lock can miss its deadline. An `NSLock` prevents a data
-/// race; it does not bound the wait.
+/// deadline. It must not touch the reference directly, for two reasons that are not equal
+/// in strength and are stated separately because of it:
+///
+/// - **`append` has a confirmed in-lock cost.** Past capacity it drops the oldest samples
+///   with `removeFirst` inside the lock, which is a memmove of the retained window on every
+///   append. That is unconditionally inside the lock.
+/// - **`snapshot` may wait, by an amount that is not established.** It returns a Swift
+///   array under the lock, which is a retain rather than a copy: the buffer's copy is
+///   copy-on-write and happens later, possibly outside the lock, depending on the caller.
+///   So an earlier claim here that a snapshot copies the whole retained window inside the
+///   lock was wrong — that figure is an upper bound on what a caller could pay, not a cost
+///   the lock holds.
+///
+/// Either way a callback that waits on that lock can miss its deadline, and an `NSLock`
+/// prevents a data race without bounding the wait. **Whether a tap callback actually waits,
+/// and for how long, is unmeasured** — this is the reason to hand off, not a measurement
+/// that the handoff is required. The handoff also removes the question: the callback no
+/// longer touches the reference at all.
 ///
 /// So the callback submits into a fixed-capacity queue and returns, and a serial queue
 /// applies the blocks to the reference off the real-time thread. This is the shape
