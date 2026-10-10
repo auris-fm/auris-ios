@@ -31,6 +31,12 @@ class VoiceControlService: ObservableObject {
     /// The grace signal this service drives, so a test can observe a route change's effect
     /// through the service rather than through the assembly that built it.
     var gracePeriodSignalForTesting: GracePeriodSignal { gracePeriodSignal }
+
+    /// The engine whose echo-filter route the assembly is responsible for keeping current.
+    var asrEngineForTesting: VoiceAsrEngine { asrEngine }
+
+    /// The monitor the assembly subscribes to in order to drive that route.
+    var routeMonitorForTesting: IOSAudioRouteMonitor { routeMonitor }
     private let analytics: VoiceAnalytics
 
     private var latestStageTiming: PipelineStageTiming?
