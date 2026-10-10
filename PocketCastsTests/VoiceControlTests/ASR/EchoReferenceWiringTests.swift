@@ -427,6 +427,95 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    // MARK: - Paired normalization at the permitted-overlap boundary
+
+    /// The numerator and both energies must come from the same sample pairs. With mixed
+    /// supports, energy in the segment **outside** the overlap raises the segment's energy
+    /// without appearing in the numerator, so the score drifts with how much audio sits
+    /// beyond the window rather than with how well the two match.
+    ///
+    /// The reference must be at least as long as the segment, otherwise the offset clamps
+    /// the window and the overlap guard declines before the score is computed — a different
+    /// case, covered separately.
+    func test_loudAudioOutsideTheOverlapDoesNotChangeTheEchoDecision() {
+        let filter = SignalFilter()
+        let echoBody = (0..<1_200).map { Float(sin(Double($0) * 0.25)) }
+        let reference = echoBody + [Float](repeating: 0.001, count: 400)
+
+        // Identical echo inside the segment; only the tail's energy differs.
+        let quietTail = echoBody + [Float](repeating: 0.001, count: 400)
+        let loudTail = echoBody + [Float](repeating: 0.9, count: 400)
+
+        let quietDecision = filter.isPlaybackBleed(mic: quietTail, reference: reference, segmentEndOffset: reference.count)
+        let loudDecision = filter.isPlaybackBleed(mic: loudTail, reference: reference, segmentEndOffset: reference.count)
+
+        XCTAssertEqual(
+            quietDecision, loudDecision,
+            "the decision changed with energy outside the overlap, so the score is not a match measure"
+        )
+        XCTAssertTrue(quietDecision, "an exact echo in the overlap was not rejected")
+    }
+
+    /// The discriminating case for paired normalization: a loud tail must not *mask* echo.
+    ///
+    /// With the segment's energy taken over its full length, a loud portion outside the
+    /// overlap inflates that energy while contributing nothing to the numerator, so the
+    /// score falls and genuine echo passes unfiltered. Taking both energies over the
+    /// winning lag's pairs removes the dependence on audio outside the overlap.
+    func test_loudTailDoesNotMaskEchoInTheOverlap() {
+        let filter = SignalFilter()
+        // The reference holds the echo body only; the segment is longer than it, so the
+        // window covers the echo and the segment's extra portion is outside the comparison.
+        // Requiring the reference to be at least as long as the segment would put the tail
+        // *inside* the window, where it is legitimately part of the compared audio and the
+        // case would prove nothing about support.
+        let echoBody = (0..<1_200).map { Float(sin(Double($0) * 0.25) * 0.1) }
+        // Exact echo, then a tail far louder than it. 1600 >= 0.75 * 1200, so the overlap
+        // guard permits the comparison.
+        let mic = echoBody + [Float](repeating: 0.9, count: 400)
+
+        XCTAssertTrue(
+            filter.isPlaybackBleed(mic: mic, reference: echoBody, segmentEndOffset: echoBody.count),
+            "a loud tail outside the overlap let its own echo through unfiltered"
+        )
+    }
+
+    /// The same property on the other branch: unrelated speech with a loud tail must not be
+    /// pushed over the threshold by that tail alone.
+    func test_loudAudioOutsideTheOverlapDoesNotRejectUnrelatedSpeech() {
+        let filter = SignalFilter()
+        let reference = (0..<1_200).map { Float(sin(Double($0) * 0.25)) }
+            + [Float](repeating: 0.001, count: 400)
+        // Orthogonal to the reference, then a loud unrelated tail.
+        let speech = (0..<1_200).map { $0 % 2 == 0 ? Float(0.3) : Float(-0.3) }
+            + [Float](repeating: 0.9, count: 400)
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: speech, reference: reference, segmentEndOffset: reference.count),
+            "a loud tail outside the overlap rejected genuine speech as echo"
+        )
+    }
+
+    /// Simultaneous user speech must survive with echo present, which is the case the owning
+    /// clause calls out.
+    func test_simultaneousUserSpeechSurvivesWithEchoPresent() {
+        let filter = SignalFilter()
+        let reference = (0..<1_200).map { Float(sin(Double($0) * 0.25)) }
+            + [Float](repeating: 0.001, count: 400)
+        // User speech dominates the mixture: the clause preserves the user's words even
+        // while our own output is audible underneath them.
+        let mixed = (0..<1_600).map { index -> Float in
+            let echo = Float(sin(Double(index % 1_200) * 0.25))
+            let user = index % 2 == 0 ? Float(0.8) : Float(-0.8)
+            return echo * 0.1 + user
+        }
+
+        XCTAssertFalse(
+            filter.isPlaybackBleed(mic: mixed, reference: reference, segmentEndOffset: reference.count),
+            "simultaneous user speech was rejected as echo"
+        )
+    }
+
     /// The engine reads the shared reference, so audio appended by a producer is what
     /// the filter correlates against — not a buffer the engine happens to hold.
     func test_engineCorrelatesAgainstTheSharedReference() async throws {
