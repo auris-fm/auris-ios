@@ -1061,15 +1061,38 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// **This asserts the wiring can be reached, which is what a source check cannot do from
     /// here.** The stronger check is the App Clip build: it fails if the voice-layer
     /// reference escapes the gate, and `podcasts` alone would not show it.
-    func testEffectsPlayerExposesTheEchoHandoffForTheEpisodeTap() {
-        // The renderer reads this before starting playback; without it the tap installs with
-        // nowhere to publish and the episode source stays inert.
+    func testEffectsPlayerStartPathInstallsTheEpisodeTap() {
+        // The previous version of this case set `EffectsPlayer.echoReferenceHandoff` itself
+        // and then asserted it was non-nil. That is a tautology: it holds whether or not the
+        // player ever installs anything, so deleting the installation from the start path
+        // left it green — which is how the tap stayed unconnected in production while its
+        // tests passed.
+        //
+        // This drives the same entry point the start path calls, on a real (unstarted)
+        // engine, and reads the placement off the tap. It fails if the installation stops
+        // happening, because then no tap is installed on the output node.
         let handoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
         EffectsPlayer.echoReferenceHandoff = handoff
+        defer { EffectsPlayer.echoReferenceHandoff = nil }
 
-        XCTAssertNotNil(
-            EffectsPlayer.echoReferenceHandoff,
-            "the renderer has no handoff to publish into"
+        let player = EffectsPlayer()
+        let engine = AVAudioEngine()
+        player.setEngineForTesting(engine)
+        defer { player.setEngineForTesting(nil) }
+
+        player.installEmittedAudioTap()
+
+        guard let tap = player.emittedAudioTapForTesting else {
+            XCTFail("the start path installed no tap, so the episode source is inert")
+            return
+        }
+        XCTAssertTrue(
+            tap.isInstalledOnOutputNode(engine.outputNode),
+            "the tap was created but never installed on the output node"
+        )
+        XCTAssertIdentical(
+            tap.handoff, handoff,
+            "the installed tap did not receive the handoff the renderer publishes into"
         )
     }
 
@@ -1359,6 +1382,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(reference.currentRenderAnchor, anchor,
                        "a render position from an ended session landed in the new one")
     }
+
 }
 
 // MARK: - Harness
