@@ -639,9 +639,34 @@ final class EchoReferenceWiringTests: XCTestCase {
         player.play(.listeningStart)
 
         let expected = frameCount * Int(PlaybackEchoReference.pipelineSampleRate) / Int(sourceRate)
+        let retained = reference.snapshot()
         XCTAssertEqual(
-            reference.snapshot().count, expected,
+            retained.count, expected,
             "playing an earcon did not reach the reference at the pipeline rate"
+        )
+
+        // **Length alone does not verify the emitted audio reached the reference**: a
+        // reference of the right length full of silence would satisfy it, and silence is
+        // exactly what a mis-wired path produces. So the content is checked against the
+        // samples the buffer held, and the case is shown to fail when the source is silent.
+        XCTAssertFalse(
+            retained.allSatisfy { $0 == 0 },
+            "the reference holds only silence, so the earcon's audio did not reach it"
+        )
+        // The tone is deterministic, so specific values are known: resampling interpolates
+        // between source samples, so the retained values must lie within the source's range
+        // rather than matching it exactly.
+        let sourcePeak = (0..<frameCount)
+            .map { abs(Float(sin(Double($0) * 0.3) * 0.4)) }
+            .max() ?? 0
+        let retainedPeak = retained.map { abs($0) }.max() ?? 0
+        XCTAssertGreaterThan(
+            retainedPeak, 0.1,
+            "the retained audio is near-silent, so the earcon's samples were not published"
+        )
+        XCTAssertLessThanOrEqual(
+            retainedPeak, sourcePeak + 0.05,
+            "the retained audio exceeds the source amplitude, so it is not this earcon's audio"
         )
     }
 
