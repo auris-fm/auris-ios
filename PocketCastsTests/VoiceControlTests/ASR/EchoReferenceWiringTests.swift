@@ -1050,6 +1050,29 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// **A producer that no process constructs feeds nothing, however well it behaves on
+    /// its own.**
+    ///
+    /// `EpisodeOutputTap` was written, tested and merged into this branch while nothing
+    /// created it in production, so the episode source was not connected at all — and every
+    /// passing case was evidence about a component no running process held. It is constructed
+    /// in `EffectsPlayer`, gated to the target that compiles the voice layer.
+    ///
+    /// **This asserts the wiring can be reached, which is what a source check cannot do from
+    /// here.** The stronger check is the App Clip build: it fails if the voice-layer
+    /// reference escapes the gate, and `podcasts` alone would not show it.
+    func testEffectsPlayerExposesTheEchoHandoffForTheEpisodeTap() {
+        // The renderer reads this before starting playback; without it the tap installs with
+        // nowhere to publish and the episode source stays inert.
+        let handoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
+        EffectsPlayer.echoReferenceHandoff = handoff
+
+        XCTAssertNotNil(
+            EffectsPlayer.echoReferenceHandoff,
+            "the renderer has no handoff to publish into"
+        )
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The

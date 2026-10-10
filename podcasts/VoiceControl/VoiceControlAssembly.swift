@@ -72,6 +72,11 @@ class VoiceControlAssembly {
         // capacity is in blocks: at this size a saturated handoff drops rather than blocks,
         // which leaves a visible gap in the reference instead of stalling the producer.
         let echoHandoff = EchoReferenceHandoff(reference: echoReference, capacity: 8)
+        // The episode renderer publishes what it emits into this handoff. Set from here
+        // because the assembly holds both sides: the reference belongs to the voice layer and
+        // the renderer to playback. The renderer reads it inside `#if !APPCLIP`, since the
+        // App Clip compiles that file and has no voice layer to publish to.
+        EffectsPlayer.echoReferenceHandoff = echoHandoff
 
         // Echo-filter scope follows the observed output route. Without this the
         // filter's classification never changes from its default and the correlation
