@@ -80,6 +80,34 @@ class VoiceAsrEngine {
     func setEchoReference(_ reference: PlaybackEchoReference) {
         echoReference = reference
     }
+
+    /// Where the segment about to be examined begins within the retained reference.
+    ///
+    /// Returns a negative offset when the segment cannot be placed: without an observed
+    /// render position the node may not be rendering, or may have restarted, and the
+    /// retained audio's position relative to the segment is then unknown. A negative
+    /// offset makes the filter decline to claim alignment rather than align against the
+    /// wrong instant — the failure this exists to avoid.
+    ///
+    /// **The offset is deliberately coarse while the capture side carries no segment
+    /// instant.** A segment arriving now is at the newest end of what has been emitted,
+    /// so the window is anchored to the reference's end; that is correct under steady
+    /// playback and is not correct across a queue lead or a restart, which is why the
+    /// segment instant is required before this closes. It is written this way rather
+    /// than guessing a precise value from the render anchor alone, because a precise
+    /// wrong offset is worse than an honest coarse one.
+    /// **The end offset is deliberately the retained end while the capture side carries
+    /// no segment instant.** A segment arriving now is the newest audio, so the window
+    /// ends where the retained reference does; that is correct under steady playback and
+    /// is not correct across a queue lead or a restart, which is why the segment instant
+    /// is required before this closes. A negative value means the segment cannot be
+    /// placed and the filter declines to align rather than aligning against the wrong
+    /// instant.
+    private func playbackEndOffsetForCurrentSegment() -> Int {
+        guard let reference = echoReference,
+              reference.currentRenderAnchor != nil else { return -1 }
+        return reference.snapshot().count
+    }
     var listeningMode: ListeningMode = .wakeWord
 
     /// Forwards the immutable routing envelope (source + English router text).
@@ -202,7 +230,11 @@ class VoiceAsrEngine {
         stageTimer.mark() // VAD segment ready
 
         if echoFilterRoute.appliesCorrelationWindow,
-           signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {  // snapshot per segment
+           signalFilter.isPlaybackBleed(
+               mic: utterance,
+               reference: playbackBuffer,
+               segmentEndOffset: playbackEndOffsetForCurrentSegment()
+           ) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -435,6 +467,16 @@ class VoiceAsrEngine {
         guard let echoReference else { return }
         echoReference.invalidate()
         echoReference.append(samples)
+        // Mirror the production rule that a reference without an observed render
+        // position cannot be aligned: the seam supplies one so cases exercise the
+        // aligned path rather than silently taking the unaligned branch.
+        echoReference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(samples.count),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 0
+            )
+        )
     }
 
     /// Sets the echo-filter scope for the current output route and retires the

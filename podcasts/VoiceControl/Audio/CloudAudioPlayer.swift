@@ -408,17 +408,48 @@ final class CloudAudioPlayer: @unchecked Sendable {
             return
         }
 
-        // Publish what is about to be emitted before it reaches the output, so the
-        // reference is populated for the same audio the microphone can hear. Resampled
-        // into the pipeline's rate because the filter correlates in that domain.
+        // Publish what is about to be emitted, so the reference holds the audio the
+        // microphone can hear. Resampled into the pipeline's rate because the filter
+        // correlates in that domain.
+        //
+        // The node's render position is read here rather than assumed. Scheduling a
+        // buffer does not mean it is audible: the node may still be playing earlier
+        // audio, so the position that matters is what it has *rendered*, not what has
+        // been handed to it. `playerTime(forNodeTime:)` reports that, and using it means
+        // a queue lead or a restart shows up as a position jump instead of the reference
+        // silently claiming audio is audible before it is.
         if let reference = emittedPCMReference,
            let channel = pcmBuffer.floatChannelData?[0] {
             let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
-            reference.append(PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate))
+            let resampled = PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate)
+            reference.append(resampled)
+            reference.recordRenderPosition(renderPosition(of: node))
         }
 
         node.play()
         node.scheduleBuffer(pcmBuffer)
+    }
+
+    /// The output node's rendered position, or nil when the node is not rendering.
+    ///
+    /// `lastRenderTime` is the host instant of the most recent render; converting it
+    /// through `playerTime(forNodeTime:)` yields the position in the played audio's own
+    /// sample frames. Both are needed: the frames give the mapping onto the reference,
+    /// and the host instant places it on the shared monotonic basis. A node that is not
+    /// playing reports no render time, which is a discontinuity rather than a position
+    /// of zero.
+    private func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
+        guard let lastRender = node.lastRenderTime,
+              lastRender.isSampleTimeValid,
+              let playerTime = node.playerTime(forNodeTime: lastRender),
+              playerTime.isSampleTimeValid else { return nil }
+        return PlaybackRenderAnchor(
+            renderedFrames: Double(playerTime.sampleTime),
+            sourceSampleRate: playerTime.sampleRate,
+            hostTime: lastRender.hostTime > 0
+                ? AVAudioTime.seconds(forHostTime: lastRender.hostTime)
+                : 0
+        )
     }
 
     /// Whether this process has an audio output to render into. `AVAudioEngine`

@@ -30,6 +30,9 @@ final class PlaybackEchoReference {
     /// `MonotonicClock` the recognition stages use, so playback and capture share one
     /// basis and are unaffected by wall-clock changes.
     private var startTime: MonotonicTime = 0
+    /// Last observed position of the output node, used to place a captured segment
+    /// against the retained audio. Cleared when the node stops rendering.
+    private var renderAnchor: PlaybackRenderAnchor?
     private let capacity: Int
     private let clock: MonotonicClock
 
@@ -86,6 +89,27 @@ final class PlaybackEchoReference {
         lock.lock()
         defer { lock.unlock() }
         samples.removeAll(keepingCapacity: true)
+        renderAnchor = nil
+    }
+
+    /// Records where the output node has actually rendered to.
+    ///
+    /// A nil anchor means the node is not rendering — it has not started, or it has
+    /// stopped/underrun. Either way the reference cannot claim a position for the audio
+    /// it holds, so the last known anchor is cleared rather than left in place: stale
+    /// render state would let the filter align a segment against audio that is no longer
+    /// playing.
+    func recordRenderPosition(_ anchor: PlaybackRenderAnchor?) {
+        lock.lock()
+        defer { lock.unlock() }
+        renderAnchor = anchor
+    }
+
+    /// The last observed render position, or nil when the node is not rendering.
+    var currentRenderAnchor: PlaybackRenderAnchor? {
+        lock.lock()
+        defer { lock.unlock() }
+        return renderAnchor
     }
 
     /// Retires the reference for a route change or a stop, retaining the acoustic tail.

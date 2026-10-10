@@ -12,15 +12,26 @@ class SignalFilter {
     /// buffer is draining, the reference runs ahead of what the microphone can hear, so
     /// the match is against audio that has not left the speaker yet.
     ///
+    /// The window passed to the positional check is the reference audio that was audible
+    /// while the segment was being captured: a span of the segment's own length **ending**
+    /// at the segment's end, because the segment just captured is the newest audio.
+    ///
+    /// Getting this backwards is not a near miss. Anchoring the window at the segment's
+    /// start and running forward leaves almost nothing when the segment sits at the end
+    /// of the reference, and the normalised correlation — `maxCorr / (micRms * pbRms *
+    /// count)`, with `count` in the denominator — then approaches 1 for unrelated signals,
+    /// so genuine user speech is rejected as bleed.
+    ///
     /// - Parameters:
     ///   - mic: the captured segment at the pipeline rate.
     ///   - reference: the retained emitted audio at the pipeline rate.
-    ///   - segmentStartOffset: where the segment begins, in pipeline samples from the
-    ///     reference's start. Negative or beyond the retained window means the two do
-    ///     not overlap, and no alignment claim can be made.
-    func isPlaybackBleed(mic: [Float], reference: [Float], segmentStartOffset: Int) -> Bool {
-        guard segmentStartOffset >= 0, segmentStartOffset < reference.count else { return false }
-        let window = Array(reference[segmentStartOffset...])
+    ///   - segmentEndOffset: where the segment's capture ends, in pipeline samples from
+    ///     the reference's start. Negative means the segment cannot be placed, so no
+    ///     alignment claim is made.
+    func isPlaybackBleed(mic: [Float], reference: [Float], segmentEndOffset: Int) -> Bool {
+        guard segmentEndOffset >= 0, segmentEndOffset <= reference.count else { return false }
+        let start = max(0, segmentEndOffset - mic.count)
+        let window = Array(reference[start..<segmentEndOffset])
         guard !window.isEmpty else { return false }
         return isPlaybackBleed(mic: mic, playback: window)
     }
