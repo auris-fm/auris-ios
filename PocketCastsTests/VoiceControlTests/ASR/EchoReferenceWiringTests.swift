@@ -706,6 +706,118 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// **Bounded handoff contract for the audio-thread producer.**
+    ///
+    /// The tap callback runs on a real-time thread, so it must not block on the
+    /// reference's lock (`snapshot` copies the whole retained window inside it, `append`
+    /// does a memmove). It hands off to a serial queue the way `NativeAudioCapture`
+    /// already does, and the reference is updated off the real-time thread.
+    ///
+    /// These cases fix the three properties @spec required: capacity, overflow behaviour,
+    /// and ownership across stop/restart.
+    func testHandoffDeliversBlocksToTheReference() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.drain()
+
+        XCTAssertEqual(
+            reference.snapshot().count, 100,
+            "a submitted block did not reach the reference"
+        )
+    }
+
+    /// **Overflow must leave a visible gap, not advance the reference as if the audio had
+    /// been captured.** If a block is dropped while the consumer is behind, the reference
+    /// must not silently close the gap: the retained window is a timeline, and pretending
+    /// dropped audio was emitted would place every later sample at the wrong offset.
+    func testHandoffOverflowDropsTheBlockRatherThanClosingTheGap() {
+        let reference = PlaybackEchoReference()
+        // Capacity one block, and nothing drains it, so the second submission overflows.
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 1)
+
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.2, count: 100), sampleRate: 16000)
+
+        let droppedBeforeDrain = handoff.droppedBlockCount
+        XCTAssertGreaterThan(
+            droppedBeforeDrain, 0,
+            "the handoff accepted more than its capacity without reporting a drop"
+        )
+
+        handoff.drain()
+
+        // The count alone cannot distinguish dropping from coalescing — both leave one
+        // block applied. What distinguishes them is *which* samples survived: a drop keeps
+        // the block that was already accepted, a coalesce replaces it with the newer one
+        // and so advances the reference over audio that was never captured.
+        let retained = reference.snapshot()
+        XCTAssertEqual(
+            retained.count, 100,
+            "the retained window is not one block"
+        )
+        XCTAssertEqual(
+            retained.first, 0.1,
+            "the reference kept the newer block, so it advanced over the dropped one"
+        )
+        XCTAssertGreaterThan(
+            handoff.droppedBlockCount, 0,
+            "the drop was not visible to a consumer"
+        )
+    }
+
+    /// **Ownership across stop/restart: a reset discards what was pending**, so audio from
+    /// before the stop is not delivered after the restart, and a block submitted after the
+    /// reset is still delivered exactly once.
+    ///
+    /// **What this does not cover, stated rather than implied.** An earlier version tagged
+    /// deliveries with a session and refused to apply across a reset boundary. I wrote a
+    /// case for it and **could not make it fail**: enumerating both orderings showed that a
+    /// stale delivery and a blocking check apply each surviving block exactly once either
+    /// way — only which delivery does it differs. So the check was removed rather than kept
+    /// as protection no test can demonstrate, and this case covers the discard, which is the
+    /// behaviour that is reachable.
+    func testHandoffResetDiscardsPendingBlocksAndKeepsLaterOnes() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+
+        // Submitted then discarded: this block must not be delivered.
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.reset()
+        // Submitted after the reset: this one belongs to the running session.
+        handoff.submit([Float](repeating: 0.2, count: 100), sampleRate: 16000)
+        handoff.drain()
+
+        let retained = reference.snapshot()
+        XCTAssertEqual(
+            retained.count, 100,
+            "a block from before the reset was delivered alongside the new one"
+        )
+        XCTAssertEqual(
+            retained.first, 0.2,
+            "a block from before the reset was delivered after the restart"
+        )
+    }
+
+    /// **Render timestamps are preserved across the handoff.** The handoff moves work off
+    /// the audio thread, which delays arrival; the block's own render instant must survive
+    /// so a segment is still placed against when the audio was audible, not when the
+    /// consumer got round to it.
+    func testHandoffPreservesTheRenderTimestamp() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
+
+        let renderedAt = 1234.5
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000, renderedAt: renderedAt)
+        handoff.drain()
+
+        XCTAssertEqual(
+            reference.currentRenderAnchor?.hostTime, renderedAt,
+            "the block's render instant was replaced by its arrival time"
+        )
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The
