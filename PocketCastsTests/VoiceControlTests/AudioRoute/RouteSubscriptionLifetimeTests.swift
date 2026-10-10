@@ -83,4 +83,49 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
             ]
         )
     }
+
+    /// The echo-filter route must keep following the observed output route after the
+    /// assembly that built the service has been released.
+    ///
+    /// `VoiceControlAssembly` subscribes to `routeMonitor.$currentRoute` and pushes the
+    /// classification into the engine, storing the cancellable in the *assembly's* own set.
+    /// `AppDelegate` builds through a temporary assembly and keeps only the service, so that
+    /// subscription is torn down as soon as the builder goes out of scope and
+    /// `setEchoFilterRoute` is never called again.
+    ///
+    /// The engine then keeps whatever route it was constructed with, so a route change on
+    /// the real device — plugging in headphones, connecting to a car — leaves the filter
+    /// correlating against the window of the route it is no longer on.
+    ///
+    /// This is the subscription the reported defect concerns, and it is not the one the
+    /// grace-signal case above exercises: that one is owned by the monitor itself and
+    /// survives on its own account.
+    func test_echoFilterRouteFollowsTheOutputRoute_afterTheAssemblyIsReleased() throws {
+        let service: VoiceControlService?
+        do {
+            let assembly = VoiceControlAssembly()
+            service = assembly.buildVoiceControlService()
+            XCTAssertNotNil(service, "the assembly built no service, so the case proves nothing")
+        }
+
+        guard let service else { return }
+
+        let engine = service.asrEngineForTesting
+        let monitor = service.routeMonitorForTesting
+
+        // Move the observed route to the built-in speaker and let Combine deliver.
+        monitor.currentRoute = AudioRoute(output: .builtInSpeaker, input: .builtInMic)
+        let delivered = expectation(description: "the engine was told about the new route")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { delivered.fulfill() }
+        wait(for: [delivered], timeout: 2)
+
+        XCTAssertEqual(
+            engine.echoFilterRoute, .builtInSpeaker,
+            """
+            after the assembly was released, the engine's echo-filter route no longer \
+            follows the observed output route: the subscription that drives it was owned by \
+            the builder rather than by the service the app keeps.
+            """
+        )
+    }
 }
