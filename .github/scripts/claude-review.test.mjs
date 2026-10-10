@@ -67,8 +67,9 @@ test('a failed or skipped review comments with the reason', () => {
 });
 
 // The workflow's own structure: a consumed job header, a duplicate permissions block, or
-// a status-writing job without the permission all leave the file looking healthy while
-// the review silently cannot run or cannot record.
+// a status-writing job without the permission. Each is caught before a run rather than by
+// reading a red job — the permission failure throws out of the script and fails the step,
+// which is loud, but only after a run that spends a review to discover it.
 test('the workflow declares one job, and every status writer declares the permission', async () => {
   const {check} = await import('./check-workflow-structure.mjs');
   const {readFileSync} = await import('node:fs');

@@ -24,10 +24,18 @@ export function check(text) {
   assert.match(body, /^    runs-on:/m, 'claude-review has no runs-on');
   assert.match(body, /^    steps:/m, 'claude-review has no steps');
 
-  // Every job that writes a status must declare the permission for it. Without it the
-  // status call fails, the step is `if: always()`-gated, and the job still reports
-  // green — so the outcome is "a review ran, the job is green, and the PR carries no
-  // status", which is the same signature as a skip.
+  // Every job that writes a status must declare the permission for it.
+  //
+  // This is a cross-artifact requirement: it is visible only by relating a step's API call
+  // to the job's own permission block, and neither half shows the defect on its own, which
+  // is why no shell guard or single-file scan catches it.
+  //
+  // The failure is a 403 from the statuses call, which throws out of the script's
+  // `execFileSync` and fails the step — so the job goes red. That is loud rather than
+  // silent. An earlier note here claimed the job stays green with no status; that was a
+  // plausible mechanism offered without checking the exit path, which is the exact error
+  // this workflow exists to reduce. What the check buys is that the defect is caught
+  // before a run at all, rather than by reading a red job's logs.
   const permissions = text.split(/\n    permissions:\n/)[1]?.split(/\n    [a-z]/)[0] ?? '';
   // The status is written by the review-control script, which the job invokes, so the
   // workflow itself need not contain the word. What identifies a status-writing job is
