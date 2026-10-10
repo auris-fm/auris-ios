@@ -65,3 +65,19 @@ test('a failed or skipped review comments with the reason', () => {
   const skipped = skippedNotice(pr);
   assert.match(skipped.comment, /skipped/i);
 });
+
+// The workflow's own structure: a consumed job header, a duplicate permissions block, or
+// a status-writing job without the permission all leave the file looking healthy while
+// the review silently cannot run or cannot record.
+test('the workflow declares one job, and every status writer declares the permission', async () => {
+  const {check} = await import('./check-workflow-structure.mjs');
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../.github/workflows/claude-code-review.yml', import.meta.url), 'utf8');
+  assert.equal(check(src), true);
+  // A consumed job header leaves valid YAML with no job at all.
+  assert.throws(() => check(src.replace('  claude-review:', '')), /exactly one job/);
+  // A second permissions block silently overrides.
+  assert.throws(() => check(src.replace('    steps:', '    permissions:\n      contents: read\n    steps:')), /one permissions block/);
+  // A status writer without the permission fails invisibly under `if: always()`.
+  assert.throws(() => check(src.replace('      statuses: write\n', '')), /statuses: write/);
+});
