@@ -71,8 +71,9 @@ class SignalFilter {
         // guard therefore changes the outcome only for a **single-sample** segment, which
         // cannot be a VAD segment and so never occurs on a real input.
         //
-        // It is kept because removing it would widen nothing and its `> 0` clause still
-        // guards the degenerate case; neither guard may be relaxed to widen coverage.
+        // It is kept as a clarity call, not as protection: removing it would widen nothing
+        // and it is the only thing declining the degenerate case, but it protects nothing
+        // on any real input. Neither guard may be relaxed to widen coverage.
         guard window.count >= mic.count else { return false }
 
         return isPlaybackBleed(mic: mic, playback: window)
