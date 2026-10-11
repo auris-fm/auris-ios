@@ -891,11 +891,25 @@ final class EchoReferenceWiringTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
 
         // Removes the block from pending, then the reset runs, then the append happens.
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        // The hook is assigned BEFORE the submit that enqueues the delivery. Assigning it
+        // afterwards races the queue: `submit` dispatches `deliver()` asynchronously, so the
+        // contract's own mid-flight interleaving would depend on the hook winning a race it
+        // has no ordering against. With this order the interleaving is structural.
+        var hookFired = false
         handoff.onDeliveryDequeued = { [weak handoff] in
+            hookFired = true
             handoff?.reset()
         }
+        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
         handoff.drain()
+
+        // The case is about a reset landing BETWEEN dequeuing and appending. If the hook never
+        // ran, the reset happened before the delivery instead and the assertion below would
+        // hold without the boundary being exercised at all.
+        XCTAssertTrue(
+            hookFired,
+            "the reset did not land mid-delivery, so this case did not exercise the boundary"
+        )
 
         XCTAssertEqual(
             reference.snapshot().count, 0,

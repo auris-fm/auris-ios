@@ -37,7 +37,8 @@ open class EarconPlayer {
         // none did — a missing resource, a bundle change — the format silently becomes the
         // mixer default, and every `scheduleBuffer` then fails the audio graph's own
         // channel-count check. Earcons would go silent with one log line, which is the
-        // failure this explicit format removes. The assets are mono at the pipeline rate.
+        // failure this explicit format removes. The assets are mono 16-bit at 44.1 kHz, not the pipeline rate, so this also declares the rate
+          // the graph is connected at instead of leaving it to be inferred.
         engine.connect(player, to: engine.mainMixerNode, format: Self.earconFormat(sampleRate: PlaybackEchoReference.pipelineSampleRate))
         engine.prepare()
     }
@@ -116,9 +117,11 @@ open class EarconPlayer {
     /// microphone can hear, and the render position is read from the node rather than
     /// assumed, because scheduling a buffer does not mean it is audible yet.
     ///
-    /// The samples are not resampled when they are already at the pipeline rate. Earcons
-    /// are loaded at that rate, and resampling would shift the timing the reference
-    /// claims was rendered.
+    /// The samples are published with the buffer's OWN rate rather than the pipeline's, so
+    /// the handoff resamples them: the assets on disk are 44.1 kHz, not 16 kHz. Declaring the
+    /// buffer's rate is what keeps the reference's timeline honest — passing the pipeline rate
+    /// for audio that is not at it would compress the samples' apparent duration and shift the
+    /// instant the reference claims they were rendered.
     func publishForEchoReference(_ buffer: AVAudioPCMBuffer) {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let frame = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
