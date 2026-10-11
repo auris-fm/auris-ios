@@ -215,3 +215,60 @@ final class InMemoryOperationRecordStore: OperationRecordStore {
     func load() -> [String: StoredRecord] { records }
     func save(_ records: [String: StoredRecord]) { self.records = records }
 }
+
+/// A file-backed store, so the claim survives a process restart.
+///
+/// The encoding is deliberately small and total: an operation is either in progress or
+/// finished, and a finished result is an outcome plus a reason. A record whose outcome this
+/// build does not recognise is dropped rather than guessed at, and dropping it means the
+/// operation is treated as genuinely new rather than reported with an outcome we invented.
+final class FileOperationRecordStore: OperationRecordStore {
+    private let url: URL
+
+    init(url: URL) { self.url = url }
+
+    func load() -> [String: StoredRecord] {
+        guard let data = try? Data(contentsOf: url),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]]
+        else { return [:] }
+
+        var records: [String: StoredRecord] = [:]
+        for (operationID, fields) in raw {
+            switch fields["state"] {
+            case "inProgress":
+                records[operationID] = .inProgress
+            case "finished":
+                guard let outcome = fields["outcome"].flatMap(OperationOutcome.init(rawValue:)) else { continue }
+                records[operationID] = .finished(
+                    outcome == .succeeded
+                        ? .succeeded
+                        : .nonSuccess(outcome, reason: fields["reason"] ?? OperationReason.interruptedInFlight)
+                )
+            default:
+                // An unreadable record is treated as absent: the operation is not claimed, so
+                // it will execute rather than be reported with an outcome we made up.
+                continue
+            }
+        }
+        return records
+    }
+
+    func save(_ records: [String: StoredRecord]) {
+        var raw: [String: [String: String]] = [:]
+        for (operationID, record) in records {
+            switch record {
+            case .inProgress:
+                raw[operationID] = ["state": "inProgress"]
+            case .finished(let result):
+                var fields: [String: String] = [
+                    "state": "finished",
+                    "outcome": result.outcome.rawValue,
+                ]
+                if let reason = result.reason { fields["reason"] = reason }
+                raw[operationID] = fields
+            }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}

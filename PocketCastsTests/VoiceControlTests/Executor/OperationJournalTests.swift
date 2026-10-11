@@ -163,6 +163,68 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(OperationResult.succeeded.outcome, .succeeded)
     }
 
+    // MARK: - the file-backed store
+
+    private func makeFileURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("opjournal-\(UUID().uuidString).json")
+    }
+
+    /// The durability claim, driven through a real file rather than a test double: a claim
+    /// written by one journal is read back by another built on the same URL.
+    func test_theFileBackedStore_survivesAJournalRebuiltOnTheSameFile() {
+        let url = makeFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-1"), .claimed)
+
+        let second = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(second.interruptedOperationIDs(), ["op-1"])
+        XCTAssertEqual(second.reconstructInterrupted("op-1")?.outcome, .unknown)
+
+        let third = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(
+            third.result(for: "op-1")?.reason,
+            OperationReason.interruptedInFlight,
+            "the reconstructed result must survive another rebuild"
+        )
+    }
+
+    func test_theFileBackedStore_roundTripsAFinishedResult() {
+        let url = makeFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-1"), .claimed)
+        first.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
+
+        let second = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(
+            second.result(for: "op-1"),
+            .nonSuccess(.refused, reason: OperationReason.stalePrecondition)
+        )
+    }
+
+    func test_theFileBackedStore_doesNotTreatAnAbsentFileAsInterrupted() {
+        let url = makeFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertTrue(journal.interruptedOperationIDs().isEmpty)
+        XCTAssertEqual(journal.claim("op-1"), .claimed, "a new operation must still execute")
+    }
+
+    func test_theFileBackedStore_recoversFromUnreadableContent() {
+        // A truncated or foreign file must not be read as "everything is interrupted", which
+        // would refuse operations that never ran.
+        let url = makeFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try? Data("not json".utf8).write(to: url)
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertTrue(journal.interruptedOperationIDs().isEmpty)
+        XCTAssertEqual(journal.claim("op-1"), .claimed)
+    }
+
     // MARK: - concurrency
 
     /// Concurrent claims must yield exactly one `.claimed` per operation: claims arrive on the
