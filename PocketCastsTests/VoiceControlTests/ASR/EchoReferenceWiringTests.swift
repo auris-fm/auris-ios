@@ -869,7 +869,17 @@ final class EchoReferenceWiringTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
 
         let renderedAt = 1234.5
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000, renderedAt: renderedAt)
+        // A position is required for an anchor to be recorded at all: a block whose producer
+        // reported no position records none, rather than one at the block's start, because a
+        // substitution would be indistinguishable from a measured zero. This case is about
+        // the timestamp, so it supplies the position the anchor also needs.
+        handoff.submit(
+            [Float](repeating: 0.1, count: 100),
+            sampleRate: 16000,
+            renderedAt: renderedAt,
+            renderedFramesInProducer: 100,
+            producerBlockStart: 0
+        )
         handoff.drain()
 
         XCTAssertEqual(
@@ -1491,28 +1501,37 @@ final class EchoReferenceWiringTests: XCTestCase {
                 [Float](repeating: 0.2, count: perRound),
                 sampleRate: PlaybackEchoReference.pipelineSampleRate,
                 renderedAt: MonotonicTime(round),
-                renderedFramesInProducer: Double((round + 1) * perRound)
+                renderedFramesInProducer: Double((round + 1) * perRound),
+                // This block begins where the previous one ended, so progress into it is
+                // one block rather than the whole running count.
+                producerBlockStart: Double(round * perRound)
             )
             handoff.drain()
 
-            // Another producer's audio lands between this producer's blocks.
+            // Another producer's audio lands between this producer's blocks. It reports a
+            // position too, the way the earcon does in production: its samples are submitted
+            // when audible and its position once the node renders, and a block with no
+            // position records no anchor rather than one at its start.
             handoff.submit(
                 [Float](repeating: 0.1, count: 300),
                 sampleRate: PlaybackEchoReference.pipelineSampleRate,
-                renderedAt: MonotonicTime(round)
+                renderedAt: MonotonicTime(round),
+                renderedFramesInProducer: 300,
+                producerBlockStart: 0
             )
             handoff.drain()
         }
 
-        // The cloud's last block ends at the position it reported, expressed in the
-        // reference: 6 rounds of its own 1 000 frames, plus 5 interleaved 300-frame earcon
-        // blocks that precede it. The sixth earcon follows, so it is not added.
-        let cloudFrames = rounds * perRound
-        let earconBefore = (rounds - 1) * 300
-        let expected = cloudFrames + earconBefore
+        // The last block appended is the EARCON, not the cloud: each round submits the
+        // cloud's block and then the earcon's, so the newest anchor is the earcon's end.
+        //
+        // What this pins is that the cloud's 1 000 frames per round were mapped into ranges
+        // that move with the interleaved 300-frame earcon blocks, rather than into a
+        // contiguous run of their own. The end of the stream is the sum of every append,
+        // and the cloud's own count alone could not produce it.
+        let expected = rounds * (perRound + 300)
 
         let offset = reference.audibleEndOffsetInRetainedWindow()
-        let appended = rounds * (perRound + 300)
         XCTAssertNotNil(offset, "the anchor could not be placed at all")
 
         // The offset is measured from the start of the retained window, which here is the
@@ -1520,11 +1539,11 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(
             offset, expected,
             """
-            the anchor is at \(String(describing: offset)) rather than \(expected). \
-            The cloud's position was mapped into the wrong reference range — an interleaved \
+            the anchor is at \(String(describing: offset)) rather than \(expected). A \
+            producer's position was mapped into the wrong reference range — an interleaved \
             producer's appends sit between its blocks, so a per-producer offset drifts by \
-            the interleaved amount, and the append tail (\(appended)) would place it past \
-            audio it has not rendered.
+            the interleaved amount, and a position mapped in its own count rather than into \
+            the range would not sum to the stream's end.
             """
         )
     }
@@ -1604,6 +1623,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(
             referenceIndexForProducerPosition(
                 rangeStart: rangeStart,
+                producerBlockStart: 0,
                 producerFrames: 800,
                 producerRate: 8_000,
                 blockLength: 3_200
@@ -1617,6 +1637,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(
             referenceIndexForProducerPosition(
                 rangeStart: rangeStart,
+                producerBlockStart: 0,
                 producerFrames: 100_000,
                 producerRate: 16_000,
                 blockLength: 3_200
@@ -1629,6 +1650,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(
             referenceIndexForProducerPosition(
                 rangeStart: rangeStart,
+                producerBlockStart: 0,
                 producerFrames: 0,
                 producerRate: 16_000,
                 blockLength: 3_200
@@ -1637,10 +1659,41 @@ final class EchoReferenceWiringTests: XCTestCase {
             "zero progress must place the block at its start, not its end"
         )
 
+        // A block that BEGINS partway into the producer's timeline must count only its own
+        // progress, not the node's running total. This is the first block after a tap
+        // installs onto a node that had already been rendering.
+        XCTAssertEqual(
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerBlockStart: 8_000,
+                producerFrames: 8_800,
+                producerRate: 8_000,
+                blockLength: 3_200
+            ),
+            rangeStart + 1_600,
+            "a block beginning at 8 000 producer frames claimed its whole running total "
+                + "as progress rather than the 800 it actually rendered"
+        )
+
+        // The same producer numbers with no progress: a block whose node has not advanced
+        // places at its own start rather than ahead of it.
+        XCTAssertEqual(
+            referenceIndexForProducerPosition(
+                rangeStart: rangeStart,
+                producerBlockStart: 8_000,
+                producerFrames: 8_000,
+                producerRate: 8_000,
+                blockLength: 3_200
+            ),
+            rangeStart,
+            "a block whose node has not advanced must place at its own start"
+        )
+
         // A restart reports a position inside its own new session, so the same value must
         // land in a LATER range rather than at the same absolute index.
         let afterRestart = referenceIndexForProducerPosition(
             rangeStart: 120_000,
+            producerBlockStart: 0,
             producerFrames: 800,
             producerRate: 8_000,
             blockLength: 3_200
