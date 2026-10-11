@@ -300,9 +300,16 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(converted[319], frame[478] + (frame[479] - frame[478]) * 0.5, accuracy: 0.0001)
     }
 
-    /// Both route-change directions must retire the reference. Retiring only when the
-    /// incoming route stops correlating leaves external -> built-in reusing audio from
-    /// the old output path as though it were an aligned reference for the new one.
+      /// A route change must retire the reference, in the direction the previous guard skipped.
+      ///
+      /// Retiring only when the incoming route stops correlating left external -> built-in
+      /// reusing audio from the old output path as though it were an aligned reference for the
+      /// new one. That is the direction this case exercises.
+      ///
+      /// **What it does NOT cover, stated rather than implied by its name:** the reverse
+      /// direction (built-in -> external) is not asserted here or anywhere else. The case was
+      /// named for both directions while exercising one, so the name promised coverage it did
+      /// not provide. Pinning the reverse direction is open, and it needs a run to verify.
     func test_routeRetirementHappensInBothDirections() async throws {
         let harness = EchoWiringHarness()
         let playbackPCM = [Float](repeating: 0.5, count: 320)
