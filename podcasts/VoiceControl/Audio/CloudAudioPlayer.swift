@@ -423,6 +423,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 renderedFrames: Double(
                     referenceIndexForProducerPosition(
                         rangeStart: rangeStart,
+                        // `playerTime.sampleTime` is the position at the END of what has been
+                        // rendered, so this block began one block earlier.
+                        producerBlockStart: position.renderedFrames - Double(resampled.count)
+                            / PlaybackEchoReference.pipelineSampleRate * position.sourceSampleRate,
                         producerFrames: position.renderedFrames,
                         producerRate: position.sourceSampleRate,
                         blockLength: resampled.count

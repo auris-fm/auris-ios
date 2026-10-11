@@ -48,14 +48,21 @@ final class EchoReferenceHandoff {
         /// segment against the consumer's arrival time would place it later than the audio
         /// was audible.
         let renderedAt: MonotonicTime?
-        /// How far the producer's node had rendered, in ITS OWN frames, when it produced
-        /// this block.
+        /// The producer's own frame count when this block began, and when it ended.
+        ///
+        /// The pair is what makes the count a position rather than progress: a block can
+        /// begin partway into the producer's timeline, so progress is the difference between
+        /// them. Nil when the producer did not report a position — kept missing rather than
+        /// filled in, because a substitution would be indistinguishable from a real
+        /// measurement of zero.
         ///
         /// This is the producer's own clock, and it is deliberately not a position in the
         /// reference: a node restarts between turns and counts from zero again, and two
         /// producers count independently. It is meaningful only against the reference range
         /// this block lands in, which is why the handoff records both rather than either.
         let renderedFramesInProducer: Double?
+        /// The producer's own frame count when this block began.
+        let producerBlockStart: Double?
     }
 
     private let reference: PlaybackEchoReference
@@ -102,7 +109,8 @@ final class EchoReferenceHandoff {
         _ samples: [Float],
         sampleRate: Double,
         renderedAt: MonotonicTime? = nil,
-        renderedFramesInProducer: Double? = nil
+        renderedFramesInProducer: Double? = nil,
+        producerBlockStart: Double? = nil
     ) {
         guard !samples.isEmpty else { return }
 
@@ -120,7 +128,8 @@ final class EchoReferenceHandoff {
                 samples: samples,
                 sampleRate: sampleRate,
                 renderedAt: renderedAt,
-                renderedFramesInProducer: renderedFramesInProducer
+                renderedFramesInProducer: renderedFramesInProducer,
+                producerBlockStart: producerBlockStart
             )
         )
         lock.unlock()
@@ -229,22 +238,31 @@ final class EchoReferenceHandoff {
         // When the producer reports no position, the block's start is recorded rather than
         // its end: the start is a fact about where the audio is, while the end would claim
         // progress the producer has not reported.
-        let anchoredEnd = block.renderedFramesInProducer.map {
-            referenceIndexForProducerPosition(
-                rangeStart: rangeStart,
-                producerFrames: $0,
-                producerRate: block.sampleRate,
-                blockLength: resampled.count
-            )
-        } ?? rangeStart
+        // A block whose producer reported no position records NO anchor, rather than one at
+        // the block's start. Substituting the start made a missing measurement look like a
+        // measured zero, and the two mean different things to the filter: the first says the
+        // placement is unknown, the second claims it is known and no progress has been made.
+        let anchoredEnd = block.renderedFramesInProducer.flatMap { frames in
+            block.producerBlockStart.map { start in
+                referenceIndexForProducerPosition(
+                    rangeStart: rangeStart,
+                    producerBlockStart: start,
+                    producerFrames: frames,
+                    producerRate: block.sampleRate,
+                    blockLength: resampled.count
+                )
+            }
+        }
 
         reference.recordRenderPosition(
-            block.renderedAt.map {
+            anchoredEnd.flatMap { end in
+                block.renderedAt.map { host in
                 PlaybackRenderAnchor(
-                    renderedFrames: Double(anchoredEnd),
+                    renderedFrames: Double(end),
                     sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
-                    hostTime: $0
+                    hostTime: host
                 )
+                }
             }
         )
     }

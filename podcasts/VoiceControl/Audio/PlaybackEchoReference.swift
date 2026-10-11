@@ -191,20 +191,31 @@ final class PlaybackEchoReference {
 /// the block because a node cannot have rendered more of it than the block contains.
 ///
 /// - Parameters:
+/// The producer count is a POSITION in the producer's own timeline, not progress into this
+/// block. A block can begin partway into that timeline — the first block after a tap installs
+/// onto a node that had already been rendering is the plain case — so subtracting the block's
+/// own producer-local start is what turns the position into progress. Without it a block that
+/// begins at 8 000 frames claims 8 000 frames of progress in a block holding far fewer, and
+/// the clamp silently saturates it to the block length instead of the real figure.
+///
+/// - Parameters:
 ///   - rangeStart: reference index where this block begins.
-///   - producerFrames: how far the producer's node had rendered, in its own frames.
-///   - producerRate: the rate those frames were rendered at.
+///   - producerBlockStart: the producer's own frame count when this block began.
+///   - producerFrames: how far the producer's node had rendered, in the same count.
+///   - producerRate: the rate those frames are counted at.
 ///   - blockLength: the block's length in reference samples, used to clamp.
 /// - Returns: the reference index of the block's audible end.
 func referenceIndexForProducerPosition(
-rangeStart: Int,
-producerFrames: Double,
-producerRate: Double,
-blockLength: Int
+    rangeStart: Int,
+    producerBlockStart: Double,
+    producerFrames: Double,
+    producerRate: Double,
+    blockLength: Int
 ) -> Int {
-guard producerRate > 0, blockLength > 0 else { return rangeStart }
-let played = Int(producerFrames / producerRate * PlaybackEchoReference.pipelineSampleRate)
-return rangeStart + min(max(played, 0), blockLength)
+    guard producerRate > 0, blockLength > 0 else { return rangeStart }
+    let progressInProducer = producerFrames - producerBlockStart
+    let played = Int(progressInProducer / producerRate * PlaybackEchoReference.pipelineSampleRate)
+    return rangeStart + min(max(played, 0), blockLength)
 }
 
 /// Resamples emitted audio into the pipeline's rate.
