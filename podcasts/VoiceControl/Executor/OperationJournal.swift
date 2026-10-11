@@ -2,9 +2,10 @@ import Foundation
 
 /// The outcome of an app operation the server asked this client to perform.
 ///
-/// The case set is the wire contract's; `refused` and `failed` are separated because they
-/// prompt different follow-ups — a refusal is a policy answer the model can relay, a failure
-/// is something to retry or report.
+/// `unknown` is reserved for a sink that answered nothing at all — a crash, a timeout, a
+/// missing implementation of the operation's family. A sink that *refuses* is not unknown:
+/// it answered, with a policy or a precondition failure, and the case for that is `refused`.
+/// Collapsing the two would tell the server a thing crashed when in fact the client declined.
 enum OperationOutcome: String, Equatable {
     case succeeded
     case refused
@@ -12,51 +13,86 @@ enum OperationOutcome: String, Equatable {
     case cancelled
     case unknown
 
-    /// A machine-readable code for the non-success cases, drawn from the reasons an action
-    /// actually fails on this client.
-    ///
-    /// `stalePrecondition` covers an episode/queue/bookmark that changed between the
-    /// server's proposal and execution; `clientPolicy` is the capture gate's own refusals,
-    /// which are a different rule from action eligibility and prompt a different reply.
+    /// The agreed reason for `cancelled` is pending with @cloud's frame proposal; until it
+    /// lands, a cancellation records the outcome without a code rather than borrowing one
+    /// from a different failure.
     var reasonCode: String? {
         switch self {
-        case .succeeded: return nil
+        case .succeeded, .cancelled: return nil
         case .refused: return "client_policy"
         case .failed: return "stale_precondition"
-        case .cancelled: return nil
         case .unknown: return "sink_unimplemented"
         }
     }
 }
 
-/// Maps `operation_id -> prior outcome`, so a redelivered operation is answered from the
-/// journal instead of being executed a second time.
+/// The result of claiming an operation for execution.
+enum OperationClaim: Equatable {
+    /// This caller is the first to claim it: run the operation, then `complete`.
+    case claimed
+    /// Another caller holds the claim and is still executing: do not run the operation.
+    case inProgress
+    /// The operation already ran, and this is what happened.
+    case alreadyRun(OperationOutcome)
+}
+
+/// Maps `operation_id` to the state of the operation it names, so a redelivered operation is
+/// answered from the record instead of being executed a second time.
 ///
-/// The dedup rule is about the MUTATION, not the answer: the result may be re-sent any
-/// number of times — a reconnecting client needs the redelivery answered — but the mutation
-/// itself must run once. That is why lookup and record are separate calls rather than one
-/// "execute once" wrapper: the caller decides where execution happens, and the journal only
-/// remembers.
+/// The claim is atomic. A lock around separate "has it run?" and "mark it running" calls
+/// would not be: two callers can both see the operation absent and both proceed to execute.
+/// `claim` performs the check and the transition in one critical section, so exactly one
+/// caller receives `.claimed` and every later one receives the outcome.
 ///
-/// Unbounded by design for now: entries are small and the population is one per server
-/// operation. If that ever needs a bound, the eviction rule has to keep entries whose
-/// redelivery is still plausible, which is a property of the server's retry window rather
-/// than of this type.
+/// The disposition on a crash is deliberately absent from this type: an in-memory journal
+/// forgets everything when the process dies, so a redelivery after a crash is answered by
+/// executing again. A durable record is a separate change, and noting the gap here is what
+/// keeps it visible rather than assumed away.
 final class OperationJournal {
-    private var outcomes: [String: OperationOutcome] = [:]
+    private enum State {
+        case inProgress
+        case finished(OperationOutcome)
+    }
+
+    private var states: [String: State] = [:]
     private let lock = NSLock()
 
-    /// The prior outcome for this operation, or nil when it has not run.
+    /// Atomically claims the operation for execution.
+    ///
+    /// - Returns: `.claimed` for the first caller, or `.alreadyRun(outcome)` when the
+    ///   operation has already completed and the outcome is the answer to redelivery.
+    func claim(_ operationID: String) -> OperationClaim {
+        lock.lock()
+        defer { lock.unlock() }
+        switch states[operationID] {
+        case .finished(let outcome)?:
+            return .alreadyRun(outcome)
+        case .inProgress?:
+            // A second caller while the first is still executing must not run the mutation:
+            // returning `.claimed` here is the both-execute failure the atomic boundary
+            // exists to prevent.
+            return .inProgress
+        case nil:
+            states[operationID] = .inProgress
+            return .claimed
+        }
+    }
+
+    /// Records the outcome of a claimed operation, releasing it for no further execution.
+    ///
+    /// A crash before this call leaves the operation recorded as in-progress with no
+    /// outcome — see the disposition note on the type.
+    func complete(_ operationID: String, outcome: OperationOutcome) {
+        lock.lock()
+        defer { lock.unlock() }
+        states[operationID] = .finished(outcome)
+    }
+
+    /// The recorded outcome, or nil when the operation never ran or is still in progress.
     func outcome(for operationID: String) -> OperationOutcome? {
         lock.lock()
         defer { lock.unlock() }
-        return outcomes[operationID]
-    }
-
-    /// Records the outcome of an operation that has just run.
-    func record(_ operationID: String, outcome: OperationOutcome) {
-        lock.lock()
-        defer { lock.unlock() }
-        outcomes[operationID] = outcome
+        if case .finished(let outcome)? = states[operationID] { return outcome }
+        return nil
     }
 }
