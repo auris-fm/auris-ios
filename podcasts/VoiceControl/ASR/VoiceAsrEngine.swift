@@ -12,8 +12,120 @@ class VoiceAsrEngine {
     private let wakeThreshold: Float
     private let translationStage: TranslationStage?
 
-    private var isExposedSpeakerRoute = false
-    private var playbackBuffer: [Float] = []
+    /// Which echo-filter scope applies to the current output route.
+    ///
+    /// `recognition-pipeline.md` "Signal Filter" distinguishes route classes rather
+    /// than treating "exposed" as a single flag: the built-in loudspeaker uses aligned
+    /// playback cross-correlation against the shared reference, external routes must
+    /// use delay tracking instead of that window, and an isolated route reduces
+    /// exposure without proving echo is absent.
+    enum EchoFilterRoute {
+        /// Built-in loudspeaker: cross-correlation against the reference applies.
+        case builtInSpeaker
+        /// External output: codec latency is large and variable, so the built-in
+        /// correlation window's alignment assumption does not hold.
+        case external
+        /// Headset/earbud. Reduced acoustic exposure, but **not** proof of no echo.
+        case isolated
+
+        /// Whether the built-in-speaker correlation window may be applied.
+        var appliesCorrelationWindow: Bool { self == .builtInSpeaker }
+
+        /// Whether this route is evidence that echo cannot occur. It never is: the
+        /// owning clause says an isolated route reduces exposure, not that it removes it.
+        var provesEchoImpossible: Bool { false }
+
+        /// Maps an observed output port to the filter scope it implies.
+        ///
+        /// Only the built-in loudspeaker allows the aligned correlation window: its
+        /// local latency is bounded and the emitted buffer matches what leaves the
+        /// device. Every other output — wired, Bluetooth, AirPlay — has large and
+        /// variable codec latency, so alignment is unreliable and the window is not
+        /// applied. A headset input does not change the output's alignment properties.
+        static func forOutput(_ output: AudioRouteOutput) -> EchoFilterRoute {
+            switch output {
+            case .builtInSpeaker:
+                return .builtInSpeaker
+            case .headphones, .bluetoothLE:
+                return .isolated
+            case .bluetoothHFP, .bluetoothA2DP, .airPlay, .unknown:
+                return .external
+            }
+        }
+    }
+
+    private(set) var echoFilterRoute: EchoFilterRoute = .external
+    /// How long the reference survives a route change so the handover is still filtered.
+    ///
+    /// **This is a chosen software limit, not a measurement of audibility.** It bounds
+    /// how much emitted audio is kept after the output path changes; it does not claim
+    /// that sound stops reaching the microphone at 0.25 s. Output latency, route delay
+    /// and the device's own buffering all contribute to the real figure, and none of
+    /// them is measured here. The value exists so the handover window is filtered at
+    /// all rather than cleared instantly, and it is expected to be revised if a
+    /// measured acoustic figure becomes available.
+    static let acousticTailSeconds: Double = 0.25
+    /// The shared emitted-PCM reference the echo filter correlates against. Producers
+    /// append what they send to the output; the filter reads it on the segment path.
+    /// When no reference is attached the filter has nothing to correlate and cannot
+    /// reject anything, so the scope alone is not sufficient wiring.
+    private var echoReference: PlaybackEchoReference?
+
+    /// The emitted audio currently retained, or empty when no reference is attached.
+    private var playbackBuffer: [Float] {
+        echoReference?.snapshot() ?? []
+    }
+
+    /// Attaches the shared emitted-PCM reference.
+    func setEchoReference(_ reference: PlaybackEchoReference) {
+        echoReference = reference
+    }
+
+    /// Where the segment about to be examined begins within the retained reference.
+    ///
+    /// Returns a negative offset when the segment cannot be placed: without an observed
+    /// render position the node may not be rendering, or may have restarted, and the
+    /// retained audio's position relative to the segment is then unknown. A negative
+    /// offset makes the filter decline to claim alignment rather than align against the
+    /// wrong instant — the failure this exists to avoid.
+    ///
+    /// **The offset is deliberately coarse while the capture side carries no segment
+    /// instant.** A segment arriving now is at the newest end of what has been emitted,
+    /// so the window is anchored to the reference's end; that is correct under steady
+    /// playback and is not correct across a queue lead or a restart, which is why the
+    /// segment instant is required before this closes. It is written this way rather
+    /// than guessing a precise value from the render anchor alone, because a precise
+    /// wrong offset is worse than an honest coarse one.
+    /// Where the audible end of the emitted stream sits in the retained window.
+    ///
+    /// Placed from the output node's **rendered** position, not from the retained end: the
+    /// retained end is the newest *submitted* sample, which is ahead of what has been
+    /// heard by however much audio is still queued. Using it is misaligned whenever the
+    /// queue is non-empty, which is most of streaming playback — not only across a
+    /// restart. A negative value means the position is unknown and the filter declines to
+    /// align rather than aligning against the wrong instant.
+    ///
+    /// **Still coarse:** the segment instant is not carried yet, so a segment is assumed
+    /// to end at the current audible position. That holds when the segment arrives as it
+    /// is captured and not when capture buffering delays it, which is why the capture-side
+    /// timestamp is required before alignment acceptance can close.
+    private func playbackEndOffsetForSegment(capturedAt: MonotonicTime?) -> Int {
+        guard let reference = echoReference,
+              let anchor = reference.currentRenderAnchor else { return -1 }
+        // Without the segment's own instant the position is unknown, so no alignment
+        // claim is made. The callback's arrival time is not a substitute: the tap runs on
+        // a processing queue, so arrival lags capture by an indeterminate amount and would
+        // place the segment later than it was spoken.
+        guard let capturedAt else { return -1 }
+        // How far the render position in the reference window is *behind* the segment's
+        // capture: emitted audio keeps playing while the segment is being captured, so the
+        // audible position at capture is earlier than the audible position now.
+        let latency = max(0, anchor.hostTime - capturedAt)
+        let latencySamples = Int(latency * PlaybackEchoReference.pipelineSampleRate)
+        let nowOffset = reference.audibleEndOffsetInRetainedWindow() ?? -1
+        guard nowOffset >= 0 else { return -1 }
+        return max(0, nowOffset - latencySamples)
+    }
     var listeningMode: ListeningMode = .wakeWord
 
     /// Forwards the immutable routing envelope (source + English router text).
@@ -109,11 +221,11 @@ class VoiceAsrEngine {
 
     func start() {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        segmenter.onUtterance = { [weak self] utterance in
-            Task { await self?.processUtterance(utterance) }
+        segmenter.onUtterance = { [weak self] utterance, capturedAt in
+            Task { await self?.processUtterance(utterance, capturedAt: capturedAt) }
         }
-        capture.onSamples = { [weak self] samples in
-            self?.segmenter.process(samples)
+        capture.onCapturedSamples = { [weak self] samples, capturedAt in
+            self?.segmenter.process(samples, capturedAt: capturedAt)
         }
 
         preloadBackend()
@@ -132,10 +244,15 @@ class VoiceAsrEngine {
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float]) async {
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
         stageTimer.mark() // VAD segment ready
 
-        if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
+        if echoFilterRoute.appliesCorrelationWindow,
+           signalFilter.isPlaybackBleed(
+               mic: utterance,
+               reference: playbackBuffer,
+               segmentEndOffset: playbackEndOffsetForSegment(capturedAt: capturedAt)
+           ) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -359,14 +476,47 @@ class VoiceAsrEngine {
         return "high"
     }
 
+    /// Test seam: replaces the retained reference contents.
+    ///
+    /// Production code does not call this — producers append through the shared
+    /// reference — so a test that relies on it is exercising the filter's logic, not
+    /// the wiring. The wiring cases drive the real producers instead.
     func updatePlaybackBuffer(_ samples: [Float]) {
-        playbackBuffer = samples
+        guard let echoReference else { return }
+        echoReference.invalidate()
+        echoReference.append(samples)
+        // Mirror the production rule that a reference without an observed render
+        // position cannot be aligned: the seam supplies one so cases exercise the
+        // aligned path rather than silently taking the unaligned branch.
+        echoReference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(samples.count),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 0
+            )
+        )
     }
 
-    func setExposedSpeakerRoute(_ exposed: Bool) {
-        if isExposedSpeakerRoute != exposed {
-            FileLog.shared.addMessage("[VoicePipeline] exposedSpeaker=\(exposed)")
-        }
-        isExposedSpeakerRoute = exposed
+    /// Sets the echo-filter scope for the current output route and retires the
+    /// reference when the filter no longer applies, so stale state from a previous
+    /// route cannot keep dropping audio after the route changes.
+    func setEchoFilterRoute(_ route: EchoFilterRoute) {
+        guard echoFilterRoute != route else { return }
+        FileLog.shared.addMessage("[VoicePipeline] echoFilterRoute=\(route)")
+        echoFilterRoute = route
+        // Retire on EVERY transition, in both directions. The retained audio belongs to
+        // the outgoing route and is not an aligned reference for the incoming one —
+        // including built-in → external *and* external → built-in, where audio captured
+        // on the old path would otherwise be correlated against the new path's window.
+        // The acoustic tail is kept rather than discarded, because audio already
+        // submitted is still audible while the old path drains; clearing outright would
+        // leave exactly that echo unfiltered during the handover.
+        echoReference?.retire(retainingAcousticTail: Self.acousticTailSeconds)
+    }
+
+    /// Whether the current route is being treated as proof that echo cannot occur.
+    /// Always `false`: no route proves that, and an isolated route only reduces exposure.
+    var echoFilterRouteConsidersEchoImpossible: Bool {
+        echoFilterRoute.provesEchoImpossible
     }
 }

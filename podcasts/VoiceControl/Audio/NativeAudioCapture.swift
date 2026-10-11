@@ -5,7 +5,14 @@ class NativeAudioCapture {
     let engine = AVAudioEngine()
     private let sampleRate = 16000.0
     private var energyLogged = false
-    var onSamples: (([Float]) -> Void)?
+    /// Delivers converted microphone audio with the instant it was captured.
+    ///
+    /// The tap receives the buffer's own `AVAudioTime`, which is when the hardware
+    /// captured those samples. The callback's arrival time is *not* a substitute: the tap
+    /// runs on a processing queue after an indeterminate delay, so using arrival time would
+    /// place a segment later than it was spoken and misalign the echo reference by however
+    /// long the queue was busy.
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
@@ -35,7 +42,7 @@ class NativeAudioCapture {
         // may deliver Int16 PCM from the Mac's audio hardware. When floatChannelData
         // is nil (non-float format), fall back to int16ChannelData and convert.
         var formatWarningLogged = false
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, _ in
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
             let nativeRate = buf.format.sampleRate
@@ -80,7 +87,13 @@ class NativeAudioCapture {
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
-                self.onSamples?(converted)
+                // `when` is the buffer's own capture time, not this callback's arrival.
+                // It can be invalid on some routes, in which case the segment carries no
+                // instant and the echo filter declines to align rather than guessing.
+                let capturedAt: MonotonicTime? = when.isHostTimeValid
+                    ? AVAudioTime.seconds(forHostTime: when.hostTime)
+                    : nil
+                self.onCapturedSamples?(converted, capturedAt)
             }
         }
 

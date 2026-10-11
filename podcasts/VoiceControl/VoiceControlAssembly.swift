@@ -1,8 +1,12 @@
 import AVFoundation
+import Combine
 import PocketCastsDataModel
 import PocketCastsUtils
 
 class VoiceControlAssembly {
+    /// Retains the route-scope subscription for the lifetime of the assembly. The
+    /// service holds the engine, so the binding must live at least as long.
+    private var cancellables = Set<AnyCancellable>()
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -42,6 +46,8 @@ class VoiceControlAssembly {
             threshold: threshold
         )
 
+        let cloudAudioPlayer = CloudAudioPlayer()
+
         let asrEngine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: NativeVadSegmenter(threshold: 0.020),
@@ -53,6 +59,35 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // One emitted-PCM reference for the whole session: the cloud-answer renderer
+        // feeds it, and the engine correlates against it. Without a producer the
+        // reference stays empty and the filter cannot fire.
+        let echoReference = PlaybackEchoReference()
+        cloudAudioPlayer.emittedPCMReference = echoReference
+        asrEngine.setEchoReference(echoReference)
+
+        // One handoff serves every producer whose audio the microphone can hear. It exists
+        // because the reference's append drops old samples with a memmove inside its lock,
+        // and a producer that appends from a deadline-bound callback can wait on that. The
+        // capacity is in blocks: at this size a saturated handoff drops rather than blocks,
+        // which leaves a visible gap in the reference instead of stalling the producer.
+        let echoHandoff = EchoReferenceHandoff(reference: echoReference, capacity: 8)
+        // The episode renderer publishes what it emits into this handoff. Set from here
+        // because the assembly holds both sides: the reference belongs to the voice layer and
+        // the renderer to playback. The renderer reads it inside `#if !APPCLIP`, since the
+        // App Clip compiles that file and has no voice layer to publish to.
+        EffectsPlayer.echoReferenceHandoff = echoHandoff
+
+        // Echo-filter scope follows the observed output route. Without this the
+        // filter's classification never changes from its default and the correlation
+        // window is never applied on the route it exists for. The monitor already
+        // republishes on route changes, so invalidation is driven from the same signal.
+        routeMonitor.$currentRoute
+            .map { VoiceAsrEngine.EchoFilterRoute.forOutput($0.output) }
+            .removeDuplicates()
+            .sink { [weak asrEngine] route in asrEngine?.setEchoFilterRoute(route) }
+            .store(in: &cancellables)
+
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).
@@ -80,7 +115,7 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
-                audioPlayer: CloudAudioPlayer(),
+                audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
                 playbackSink: playbackSink,
                 fingerprintMapper: FingerprintTimingManager.shared,
@@ -97,6 +132,13 @@ class VoiceControlAssembly {
 
         let audioEngine = AVAudioEngine()
         let earconPlayer = EarconPlayer(engine: audioEngine)
+        // The earcon player is the second producer of emitted audio, after the cloud
+        // renderer. An earcon is audible to the microphone, so it belongs in the same
+        // reference; without it, a chime played while the user speaks forms a segment the
+        // filter cannot recognise as our output and the utterance is transcribed as if
+        // the user had said it.
+        earconPlayer.emittedPCMReference = echoReference
+        earconPlayer.handoff = echoHandoff
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 

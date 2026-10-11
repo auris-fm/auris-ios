@@ -17,8 +17,19 @@ class NativeVadSegmenter {
     private var speechActive = false
     private var silenceStart: Date?
     private var speechFrameCount = 0
+    /// Capture instant of the first retained sample, preserved across the buffers that
+    /// make up one utterance.
+    private var utteranceCapturedAt: MonotonicTime?
 
-    var onUtterance: (([Float]) -> Void)?
+    /// Delivers the completed utterance with the instant its **first retained sample** was
+    /// captured.
+    ///
+    /// Preserved through buffering: the segmenter appends several tap buffers before it
+    /// emits, so the utterance's start is not the start of the buffer that completed it.
+    /// Carrying the first buffer's instant is what lets the echo filter place the segment
+    /// against the emitted reference; using the completing buffer's time would shift it by
+    /// the segment's own length.
+    var onUtterance: (([Float], MonotonicTime?) -> Void)?
 
     /// - Parameters:
     ///   - threshold: RMS energy threshold above which audio is considered speech
@@ -41,10 +52,11 @@ class NativeVadSegmenter {
         self.maxUtteranceSamples = maxUtteranceMs.map { $0 * 16000 / 1000 }
     }
 
-    func process(_ samples: [Float]) {
+    func process(_ samples: [Float], capturedAt: MonotonicTime? = nil) {
         let energy = rms(samples)
 
         if energy >= threshold {
+            if buffer.isEmpty { utteranceCapturedAt = capturedAt }
             buffer.append(contentsOf: samples)
             speechFrameCount += 1
             if !speechActive && speechFrameCount >= minSpeechFrames {
@@ -82,11 +94,12 @@ class NativeVadSegmenter {
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0
-        onUtterance?(utterance)
+        onUtterance?(utterance, utteranceCapturedAt)
     }
 
     func reset() {
         buffer.removeAll()
+        utteranceCapturedAt = nil
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0
