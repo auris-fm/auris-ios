@@ -55,8 +55,19 @@ struct OperationResult: Equatable {
 enum OperationReason {
     /// The client's own policy declined the action before mutating anything.
     static let clientPolicy = "client_policy"
-    /// A precondition read from current client state failed before the mutation.
+    /// A precondition read from current client state failed before the mutation. A refusal,
+    /// not a failure: the contract's table places it under `refused` precisely because no
+    /// mutation was attempted.
     static let stalePrecondition = "stale_precondition"
+    /// The sink does not support this operation at all, as opposed to supporting it and
+    /// refusing for a policy reason.
+    static let unsupportedOperation = "unsupported_operation"
+    /// The account or device is not entitled to the operation.
+    static let missingEntitlement = "missing_entitlement"
+    /// The audio session is held by something else (a call), so voice control cannot act. Kept
+    /// distinct from `client_policy` because the clarification differs: "you cannot do this
+    /// while on a call" is not "policy says no". The gate already distinguishes this reason.
+    static let audioSessionDenied = "audio_session_denied"
     /// The sink had no implementation for this operation — an explicit unavailability.
     static let sinkUnimplemented = "sink_unimplemented"
     /// An independent confident fast control preempted a pending flow; the preempted flow
