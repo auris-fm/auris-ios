@@ -109,7 +109,11 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
     // MARK: - unaligned quotes
 
-    func testUnalignedQuoteSeeksBestEffortAndStopRestoresPreActionPosition() async {
+    /// An unmapped `play_quote` is refused rather than converted by assumption: reference time
+    /// is not playback time, and the raw value is a position the server never asked for. With
+    /// the seek refused, no pre-action position is captured, so `stop_quote` has nothing to
+    /// restore — and must not seek on that missing evidence either.
+    func testUnmappedQuoteIsRefusedAndStopQuoteDoesNotRestore() async {
         self.pendingFixture =
             """
             event: action
@@ -125,12 +129,49 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        // No mapping for reference 500s: the client seeks as-is (best effort).
+        // No mapping for reference 500s.
         playback.positionMs = 900_000
+        let sink = makeSink()
 
-        _ = await makeSink().routeToCloud(request: "play that", tier: .free, context: sampleContext())
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext())
 
-        XCTAssertTrue(playback.calls.contains(.seekTo(500)), "unmapped reference seeks as-is")
+        // The refusal removes the QUOTE seek only. stop_quote still restores the pre-action
+        // position, which was captured before the refusal and is sink time — the existing
+        // restore behaviour @spec kept.
+        XCTAssertFalse(playback.calls.contains(.seekTo(500)), "an unmapped reference must not become a playback position")
+        XCTAssertTrue(playback.calls.contains(.seekTo(900)), "stop_quote restores the pre-action position in sink time")
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// The mapped counterpart: a quote with a known mapping seeks to the mapped position and
+    /// `stop_quote` restores the pre-action position, which is sink time.
+    func testMappedQuoteSeeksToMappedPositionAndStopRestoresPreActionPosition() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
+
+            event: token
+            data: {"text":"quote"}
+
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // 500s reference maps to 515s playback: a nonzero offset, so passing this by seeking to
+        // the raw reference value is not possible.
+        mapper.playbackSecondsForReference = [500.0: 515.0]
+        playback.positionMs = 900_000
+        let sink = makeSink()
+
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext())
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(515)), "the quote seeks to the mapped position")
+        XCTAssertFalse(playback.calls.contains(.seekTo(500)), "the raw reference value is not the target")
         XCTAssertTrue(playback.calls.contains(.seekTo(900)), "stop_quote restores the pre-action playback position")
     }
 

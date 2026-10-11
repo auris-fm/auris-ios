@@ -274,8 +274,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
     }
 
-    func testUnmappedReferenceSeeksAsIsBestEffort() async {
-        self.pendingFixture = 
+    /// An unmapped reference target is NOT converted by assumption. Reference time is not
+    /// playback time: falling back to the raw value seeks somewhere the server never asked for
+    /// on a mapped episode, and nothing downstream can tell that apart from a correct seek. The
+    /// operation is refused instead, and no position changes.
+    func testUnmappedReferenceSeekIsRefusedAndDoesNotMove() async {
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
@@ -284,8 +288,78 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
-        XCTAssertTrue(playback.calls.contains(.seekTo(200)))
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "an unmapped reference time must not become a playback position"
+        )
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertEqual(unavailable?.outcome, .refused)
+        XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// The same gap through `play_quote`, which shares the conversion path.
+    func testUnmappedReferencePlayQuoteIsRefusedAndDoesNotMove() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
+    /// value. A mapping that returned its input would satisfy an equality check by accident, so
+    /// the offset is deliberate.
+    func testMappedReferenceSeekUsesTheMappedPositionNotTheRawReferenceValue() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        mapper.playbackSecondsForReference = [200.0: 215.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)))
+        XCTAssertFalse(playback.calls.contains(.seekTo(200)), "the raw reference value is not the target")
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertNil(unavailable, "a successful mapping is not an unavailability")
+    }
+
+    /// And through `play_quote`, so both actions are shown to use the mapping rather than only
+    /// the one that happens to be convenient.
+    func testMappedReferencePlayQuoteUsesTheMappedPosition() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        mapper.playbackSecondsForReference = [200.0: 215.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)))
+        XCTAssertFalse(playback.calls.contains(.seekTo(200)))
     }
 
     /// Per-turn state: a `stop_quote` in a turn that issued no `play_quote`

@@ -328,6 +328,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
     }
 
+    /// Records that a reference-time seek could not be mapped to playback time.
+    ///
+    /// The unavailable mapping is the operation's outcome: no position was changed, and the
+    /// reason the server is told is that this client cannot convert the target — not that it
+    /// sought somewhere arbitrary.
+    private func recordReferenceSeekUnavailable(referenceMs: Int64) {
+        unavailableReferenceSeek = OperationResult.nonSuccess(
+            .refused,
+            reason: OperationReason.referenceMappingUnavailable
+        )
+    }
+
+    /// The most recent unavailable-reference-seek outcome, consumed by the executor.
+    private(set) var unavailableReferenceSeek: OperationResult?
+
     /// Capture the current playback position before a relative seek so that a
     /// subsequent "go back to where I was" restores the correct place. The
     /// recovery contract (PR 59, cloud-seek-relative) requires this for all
@@ -353,8 +368,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     private func seekToReference(_ referenceMs: Int64) {
         let referenceSeconds = Double(referenceMs) / 1000.0
-        let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
-            ?? referenceSeconds
+        // Reference time is not playback time. The two happen to coincide on an unmapped
+        // episode, but taking the fallback when the mapping is *missing* silently seeks to a
+        // position the server never asked for — on a mapped episode that is the wrong place,
+        // and nothing downstream can tell it apart from a correct seek. So an unavailable
+        // mapping is reported as unavailable rather than converted by assumption.
+        guard let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds) else {
+            recordReferenceSeekUnavailable(referenceMs: referenceMs)
+            return
+        }
         let seconds = Int(playbackSeconds.rounded())
         // Negative positionSeconds is an offset back from the episode end.
         // Use the duration-aware overload so the sink resolves and bounds it.

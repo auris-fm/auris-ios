@@ -76,6 +76,11 @@ enum OperationReason {
     /// producer today, and a producer is not to be manufactured for it.
     static let audioSessionDenied = "audio_session_denied"
 
+    /// The target is expressed in reference (transcript) time, and this client cannot map it to
+    /// playback time. No position was changed, and the seek must not be performed at the raw
+    /// reference value: on a mapped episode that is a different position.
+    static let referenceMappingUnavailable = "reference_mapping_unavailable"
+
     /// The sink cannot act because the mechanism it needs is unavailable — here, the system
     /// volume slider could not be resolved, so no volume was changed.
     ///
