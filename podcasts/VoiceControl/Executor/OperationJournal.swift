@@ -64,18 +64,24 @@ enum OperationReason {
     static let unsupportedOperation = "unsupported_operation"
     /// The account or device is not entitled to the operation.
     static let missingEntitlement = "missing_entitlement"
-    /// A required audio session could not be acquired, so the operation cannot act.
+    /// A required audio session was **refused**. **Unsupported on this client, deliberately.**
     ///
-    /// This applies to exactly one operation on this client: the volume operation, whose
-    /// session-acquisition failure path is `VolumeManagerSink.setSystemVolume`. That path fails
-    /// when the system volume slider cannot be reached, and it currently returns a
-    /// success-shaped response while changing nothing — the case this reason exists to name.
+    /// No operation here has been shown to observe a denied session acquisition. The volume
+    /// operation's failure path is a slider lookup that cannot be resolved, and that is not a
+    /// refusal of a session — nothing asked for a session and was denied. Recording it under
+    /// this name would rename a real failure to fit an enum, which makes the wire say something
+    /// the client never observed.
     ///
-    /// Audio capture is not an app-operation capability in the approved action set, so it is
-    /// not a producer of this reason and must not be cited as one. A capture gate that
-    /// distinguishes a call is not evidence that an unrelated app operation has a
-    /// session precondition either.
+    /// The reason stays defined so the contract can name it once a producer exists; it has no
+    /// producer today, and a producer is not to be manufactured for it.
     static let audioSessionDenied = "audio_session_denied"
+
+    /// The sink cannot act because the mechanism it needs is unavailable — here, the system
+    /// volume slider could not be resolved, so no volume was changed.
+    ///
+    /// This is the honest name for the volume operation's failure: the operation could not be
+    /// carried out, and no session was denied.
+    static let volumeControlUnavailable = "volume_control_unavailable"
     /// The sink had no implementation for this operation — an explicit unavailability.
     static let sinkUnimplemented = "sink_unimplemented"
     /// An independent confident fast control preempted a pending flow; the preempted flow

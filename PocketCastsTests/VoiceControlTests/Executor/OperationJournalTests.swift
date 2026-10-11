@@ -148,12 +148,14 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(OperationReason.sinkUnimplemented, "sink_unimplemented")
     }
 
-    /// The audio-session denial is its own reason, not folded into a general policy refusal:
-    /// the two produce different clarifications.
-    ///
-    /// It is also not a reason every operation can produce. It is reserved for operations that
-    /// need a session, so reporting it elsewhere would name a failure that did not occur.
-    func test_audioSessionDenialIsDistinctFromClientPolicy() {
+    /// `audio_session_denied` is defined and has no producer on this client. The volume
+    /// operation's failure is a slider that cannot be resolved, which is not a refused session
+    /// acquisition, so it is reported under its own reason rather than renamed to fit this one.
+    func test_theVolumeFailureIsNotReportedAsASessionDenial() {
+        XCTAssertNotEqual(OperationReason.volumeControlUnavailable, OperationReason.audioSessionDenied)
+    }
+
+    func test_audioSessionDenialIsDistinctFromTheOtherRefusals() {
         XCTAssertNotEqual(OperationReason.audioSessionDenied, OperationReason.clientPolicy)
         XCTAssertNotEqual(OperationReason.audioSessionDenied, OperationReason.sinkUnimplemented)
     }
