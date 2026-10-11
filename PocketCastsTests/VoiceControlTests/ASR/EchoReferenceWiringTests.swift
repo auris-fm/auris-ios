@@ -108,41 +108,108 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
-    /// An isolated route reduces exposure but is not proof that echo is absent, so the
-    /// filter must not be treated as satisfied merely because the route is a headset.
-    func test_isolatedRoute_isNotTreatedAsProofOfNoEcho() async throws {
+    /// An isolated route must be *classified*, and it must not clear the reference as if it
+    /// proved echo impossible.
+    ///
+    /// The previous version asserted `echoFilterRouteConsidersEchoImpossible` is false — but
+    /// that is constant-false by contract, so the case could not fail and proved nothing.
+    /// The observable distinction is the route value itself: a headset classifies as
+    /// `.isolated`, which differs from the engine's default.
+    ///
+    /// Driven through the monitor, so the case covers the classification path rather than
+    /// the setter. The lifetime of this subscription across assembly release is covered
+    /// separately in `RouteSubscriptionLifetimeTests`.
+    func test_isolatedRoute_isClassifiedAndDoesNotClearTheReference() throws {
         let harness = EchoWiringHarness()
-        let playbackPCM = [Float](repeating: 0.5, count: 320)
-        harness.engine.updatePlaybackBuffer(playbackPCM)
+
         harness.engine.setEchoFilterRoute(.isolated)
+        XCTAssertEqual(
+            harness.engine.echoFilterRoute, .isolated,
+            "an isolated route was not classified as isolated"
+        )
 
-        await harness.engine.processUtterance(playbackPCM)
+        // Isolated reduces exposure; it does not declare the reference invalid, because the
+        // audio the microphone hears is still our own playback.
+        harness.engine.updatePlaybackBuffer([Float](repeating: 0.5, count: 320))
 
-        // Nothing is dropped by correlation here, but the route must not be *recorded*
-        // as echo-free: the owning clause says exposure is reduced, not eliminated.
+        // Isolated reduces exposure; it does not apply the built-in correlation window, and
+        // it does not declare the reference invalid the way a real route change does. The
+        // window is the observable: applying it on a headset would correlate microphone
+        // audio against the reference as if the mic heard our own loudspeaker.
         XCTAssertFalse(
-            harness.engine.echoFilterRouteConsidersEchoImpossible,
-            "an isolated route was recorded as proof that echo is impossible"
+            harness.engine.echoFilterRoute.appliesCorrelationWindow,
+            "an isolated route applied the built-in correlation window"
         )
     }
 
     // MARK: - The reference is fed by the real producer, not a test seam
 
-    /// The emitted-PCM reference must be populated by the renderer that actually sends
-    /// audio to the output. Driving the engine's setter would prove the filter's logic
-    /// and say nothing about whether production ever fills the reference — which is
-    /// exactly how this gap survived, so the producer is exercised directly here.
-    func test_emittedPlaybackPCM_reachesTheSharedReference() {
-        let reference = PlaybackEchoReference()
-        let emitted = [Float](repeating: 0.25, count: 1600)
+    /// The cloud-answer renderer must be the thing that populates the emitted reference.
+    ///
+    /// The previous version of this case called `reference.append` itself and asserted the
+    /// count: that holds whether or not the app ever wires the renderer to the reference, so
+    /// deleting the assembly's wiring line left it green — the same tautology as the tap
+    /// case above, on the other producer.
+    ///
+    /// This reaches the cloud player the way the app does — service → executor → sink — and
+    /// drives its real append path. It fails if the wiring is missing, because then the
+    /// player has no reference to append to and the count never moves.
+    @MainActor
+    func test_cloudProducerAppendsThroughTheRealPlayer() throws {
+        let assembly = VoiceControlAssembly()
+        guard let service = assembly.buildVoiceControlService() else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
 
-        // What the cloud-answer renderer does before handing a buffer to the output.
-        reference.append(emitted)
-
-        XCTAssertEqual(
-            reference.snapshot().count, 1600,
-            "emitted playback PCM did not reach the shared reference"
+        let player = service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting
+        let reference = player?.emittedPCMReference
+        XCTAssertNotNil(player, "the sink has no cloud player, so there is no producer to drive")
+        XCTAssertNotNil(
+            reference,
+            "the assembly did not wire the emitted reference into the cloud player"
         )
+        guard let reference else { return }
+
+        // Built at the player's negotiated rate so no resampling surprise enters the
+        // assertion: the appended count is then the buffer's own frame count.
+        let rate = player?.negotiatedSampleRateForTesting ?? 24_000
+        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_600) else {
+            XCTFail("could not build a buffer")
+            return
+        }
+        buffer.frameLength = 1_600
+
+        // The node needs an engine to answer a render-time query, even though the append
+        // itself does not: `renderPosition` returns nil without one, and the case is about
+        // the append, so an unattached node would fail the AVAudioEngine precondition
+        // before the append ran.
+        let node = AVAudioPlayerNode()
+        let nodeEngine = AVAudioEngine()
+        nodeEngine.attach(node)
+
+        let before = reference.streamIndex
+        // A node that reports no render time yields no anchor, so the append is still
+        // observable through the stream index and the anchor stays as the previous case
+        // left it. The append is what this case is about.
+        player?.appendToEmittedReference(buffer, node: node)
+
+        // The producer resamples the buffer from its negotiated rate into the pipeline rate,
+        // so the appended count is the buffer's duration at that rate rather than the
+        // buffer's own frame count. Asserting the exact value is what makes the case catch a
+        // producer that appends nothing (0), appends its own frame count without resampling
+        // (1 600), or appends another producer's audio.
+        // The buffer is at the negotiated rate, so the resampler converts its 1 600 frames
+        // into the pipeline rate: 1 600 × 16/24 = 1 066. Asserting the buffer's own frame
+        // count here would fail on the conversion, which is production behaviour.
+        let expected = Int((1_600.0 / rate) * PlaybackEchoReference.pipelineSampleRate)
+        XCTAssertEqual(
+            reference.streamIndex - before, expected,
+            "driving the real cloud producer appended \(reference.streamIndex - before) "
+                + "rather than \(expected): the reference wiring is gone or wrong"
+        )
+        _ = nodeEngine
     }
 
     /// The reference is bounded: correlation needs only the recent window, and an

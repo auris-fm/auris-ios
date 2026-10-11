@@ -110,6 +110,10 @@ class VoiceIntentExecutor {
     private let playbackQuerySink: VoicePlaybackQuerySink
     private let statsQuerySink: VoiceStatsQuerySink
     private let cloudRouteSink: VoiceCloudRouteSink
+
+    /// The sink this executor routes cloud playback through, so a test can reach the real
+    /// producer the app built rather than constructing its own.
+    var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
     private let playbackContextProvider: PlaybackContextProvider
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics?

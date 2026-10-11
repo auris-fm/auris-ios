@@ -8,6 +8,10 @@ import PocketCastsUtils
 /// accumulation (`.token`) is removed — cloud answers are played, not spoken.
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
+
+    /// The cloud player this sink drives, so a test can reach the real producer through
+    /// the chain the app builds rather than constructing its own.
+    var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
     private let playbackSink: VoicePlaybackSink
