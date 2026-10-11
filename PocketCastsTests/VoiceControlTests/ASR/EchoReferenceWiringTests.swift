@@ -749,9 +749,20 @@ final class EchoReferenceWiringTests: XCTestCase {
             retainedPeak, 0.1,
             "the retained audio is near-silent, so the earcon's samples were not published"
         )
-        XCTAssertLessThanOrEqual(
-            retainedPeak, sourcePeak + 0.05,
-            "the retained audio exceeds the source amplitude, so it is not this earcon's audio"
+        // The upper bound that used to sit here asserted `retainedPeak <= sourcePeak + 0.05`.
+        // That cannot fail: `PlaybackResampler.toPipelineRate` returns convex combinations of
+        // adjacent source samples, so a resampled value never exceeds the largest input by
+        // construction — it held for any resampler that interpolates, including a wrong one.
+        // Replaced with a property that DOES distinguish a rate-correct resample: the tone is
+        // low enough that resampling preserves its zero-crossing count, while a wrong rate
+        // changes it. Amplitude is untouched by correct and incorrect interpolation alike.
+        let sourceSamples = (0..<frameCount).map { Float(sin(Double($0) * 0.3) * 0.4) }
+        let sourceZeroCrossings = zip(sourceSamples, sourceSamples.dropFirst()).filter { $0.0 * $0.1 < 0 }.count
+        let retainedZeroCrossings = zip(retained, retained.dropFirst()).filter { $0.0 * $0.1 < 0 }.count
+        XCTAssertGreaterThan(sourceZeroCrossings, 0, "the fixture tone has no zero crossings to compare")
+        XCTAssertEqual(
+            retainedZeroCrossings, sourceZeroCrossings,
+            "the retained audio crosses zero \(retainedZeroCrossings) times against the source's \(sourceZeroCrossings): the samples were placed at the wrong rate"
         )
     }
 
