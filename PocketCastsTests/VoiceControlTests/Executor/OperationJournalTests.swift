@@ -149,9 +149,13 @@ final class OperationJournalTests: XCTestCase {
     }
 
     /// The audio-session denial is its own reason, not folded into a general policy refusal:
-    /// the two produce different clarifications, and the gate already tells them apart.
+    /// the two produce different clarifications.
+    ///
+    /// It is also not a reason every operation can produce. It is reserved for operations that
+    /// need a session, so reporting it elsewhere would name a failure that did not occur.
     func test_audioSessionDenialIsDistinctFromClientPolicy() {
         XCTAssertNotEqual(OperationReason.audioSessionDenied, OperationReason.clientPolicy)
+        XCTAssertNotEqual(OperationReason.audioSessionDenied, OperationReason.sinkUnimplemented)
     }
 
     func test_successCarriesNoReason() {

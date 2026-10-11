@@ -64,9 +64,14 @@ enum OperationReason {
     static let unsupportedOperation = "unsupported_operation"
     /// The account or device is not entitled to the operation.
     static let missingEntitlement = "missing_entitlement"
-    /// The audio session is held by something else (a call), so voice control cannot act. Kept
-    /// distinct from `client_policy` because the clarification differs: "you cannot do this
-    /// while on a call" is not "policy says no". The gate already distinguishes this reason.
+    /// A required audio session could not be acquired (it is held by something else, such as
+    /// a call), so the operation cannot act.
+    ///
+    /// This does **not** apply to app operations generally. Only operations that actually need
+    /// a session can report it — on this client that means the volume path and audio capture,
+    /// not every sink. A capture gate that distinguishes a call is not evidence that an
+    /// unrelated app operation has an audio-session precondition, and reporting this reason
+    /// where no session was required would name a failure that did not occur.
     static let audioSessionDenied = "audio_session_denied"
     /// The sink had no implementation for this operation — an explicit unavailability.
     static let sinkUnimplemented = "sink_unimplemented"
@@ -75,8 +80,14 @@ enum OperationReason {
     static let supersededByPreemption = "superseded_by_preemption"
     /// The user withdrew the request that was being carried out.
     static let cancelledByUser = "cancelled_by_user"
-    /// The turn ended before the operation could be carried out, and it is known not to have
-    /// mutated. A turn that may have mutated is `.unknown`, not a cancellation.
+    /// An **observed** turn budget expired before the operation could be carried out.
+    ///
+    /// A turn merely ending with the operation undispatched does not establish this: that is a
+    /// generic terminal event, and it is equally consistent with the turn being abandoned for
+    /// another reason. This code requires a budget this client actually observes expiring —
+    /// and this client has no per-turn execution budget today (the retained-turn count sent in
+    /// the envelope is a conversation-history window, not an execution deadline). Until such a
+    /// budget exists, only `.unknown` is honest for a turn that ended mid-flight.
     static let turnBudgetExhausted = "turn_budget_exhausted"
     /// The mutation was interrupted in flight: it may or may not have happened.
     static let interruptedInFlight = "interrupted_in_flight"
