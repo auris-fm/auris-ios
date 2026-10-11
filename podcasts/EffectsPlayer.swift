@@ -178,12 +178,20 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             strongSelf.audioFileSampleRate = strongSelf.audioFile!.fileFormat.sampleRate
 
             strongSelf.startReadAndPlayThreads()
+            #if !APPCLIP
+            // Installed here, with the graph, rather than after a successful `start()`.
+            //
+            // The tap reads the output node, and the output node exists as soon as the graph
+            // is built — a running engine is not a precondition. Installing it only after
+            // `start()` meant a graph that was built and then failed to start carried no tap,
+            // and it also put the installation behind a real audio device, which is why no
+            // test could reach it: the only way to observe it was to call this directly, and
+            // a case that calls it directly cannot tell whether `play` does.
+            strongSelf.installEmittedAudioTap()
+            #endif
             do {
                 strongSelf.engine?.prepare()
                 try strongSelf.engine?.start()
-                #if !APPCLIP
-                strongSelf.installEmittedAudioTap()
-                #endif
             } catch {
                 strongSelf.playerLock.unlock()
                 PlaybackManager.shared.playbackDidFail(error: .fileCorrupted(logMessage: error.localizedDescription))
@@ -533,7 +541,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     /// - Returns: the installed tap, or nil when there is no engine to install on.
     @discardableResult
     func installEmittedAudioTap() -> EpisodeOutputTap? {
-        guard let engine else { return nil }
+        // A call with no engine leaves whatever is installed alone. Clearing it would report
+        // "no tap" for a graph whose tap is present, which is how this could read as a wiring
+        // failure while the wiring was intact.
+        guard let engine else { return emittedAudioTap }
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = EffectsPlayer.echoReferenceHandoff
         tap.install()

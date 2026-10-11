@@ -1,5 +1,6 @@
 import XCTest
 @testable import podcasts
+@testable import PocketCastsDataModel
 
 /// Production echo-reference wiring and the two-sided answer-echo acceptance.
 ///
@@ -1127,27 +1128,63 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
-    /// **A producer that no process constructs feeds nothing, however well it behaves on
-    /// its own.**
+    /// **The production start path installs the tap — asserted through the entry the app
+    /// actually calls, not through the helper it calls.**
     ///
-    /// `EpisodeOutputTap` was written, tested and merged into this branch while nothing
-    /// created it in production, so the episode source was not connected at all — and every
-    /// passing case was evidence about a component no running process held. It is constructed
-    /// in `EffectsPlayer`, gated to the target that compiles the voice layer.
+    /// An earlier version of this case called `installEmittedAudioTap()` itself and then read
+    /// the tap back. That is a closed loop: it holds whether or not `play()` ever installs
+    /// anything, so deleting the installation from `play` left it green — which is how the tap
+    /// could be disconnected in production while a test named for the start path passed.
     ///
-    /// **This asserts the wiring can be reached, which is what a source check cannot do from
-    /// here.** The stronger check is the App Clip build: it fails if the voice-layer
-    /// reference escapes the gate, and `podcasts` alone would not show it.
-    func testEffectsPlayerStartPathInstallsTheEpisodeTap() {
-        // The previous version of this case set `EffectsPlayer.echoReferenceHandoff` itself
-        // and then asserted it was non-nil. That is a tautology: it holds whether or not the
-        // player ever installs anything, so deleting the installation from the start path
-        // left it green — which is how the tap stayed unconnected in production while its
-        // tests passed.
-        //
-        // This drives the same entry point the start path calls, on a real (unstarted)
-        // engine, and reads the placement off the tap. It fails if the installation stops
-        // happening, because then no tap is installed on the output node.
+    /// This case drives `loadEpisode` + `play(completion:)` — the same two calls
+    /// `PlaybackManager` makes — against a real episode whose audio exists on disk at the path
+    /// `DownloadManager` resolves. It never calls the install helper, so removing that call
+    /// from `play` fails it by construction.
+    func testProductionStartPathInstallsTheEpisodeTap() throws {
+        let handoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
+        EffectsPlayer.echoReferenceHandoff = handoff
+        defer { EffectsPlayer.echoReferenceHandoff = nil }
+
+        // A real episode with real audio, because `play` opens the file, builds the graph and
+        // only installs the tap once the engine has actually started. A fixture that skipped
+        // any of that would not reach the line under test.
+        let fixture = FingerprintEpisodeFixture(duration: 1)
+        defer { fixture.removeFiles() }
+        try fixture.writeAudio(seconds: 1)
+        // `pathToDownloadedFile` returns the downloaded path only for a downloaded episode,
+        // and a temp path otherwise — so a fixture without this status writes audio somewhere
+        // `play` never looks, and the case would be measuring the fixture rather than the start
+        // path.
+        fixture.episode.episodeStatus = DownloadStatus.downloaded.rawValue
+
+        // The fixture must be where the production path looks, or `play` never reaches the
+        // line under test and this case would be measuring the fixture instead.
+        let resolved = fixture.episode.pathToDownloadedFile(pathFinder: DownloadManager.shared)
+        XCTAssertEqual(resolved, fixture.audioURL.path, "the fixture audio is not where play() looks")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: resolved), "the fixture wrote no audio")
+
+        let player = EffectsPlayer()
+        player.loadEpisode(fixture.episode)
+
+        let started = expectation(description: "playback start returned")
+        player.play { started.fulfill() }
+        wait(for: [started], timeout: 30)
+
+        guard let tap = player.emittedAudioTapForTesting else {
+            XCTFail("the production start path installed no tap, so the episode source is inert")
+            return
+        }
+        XCTAssertIdentical(
+            tap.handoff, handoff,
+            "the tap installed by the start path did not receive the renderer's handoff"
+        )
+        player.endPlayback(permanent: false)
+    }
+
+    /// The helper's own narrower property, kept: given a handoff, the helper installs a real
+    /// tap on the output node. This is the half that does NOT establish the start path uses it,
+    /// which is why the case above exists — and the two are kept apart deliberately.
+    func testInstallHelperInstallsTheTapOnTheOutputNode() {
         let handoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
         EffectsPlayer.echoReferenceHandoff = handoff
         defer { EffectsPlayer.echoReferenceHandoff = nil }
@@ -1160,16 +1197,12 @@ final class EchoReferenceWiringTests: XCTestCase {
         player.installEmittedAudioTap()
 
         guard let tap = player.emittedAudioTapForTesting else {
-            XCTFail("the start path installed no tap, so the episode source is inert")
+            XCTFail("the helper installed no tap")
             return
         }
         XCTAssertTrue(
             tap.isInstalledOnOutputNode(engine.outputNode),
             "the tap was created but never installed on the output node"
-        )
-        XCTAssertIdentical(
-            tap.handoff, handoff,
-            "the installed tap did not receive the handoff the renderer publishes into"
         )
     }
 
