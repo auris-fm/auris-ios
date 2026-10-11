@@ -454,6 +454,14 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// other clock available, and it is not a substitute: the tap runs on a processing
     /// queue, so arrival lags capture by an indeterminate amount and would place the
     /// segment later than it was spoken.
+    ///
+    /// Runs on the main actor for the same reason as the case above: `onCommandRecognized`
+    /// hops to the main queue asynchronously from a background thread, so without this the
+    /// window is opened by a queued block racing the engine's read of `isActive`. When the
+    /// read wins, `WakeGate` drops the segment for having no grace and this case fails with
+    /// an empty transcript — intermittently, and for a reason that has nothing to do with
+    /// the alignment it claims to test. It asserts on the filter, not on that hop.
+    @MainActor
     func test_segmentWithoutACaptureInstantIsNotAligned() async throws {
         let harness = EchoWiringHarness()
         harness.engine.setEchoFilterRoute(.builtInSpeaker)
