@@ -64,14 +64,17 @@ enum OperationReason {
     static let unsupportedOperation = "unsupported_operation"
     /// The account or device is not entitled to the operation.
     static let missingEntitlement = "missing_entitlement"
-    /// A required audio session could not be acquired (it is held by something else, such as
-    /// a call), so the operation cannot act.
+    /// A required audio session could not be acquired, so the operation cannot act.
     ///
-    /// This does **not** apply to app operations generally. Only operations that actually need
-    /// a session can report it — on this client that means the volume path and audio capture,
-    /// not every sink. A capture gate that distinguishes a call is not evidence that an
-    /// unrelated app operation has an audio-session precondition, and reporting this reason
-    /// where no session was required would name a failure that did not occur.
+    /// This applies to exactly one operation on this client: the volume operation, whose
+    /// session-acquisition failure path is `VolumeManagerSink.setSystemVolume`. That path fails
+    /// when the system volume slider cannot be reached, and it currently returns a
+    /// success-shaped response while changing nothing — the case this reason exists to name.
+    ///
+    /// Audio capture is not an app-operation capability in the approved action set, so it is
+    /// not a producer of this reason and must not be cited as one. A capture gate that
+    /// distinguishes a call is not evidence that an unrelated app operation has a
+    /// session precondition either.
     static let audioSessionDenied = "audio_session_denied"
     /// The sink had no implementation for this operation — an explicit unavailability.
     static let sinkUnimplemented = "sink_unimplemented"
