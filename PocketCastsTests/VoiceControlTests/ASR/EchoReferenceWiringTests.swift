@@ -1349,18 +1349,35 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// though it were the built-in speaker.
     func test_routeClassification_mapsOutputsToFilterScopes() {
         let buildIn = VoiceAsrEngine.EchoFilterRoute.forOutput(.builtInSpeaker)
-        XCTAssertTrue(buildIn.appliesCorrelationWindow)
-        XCTAssertFalse(buildIn.provesEchoImpossible)
+        XCTAssertEqual(buildIn, .builtInSpeaker)
+        XCTAssertTrue(
+            buildIn.appliesCorrelationWindow,
+            "the built-in speaker must apply the correlation window"
+        )
 
-        for output: AudioRouteOutput in [.headphones, .bluetoothHFP, .bluetoothA2DP, .bluetoothLE, .airPlay, .unknown] {
+        // The scope value is the observable distinction. `provesEchoImpossible` is not
+        // asserted here: it is constant-false by contract (`VoiceAsrEngine.swift:36`), so an
+        // assertion on it cannot fail whichever route it is handed, and reading it as coverage
+        // is worse than leaving it out. The same correction was already applied to the
+        // isolated-route case above and had not been carried to this one.
+        // Expected scopes read from `forOutput` itself (`VoiceAsrEngine.swift:45-53`):
+        // headphones and BLE are isolated; HFP, A2DP, AirPlay and unknown are external.
+        for (output, expected): (AudioRouteOutput, VoiceAsrEngine.EchoFilterRoute) in [
+            (.headphones, .isolated),
+            (.bluetoothLE, .isolated),
+            (.bluetoothHFP, .external),
+            (.bluetoothA2DP, .external),
+            (.airPlay, .external),
+            (.unknown, .external),
+        ] {
             let route = VoiceAsrEngine.EchoFilterRoute.forOutput(output)
+            XCTAssertEqual(
+                route, expected,
+                "\(output) classified as \(route), not \(expected)"
+            )
             XCTAssertFalse(
                 route.appliesCorrelationWindow,
                 "\(output) must not apply the built-in-speaker correlation window"
-            )
-            XCTAssertFalse(
-                route.provesEchoImpossible,
-                "\(output) must not be recorded as proof that echo is impossible"
             )
         }
     }
