@@ -274,6 +274,86 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
     }
 
+    /// The ordinary cloud seek form: position_seconds is SINK time and seeks directly, with
+    /// no mapping involved. A mapper with no entries must not block it.
+    func testOrdinarySeekToUsesSinkTimeDirectlyWithoutMapping() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // No mapping at all: the ordinary form must not depend on one.
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(95)))
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertNil(unavailable, "the ordinary form is not a reference seek")
+    }
+
+    /// Both forms at once is malformed: the request does not say which target governs.
+    func testSeekToWithBothFormsIsRefused() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
+        let rejection = await MainActor.run { sink.lastSeekRejection }
+        XCTAssertEqual(rejection?.outcome, .refused)
+        XCTAssertEqual(rejection?.reason, OperationReason.malformedSeekTarget)
+    }
+
+    /// Neither form is equally malformed: there is no default target to fall back to.
+    func testSeekToWithNeitherFormIsRefused() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
+        let rejection = await MainActor.run { sink.lastSeekRejection }
+        XCTAssertEqual(rejection?.reason, OperationReason.malformedSeekTarget)
+    }
+
+    /// A fractional position is not an integer position: it parses as neither form and is
+    /// refused rather than truncated toward a value nobody asked for.
+    func testSeekToWithFractionalPositionIsRefused() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95.5}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext())
+
+        XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
+        let rejection = await MainActor.run { sink.lastSeekRejection }
+        XCTAssertEqual(rejection?.reason, OperationReason.malformedSeekTarget)
+    }
+
     /// An unmapped reference target is NOT converted by assumption. Reference time is not
     /// playback time: falling back to the raw value seeks somewhere the server never asked for
     /// on a mapped episode, and nothing downstream can tell that apart from a correct seek. The

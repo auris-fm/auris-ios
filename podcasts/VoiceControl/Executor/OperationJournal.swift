@@ -76,6 +76,10 @@ enum OperationReason {
     /// producer today, and a producer is not to be manufactured for it.
     static let audioSessionDenied = "audio_session_denied"
 
+    /// The seek request carried both target forms, neither, or a value that could not be
+    /// parsed. Nothing was sought: the request does not say where to go.
+    static let malformedSeekTarget = "malformed_seek_target"
+
     /// The target is expressed in reference (transcript) time, and this client cannot map it to
     /// playback time. No position was changed, and the seek must not be performed at the raw
     /// reference value: on a mapped episode that is a different position.

@@ -280,9 +280,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         switch action {
         case "seek_to":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
-            capturePreActionPosition(referenceMs: referenceMs)
-            seekToReference(referenceMs)
+            // Two forms, per the wire contract's schema (app_operation_schema_map 11993ca):
+            // "ordinary" carries position_seconds in SINK time and seeks directly;
+            // "reference_target" carries reference_position_ms and requires the validated
+            // mapping. Both or neither is a malformed request, not a default to guess.
+            let sinkSeconds = params["position_seconds"]?.int64Value
+            let referenceMs = params["reference_position_ms"]?.int64Value
+            switch (sinkSeconds, referenceMs) {
+            case (let seconds?, nil):
+                seekToSinkSeconds(seconds)
+            case (nil, let reference?):
+                capturePreActionPosition(referenceMs: reference)
+                seekToReference(reference)
+            default:
+                recordSeekRejection(.nonSuccess(.refused, reason: OperationReason.malformedSeekTarget))
+            }
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
@@ -365,6 +377,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if declared == "forward" { return .forward }
         return .forward // default: app's configurable interval
     }
+
+    /// Seeks to an absolute position in SINK time — the ordinary form, no mapping involved.
+    ///
+    /// Signed values are allowed: the duration-aware sink overload resolves a negative
+    /// position as an offset back from the episode end, matching how the local path behaves.
+    private func seekToSinkSeconds(_ seconds: Int64) {
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        _ = playbackSink.seekTo(positionSeconds: Int(seconds), episodeDurationSeconds: durationSeconds)
+    }
+
+    private func recordSeekRejection(_ result: OperationResult) {
+        lastSeekRejection = result
+    }
+
+    /// The most recent malformed-seek rejection, consumed by the executor.
+    @MainActor private(set) var lastSeekRejection: OperationResult?
 
     private func seekToReference(_ referenceMs: Int64) {
         let referenceSeconds = Double(referenceMs) / 1000.0
