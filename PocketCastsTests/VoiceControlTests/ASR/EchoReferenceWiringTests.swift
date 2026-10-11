@@ -917,6 +917,63 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// A reset moves the session on but does NOT clear the reference, and that is what makes
+    /// the delivery/reset interleaving unobservable: whether a block is appended just before or
+    /// just after a reset, the reference ends up holding the same samples at the same scan
+    /// position. `deliver()` re-checks the generation inside the same critical section that
+    /// appends, which narrows the window; this case records why that narrowing cannot be
+    /// demonstrated by an outcome, so a future change making `reset()` clear the reference knows
+    /// it is changing an assumption rather than tidying one.
+    func test_aResetDoesNotClearTheReference_soTheInterleavingIsUnobservable() {
+        // The control: the same two blocks with NO reset between them. The delivered audio is
+        // retained, and the scan position reflects it.
+        let control = PlaybackEchoReference()
+        let controlHandoff = EchoReferenceHandoff(reference: control, capacity: 8)
+        controlHandoff.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        controlHandoff.drain()
+        controlHandoff.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        controlHandoff.drain()
+
+        // Delivered, then reset.
+        let referenceA = PlaybackEchoReference()
+        let handoffA = EchoReferenceHandoff(reference: referenceA, capacity: 8)
+        handoffA.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        handoffA.drain()
+        handoffA.reset()
+        handoffA.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        handoffA.drain()
+
+        // Reset, then the block is delivered into the moved-on session.
+        let referenceB = PlaybackEchoReference()
+        let handoffB = EchoReferenceHandoff(reference: referenceB, capacity: 8)
+        handoffB.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        handoffB.drain()
+        handoffB.reset()
+        handoffB.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        handoffB.drain()
+
+        // The control is what makes this discriminating: it fails if a reset discards the
+        // reference, and it also fails if a reset introduces any extra delivery.
+        XCTAssertEqual(
+            referenceA.streamIndex, control.streamIndex,
+            "a reset changed the reference scan position, so it is no longer confined to the "
+                + "handoff gate"
+        )
+        XCTAssertEqual(
+            referenceB.streamIndex, control.streamIndex,
+            "a reset landing before the delivery changed the scan position"
+        )
+        XCTAssertEqual(
+            referenceA.snapshot().count, control.snapshot().count,
+            "a reset removed retained audio"
+        )
+        XCTAssertEqual(
+            referenceB.snapshot().count, control.snapshot().count,
+            "a reset landing before the delivery removed retained audio"
+        )
+        _ = controlHandoff
+    }
+
     /// **Ownership across stop/restart: a reset discards what was pending**, so audio from
     /// before the stop is not delivered after the restart, and a block submitted after the
     /// reset is still delivered exactly once.

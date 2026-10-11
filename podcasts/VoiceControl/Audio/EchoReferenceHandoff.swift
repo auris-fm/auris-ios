@@ -208,10 +208,20 @@ final class EchoReferenceHandoff {
         // the new reference. Applying each block exactly once is satisfied either way; that
         // is why this boundary needs checking separately from the counting argument.
         onDeliveryDequeued?()
+
+        // The generation is re-checked inside the same critical section that performs the
+        // append, not before it. Checking first and appending after leaves a window: `reset()`
+        // can land between the two, and the block then lands in a session that ended — the
+        // exact boundary a check-then-act sequence cannot close. Holding the lock across the
+        // append means a reset either happens before the check (the block is refused) or after
+        // the append (the block was already in the old session's audio, which the reset
+        // discards), and there is no interleaving in between.
         lock.lock()
-        let stillCurrent = blockGeneration == generation
-        lock.unlock()
-        guard stillCurrent else { return }
+        guard blockGeneration == generation else {
+            lock.unlock()
+            return
+        }
+        defer { lock.unlock() }
 
         let resampled = PlaybackResampler.toPipelineRate(
             block.samples,
