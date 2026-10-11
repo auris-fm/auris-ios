@@ -83,16 +83,6 @@ class VoiceControlAssembly {
         // App Clip compiles that file and has no voice layer to publish to.
         EffectsPlayer.echoReferenceHandoff = echoHandoff
 
-        // Echo-filter scope follows the observed output route. Without this the
-        // filter's classification never changes from its default and the correlation
-        // window is never applied on the route it exists for. The monitor already
-        // republishes on route changes, so invalidation is driven from the same signal.
-        routeMonitor.$currentRoute
-            .map { VoiceAsrEngine.EchoFilterRoute.forOutput($0.output) }
-            .removeDuplicates()
-            .sink { [weak asrEngine] route in asrEngine?.setEchoFilterRoute(route) }
-            .store(in: &cancellables)
-
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).

@@ -38,6 +38,23 @@ class VoiceControlService: ObservableObject {
     /// The monitor the assembly subscribes to in order to drive that route.
     var routeMonitorForTesting: IOSAudioRouteMonitor { routeMonitor }
 
+    /// Drives the echo filter's scope from the observed output route.
+    ///
+    /// The monitor republishes on route changes, so invalidation is driven from the same
+    /// signal that reports them. This is wired on the service, not in `VoiceControlAssembly`:
+    /// `AppDelegate` constructs the assembly inline and keeps only the service, so a
+    /// subscription stored in the assembly's `cancellables` is cancelled as soon as the build
+    /// call returns and the engine keeps the classification it was built with for the life of
+    /// the app. `@Published` delivers the current value at subscribe time, so construction
+    /// alone is enough to establish the initial classification.
+    private func wireEchoFilterRoute() {
+        routeMonitor.$currentRoute
+            .map { VoiceAsrEngine.EchoFilterRoute.forOutput($0.output) }
+            .removeDuplicates()
+            .sink { [weak asrEngine] route in asrEngine?.setEchoFilterRoute(route) }
+            .store(in: &cancellables)
+    }
+
     /// The executor this service routes validated intents through.
     var executorForTesting: VoiceIntentExecutor { executor }
     private let analytics: VoiceAnalytics
@@ -147,6 +164,11 @@ class VoiceControlService: ObservableObject {
             try? AVAudioSession.sharedInstance().setActive(true)
             // Gate will recompute the mode via CombineLatest4 — no explicit restart needed
         }
+
+        // Wired at construction, not at start: a route change before the first
+        // `startIfAllowed()` is still a route change, and the filter must not keep classifying
+        // against the route it was built with. See the lifetime note on the helper.
+        wireEchoFilterRoute()
     }
 
     func startIfAllowed() {

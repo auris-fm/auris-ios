@@ -114,13 +114,13 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
         let monitor = service.routeMonitorForTesting
 
         // Move the observed route to the built-in speaker and let Combine deliver.
-        monitor.currentRoute = AudioRoute(output: .builtInSpeaker, input: .builtInMic)
+        monitor.currentRoute = AudioRoute(output: .bluetoothA2DP, input: .builtInMic)  // DISCRIMINATING
         let delivered = expectation(description: "the engine was told about the new route")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { delivered.fulfill() }
         wait(for: [delivered], timeout: 2)
 
         XCTAssertEqual(
-            engine.echoFilterRoute, .builtInSpeaker,
+            engine.echoFilterRoute, .external,
             """
             after the assembly was released, the engine's echo-filter route no longer \
             follows the observed output route: the subscription that drives it was owned by \
