@@ -52,8 +52,8 @@ final class OperationJournalTests: XCTestCase {
     func test_complete_replacesTheRecordedResult() {
         let (journal, _) = makeJournal()
         XCTAssertEqual(journal.claim("op-1"), .claimed)
-        journal.complete("op-1", result: .nonSuccess(.failed, reason: OperationReason.stalePrecondition))
-        XCTAssertEqual(journal.result(for: "op-1")?.outcome, .failed)
+        journal.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
+        XCTAssertEqual(journal.result(for: "op-1")?.outcome, .refused)
         journal.complete("op-1", result: .succeeded)
         XCTAssertEqual(journal.result(for: "op-1"), .succeeded)
     }
@@ -137,6 +137,21 @@ final class OperationJournalTests: XCTestCase {
             OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight).outcome,
             .unknown
         )
+    }
+
+    /// The refusal vocabulary the contract's table names, each producible by this client.
+    func test_theRefusalReasonsAreTheOnesThisClientCanProduce() {
+        XCTAssertEqual(OperationReason.stalePrecondition, "stale_precondition")
+        XCTAssertEqual(OperationReason.unsupportedOperation, "unsupported_operation")
+        XCTAssertEqual(OperationReason.missingEntitlement, "missing_entitlement")
+        XCTAssertEqual(OperationReason.clientPolicy, "client_policy")
+        XCTAssertEqual(OperationReason.sinkUnimplemented, "sink_unimplemented")
+    }
+
+    /// The audio-session denial is its own reason, not folded into a general policy refusal:
+    /// the two produce different clarifications, and the gate already tells them apart.
+    func test_audioSessionDenialIsDistinctFromClientPolicy() {
+        XCTAssertNotEqual(OperationReason.audioSessionDenied, OperationReason.clientPolicy)
     }
 
     func test_successCarriesNoReason() {
