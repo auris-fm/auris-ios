@@ -175,13 +175,22 @@ final class EchoReferenceHandoff {
     /// Applies the oldest pending block.
     ///
     /// A delivery whose block was discarded by a `reset` finds the queue empty or holding a
-    /// newer block, and applies that newer block instead — which is correct, because the
-    /// blocks are applied in submission order on one serial queue and every submitted block
-    /// is applied exactly once. An earlier version tagged each delivery with a session and
-    /// refused to apply across a reset boundary; that check could not change any observable
-    /// result (both orderings apply each surviving block exactly once, only which delivery
-    /// applies it differs), so it was removed rather than kept as protection that cannot be
-    /// demonstrated.
+/// newer block, and applies that newer block instead — which is correct, because the
+/// blocks are applied in submission order on one serial queue and every submitted block
+/// is applied exactly once.
+///
+/// The session boundary IS enforced, in `deliver()` and `record(_:generation:)`: both
+/// re-check the generation they were issued under and refuse to touch the reference when
+/// it has moved. An earlier version omitted that check on the argument that both orderings
+/// apply each surviving block exactly once, so it could not change an observable result —
+/// that argument is about the COUNT of applications, while the boundary is about WHICH
+/// session receives them. A block appended after a reset carries the previous session's
+/// audio into the new one, which the count cannot see.
+///
+/// Do not remove those guards on the strength of the counting argument. They cannot be
+/// demonstrated by an outcome while `reset()` leaves the reference's samples in place —
+/// the two orderings converge for samples and scan position — so their justification is
+/// the contract rather than a failing case.
     private func record(_ anchor: PlaybackRenderAnchor?, generation submittedGeneration: Int) {
         lock.lock()
         // Same boundary as a block: a position from an ended session must not land in the

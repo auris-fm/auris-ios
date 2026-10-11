@@ -581,9 +581,12 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// is always zero, and `paired` is the whole segment — so `rms(paired)` and `rms(mic)`
     /// are the *same array* and the pairing is unobservable there.
     ///
-    /// This case therefore calls the positional overload directly with **differing** lengths,
-    /// where `paired` is a strict sub-span of the segment: it passes on the pairing and fails
-    /// when the energy is taken over the whole segment.
+      /// This case therefore calls the **two-argument** overload
+      /// (`isPlaybackBleed(mic:playback:)`) directly with **differing** lengths, where `paired`
+      /// is a strict sub-span of the segment: it passes on the pairing and fails when the energy
+      /// is taken over the whole segment. It is the positional overload that the aligned path
+      /// uses, which is why bypassing the aligned caller is what makes the pairing observable —
+      /// the call here is the one that does not impose `mic == window`.
     func test_pairedNormalizationIsObservableOnlyWithDifferingLengths() {
         let filter = SignalFilter()
         // The compared span is quiet; the remainder of the segment is loud and not compared.
