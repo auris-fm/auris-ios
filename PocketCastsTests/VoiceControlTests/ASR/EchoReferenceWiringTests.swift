@@ -1285,6 +1285,47 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// The aligned-window rejection is placed at the segment's END, not its start.
+    ///
+    /// `capturedAt` is the instant of the segment's FIRST sample, while the filter compares a
+    /// window that ends at the offset it is given. Using the first instant for the end places
+    /// the whole window one segment-length early, and the window is exactly `mic.count` long —
+    /// so the real alignment falls outside it and the filter stops rejecting the echo it exists
+    /// for. This case supplies an anchor and a capture instant whose correct end offset is known,
+    /// and a segment long enough that the start and the end are distinguishable positions.
+    /// The offset the filter is given is measured from the segment's END instant.
+    ///
+    /// `capturedAt` is the instant of the segment's FIRST sample (`NativeVadSegmenter` sets it
+    /// when the buffer first fills), while the value is used as `segmentEndOffset`. Measuring it
+    /// directly rather than through the filter's verdict: a verdict can be produced by any
+    /// alignment that happens to correlate, so it cannot separate the two forms.
+    func test_theSegmentOffsetIsMeasuredFromTheSegmentsEndInstant() throws {
+        let harness = EchoWiringHarness()
+        let rate = PlaybackEchoReference.pipelineSampleRate
+        let segmentSamples = Int(rate * 0.25)
+
+        let reference = PlaybackEchoReference()
+        reference.append((0..<(Int(rate) * 2)).map { Float(sin(Double($0) * 0.3)) })
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(renderedFrames: Double(Int(rate) * 2), sourceSampleRate: rate, hostTime: 1.0)
+        )
+        harness.engine.setEchoReference(reference)
+
+        // The segment runs 0.5s..0.75s, so its end is at 0.75 and the anchor is at 1.0: the
+        // latency is 0.25s. From the START instant the latency would be 0.5s.
+        let offset = harness.engine.playbackEndOffsetForTesting(capturedAt: 0.5, segmentSamples: segmentSamples)
+        let audibleEnd = try XCTUnwrap(reference.audibleEndOffsetInRetainedWindow())
+
+        XCTAssertEqual(
+            offset, audibleEnd - Int(0.25 * rate),
+            "the offset was measured from the segment's start instant, not its end"
+        )
+        XCTAssertNotEqual(
+            offset, audibleEnd - Int(0.5 * rate),
+            "the offset is one segment-length early"
+        )
+    }
+
     /// A port this client does not recognise must not acquire the built-in speaker's alignment.
     ///
     /// `forOutput` gives `.builtInSpeaker` the correlation window, which is justified by that

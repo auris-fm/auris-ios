@@ -109,7 +109,11 @@ class VoiceAsrEngine {
     /// to end at the current audible position. That holds when the segment arrives as it
     /// is captured and not when capture buffering delays it, which is why the capture-side
     /// timestamp is required before alignment acceptance can close.
-    private func playbackEndOffsetForSegment(capturedAt: MonotonicTime?) -> Int {
+    func playbackEndOffsetForTesting(capturedAt: MonotonicTime?, segmentSamples: Int) -> Int {
+        playbackEndOffsetForSegment(capturedAt: capturedAt, segmentSamples: segmentSamples)
+    }
+
+    private func playbackEndOffsetForSegment(capturedAt: MonotonicTime?, segmentSamples: Int) -> Int {
         guard let reference = echoReference,
               let anchor = reference.currentRenderAnchor else { return -1 }
         // Without the segment's own instant the position is unknown, so no alignment
@@ -120,7 +124,19 @@ class VoiceAsrEngine {
         // How far the render position in the reference window is *behind* the segment's
         // capture: emitted audio keeps playing while the segment is being captured, so the
         // audible position at capture is earlier than the audible position now.
-        let latency = max(0, anchor.hostTime - capturedAt)
+        // `capturedAt` is the instant of the segment's FIRST sample
+        // (`NativeVadSegmenter.utteranceCapturedAt` is set when the buffer first fills), while
+        // the value returned here is used as `segmentEndOffset` — the position the compared
+        // window ENDS at. Using the first sample's instant for the end places the whole window
+        // one segment-length early, and the displacement is not absorbable by the correlation:
+        // the window is exactly `mic.count` long, so the real alignment falls outside it and
+        // the filter stops rejecting the echo it exists for.
+        let segmentEndInstant = capturedAt
+            + Double(segmentSamples) / PlaybackEchoReference.pipelineSampleRate
+
+        // How far the render position is *behind* the segment's end: emitted audio keeps playing
+        // while the segment is captured, so the audible position then is earlier than now.
+        let latency = max(0, anchor.hostTime - segmentEndInstant)
         let latencySamples = Int(latency * PlaybackEchoReference.pipelineSampleRate)
         let nowOffset = reference.audibleEndOffsetInRetainedWindow() ?? -1
         guard nowOffset >= 0 else { return -1 }
@@ -261,7 +277,10 @@ class VoiceAsrEngine {
            signalFilter.isPlaybackBleed(
                mic: utterance,
                reference: playbackBuffer,
-               segmentEndOffset: playbackEndOffsetForSegment(capturedAt: capturedAt)
+               segmentEndOffset: playbackEndOffsetForSegment(
+                   capturedAt: capturedAt,
+                   segmentSamples: utterance.count
+               )
            ) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             return
