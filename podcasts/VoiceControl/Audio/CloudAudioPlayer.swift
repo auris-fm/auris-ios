@@ -127,6 +127,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Sample rate the negotiated codec delivers, defaulting to the advertised
     /// codec's rate when no `connected` frame has been seen yet.
+    var negotiatedSampleRateForTesting: Double { negotiatedSampleRate }
     private var negotiatedSampleRate: Double {
         bufferLock.lock()
         defer { bufferLock.unlock() }

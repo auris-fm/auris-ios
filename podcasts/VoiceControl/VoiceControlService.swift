@@ -37,6 +37,9 @@ class VoiceControlService: ObservableObject {
 
     /// The monitor the assembly subscribes to in order to drive that route.
     var routeMonitorForTesting: IOSAudioRouteMonitor { routeMonitor }
+
+    /// The executor this service routes validated intents through.
+    var executorForTesting: VoiceIntentExecutor { executor }
     private let analytics: VoiceAnalytics
     /// Whether the app is playing through the shared `AVAudioSession`. Used so a
     /// failed/cancelled acquisition never deactivates the session playback owns.
