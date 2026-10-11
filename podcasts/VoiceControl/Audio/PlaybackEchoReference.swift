@@ -49,6 +49,9 @@ final class PlaybackEchoReference {
     /// Last observed position of the output node, used to place a captured segment
     /// against the retained audio. Cleared when the node stops rendering.
     private var renderAnchor: PlaybackRenderAnchor?
+    /// The rate this instance's samples are at. `capacity` and the trim timeline both derive
+    /// from it, so the two cannot disagree about the rate the window advances at.
+    private let sampleRate: Double
     private let capacity: Int
     private let clock: MonotonicClock
 
@@ -60,6 +63,7 @@ final class PlaybackEchoReference {
          retainedSeconds: Double = PlaybackEchoReference.retainedSeconds,
          clock: MonotonicClock = SystemMonotonicClock()) {
         self.capacity = Int(sampleRate * retainedSeconds)
+        self.sampleRate = sampleRate
         self.clock = clock
     }
 
@@ -76,8 +80,11 @@ final class PlaybackEchoReference {
         if samples.count > capacity {
             let dropped = samples.count - capacity
             samples.removeFirst(dropped)
-            // The retained window now begins `dropped` samples later.
-            startTime += Double(dropped) / PlaybackEchoReference.pipelineSampleRate
+            // The retained window now begins `dropped` samples later. The divisor is this
+            // instance's rate, not the pipeline constant: `capacity` derives from the instance
+            // rate, so trimming a reference built at any other rate with the constant advanced
+            // its start time at a rate its samples were never at.
+            startTime += Double(dropped) / sampleRate
         }
     }
 
@@ -166,14 +173,17 @@ final class PlaybackEchoReference {
         lock.lock()
         defer { lock.unlock() }
         guard !samples.isEmpty else { return }
-        let tail = max(0, min(samples.count, Int(delaySeconds * PlaybackEchoReference.pipelineSampleRate)))
+        // The tail is a duration converted to samples, so it converts at THIS instance's rate:
+        // using the pipeline constant on samples that are not at it would retain a different
+        // duration than the caller asked for.
+        let tail = max(0, min(samples.count, Int(delaySeconds * sampleRate)))
         guard tail > 0 else {
             samples.removeAll(keepingCapacity: true)
             return
         }
         let dropped = samples.count - tail
         samples.removeFirst(dropped)
-        startTime += Double(dropped) / PlaybackEchoReference.pipelineSampleRate
+        startTime += Double(dropped) / sampleRate
     }
 }
 

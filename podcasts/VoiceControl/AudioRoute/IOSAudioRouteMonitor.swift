@@ -486,9 +486,22 @@ class IOSAudioRouteMonitor: ObservableObject {
             return false
         }
     }
+    func classifyOutputForTesting(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        classifyOutput(port)
+    }
 
-    private func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
-        guard let port else { return .builtInSpeaker }
+    /// Classifies the current output port, defaulting to `unknown` rather than to any named
+    /// route.
+    ///
+    /// A missing port and an unrecognised port type are both "not known to be the built-in
+    /// speaker", and they must not acquire its alignment: `forOutput` gives `.builtInSpeaker`
+    /// the correlation window, which is justified by that route's bounded local latency. A USB
+    /// DAC, car head unit, hearing aid or any future port type has codec latency this client
+    /// has not measured, so claiming the built-in window for it would align the filter against
+    /// a latency that is not there. `unknown` maps to `.external`, which is the honest scope
+    /// for a route whose behaviour has not been established.
+    private func classifyOutput(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        guard let port else { return .unknown }
         switch port.portType {
         case .headphones: return .headphones
         case .bluetoothHFP: return .bluetoothHFP
@@ -496,7 +509,10 @@ class IOSAudioRouteMonitor: ObservableObject {
         case .bluetoothLE: return .bluetoothLE
         case .builtInSpeaker: return .builtInSpeaker
         case .airPlay: return .airPlay
-        default: return .builtInSpeaker
+        // Every other port type — USB, car audio, hearing aids, and anything Apple adds — is
+        // unknown rather than assumed. The previous `.builtInSpeaker` default silently enabled
+        // the correlation window on routes the alignment does not hold for.
+        default: return .unknown
         }
     }
 

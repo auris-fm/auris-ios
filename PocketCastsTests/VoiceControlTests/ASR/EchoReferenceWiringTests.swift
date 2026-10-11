@@ -1228,6 +1228,87 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// A port this client does not recognise must not acquire the built-in speaker's alignment.
+    ///
+    /// `forOutput` gives `.builtInSpeaker` the correlation window, which is justified by that
+    /// route's bounded local latency. A USB DAC, car head unit or hearing aid has codec latency
+    /// this client has not measured, so classifying it as the built-in speaker would apply the
+    /// window where its premise does not hold. The fallback is `.unknown`, which maps to
+    /// `.external` — the scope for a route whose behaviour has not been established.
+    ///
+    /// Driven through the engine's own classification so the case covers the route the filter
+    /// actually receives, not the enum in isolation.
+    func test_unrecognisedOutputPort_doesNotAcquireBuiltInSpeakerAlignment() {
+        let monitor = IOSAudioRouteMonitor()
+
+        // A missing port and an unrecognised port type take the same branch, and that branch
+        // must not be the built-in speaker: its correlation window is justified by a bounded
+        // local latency that a USB DAC, car head unit or hearing aid does not have.
+        XCTAssertEqual(
+            monitor.classifyOutputForTesting(nil), .unknown,
+            "a missing port was not classified as unknown"
+        )
+        XCTAssertEqual(
+            VoiceAsrEngine.EchoFilterRoute.forOutput(monitor.classifyOutputForTesting(nil)), .external,
+            "a missing port acquired the built-in speaker's correlation window"
+        )
+
+        // The control, so the pair above cannot pass by making everything unknown or external:
+        // the built-in speaker still classifies as itself and still applies the window.
+        let session = AVAudioSession.sharedInstance()
+        if let speaker = session.currentRoute.outputs.first(where: { $0.portType == .builtInSpeaker }) {
+            XCTAssertEqual(monitor.classifyOutputForTesting(speaker), .builtInSpeaker)
+            XCTAssertTrue(
+                VoiceAsrEngine.EchoFilterRoute.forOutput(monitor.classifyOutputForTesting(speaker)).appliesCorrelationWindow,
+                "the built-in speaker no longer applies the window, so the fallback protects nothing"
+            )
+        }
+        XCTAssertTrue(
+            VoiceAsrEngine.EchoFilterRoute.builtInSpeaker.appliesCorrelationWindow,
+            "the built-in speaker no longer applies the correlation window at all"
+        )
+    }
+
+    /// Trimming a reference built at a NON-pipeline rate advances its start time at THAT rate.
+    ///
+    /// `capacity` is derived from the instance's rate, so the retained window holds
+    /// `sampleRate * retainedSeconds` samples. Advancing the start time with the pipeline
+    /// constant instead would move it at a rate these samples were never at: the window's
+    /// claimed start would drift from the audio it actually holds, by the ratio of the two
+    /// rates.
+    ///
+    /// The clock is fixed so the drift is the only thing that can move `startedAt` after the
+    /// first append.
+    func test_trimmingAtANonPipelineRateAdvancesTheStartTimeAtThatRate() {
+        let clock = FixedMonotonicClock(time: 1_000)
+        // 8 kHz: half the pipeline rate, so a pipeline-rate divisor would advance the window
+        // twice as fast as the audio it dropped.
+        let rate = 8_000.0
+        let reference = PlaybackEchoReference(sampleRate: rate, retainedSeconds: 0.5, clock: clock)
+        let capacity = Int(rate * 0.5)
+        XCTAssertEqual(capacity, 4_000, "the fixture's capacity is not what this case assumes")
+
+        // Fill to capacity, then append one more second: 8 000 samples must be dropped.
+        reference.append([Float](repeating: 0.1, count: capacity))
+        reference.append([Float](repeating: 0.2, count: Int(rate)))
+
+        let dropped = 8_000
+        let expectedAdvance = Double(dropped) / rate        // 1.0 s at the instance rate
+        let pipelineAdvance = Double(dropped) / PlaybackEchoReference.pipelineSampleRate // 0.5 s
+
+        guard let span = reference.span() else {
+            XCTFail("a populated reference should expose a span")
+            return
+        }
+        XCTAssertEqual(
+            span.startedAt - 1_000, expectedAdvance, accuracy: 1e-9,
+            "the trim advanced the window by \(span.startedAt - 1_000)s, not \(expectedAdvance)s"
+        )
+        // The assertion that makes the case discriminating: the pipeline constant would give a
+        // different answer, so a reference using it cannot satisfy this.
+        XCTAssertNotEqual(expectedAdvance, pipelineAdvance, accuracy: 1e-9)
+    }
+
     /// An anti-correlated segment scores at the negative end of the normalised range, so
     /// every candidate is negative. Seeding the maximum at zero would hide that; seeding it
     /// at the lowest representable value makes the verdict depend only on the loop. The
