@@ -135,7 +135,22 @@ open class EarconPlayer {
         // `emittedPCMReference` is therefore only used for the render-position anchor and
         // for the retire path; publishing goes through the handoff or not at all.
         guard let handoff else { return }
-        handoff.submit(frame, producer: producerIdentity, sampleRate: buffer.format.sampleRate, renderedAt: nil)
+
+        // The block's producer-local range, captured from the node's own clock: the count when
+        // these samples begin, plus their length. Carrying it is what lets the handoff map a
+        // later position observation against this block — without a retained range there is
+        // nothing to convert through, and an observation is refused rather than guessed at.
+        // A node clock that is not yet readable leaves the metadata nil, honestly: an
+        // unmappable block is better than one anchored at an invented zero.
+        let blockStart = nodeSampleTime()
+        handoff.submit(
+            frame,
+            producer: producerIdentity,
+            sampleRate: buffer.format.sampleRate,
+            renderedAt: nil,
+            renderedFramesInProducer: blockStart.map { $0 + Double(frame.count) },
+            producerBlockStart: blockStart
+        )
     }
 
     /// Records the render position once the audio is actually rendering.
@@ -160,6 +175,22 @@ open class EarconPlayer {
     /// `playerTime(forNodeTime:)` gives the position in the played audio's own frames and
     /// the host instant, so a queue lead or a restart shows as a jump rather than the
     /// reference claiming audio is audible before it is.
+    /// This node's current frame count in its own clock, or nil when it cannot be read.
+    ///
+    /// Uses the same `playerTime(forNodeTime:)` conversion as `renderPosition()`; both must
+    /// agree on the clock or a position observation and its containing block would disagree.
+    /// Reading the render time requires the node to be attached to an engine — on the
+    /// no-graph path there is no render clock, and nil metadata is the honest answer: the
+    /// samples are published, but nothing has rendered that a position could describe.
+    private func nodeSampleTime() -> Double? {
+        guard engine != nil else { return nil }
+        guard let lastRender = player.lastRenderTime,
+              lastRender.isSampleTimeValid,
+              let playerTime = player.playerTime(forNodeTime: lastRender),
+              playerTime.isSampleTimeValid else { return nil }
+        return Double(playerTime.sampleTime)
+    }
+
     private func renderPosition() -> PlaybackRenderAnchor? {
         guard let lastRender = player.lastRenderTime,
               lastRender.isSampleTimeValid,
