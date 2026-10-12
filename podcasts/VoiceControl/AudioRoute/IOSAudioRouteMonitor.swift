@@ -500,9 +500,22 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// has not measured, so claiming the built-in window for it would align the filter against
     /// a latency that is not there. `unknown` maps to `.external`, which is the honest scope
     /// for a route whose behaviour has not been established.
+    /// The ABSTRACTION-side overload: `audioSession.currentOutputs` yields `AudioPort` values, so the
+    /// monitor's own callers classify through this. It dispatches on the port TYPE only, so it shares
+    /// the classification with the AVAudioSession overload rather than duplicating it.
+    func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
+        classifyOutput(portType: port?.portType)
+    }
+
     private func classifyOutput(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
-        guard let port else { return .unknown }
-        switch port.portType {
+        classifyOutput(portType: port?.portType)
+    }
+
+    /// Shared classification: dispatches on the port TYPE raw value, so both overloads agree on every
+    /// route. A missing port and an unrecognised type both map to `unknown`.
+    private func classifyOutput(portType: AVAudioSession.Port?) -> AudioRouteOutput {
+        guard let portType else { return .unknown }
+        switch portType {
         case .headphones: return .headphones
         case .bluetoothHFP: return .bluetoothHFP
         case .bluetoothA2DP: return .bluetoothA2DP

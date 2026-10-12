@@ -14,7 +14,19 @@ protocol CaptureAudioSession: AnyObject {
     func setActive(_ active: Bool, notifyOthers: Bool) throws
 }
 
-class NativeAudioCapture {
+/// The microphone source the ASR engine consumes.
+///
+/// Extracted so a test can substitute capture and drive the REAL start/input path — the service
+/// reaches `start(in:)` only through its gate, and `start(in:)` begins capture, so without this
+/// seam a caller-level control cannot run without opening the microphone. Substituting is
+/// behaviourally what the production object does; nothing about the listening or provenance
+/// semantics changes.
+protocol AudioCaptureSource: AnyObject {
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? { get set }
+    func start() throws
+    func stop()
+}
+
     let engine = AVAudioEngine()
     private let sampleRate = 16000.0
     private var energyLogged = false
@@ -55,7 +67,7 @@ final class RealCaptureAudioSession: CaptureAudioSession {
     }
 }
 
-class NativeAudioCapture {
+class NativeAudioCapture: AudioCaptureSource {
     let engine = AVAudioEngine()
     private let sampleRate = 16000.0
     private var energyLogged = false
@@ -66,6 +78,20 @@ class NativeAudioCapture {
     /// capture itself activated may be deactivated.
     private let isPlaybackActive: () -> Bool
     var onSamples: (([Float]) -> Void)?
+
+    /// The protocol-facing callback. `AudioCaptureSource` requires a capture instant alongside the
+    /// samples; this tap does not carry one (the capture instant work is a separate seam), so the
+    /// instant is delivered as nil and the consumer must not read it as a measurement.
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? {
+        get {
+            // The tap carries no capture instant, so the instant is nil: the consumer must not read it
+            // as a measurement.
+            onSamples.map { callback in { samples, instant in callback(samples) } }
+        }
+        set {
+            onSamples = newValue.map { callback in { samples in callback(samples, nil) } }
+        }
+    }
 
     init(
         session: CaptureAudioSession = RealCaptureAudioSession(),

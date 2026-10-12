@@ -2,7 +2,7 @@ import Foundation
 import PocketCastsUtils
 
 class VoiceAsrEngine {
-    private let capture: NativeAudioCapture
+    private let capture: any AudioCaptureSource
     private let segmenter: NativeVadSegmenter
     private let backend: AsrBackend
     private let signalFilter: SignalFilter
@@ -163,7 +163,7 @@ class VoiceAsrEngine {
     var onStageTiming: ((PipelineStageTiming) -> Void)?
 
     init(
-        capture: NativeAudioCapture,
+        capture: any AudioCaptureSource = NativeAudioCapture(),
         segmenter: NativeVadSegmenter,
         backend: AsrBackend,
         signalFilter: SignalFilter,
