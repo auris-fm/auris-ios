@@ -30,6 +30,11 @@ enum OperationOutcome: String, Equatable, CaseIterable {
     ///
     /// The `idempotent` conjunct is what stops this being permissive in exactly the case where
     /// permissiveness has consequences: a NON-IDEMPOTENT operation that failed.
+    /// The switch below is EXHAUSTIVE with no `default`, and that is deliberate: a new case added
+    /// to this enum fails the BUILD here rather than silently taking a default branch. The cloud
+    /// lane lost a refusal code to the opposite arrangement — a hand-written allow-list that drifted
+    /// from the source union, so a code reached the client as an unrecognised server fault and
+    /// nothing failed, because the list had no coverage. A compiler-enforced switch cannot drift.
     func admitsReplay(isIdempotent: Bool) -> Bool {
         guard isIdempotent else { return false }
         switch self {
