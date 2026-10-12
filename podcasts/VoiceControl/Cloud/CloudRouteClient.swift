@@ -184,11 +184,18 @@ final class CloudRouteClient {
         // the connection held until the server's own idle timeout).
         defer { wsTask.cancel(with: .goingAway, reason: nil) }
 
-        // Whether this turn's request frame was handed to the socket — set BEFORE the send is
-        // invoked, because a send may transmit and then throw. Everything below keys recovery on
-        // this and not on an error code: the code says what failed, not whether admission may
-        // already have happened.
-        var frameSendAttempted = false
+        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
+        // plainly rather than leave a dead branch implying otherwise.
+        //
+        // The failure kinds that could precede submission — frame construction and encoding —
+        // already return above as `invalid_request` BEFORE this point. Everything that can fail
+        // from here on happens after the send has been INVOKED, and a send may transmit and then
+        // throw, so admission is possible and the outcome must be preserved rather than replayed.
+        //
+        // Consequence, stated as a limit: this client cannot currently produce the one outcome that
+        // would make eligible automatic recovery possible. The transport never reports "provably
+        // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
+        // producer is separate work; until then, automatic retry of a turn is not available.
 
         do {
             // Send authentication frame. The task's text message is a String,
@@ -208,7 +215,6 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
-            frameSendAttempted = true
             try await wsTask.send(.string(authText))
 
             // Written by the receive loop and read by the timeout task, so the
@@ -273,14 +279,6 @@ final class CloudRouteClient {
             return true
         } catch {
             if Task.isCancelled {
-                continuation.finish()
-                return true
-            }
-            // A failure BEFORE the send is a request that provably never left, so it is the one
-            // case automatic recovery may re-drive. After the send it may have been admitted, and
-            // the outcome is preserved rather than replayed.
-            if !frameSendAttempted {
-                continuation.yield(.neverSubmitted(code: "connection_lost", message: ""))
                 continuation.finish()
                 return true
             }

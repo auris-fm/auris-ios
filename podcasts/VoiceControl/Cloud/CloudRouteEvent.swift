@@ -103,13 +103,6 @@ enum CloudRouteEvent: Equatable {
     /// Terminal error.
     case error(code: String, message: String)
 
-    /// The transport never handed this turn's request frame to the socket.
-    ///
-    /// Automatic recovery is confined to this case: a frame that was PROVEN never submitted cannot
-    /// have been admitted, so re-driving it cannot duplicate a turn. Once the frame may have left,
-    /// the outcome is `unknown` and must be preserved rather than replayed — the request may
-    /// already have had effects.
-    case neverSubmitted(code: String, message: String)
 }
 
 /// JSON values that appear in action `params` (numbers normalized to Int64 when integral).

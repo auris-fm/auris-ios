@@ -252,16 +252,19 @@ final class CloudTurnContractTests: XCTestCase {
         capturedTasks.append(built.task)
         return built.client
     }
-    /// A send that TRANSMITS and then fails must NOT be classified never-submitted. The frame
-    /// demonstrably left the client, so its admission is possible and replaying it could duplicate
-    /// a turn — which is why submission is marked at ATTEMPT rather than on a successful return.
-    func testASendThatTransmitsThenThrowsIsNotNeverSubmitted() async {
+    /// A send that TRANSMITS and then fails is reported as an ordinary transport failure.
+    ///
+    /// The distinction that matters is preserved even though the never-submitted case is gone: a
+    /// frame that left the client is NOT treated as one that never did, so nothing may re-drive it.
+    /// The assertion is that the failure is surfaced at all and the frame is recorded as sent —
+    /// there is no separate "never submitted" outcome for a transmitted frame to be misclassified
+    /// into, which is the stronger position.
+    func testASendThatTransmitsThenThrowsIsReportedAsATransportFailure() async {
         let built = CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "")
         let task = built.task
         let client = built.client
         task.transmitsThenThrows = true
 
-        var sawNeverSubmitted = false
         var sawError = false
         for await event in client.route(
             request: "x",
@@ -271,16 +274,10 @@ final class CloudTurnContractTests: XCTestCase {
             ),
             turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
         ) {
-            if case .neverSubmitted = event { sawNeverSubmitted = true }
             if case .error = event { sawError = true }
         }
 
         XCTAssertEqual(task.sent.count, 1, "the frame was not transmitted, so the case is vacuous")
-        XCTAssertFalse(
-            sawNeverSubmitted,
-            "a frame that WAS transmitted and then threw was reported as never submitted, so it "
-                + "would be replayed after possible admission"
-        )
         XCTAssertTrue(sawError, "the failure was not surfaced at all")
     }
 

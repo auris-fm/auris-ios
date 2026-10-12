@@ -490,19 +490,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 audioPlayer.finish()
                 return CloudRouteResult(response: .silent, outcome: .completed,
                                     retainedPreparation: preparationHandle)
-            case let .neverSubmitted(code, _):
-                // The request frame provably never left, so this is the ONE case where automatic
-                // recovery cannot duplicate a turn. It is reported as a FAILED outcome with the
-                // code, not silently re-driven here: the sink does not own the retry decision, and
-                // re-driving from inside the transport would put that decision where the admission
-                // boundary is not visible.
-                guard !turnToken.isCancelled else { break turnLoop }
-                audioPlayer.cancel()
-                restoreTransientAudioState()
-                return CloudRouteResult(
-                    response: .earcon(.error), outcome: .failed(code: code),
-                    retainedPreparation: preparationHandle
-                )
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
