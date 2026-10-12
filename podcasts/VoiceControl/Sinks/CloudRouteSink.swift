@@ -106,13 +106,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The last prepared logical request, retained so an EXPLICIT retry can re-drive it with the
     /// same ids. Retaining the envelope rather than rebuilding it is what makes identity
     /// preservation structural: a retry has no other source for its `request_id`.
+    /// The COMPLETE prepared logical request. Every field the original attempt used is retained,
+    /// because re-driving with substitutes would send a DIFFERENT request under the same ids — the
+    /// ids would be preserved while the request was not, which is worse than not retrying.
     private struct PreparedRequest {
         let turn: CloudTurnEnvelope
-        let context: CloudRouteContext
         let request: String
+        let tier: CloudTier
+        let playbackContext: PlaybackContext
         /// The origin captured when the request was prepared. A retry must be validated against
         /// the origin it belonged to, not whatever is current when the retry is invoked.
         let origin: Int?
+        /// The selection captured with the request, for the same reason.
+        let selection: CloudConversationSelection?
     }
 
     /// Prepared requests keyed by their `request_id`, NOT a single "last" slot.
@@ -156,10 +162,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // the very attribution error the captured origin exists to prevent.
         return await route(
             request: prepared.request,
-            tier: .unknown,
-            context: PlaybackContext.absent,
+            tier: prepared.tier,                        // retained, not substituted
+            context: prepared.playbackContext,          // retained, not `absent`
             origin: prepared.origin,
-            selection: nil,
+            selection: prepared.selection,
             retainedTurn: prepared.turn   // retained: same request_id, same conversation id
         )
     }
@@ -293,6 +299,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
         // leave the sink pointing at a token nobody will ever complete.
         let effectiveSelection = selection ?? conversationSelectionProvider()
+        // A RETRY must not re-prepare: `prepare` can select or mint a conversation, and cancelling
+        // `activeTurn` after that would disturb a successor for a turn that already has its own
+        // identity. The retained envelope already carries the conversation it was admitted under,
+        // so a re-drive uses that and touches none of the preparation path.
+        if let retainedTurn {
+            return await driveRetained(retainedTurn, request: request, context: context,
+                                       origin: origin, selection: selection)
+        }
+
         guard let conversation = conversationManager.prepare(
             // The captured selection when the caller supplied one; the provider is the fallback
             // for callers that did not, which is the late-reading behaviour this replaces.
@@ -325,7 +340,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
         // before admission is safe to re-drive, and that decision belongs to an explicit caller.
         preparedRequests[turn.requestId] = PreparedRequest(
-            turn: turn, context: routeContext, request: request, origin: origin
+            turn: turn,
+            request: request,
+            tier: tier,
+            playbackContext: context,
+            origin: origin,
+            selection: effectiveSelection
         )
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
@@ -430,6 +450,39 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         restoreTransientAudioState()
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
+        return CloudRouteResult(response: .silent, outcome: .earlyClose)
+    }
+
+    /// Re-drives a retained request WITHOUT the preparation path. It still owns a turn token and
+    /// the transport, so cancellation and supersede semantics are unchanged — what it does not do
+    /// is choose or create a conversation, because the retained request already names one.
+    private func driveRetained(
+        _ turn: CloudTurnEnvelope,
+        request: String,
+        context: PlaybackContext,
+        origin: Int?,
+        selection: CloudConversationSelection?
+    ) async -> CloudRouteResult {
+        let client = clientFactory()
+        let routeContext = CloudRouteContext(from: context)
+        let turnToken = CloudTurnToken()
+        activeTurn?.cancel()
+        activeTurn = turnToken
+        for await event in client.route(request: request, context: routeContext, turn: turn) {
+            if turnToken.isCancelled { break }
+            if case .done = event {
+                audioPlayer.finish()
+                return CloudRouteResult(response: .silent, outcome: .completed)
+            }
+            if case let .error(code, _) = event {
+                return CloudRouteResult(
+                    response: .earcon(.error), outcome: .failed(code: code)
+                )
+            }
+        }
+        if turnToken.isCancelled {
+            return CloudRouteResult(response: .silent, outcome: .earlyClose)
+        }
         return CloudRouteResult(response: .silent, outcome: .earlyClose)
     }
 
