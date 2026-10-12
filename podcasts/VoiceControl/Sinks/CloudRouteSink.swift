@@ -106,6 +106,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The last prepared logical request, retained so an EXPLICIT retry can re-drive it with the
     /// same ids. Retaining the envelope rather than rebuilding it is what makes identity
     /// preservation structural: a retry has no other source for its `request_id`.
+    /// A handle to one prepared logical request, returned to the OWNER so a retry can be
+    /// request-scoped rather than "the last thing prepared".
+    ///
+    /// Holding the id (rather than letting the caller reach for whatever was prepared most
+    /// recently) is what stops an older retry selecting a successor. The owning lifecycle
+    /// invalidates it: `invalidateRetained(_:)` drops the entry, and a handle whose entry is gone
+    /// refuses rather than re-driving something else.
+    struct RetainedPreparation: Equatable {
+        let requestId: String
+    }
+
     /// The COMPLETE prepared logical request. Every field the original attempt used is retained,
     /// because re-driving with substitutes would send a DIFFERENT request under the same ids — the
     /// ids would be preserved while the request was not, which is worse than not retrying.
@@ -128,6 +139,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the caller never named — with the wrong identity, which is the opposite of the point. Keyed
     /// by the id the caller is retrying, a request can only be re-driven by naming it.
     private var preparedRequests: [String: PreparedRequest] = [:]
+
+    /// The handle for the request most recently prepared, returned to the owner so it can retry
+    /// THAT request by name.
+    private(set) var lastRetainedHandle: RetainedPreparation?
+
+    /// Drops a retained request when its owning lifecycle ends, so a later retry of it refuses
+    /// instead of re-driving a request that no longer belongs to anything.
+    func invalidateRetained(_ handle: RetainedPreparation) {
+        preparedRequests.removeValue(forKey: handle.requestId)
+        if lastRetainedHandle == handle { lastRetainedHandle = nil }
+    }
 
     /// Re-drives the last prepared logical request, preserving its `request_id`, conversation id
     /// and mode.
@@ -360,6 +382,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // There is deliberately NO blanket retry loop here. The identity requirement does not
         // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
         // before admission is safe to re-drive, and that decision belongs to an explicit caller.
+        lastRetainedHandle = RetainedPreparation(requestId: turn.requestId)
         preparedRequests[turn.requestId] = PreparedRequest(
             turn: turn,
             request: request,
