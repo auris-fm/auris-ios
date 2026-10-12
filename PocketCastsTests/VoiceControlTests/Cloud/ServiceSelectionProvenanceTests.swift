@@ -20,6 +20,14 @@ final class FakeAudioCapture: AudioCaptureSource {
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
 final class ServiceSelectionProvenanceTests: XCTestCase {
+    /// Delivers audio through the capture so the REAL registered path runs rather than a direct
+    /// handler call.
+    private func driveRegisteredCallback(capture: FakeAudioCapture) async {
+        // Two seconds of signal at the engine rate, enough to close a VAD segment.
+        capture.emit(samples: [Float](repeating: 0.05, count: 16_000 * 2), at: nil)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+    }
+
     @MainActor
     func testAWakeInputDuringActiveGraceReachesTheSinkAsWake() async throws {
         let capture = FakeAudioCapture()
@@ -62,15 +70,23 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
 
         let sink = service.executorForTesting.cloudRouteSinkForTesting
-        // An UNROUTABLE transcript, because the cloud route is reached through `.none` — the
-        // router finds no local intent and the turn escalates. A phrase the local router CAN
-        // handle never reaches the sink, so it could not carry this assertion.
-        await service.handleRoutingInput(
-            IntentRoutingInput.english(
-                transcript: "what did the host mean by that remark",
-                selection: .wakeWord
+
+        // DRIVE THE REGISTERED CALLBACK, so this covers registration and not only the derivation.
+        // Delivering samples through the capture runs capture -> segmenter -> ASR ->
+        // `onRoutingInput` -> the service's serial callback, which is where the input's provenance
+        // has to survive. Calling `handleRoutingInput` directly would prove the derivation and
+        // NOTHING about registration — the two are separate, and a passing direct call must not be
+        // read as covering the callback.
+        await driveRegisteredCallback(capture: capture)
+
+        let delivered = await MainActor.run { sink.lastSelectionForTesting }
+        if delivered == nil {
+            XCTFail(
+                "the registered callback path produced no turn, so the provenance has not been "
+                    + "shown to survive registration; only the direct handler was exercised"
             )
-        )
+            return
+        }
 
         let reached = await MainActor.run { sink.lastSelectionForTesting }
         XCTAssertEqual(
