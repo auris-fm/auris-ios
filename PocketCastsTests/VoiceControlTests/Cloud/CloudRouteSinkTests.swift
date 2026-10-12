@@ -923,6 +923,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // which is exactly how the first version of this case proved nothing.
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(cloudTestOrigin)
+        // A REAL completion fixture, so the held turn can finish and be observed finishing.
+        nextTurnFixture = """
+            event: token
+            data: {"text":"live answer"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
         let gate = holdNextTurn()
         let sink = makeSink(conversationManager: manager)
 
@@ -951,19 +960,24 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
 
         XCTAssertEqual(staleResult.outcome, .refused)
-        // The successor's TURN TOKEN must still be live. Cancellation is a flag the running
-        // turn checks at its next event, so a held turn has not acted on it yet — asserting the
-        // flag is what separates "cancelled but not yet observed" from "never cancelled". The
-        // earlier version read the socket's close state instead, which stays nil either way while
-        // the turn is parked at the gate, and so could not detect the defect at all.
-        let successorCancelled = await MainActor.run { sink.activeTurnIsCancelledForTesting }
-        XCTAssertEqual(
-            successorCancelled, false,
-            "a refused stale turn cancelled the HELD LIVE SUCCESSOR's turn token"
-        )
 
+        // The discriminator: RELEASE the held turn and observe whether it can still COMPLETE.
+        // Reading the sink's current `activeTurn` cannot work — the bad ordering cancels the held
+        // token and REPLACES activeTurn with the stale turn's, so that read returns the
+        // replacement's flag and never the successor's. The successor's own outcome is the thing
+        // that distinguishes the two orderings.
         gate.release()
-        _ = await live.value
+        let liveResult = await live.value
+        XCTAssertEqual(
+            liveResult.outcome, .completed,
+            "a refused stale turn prevented the held successor from completing"
+        )
+        // The transport close-code assertion is deliberately NOT made. In the full suite the held
+        // socket carries a normal close code even when the successor completes, so a non-nil code
+        // does not separate "cancelled by the stale attempt" from "closed by its own completion"
+        // — it passed in isolation and failed under suite load, which is the signature of an
+        // assertion reading a state the case does not control. The successor's OUTCOME above is
+        // the discriminator that does separate the two orderings.
     }
 }
 
