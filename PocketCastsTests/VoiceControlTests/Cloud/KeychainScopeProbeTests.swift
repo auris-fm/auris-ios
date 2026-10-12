@@ -56,12 +56,19 @@ final class KeychainScopeProbeTests: XCTestCase {
 
         // 2. Read back with ATTRIBUTES ONLY. `kSecReturnData` is deliberately absent.
         let service = "fm.auris." + probeKey
-        let query: [String: Any] = [
+        // The access group is SPECIFIED, because that is the whole question: a query without it
+        // finds an item wherever the caller happens to see it, so a success proves only that some
+        // scope can read SOME item — not that the intended group is visible to this signer.
+        let group = Bundle.main.object(forInfoDictionaryKey: "AurisKeychainAccessGroup") as? String
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        if let group, !group.isEmpty {
+            query[kSecAttrAccessGroup as String] = group
+        }
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
@@ -70,7 +77,11 @@ final class KeychainScopeProbeTests: XCTestCase {
         let attributes = try XCTUnwrap(result as? [String: Any])
         // Report what the store DISCLOSES, never the value.
         let disclosed = attributes.keys.sorted().joined(separator: ",")
-        print("SCOPE-PROBE status=\(status) service=\(service) attributes=[\(disclosed)]")
+        let actualGroup = attributes[kSecAttrAccessGroup as String] as? String ?? "(none)"
+        print(
+            "SCOPE-PROBE status=\(status) service=\(service) requestedGroup=\(group ?? "(unspecified)")"
+                + " actualGroup=\(actualGroup) attributes=[\(disclosed)]"
+        )
         XCTAssertNotNil(attributes[kSecAttrAccessGroup as String], "no access group disclosed")
     }
 }
