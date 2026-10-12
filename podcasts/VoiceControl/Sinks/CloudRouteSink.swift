@@ -40,6 +40,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// must be too. A test awaits it through `MainActor.run`.
     var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
 
+    /// The selection the last turn arrived with, so a caller-level case can assert that the
+    /// service derived it from the turn's own provenance rather than from live window state.
+    /// Necessary because the two are indistinguishable from inside the sink when grace is active.
+    @MainActor private(set) var lastSelectionForTesting: CloudConversationSelection?
+
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
@@ -202,10 +207,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // supersede block below cancels the in-flight turn and claims `activeTurn`; running that
         // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
         // leave the sink pointing at a token nobody will ever complete.
+        let effectiveSelection = selection ?? conversationSelectionProvider()
+        MainActor.assumeIsolated { lastSelectionForTesting = effectiveSelection }
         guard let conversation = conversationManager.prepare(
             // The captured selection when the caller supplied one; the provider is the fallback
             // for callers that did not, which is the late-reading behaviour this replaces.
-            selection: selection ?? conversationSelectionProvider(),
+            selection: effectiveSelection,
             origin: origin
         ) else {
             return CloudRouteResult(response: .silent, outcome: .refused)

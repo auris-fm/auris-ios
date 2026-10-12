@@ -179,10 +179,17 @@ final class CloudConversationManagerTests: XCTestCase {
 
 
 
-    /// A wake that fires WHILE GRACE IS ACTIVE must still CREATE. Read from live state the two
-    /// are identical — both arrive with `isActive == true` — so the distinction has to travel
-    /// with the input, which is what this pins. The mutation it catches is a live `isActive`
-    /// read: under that, this wake would be classified a follow-up and resume.
+    /// The MANAGER's wake-resume rule: a wake must create even when a conversation is already
+    /// open, so it has something it could wrongly resume.
+    ///
+    /// SCOPE, stated narrowly because the comment previously claimed more: this drives the
+    /// manager with an explicit selection, so **it cannot exercise the service's selection
+    /// derivation** and does NOT catch a live `isActive` read in `VoiceControlService`. What it
+    /// catches is the manager resuming on a wake — independently executed by @reviewer, where
+    /// changing the manager to resume on wake fails both assertions here.
+    ///
+    /// The service-level control — a wake during active grace driven through the real caller —
+    /// remains OPEN, and this case is not a substitute for it.
     func testAWakeDuringActiveGraceStillCreates() throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(1)
