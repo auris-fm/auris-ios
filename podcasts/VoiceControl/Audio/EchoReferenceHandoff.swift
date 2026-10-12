@@ -40,6 +40,8 @@ import PocketCastsUtils
 final class EchoReferenceHandoff {
     /// A block of emitted audio, with the instant it was rendered and its source rate.
     struct Block {
+        /// Which producer's clock the frames below belong to.
+        let producer: ProducerIdentity
         let samples: [Float]
         let sampleRate: Double
         /// The instant the producer rendered this audio, on the shared monotonic basis.
@@ -74,6 +76,61 @@ final class EchoReferenceHandoff {
     /// recall a block that has already been removed from it.
     var onDeliveryDequeued: (() -> Void)?
 
+    /// Where an appended block's audio sits, in both clocks it has to be matched in.
+    ///
+    /// The producer's own frame count says which of that producer's blocks a later position
+    /// was observed in; the shared-reference range says where that block's audio landed. A
+    /// later position can only be converted by finding the block that CONTAINS it, because the
+    /// producer's count runs from its own zero while the reference's runs from the append. The
+    /// latest append's origin cannot substitute: later blocks, from this producer or another,
+    /// may already be queued behind the one the position belongs to.
+    private struct AppendedRange {
+        /// WHICH producer's clock the range below is expressed in. Every producer counts from
+        /// its own zero, so two blocks can carry overlapping local ranges while describing
+        /// different audio; a containing range alone selects the wrong block.
+        let producer: ProducerIdentity
+        /// Producer-local frames this block spans: `producerStart` inclusive.
+        let producerStart: Double
+        let producerEnd: Double
+        /// The shared-reference index range this block occupies.
+        let referenceStart: Int
+        let referenceLength: Int
+        /// The session it was appended under, so a position from a later session is refused
+        /// rather than matched against audio it never described.
+        let generation: Int
+    }
+
+    /// Identifies the producer that submitted a block or a position: a stable value per
+    /// producer node, which is what separates two producers' clocks when their ranges overlap.
+    /// Identifies one producer CLOCK, not merely one producer.
+    ///
+    /// A producer's counter resets when its node restarts, and the old ranges may still be
+    /// retained in the same handoff generation. The kind alone therefore cannot separate a
+    /// restarted clock from the one it replaced: two blocks of the same kind, from before and
+    /// after the restart, would carry overlapping local ranges while describing different
+    /// audio. The incarnation changes on exactly that reset, so an observation from a retired
+    /// incarnation is refused rather than matched against audio it never described.
+    ///
+    /// The token is owned by the producer — it changes when that producer's clock resets, and
+    /// nothing else resets it. Restarting one producer must not invalidate another's
+    /// incarnation, since an unrelated reset would discard positions that are still valid.
+    struct ProducerIdentity: Hashable {
+        enum Kind: Hashable {
+            case earcon
+            case cloud
+            case episodeTap
+        }
+
+        let kind: Kind
+        /// Changes when this producer's node restarts and its frame counter returns to zero.
+        let incarnation: UInt64
+    }
+
+    /// Blocks that have been appended, newest last, so a later render position can be matched
+    /// to the block that contains it. Bounded: a position only refers to recent audio, and an
+    /// unbounded list would retain every block of the session.
+    private var appendedRanges: [AppendedRange] = []
+    private let appendedRangeRetention = 32
     private let lock = NSLock()
     private var pending: [Block] = []
     private var droppedBlocks = 0
@@ -81,6 +138,17 @@ final class EchoReferenceHandoff {
     /// before appending, so a block whose session ended while it was in flight is dropped
     /// instead of landing in the new session's reference.
     private var generation = 0
+
+    /// The ACTIVE incarnation per producer kind — the clock that positions are currently
+    /// being submitted under.
+    ///
+    /// A producer reports its new identity when its node restarts, and the handoff records it
+    /// here. Observations whose identity is not the active one for their kind are refused
+    /// BEFORE range lookup: a retired incarnation's numbers are still valid numbers, and its
+    /// retained blocks may still be resident, so a range-and-identity match alone would accept
+    /// a late observation from a clock that has already been replaced. Refusing on identity is
+    /// the boundary; the retained block is kept because its audio is genuinely still resident.
+    private var activeIncarnations: [ProducerIdentity.Kind: UInt64] = [:]
 
     init(
         reference: PlaybackEchoReference,
@@ -107,6 +175,7 @@ final class EchoReferenceHandoff {
     /// - Parameter renderedAt: the instant the producer rendered this audio.
     func submit(
         _ samples: [Float],
+        producer: ProducerIdentity,
         sampleRate: Double,
         renderedAt: MonotonicTime? = nil,
         renderedFramesInProducer: Double? = nil,
@@ -125,6 +194,7 @@ final class EchoReferenceHandoff {
         }
         pending.append(
             Block(
+                producer: producer,
                 samples: samples,
                 sampleRate: sampleRate,
                 renderedAt: renderedAt,
@@ -139,6 +209,20 @@ final class EchoReferenceHandoff {
         }
     }
 
+    /// Records the producer's NEW active incarnation after its clock reset, and retires the
+    /// previous one.
+    ///
+    /// Called by the producer at the reset itself, so the boundary is the reset rather than the
+    /// next submission: an observation submitted under the retired incarnation after this call
+    /// is refused before range lookup, even though its numbers still fall inside a retained
+    /// block. A producer that never calls this keeps submitting under its current identity, and
+    /// unrelated producers are untouched — the boundary is per kind, not global.
+    func rotateIncarnation(for kind: ProducerIdentity.Kind, to incarnation: UInt64) {
+        lock.lock()
+        activeIncarnations[kind] = incarnation
+        lock.unlock()
+    }
+
     /// Submits a render position to be recorded on the reference, in order with the blocks.
     ///
     /// Producers that learn their position after submitting their samples need both to
@@ -148,12 +232,12 @@ final class EchoReferenceHandoff {
     /// serial queue so the anchor lands after the block it belongs to.
     ///
     /// - Parameter anchor: the position, or nil when the node is not rendering.
-    func submitRenderPosition(_ anchor: PlaybackRenderAnchor?) {
+    func submitRenderPosition(_ anchor: PlaybackRenderAnchor?, producer: ProducerIdentity) {
         lock.lock()
         let session = generation
         lock.unlock()
         queue.async { [weak self] in
-            self?.record(anchor, generation: session)
+            self?.record(anchor, producer: producer, generation: session)
         }
     }
 
@@ -172,33 +256,88 @@ final class EchoReferenceHandoff {
         lock.unlock()
     }
 
-    /// Applies the oldest pending block.
+    /// Records a producer's render position against the block that contains it.
     ///
-    /// A delivery whose block was discarded by a `reset` finds the queue empty or holding a
-/// newer block, and applies that newer block instead — which is correct, because the
-/// blocks are applied in submission order on one serial queue and every submitted block
-/// is applied exactly once.
-///
-/// The session boundary IS enforced, in `deliver()` and `record(_:generation:)`: both
-/// re-check the generation they were issued under and refuse to touch the reference when
-/// it has moved. An earlier version omitted that check on the argument that both orderings
-/// apply each surviving block exactly once, so it could not change an observable result —
-/// that argument is about the COUNT of applications, while the boundary is about WHICH
-/// session receives them. A block appended after a reset carries the previous session's
-/// audio into the new one, which the count cannot see.
-///
-/// Do not remove those guards on the strength of the counting argument. They cannot be
-/// demonstrated by an outcome while `reset()` leaves the reference's samples in place —
-/// the two orderings converge for samples and scan position — so their justification is
-/// the contract rather than a failing case.
-    private func record(_ anchor: PlaybackRenderAnchor?, generation submittedGeneration: Int) {
+    /// The position arrives in the submitting producer's own frame count, so it is converted
+    /// through the SHARED-REFERENCE RANGE of the block whose producer-local range contains it
+    /// — not through the latest append's origin, which may belong to a later block or to
+    /// another producer entirely.
+    ///
+    /// The generation check and the reference update are in ONE critical section, the same
+    /// boundary `deliver()` closes: a check that releases the lock before the act permits a
+    /// reset to land in between, and the position then lands in a session that ended. Holding
+    /// the lock across both means a reset either happens before the check (the position is
+    /// refused) or after the update (the position was already in the old session's reference).
+    ///
+    /// Lock order is `handoff.lock` -> `reference.lock`; `deliver()` already takes that order
+    /// when it reads `reference.streamIndex` under this lock, and nothing in the reference
+    /// calls back into the handoff, so the reverse order does not exist.
+    private func record(
+        _ anchor: PlaybackRenderAnchor?,
+        producer: ProducerIdentity,
+        generation submittedGeneration: Int
+    ) {
         lock.lock()
-        // Same boundary as a block: a position from an ended session must not land in the
-        // new session's reference.
-        let stillCurrent = submittedGeneration == generation
-        lock.unlock()
-        guard stillCurrent else { return }
-        reference.recordRenderPosition(anchor)
+        defer { lock.unlock() }
+
+        // A position from an ended session must not land in the new session's reference.
+        guard submittedGeneration == generation else { return }
+
+        // The position must carry the ACTIVE incarnation for its kind. Identity equality
+        // alone is not the boundary: a late observation honestly carrying the RETIRED
+        // incarnation still falls inside that incarnation retained block, so a range-and-
+        // identity match would accept it and place the window in a clock that has already
+        // been replaced. The active-incarnation boundary refuses it before the lookup; a
+        // producer that has not reported a reset has no retired incarnation to refuse.
+        // An absent entry means this kind has never reported a reset, so there is no retired
+        // incarnation to refuse and the observation is accepted.
+        if let active = activeIncarnations[producer.kind], active != producer.incarnation {
+            return
+        }
+
+        guard let anchor else {
+            reference.recordRenderPosition(nil)
+            return
+        }
+        let producerFrames = anchor.renderedFrames
+        // Matched on the whole IDENTITY (kind AND incarnation) as well as the range. Every
+        // producer counts from its own zero, so an earcon block spanning 0..<400 and a cloud
+        // block spanning 0..<400 overlap exactly while describing different audio; and a
+        // restarted node of the SAME kind reuses those numbers again.
+        // The comparison is on the WHOLE identity, so a range recorded by a retired
+        // incarnation of this kind does not match: its numbers were reused after the restart.
+        // The containing block must ALSO still be resident in the reference. The retained
+        // ranges are bounded at 32 entries while the reference ring is bounded at
+        // `sampleRate * retainedSeconds` samples, and those two bounds are independent: 32
+        // tap blocks can span far more audio than the ring retains, and the ring drops from
+        // the front as it fills. A position matched to a range whose samples were trimmed
+        // would be recorded as a confident offset against audio the window no longer holds —
+        // the stale-anchor failure reached by a different door. Residency is checked against
+        // the reference's own retained span rather than assumed from the match.
+        let residentStart = reference.retainedStreamStart()
+        let containing = appendedRanges.last { range in
+            range.producer == producer
+                && range.generation == submittedGeneration
+                && producerFrames >= range.producerStart
+                && producerFrames < range.producerEnd
+                && range.referenceStart >= residentStart
+        }
+        guard let containing else {
+            reference.recordRenderPosition(nil)
+            return
+        }
+        let withinProducer = (producerFrames - containing.producerStart)
+            / max(1, containing.producerEnd - containing.producerStart)
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(
+                    containing.referenceStart
+                        + Int(withinProducer * Double(containing.referenceLength))
+                ),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: anchor.hostTime
+            )
+        )
     }
 
     private func deliver() {
@@ -244,6 +383,26 @@ final class EchoReferenceHandoff {
         let rangeStart = reference.streamIndex
 
         reference.append(resampled)
+
+        // Keep this block's two clocks together so a later position can be matched to the
+        // block that contains it. Recorded only when the producer reported its own range: a
+        // block with no producer-local start or end cannot be matched against, and inventing
+        // one would make an unknown position look like a known zero.
+        if let start = block.producerBlockStart, let end = block.renderedFramesInProducer {
+            appendedRanges.append(
+                AppendedRange(
+                    producer: block.producer,
+                    producerStart: start,
+                    producerEnd: end,
+                    referenceStart: rangeStart,
+                    referenceLength: resampled.count,
+                    generation: blockGeneration
+                )
+            )
+            if appendedRanges.count > appendedRangeRetention {
+                appendedRanges.removeFirst(appendedRanges.count - appendedRangeRetention)
+            }
+        }
 
         // The anchor is the block's reference range plus how far the producer had actually
         // rendered within it. Two things are deliberately not used here:

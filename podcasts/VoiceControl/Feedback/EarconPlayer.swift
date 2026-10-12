@@ -135,7 +135,7 @@ open class EarconPlayer {
         // `emittedPCMReference` is therefore only used for the render-position anchor and
         // for the retire path; publishing goes through the handoff or not at all.
         guard let handoff else { return }
-        handoff.submit(frame, sampleRate: buffer.format.sampleRate, renderedAt: nil)
+        handoff.submit(frame, producer: producerIdentity, sampleRate: buffer.format.sampleRate, renderedAt: nil)
     }
 
     /// Records the render position once the audio is actually rendering.
@@ -151,7 +151,7 @@ open class EarconPlayer {
     /// routing change removed: two paths to one reference, one of which a future edit could
     /// miss.
     private func referenceAnchorAfterScheduling() {
-        handoff?.submitRenderPosition(renderPosition())
+        handoff?.submitRenderPosition(renderPosition(), producer: producerIdentity)
     }
 
     /// The player node's rendered position, or nil when it is not rendering.
@@ -185,10 +185,46 @@ open class EarconPlayer {
         return (frame, buffer.format.sampleRate)
     }
 
-    func stop() { player.stop() }
+    /// This producer's clock incarnation, rotated whenever the node restarts.
+    ///
+    /// `AVAudioPlayerNode.playerTime` counts from the node's start, and `stop()` returns it to
+    /// zero. A position observed before that reset therefore uses the same numbers as one after
+    /// it, while describing different audio, so the incarnation changes HERE — at the reset —
+    /// and travels with every block and position this producer submits. Rotating it anywhere
+    /// else, or on an unrelated producer, would retire positions that are still valid.
+    private var nodeIncarnation: UInt64 = 0
+
+    /// Retires the current incarnation and begins a new one. Called wherever this producer's
+    /// node clock returns to zero.
+    private func rotateNodeIncarnation() {
+        nodeIncarnation &+= 1
+    }
+
+    /// The identity this producer is currently submitting under.
+    ///
+    /// Readable so a test can observe a real reset through the lifecycle rather than
+    /// constructing both values by hand: the restart case captures this before `stop()` and
+    /// expects the post-restart incarnation to be the captured one advanced by exactly one.
+    var currentIdentity: EchoReferenceHandoff.ProducerIdentity { producerIdentity }
+
+    /// The identity every submission from this producer carries.
+    private var producerIdentity: EchoReferenceHandoff.ProducerIdentity {
+        EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: nodeIncarnation)
+    }
+
+    /// Stopping the node returns its clock to zero, so the incarnation this producer has been
+    /// submitting under is retired here rather than at the next submission: a position observed
+    /// after the restart must not be matched to a block from before it.
+    func stop() {
+        player.stop()
+        rotateNodeIncarnation()
+        handoff?.rotateIncarnation(for: .earcon, to: nodeIncarnation)
+    }
 
     func release() {
         player.stop()
+        rotateNodeIncarnation()
+        handoff?.rotateIncarnation(for: .earcon, to: nodeIncarnation)
         engine?.detach(player)
         cachedEarcons.removeAll()
     }

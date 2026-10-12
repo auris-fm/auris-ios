@@ -41,6 +41,18 @@ final class PlaybackEchoReference {
     /// Read before an append, this is the reference range a submitted block is about to
     /// occupy. It is an origin, not a position: it says where a block's audio sits in the
     /// shared timeline, not how much of it has been heard.
+    /// The reference-stream index of the FIRST retained sample.
+    ///
+    /// The window trims from the front as it fills, so the retained audio does not begin at
+    /// zero: positions below this index described audio the window has already dropped. Callers
+    /// that match a position to a retained block use this to refuse a match whose audio is no
+    /// longer resident, rather than recording a confident offset against audio that is gone.
+    func retainedStreamStart() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return totalAppended - samples.count
+    }
+
     var streamIndex: Int {
         lock.lock()
         defer { lock.unlock() }

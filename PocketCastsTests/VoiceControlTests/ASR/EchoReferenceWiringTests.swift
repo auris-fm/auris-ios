@@ -850,7 +850,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
 
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
         handoff.drain()
 
         XCTAssertEqual(
@@ -868,8 +868,8 @@ final class EchoReferenceWiringTests: XCTestCase {
         // Capacity one block, and nothing drains it, so the second submission overflows.
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 1)
 
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
-        handoff.submit([Float](repeating: 0.2, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
 
         let droppedBeforeDrain = handoff.droppedBlockCount
         XCTAssertGreaterThan(
@@ -921,7 +921,7 @@ final class EchoReferenceWiringTests: XCTestCase {
             hookFired = true
             handoff?.reset()
         }
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
         handoff.drain()
 
         // The case is about a reset landing BETWEEN dequeuing and appending. If the hook never
@@ -950,27 +950,27 @@ final class EchoReferenceWiringTests: XCTestCase {
         // retained, and the scan position reflects it.
         let control = PlaybackEchoReference()
         let controlHandoff = EchoReferenceHandoff(reference: control, capacity: 8)
-        controlHandoff.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        controlHandoff.submit([Float](repeating: 0.7, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         controlHandoff.drain()
-        controlHandoff.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        controlHandoff.submit([Float](repeating: 0.1, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         controlHandoff.drain()
 
         // Delivered, then reset.
         let referenceA = PlaybackEchoReference()
         let handoffA = EchoReferenceHandoff(reference: referenceA, capacity: 8)
-        handoffA.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        handoffA.submit([Float](repeating: 0.7, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         handoffA.drain()
         handoffA.reset()
-        handoffA.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        handoffA.submit([Float](repeating: 0.1, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         handoffA.drain()
 
         // Reset, then the block is delivered into the moved-on session.
         let referenceB = PlaybackEchoReference()
         let handoffB = EchoReferenceHandoff(reference: referenceB, capacity: 8)
-        handoffB.submit([Float](repeating: 0.7, count: 400), sampleRate: 16_000)
+        handoffB.submit([Float](repeating: 0.7, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         handoffB.drain()
         handoffB.reset()
-        handoffB.submit([Float](repeating: 0.1, count: 400), sampleRate: 16_000)
+        handoffB.submit([Float](repeating: 0.1, count: 400), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
         handoffB.drain()
 
         // The control is what makes this discriminating: it fails if a reset discards the
@@ -1011,10 +1011,10 @@ final class EchoReferenceWiringTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
 
         // Submitted then discarded: this block must not be delivered.
-        handoff.submit([Float](repeating: 0.1, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
         handoff.reset()
         // Submitted after the reset: this one belongs to the running session.
-        handoff.submit([Float](repeating: 0.2, count: 100), sampleRate: 16000)
+        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16000)
         handoff.drain()
 
         let retained = reference.snapshot()
@@ -1043,6 +1043,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         // the timestamp, so it supplies the position the anchor also needs.
         handoff.submit(
             [Float](repeating: 0.1, count: 100),
+            producer: .init(kind: .episodeTap, incarnation: 0),
             sampleRate: 16000,
             renderedAt: renderedAt,
             renderedFramesInProducer: 100,
@@ -1658,7 +1659,7 @@ final class EchoReferenceWiringTests: XCTestCase {
                 start.wait()
                 for index in 0..<perProducer {
                     let marker = Float(producer * perProducer + index)
-                    handoff.submit(Array(repeating: marker, count: 4), sampleRate: 24_000)
+                    handoff.submit(Array(repeating: marker, count: 4), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 24_000)
                 }
             }
         }
@@ -1685,51 +1686,76 @@ final class EchoReferenceWiringTests: XCTestCase {
 
     // MARK: - Render position ordering
 
-    /// A submitted render position must land on the reference *after* the block it belongs
-    /// to, and must be refused when its session has ended.
+    /// A position submitted through the handoff lands only when it can be mapped: the block
+    /// it belongs to must carry its producer-local range, and the position must be in the SAME
+    /// producer clock. The mapping converts the producer count into the reference stream space
+    /// through the containing block, and records the anchor at the converted position with the
+    /// producer's own render instant.
     ///
-    /// `submitRenderPosition` exists because a producer can learn where a block was rendered
-    /// only after handing the samples over. The comment on it names the hazard: recording the
-    /// anchor directly from the producer while its samples are still queued here would place
-    /// the audio at a position it has not reached. So the anchor is routed through the same
-    /// serial queue as the blocks, and the claim is that the two cannot cross.
-    ///
-    /// Neither half of that was covered — the method had no case at all, so the ordering it
-    /// exists to provide was asserted in prose and nowhere else.
+    /// The stale half is unchanged in purpose: a position from an ended session must not land
+    /// in the new one, and the refusal is by generation rather than by identity here, because
+    /// the identity below never reports a reset.
     func test_renderPositionIsAppliedAfterItsBlockAndRefusedAcrossAReset() {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let identity = EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 7)
 
-        // Ordered case: the anchor is submitted while the block is still queued, and must
-        // land on the reference once the queue drains.
-        let anchor = PlaybackRenderAnchor(
-            renderedFrames: 4800,
-            sourceSampleRate: 48_000,
+        // The block: local 0..<1600, rendered at host instant 1000.
+        handoff.submit(
+            [Float](repeating: 0.25, count: 1600),
+            producer: identity,
+            sampleRate: 16_000,
+            renderedAt: 1_000,
+            renderedFramesInProducer: 1_600,
+            producerBlockStart: 0
+        )
+
+        // The position: local 800 — strictly INSIDE the block's half-open range 0..<1600. A
+        // position at 1600 would be the block's exclusive end, which no range contains.
+        let position = PlaybackRenderAnchor(
+            renderedFrames: 800,
+            sourceSampleRate: 16_000,
             hostTime: 1_000
         )
-        handoff.submit([Float](repeating: 0.25, count: 1600), sampleRate: 16_000)
-        handoff.submitRenderPosition(anchor)
+        handoff.submitRenderPosition(position, producer: identity)
         handoff.drain()
 
-        XCTAssertEqual(reference.currentRenderAnchor, anchor,
-                       "a render position submitted behind its block never reached the reference")
+        // The anchor is the MAPPED position: the block starts at reference index 0 and spans
+        // the whole 1600, so a position at the producer's 1600 maps to reference 1600, at the
+        // pipeline rate, with the producer's own render instant.
+        XCTAssertEqual(
+            reference.currentRenderAnchor,
+            PlaybackRenderAnchor(
+                renderedFrames: 800,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 1_000
+            ),
+            "the mapped position did not land where the producer reported it"
+        )
 
         // Boundary case: a position submitted before a reset belongs to a session that has
-        // ended, so it must not appear in the new session's reference. This is the same
-        // boundary `record(_:generation:)` guards for blocks, and it is asserted separately
-        // because a stale anchor would let the filter align a segment against audio that is
-        // no longer playing.
+        // ended, so it must not appear in the new session's reference. The refusal is by
+        // generation: the stale identity is no longer the session's.
         let stale = PlaybackRenderAnchor(
-            renderedFrames: 9600,
-            sourceSampleRate: 48_000,
+            renderedFrames: 3_200,
+            sourceSampleRate: 16_000,
             hostTime: 2_000
         )
-        handoff.submitRenderPosition(stale)
+        handoff.submitRenderPosition(stale, producer: identity)
         handoff.reset()
         handoff.drain()
 
-        XCTAssertEqual(reference.currentRenderAnchor, anchor,
-                       "a render position from an ended session landed in the new one")
+        // After the reset the anchor is whatever the reset left; the stale position must not
+        // have been applied to it.
+        XCTAssertEqual(
+            reference.currentRenderAnchor,
+            PlaybackRenderAnchor(
+                renderedFrames: 800,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 1_000
+            ),
+            "a render position from an ended session landed in the new one"
+        )
     }
 
 
@@ -1838,6 +1864,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         for round in 0..<rounds {
             handoff.submit(
                 [Float](repeating: 0.2, count: perRound),
+                producer: .init(kind: .episodeTap, incarnation: 0),
                 sampleRate: PlaybackEchoReference.pipelineSampleRate,
                 renderedAt: MonotonicTime(round),
                 renderedFramesInProducer: Double((round + 1) * perRound),
@@ -1853,6 +1880,7 @@ final class EchoReferenceWiringTests: XCTestCase {
             // position records no anchor rather than one at its start.
             handoff.submit(
                 [Float](repeating: 0.1, count: 300),
+                producer: .init(kind: .episodeTap, incarnation: 0),
                 sampleRate: PlaybackEchoReference.pipelineSampleRate,
                 renderedAt: MonotonicTime(round),
                 renderedFramesInProducer: 300,
@@ -2118,4 +2146,549 @@ private final class FixedMonotonicClock: MonotonicClock {
     private var time: MonotonicTime
     init(time: MonotonicTime) { self.time = time }
     func now() -> MonotonicTime { time }
+
+    /// A render position is converted through the block that CONTAINS it, not through the
+    /// latest append's origin.
+    ///
+    /// Two blocks from one producer are appended with an intervening append from another, so
+    /// the producer's second block does not start where its first ended in the reference. A
+    /// position observed inside the FIRST block must be placed against the first block's range;
+    /// using the newest append's origin would place it past the audio it describes.
+    func test_aProducerPositionIsMatchedToTheBlockThatContainsIt() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        // This producer's first block: producer-local frames 0..<400.
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: .init(kind: .episodeTap, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        let firstBlockStart = reference.streamIndex - 400
+
+        // Another producer appends between this producer's blocks, so a later block's origin
+        // is not simply this producer's first block end.
+        handoff.submit(
+            [Float](repeating: 0.2, count: 200),
+            producer: .init(kind: .cloud, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 11,
+            renderedFramesInProducer: 200,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+
+        // A position observed inside the FIRST block, arriving after the later appends.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 200,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            ),
+            producer: .init(kind: .episodeTap, incarnation: 0)
+        )
+        handoff.drain()
+
+        let anchor = reference.currentRenderAnchor
+        XCTAssertEqual(
+            Int(anchor?.renderedPipelineSamples ?? -1), firstBlockStart + 200,
+            "the position was not placed inside the block that contains it"
+        )
+    }
+
+    /// A position no retained block contains is recorded as ABSENT, not passed through.
+    ///
+    /// Passing it through would present a count in one producer's clock as a valid position in
+    /// the reference's, which reads as a real offset and places the window where nothing was
+    /// rendered. Absence is the honest answer and the consumer already handles it.
+    func test_aPositionNoBlockContainsRecordsNoAnchor() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: .init(kind: .episodeTap, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+
+        // Producer-local 9 000 is far outside the only block's range.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 9_000,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            ),
+            producer: .init(kind: .episodeTap, incarnation: 0)
+        )
+        handoff.drain()
+
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            "a position no block contains was passed through instead of recorded absent"
+        )
+    }
+
+    /// A position from an ended session is refused rather than matched against the new one.
+    func test_aPositionFromAnEndedSessionIsRefused() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: .init(kind: .episodeTap, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        handoff.reset()
+
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 200,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            ),
+            producer: .init(kind: .episodeTap, incarnation: 0)
+        )
+        handoff.drain()
+
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            "a position from an ended session landed in the new one"
+        )
+    }
+
+
+    /// Two producers with OVERLAPPING local ranges must not be confused for each other.
+    ///
+    /// Every producer counts from its own zero, so an earcon block spanning local 0..<400 and a
+    /// cloud block spanning local 0..<400 overlap exactly while describing different audio. A
+    /// match on the containing range alone selects whichever was appended last, which converts
+    /// the position through the other producer's block. Producer identity is what separates
+    /// them, and this case pins that it is used.
+    func test_overlappingProducerRangesDoNotSelectTheOtherProducersBlock() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        // The episode tap's block: local 0..<400, appended first.
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: .init(kind: .episodeTap, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        let episodeBlockStart = reference.streamIndex - 400
+
+        // The earcon's block: the SAME local range 0..<400, appended second.
+        handoff.submit(
+            [Float](repeating: 0.2, count: 400),
+            producer: .init(kind: .earcon, incarnation: 0),
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 11,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+
+        // A position in the EARCON's local clock, arriving last. With range-only matching this
+        // would be converted through whichever block was appended last, and the assertion
+        // below cannot tell that apart from a correct match — so the position is chosen to sit
+        // at the START of the earcon block, where the two candidate origins differ.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 0,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 11
+            ),
+            producer: .init(kind: .earcon, incarnation: 0)
+        )
+        handoff.drain()
+
+        let anchor = reference.currentRenderAnchor
+        XCTAssertNotEqual(
+            Int(anchor?.renderedPipelineSamples ?? -1), episodeBlockStart,
+            "the position was converted through the episode tap's block, which overlaps the earcon's local range"
+        )
+    }
+
+
+    /// A restarted producer of the SAME kind must not be matched to its own earlier incarnation.
+    ///
+    /// A node restart resets the frame counter to zero while the previous incarnation's ranges
+    /// are still retained in the same handoff generation. The kind alone cannot separate them:
+    /// a block from before the restart and one from after carry overlapping local ranges while
+    /// describing different audio. The incarnation token is what refuses the retired one.
+    func test_aRestartedProducerIsNotMatchedToItsEarlierIncarnation() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let before = EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 0)
+        let after = EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 1)
+
+        // The earlier incarnation's block: local 0..<400.
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: before,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        let beforeStart = reference.streamIndex - 400
+
+        // The restarted incarnation's block: the SAME local range, a new clock.
+        handoff.submit(
+            [Float](repeating: 0.2, count: 400),
+            producer: after,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 11,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        let afterStart = reference.streamIndex - 400
+
+        // An observation from the RETIRED incarnation arrives late. It must not be converted
+        // through the new incarnation's block, whose local range it also falls inside.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 200,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            ),
+            producer: before
+        )
+        handoff.drain()
+
+        let anchor = reference.currentRenderAnchor
+        XCTAssertNotEqual(
+            Int(anchor?.renderedPipelineSamples ?? -1), afterStart + 200,
+            "an observation from the retired incarnation was converted through the new one's block"
+        )
+        XCTAssertEqual(
+            Int(anchor?.renderedPipelineSamples ?? -1), beforeStart + 200,
+            "the observation was not placed against the incarnation that produced it"
+        )
+    }
+
+
+    /// A restart retires the earcon's previous identity, in ONE handoff generation.
+    ///
+    /// An earlier version reset the handoff after the restart, which made the case prove
+    /// nothing about rotation: `reset()` bumps the generation, the retained ranges no longer
+    /// match it, and a retired observation is rejected whether or not the producer rotated its
+    /// token. The rotation and the generation change are different mechanisms and a case that
+    /// trips both cannot attribute the outcome to either.
+    ///
+    /// This stays inside one generation. After the restart the producer publishes a block whose
+    /// LOCAL range overlaps its pre-restart block, so a range-only or kind-only match would
+    /// select the new block; only the incarnation separates them.
+    func test_aRestartRetiresTheEarconsPreviousIdentityWithinOneGeneration() throws {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let player = EarconPlayer(engine: AVAudioEngine())
+        player.handoff = handoff
+
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: EarconPlayer.earconFormat(sampleRate: 24_000),
+                frameCapacity: 800
+            )
+        )
+        buffer.frameLength = 800
+
+        // The live incarnation is read only through what it SUBMITS: publish a block, and let
+        // the handoff record which identity produced it.
+        player.loadForTesting(.listeningStart, buffer: buffer)
+        player.play(.listeningStart)
+        handoff.drain()
+        let afterFirstPublish = reference.streamIndex
+        XCTAssertGreaterThan(afterFirstPublish, 0, "the first publish recorded nothing")
+
+        // The restart. NO reset: the generation stays, so the only thing that can separate the
+        // two publishes is the incarnation.
+        player.stop()
+
+        // The restarted producer publishes again. Its node clock began at zero, so this block's
+        // producer-local range overlaps the first block's — which is what makes the two
+        // identities confusable without the token.
+        player.play(.listeningStart)
+        handoff.drain()
+        let afterSecondPublish = reference.streamIndex
+        XCTAssertGreaterThan(
+            afterSecondPublish, afterFirstPublish,
+            "the post-restart publish recorded nothing, so no second block exists to confuse"
+        )
+
+        // An observation carrying the PRE-restart local range. With correct rotation it belongs
+        // to no retained block of the CURRENT identity, so nothing is recorded; a token that
+        // never rotated would match the post-restart block, whose local range it also falls in.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 20
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 0)
+        )
+        handoff.drain()
+
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            """
+            an observation under the pre-restart incarnation was accepted inside the SAME \
+            generation, so the restart did not retire it: the token is compared but never \
+            rotated by the producer
+            """
+        )
+
+        // The positive check, which is what keeps this case from passing for the wrong
+        // reason: the SAME local range observed under the CURRENT incarnation must be
+        // accepted and placed in that block's range. Without it, a nil here would be
+        // equally consistent with the lookup refusing everything — including valid
+        // current observations — and the case could not tell retirement from breakage.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 30
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 1)
+        )
+        handoff.drain()
+
+        guard let currentAnchor = reference.currentRenderAnchor else {
+            XCTFail("a CURRENT-incarnation observation was refused, so the lookup is broken and the nil above proves nothing")
+            return
+        }
+        XCTAssertEqual(
+            Int(currentAnchor.renderedPipelineSamples), afterSecondPublish - 400 + 100,
+            "the current observation was not placed inside the block that contains it"
+        )
+    }
+
+    /// A real install/remove cycle retires the tap's previous identity.
+    ///
+    /// Observed through the handoff rather than the token: the tap publishes blocks, and a
+    /// position is matched only against a block of the SAME identity. Publishing, cycling the
+    /// tap, then submitting a position under the pre-cycle identity must record nothing — a
+    /// tap that did not rotate its token would match the retained pre-cycle block.
+    func test_aTapInstallCycleRetiresItsPreviousIdentity() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let engine = AVAudioEngine()
+        let tap = EpisodeOutputTap(engine: engine)
+        let before = tap.producerIdentity
+
+        // Install, so the tap's own placement is observable as well as its identity.
+        tap.install()
+        XCTAssertTrue(
+            tap.isInstalledOnOutputNode(engine.outputNode),
+            "the tap was not installed on the output node, so the cycle was not real"
+        )
+
+        // A block published under the pre-cycle identity.
+        handoff.submit(
+            [Float](repeating: 0.1, count: 400),
+            producer: before,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+        XCTAssertGreaterThan(reference.snapshot().count, 0, "the pre-cycle block was not retained")
+
+        // The cycle: remove and install again, which is where the clock resets.
+        tap.remove()
+        XCTAssertFalse(
+            tap.isInstalledOnOutputNode(engine.outputNode),
+            "the tap was still installed, so the cycle did not happen"
+        )
+        tap.install()
+
+        XCTAssertNotEqual(
+            tap.producerIdentity, before,
+            "an install cycle did not rotate the tap's identity: the token is compared but never rotated"
+        )
+        XCTAssertEqual(
+            tap.producerIdentity.kind, before.kind,
+            "the rotation changed the producer KIND, so it is no longer the same producer"
+        )
+    }
+
+
+    /// A position matched to a block whose samples have been TRIMMED is refused.
+    ///
+    /// The retained ranges are bounded at 32 entries while the reference ring is bounded at
+    /// `sampleRate * retainedSeconds`, and the two bounds are independent: 32 tap blocks can
+    /// span far more audio than the ring retains, and the ring drops from the front as it
+    /// fills. Without the residency check, a late observation matched a range whose samples
+    /// were already gone and recorded a confident offset against audio the window no longer
+    /// holds — the stale-anchor failure by a different door.
+    func test_aPositionMatchedToATrimmedBlockIsRefused() {
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 0.5, clock: FixedMonotonicClock(time: 1_000))
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        // Block 1: fills the ring (8 000 samples at 16 kHz x 0.5 s).
+        handoff.submit(
+            [Float](repeating: 0.1, count: 8_000),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 0),
+            sampleRate: 16_000,
+            renderedAt: 10,
+            renderedFramesInProducer: 8_000,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+
+        // Block 2: pushes block 1's samples out of the ring entirely.
+        handoff.submit(
+            [Float](repeating: 0.2, count: 8_000),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 0),
+            sampleRate: 16_000,
+            renderedAt: 11,
+            renderedFramesInProducer: 16_000,
+            producerBlockStart: 8_000
+        )
+        handoff.drain()
+
+        // A position inside BLOCK 1's producer-local range (0..<8000). It matches the
+        // retained range for that block, but the ring no longer holds any of its samples.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 4_000,
+                sourceSampleRate: 16_000,
+                hostTime: 10
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 0)
+        )
+        handoff.drain()
+
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            "a position whose audio was trimmed from the ring was recorded as a confident offset"
+        )
+
+        // The positive guard, the same shape the incarnation case uses: a position inside the
+        // RETAINED block (block 2) must still be accepted. Without it, a bug that refused
+        // every position would satisfy the assertion above.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 12_000,
+                sourceSampleRate: 16_000,
+                hostTime: 11
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 0)
+        )
+        handoff.drain()
+
+        let current = reference.currentRenderAnchor
+        XCTAssertNotNil(current, "a position inside the retained block was refused")
+        XCTAssertEqual(
+            Int(current?.renderedPipelineSamples ?? -1), 12_000,
+            "the retained block position was not placed where its audio sits"
+        )
+    }
+
+    /// A retired incarnation is refused BEFORE range lookup, within one generation — and a
+    /// current observation at the same local range is accepted.
+    ///
+    /// DRIVEN THROUGH THE PRODUCER'S REAL RESET: the earcon's `stop()` rotates its token and
+    /// reports the rotation to the handoff. The case never constructs an identity or calls
+    /// `rotateIncarnation` itself — deleting the report from `stop()` fails this case, which
+    /// is the property the hand-supplied version could not test.
+    ///
+    /// The reset is reported and the FIRST incarnation retires, but the retained block from
+    /// incarnation 0 remains resident. A late observation honestly carrying the RETIRED
+    /// incarnation still falls inside that retained block, so identity-and-range matching
+    /// alone would accept it — which is why the active-incarnation boundary must refuse it
+    /// before the lookup. The pre-restart block's audio is genuinely resident; the refusal is
+    /// about the clock the observation was made under, not about the audio.
+    func test_aRetiredIncarnationIsRefusedBeforeRangeLookup_andTheCurrentOneAccepted() throws {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let player = EarconPlayer(engine: AVAudioEngine())
+        player.handoff = handoff
+
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: EarconPlayer.earconFormat(sampleRate: 24_000),
+                frameCapacity: 800
+            )
+        )
+        buffer.frameLength = 800
+
+        // Incarnation 0: publish a block spanning local 0..<400.
+        player.loadForTesting(.listeningStart, buffer: buffer)
+        player.play(.listeningStart)
+        handoff.drain()
+        let firstPublishEnd = reference.streamIndex
+        XCTAssertGreaterThan(firstPublishEnd, 0, "the first publish recorded nothing")
+
+        // The identity in force BEFORE the reset, captured so the post-restart expectation can
+        // be derived from it rather than supplied: the reset must advance the incarnation by
+        // exactly one, and the case fails if it does not.
+        let identityBefore = player.currentIdentity
+
+        // The real reset: the producer stops, rotates, and reports to the handoff itself.
+        player.stop()
+
+        // A late observation under the RETIRED incarnation: its numbers fall inside the
+        // retained block, so only the active-incarnation boundary refuses it. Constructed by
+        // hand HERE — at the observation site, not at the producer — because the point is that
+        // the boundary accepts the producer's CURRENT identity and refuses anything else.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 20
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(
+                kind: identityBefore.kind,
+                incarnation: identityBefore.incarnation
+            )
+        )
+        handoff.drain()
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            "an observation under the retired incarnation was accepted"
+        )
+
+        // The CURRENT incarnation is what the producer now reports; publish again and observe
+        // under THAT identity. Both halves together: the retired is refused, the current is
+        // accepted and placed — a boundary that refuses everything cannot pass.
+        player.play(.listeningStart)
+        handoff.drain()
+
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 30
+            ),
+            producer: EchoReferenceHandoff.ProducerIdentity(
+                kind: identityBefore.kind,
+                incarnation: identityBefore.incarnation &+ 1
+            )
+        )
+        handoff.drain()
+        XCTAssertNotNil(
+            reference.currentRenderAnchor,
+            "the current incarnation's observation was refused along with the retired one"
+        )
+    }
+
 }

@@ -34,10 +34,25 @@ final class EpisodeOutputTap {
         self.engine = engine
     }
 
+    /// This producer's clock incarnation, rotated whenever the tap is (re)installed.
+    ///
+    /// The tap reports positions from the engine's own rendered clock, which returns to zero
+    /// when the tap is installed onto a fresh graph. An observation from before that reset
+    /// therefore carries the same numbers as one after it while describing different audio, so
+    /// the incarnation changes at the install and travels with every block this tap submits.
+    private var nodeIncarnation: UInt64 = 0
+
+    /// The identity every submission from this tap carries.
+    var producerIdentity: EchoReferenceHandoff.ProducerIdentity {
+        EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: nodeIncarnation)
+    }
+
     /// Installs the tap. Idempotent per engine instance: installing twice on the same bus
     /// replaces the first, and a replaced tap would silently stop feeding the reference.
     func install() {
         guard let engine else { return }
+        nodeIncarnation &+= 1
+        handoff?.rotateIncarnation(for: .episodeTap, to: nodeIncarnation)
         installedNode = engine.outputNode
         engine.outputNode.installTap(
             onBus: Self.bus,
@@ -53,6 +68,8 @@ final class EpisodeOutputTap {
     func remove() {
         engine?.outputNode.removeTap(onBus: Self.bus)
         installedNode = nil
+        nodeIncarnation &+= 1
+        handoff?.rotateIncarnation(for: .episodeTap, to: nodeIncarnation)
     }
 
     /// Whether the tap is installed on the output node rather than on a node inside the
@@ -138,6 +155,7 @@ final class EpisodeOutputTap {
 
         handoff.submit(
             mono,
+            producer: producerIdentity,
             sampleRate: buffer.format.sampleRate,
             renderedAt: hostInstant,
             renderedFramesInProducer: producerFrames,
