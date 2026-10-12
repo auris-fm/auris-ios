@@ -193,6 +193,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var liveOriginForRetry: () -> Int? { liveOriginProviderForRetry }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
+        // NOT AN ACCESSIBLE REPLAY PATH AFTER POSSIBLE SUBMISSION (@spec's constraint).
+        //
+        // Two conditions stand between a caller and a re-drive, and both must hold: the request must
+        // still be RETAINED (retired on use, dropped at session end), and its captured origin must
+        // equal the LIVE origin. A request prepared under a still-current window is therefore the
+        // only thing this can reach — and the caller is responsible for establishing eligibility,
+        // which today NO producer can, because this transport cannot report a frame as provably
+        // never submitted.
+        //
+        // So the API is deliberate but currently unreachable-in-practice: retaining it preserves the
+        // seam for the producer that does not yet exist, and it cannot be used to replay a turn
+        // whose window has moved on.
         // Refuse BEFORE `route()`, which is where `activeTurn.cancel()` and the output
         // registration happen: an absent or retired retry must not disturb a successor. Retiring
         // the entry on use also stops a second retry of the same turn re-driving it again.
