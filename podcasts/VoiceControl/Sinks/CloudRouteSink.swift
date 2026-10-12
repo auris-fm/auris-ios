@@ -103,6 +103,43 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// double-restore the pause.
     private var activeTurn: CloudTurnToken?
 
+    /// The last prepared logical request, retained so an EXPLICIT retry can re-drive it with the
+    /// same ids. Retaining the envelope rather than rebuilding it is what makes identity
+    /// preservation structural: a retry has no other source for its `request_id`.
+    private var lastPreparedTurn: CloudTurnEnvelope?
+    private var lastPreparedContext: CloudRouteContext?
+    private var lastPreparedRequest: String?
+
+    /// Re-drives the last prepared logical request, preserving its `request_id`, conversation id
+    /// and mode.
+    ///
+    /// **Only call this for a transport that dropped BEFORE admission.** The identity requirement
+    /// does not authorize replaying a turn after an unknown outcome: a turn whose admission may
+    /// have landed is not safe to resubmit, and the failure that reaches here must be one the
+    /// caller has established as pre-admission. That is why this is an explicit entry point rather
+    /// than a loop around `client.route`.
+    ///
+    /// Returns nil when there is nothing retained to re-drive, so a caller cannot mistake an
+    /// absent request for a successful retry.
+    func retryLastPreparedRequest() async -> CloudRouteResult? {
+        guard let turn = lastPreparedTurn,
+              let context = lastPreparedContext,
+              let request = lastPreparedRequest
+        else { return nil }
+        // Re-enters the single-attempt path with the RETAINED envelope, so the ids on the wire are
+        // the originals by construction. Passing the retained turn through means the retry cannot
+        // mint a fresh id even by mistake.
+        _ = context
+        return await route(
+            request: request,
+            tier: .unknown,
+            context: PlaybackContext.absent,
+            origin: nil,
+            selection: nil,
+            retainedTurn: turn      // the RETAINED envelope: same request_id, same conversation id
+        )
+    }
+
     /// Cancellation handle for one logical turn.
     final class CloudTurnToken {
         private let lock = NSLock()
@@ -184,12 +221,30 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
+    /// - Parameter retainedTurn: a previously prepared logical request to re-drive. Passed ONLY by
+    ///   `retryLastPreparedRequest`, so the ids on the wire are the originals rather than freshly
+    ///   minted — the identity requirement is then structural, not a convention each caller must
+    ///   remember.
     func routeToCloud(
         request: String,
         tier: CloudTier,
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?
+    ) async -> CloudRouteResult {
+        await route(request: request, tier: tier, context: context, origin: origin,
+                    selection: selection, retainedTurn: nil)
+    }
+
+    /// The shared body. `retainedTurn`, when present, is a previously prepared logical request
+    /// being re-driven, so its ids are the originals rather than freshly minted.
+    private func route(
+        request: String,
+        tier: CloudTier,
+        context: PlaybackContext,
+        origin: Int?,
+        selection: CloudConversationSelection?,
+        retainedTurn: CloudTurnEnvelope?
     ) async -> CloudRouteResult {
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -232,12 +287,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         activeTurn?.cancel()
         activeTurn = turnToken
 
-        let turn = CloudTurnEnvelope.make(
+        let turn = retainedTurn ?? CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
             recentConversation: recentConversationProvider(),
             conversation: conversation
         )
+        // Retained so an EXPLICIT retry can re-drive the SAME logical request. Holding the whole
+        // envelope is what makes identity preservation structural rather than a convention: a
+        // retry has nothing else to build an id from.
+        //
+        // There is deliberately NO blanket retry loop here. The identity requirement does not
+        // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
+        // before admission is safe to re-drive, and that decision belongs to an explicit caller.
+        lastPreparedTurn = turn
+        lastPreparedContext = routeContext
+        lastPreparedRequest = request
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's

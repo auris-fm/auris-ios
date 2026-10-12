@@ -221,6 +221,8 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
     ) async -> CloudRouteResult {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }
+
+    func retryLastPreparedRequest() async -> CloudRouteResult? { nil }
 }
 
 private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {

@@ -560,6 +560,8 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         lastSelection = selection
         return CloudRouteResult(response: response, outcome: outcome)
     }
+
+    func retryLastPreparedRequest() async -> CloudRouteResult? { nil }
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {
