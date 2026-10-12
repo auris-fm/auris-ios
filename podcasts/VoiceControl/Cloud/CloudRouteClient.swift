@@ -162,6 +162,11 @@ final class CloudRouteClient {
         // the connection held until the server's own idle timeout).
         defer { wsTask.cancel(with: .goingAway, reason: nil) }
 
+        // Whether this turn's request frame was actually handed to the socket. Everything below
+        // keys recovery on this and not on an error code: the code says what failed, not whether
+        // admission may already have happened.
+        var frameSubmitted = false
+
         do {
             // Send authentication frame. The task's text message is a String,
             // so the frame is serialized to JSON text here.
@@ -171,7 +176,11 @@ final class CloudRouteClient {
                 continuation.finish()
                 return true
             }
+            // SUBMISSION PROVENANCE. The flag is set only AFTER the send returns, so a failure
+            // before this line is a frame that provably never left — the sole case where automatic
+            // recovery cannot duplicate a turn. Anything past this line may have been admitted.
             try await wsTask.send(.string(authText))
+            frameSubmitted = true
 
             // Written by the receive loop and read by the timeout task, so the
             // flag is lock-protected rather than a plain `Bool` shared across
@@ -235,6 +244,14 @@ final class CloudRouteClient {
             return true
         } catch {
             if Task.isCancelled {
+                continuation.finish()
+                return true
+            }
+            // A failure BEFORE the send is a request that provably never left, so it is the one
+            // case automatic recovery may re-drive. After the send it may have been admitted, and
+            // the outcome is preserved rather than replayed.
+            if !frameSubmitted {
+                continuation.yield(.neverSubmitted(code: "connection_lost", message: ""))
                 continuation.finish()
                 return true
             }
