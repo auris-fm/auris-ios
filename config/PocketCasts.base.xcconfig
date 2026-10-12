@@ -12,7 +12,7 @@ PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris
 
 // The name the launcher shows. Configs that install alongside the base app
 // (staging, prototypes) override this so the two are distinguishable.
-APP_DISPLAY_NAME = Pocket Casts
+APP_DISPLAY_NAME = Auris
 
 DEVELOPMENT_TEAM = 6LL2R2A55F
 
