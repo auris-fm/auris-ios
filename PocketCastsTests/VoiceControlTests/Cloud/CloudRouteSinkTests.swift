@@ -551,45 +551,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// A refused stale turn must not disturb the successor's state. The refusal used to happen
-    /// AFTER the supersede block, so a stale dispatch cancelled a live successor, claimed
-    /// `activeTurn`, and left the sink pointing at a token nobody would complete — and the user
-    /// paused, because the turn also ran the auto-pause hold before refusing.
-    func testARefusedStaleTurnDoesNotCancelTheLiveSuccessor() async {
-        let sink = makeSink()
 
-        // A live turn takes the hold and becomes the active token.
-        _ = await sink.routeToCloud(
-            request: "live", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: .wakeWord
-        )
-
-        // A stale turn arrives: same origin, but the manager's live origin has moved on.
-        let manager = CloudConversationManager()
-        manager.registerLiveOrigin(cloudTestOrigin + 1)
-        let staleSink = CloudRouteSink(
-            clientFactory: {
-                CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "").client
-            },
-            playbackSink: playback,
-            fingerprintMapper: RecordingFingerprintMapper(),
-            playbackPositionMs: { 0 },
-            cloudPlaybackContextState: CloudPlaybackContextState(),
-            conversationManager: manager
-        )
-        playback.calls.removeAll()
-
-        let result = await staleSink.routeToCloud(
-            request: "stale", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: .followUp
-        )
-
-        XCTAssertEqual(result.outcome, .refused)
-        XCTAssertFalse(
-            playback.calls.contains(.pause),
-            "a refused stale turn took the auto-pause hold, so the user is left paused"
-        )
-    }
 
     private func sampleContext() -> PlaybackContext {
         PlaybackContext(
@@ -910,7 +872,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// `pendingFixture` handoff would let the second overwrite the first's.
     private var nextTurnFixture: String?
 
-    private func makeSink() -> CloudRouteSink {
+    private func makeSink(conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
@@ -932,7 +894,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
-            conversationManager: testConversationManager()
+            conversationManager: conversationManager ?? testConversationManager()
         )
     }
 
@@ -945,6 +907,63 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             recentReferencePositions: [],
             previousReferencePositionMs: nil
         )
+    }
+
+    /// A refused stale turn must not disturb the LIVE SUCCESSOR'S state, observed on ONE sink.
+    ///
+    /// The first version of this case used two sink instances and awaited the first turn to
+    /// completion, so it never held a live successor and could not observe `activeTurn`
+    /// cancellation at all — it passed while the defect it named was present. This one holds the
+    /// successor in flight on the same sink (through the gate the harness already provides) and
+    /// then dispatches the stale turn against that same sink.
+    func testARefusedStaleTurnDoesNotCancelTheHeldLiveSuccessor() async {
+        // The successor is held mid-turn: it has claimed activeTurn and is still running.
+        // The sink's manager is held so the live origin can MOVE while the successor is in
+        // flight — otherwise both turns share a live origin and the second is not stale at all,
+        // which is exactly how the first version of this case proved nothing.
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let gate = holdNextTurn()
+        let sink = makeSink(conversationManager: manager)
+
+        let live = Task {
+            await sink.routeToCloud(
+                request: "live", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord
+            )
+        }
+        // Give the live turn time to reach the socket and hold there. `Task.yield()` is not
+        // enough: the turn has to get through the pause hold and into the socket, which the
+        // sibling barge-in case does with a 200 ms sleep.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let heldTask = heldTurn?.task
+        XCTAssertNotNil(heldTask, "the live turn never reached the socket, so nothing was held")
+
+        // The window moves on while the successor is still in flight, so the next turn's
+        // captured origin is genuinely stale.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+
+        // The SAME sink now receives a turn whose origin is no longer live, while the held
+        // successor is genuinely in flight and owns `activeTurn`.
+        let staleResult = await sink.routeToCloud(
+            request: "stale", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp
+        )
+
+        XCTAssertEqual(staleResult.outcome, .refused)
+        // The successor's TURN TOKEN must still be live. Cancellation is a flag the running
+        // turn checks at its next event, so a held turn has not acted on it yet — asserting the
+        // flag is what separates "cancelled but not yet observed" from "never cancelled". The
+        // earlier version read the socket's close state instead, which stays nil either way while
+        // the turn is parked at the gate, and so could not detect the defect at all.
+        let successorCancelled = await MainActor.run { sink.activeTurnIsCancelledForTesting }
+        XCTAssertEqual(
+            successorCancelled, false,
+            "a refused stale turn cancelled the HELD LIVE SUCCESSOR's turn token"
+        )
+
+        gate.release()
+        _ = await live.value
     }
 }
 

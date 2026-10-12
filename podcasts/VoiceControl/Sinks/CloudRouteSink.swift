@@ -32,6 +32,14 @@ struct CloudRouteResult: Equatable {
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
 
+    /// The active turn's cancellation state, readable so a test can observe whether a refused
+    /// turn cancelled its predecessor. The cancellation is a FLAG the running turn checks at its
+    /// next event, so a held turn has not yet acted on it — reading the flag is what distinguishes
+    /// "cancelled but not yet observed" from "never cancelled".
+    /// Main-actor isolated like the rest of the sink: `activeTurn` is actor state, so the read
+    /// must be too. A test awaits it through `MainActor.run`.
+    var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
+
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }

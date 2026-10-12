@@ -243,6 +243,15 @@ class VoiceControlService: ObservableObject {
             }
             let epoch = self.transcriptEpoch
             let previous = self.transcriptSerialTask
+            // Capture the turn's origin and selection HERE, at the callback, BEFORE the Task is
+            // created — not inside `handleRoutingInput`, which runs only after this Task has
+            // awaited all previous work. A capture taken there is a capture taken AFTER the queue
+            // wait, which is the attribution error this exists to prevent: a turn that queued
+            // behind earlier work would be stamped with whatever window is current by the time it
+            // runs, and classified by the window state then rather than by what selected it.
+            let capturedOrigin = self.gracePeriodSignal.currentGeneration()
+            let capturedSelection: CloudConversationSelection =
+                self.gracePeriodSignal.isActive ? .followUp : .wakeWord
             let task = Task { [weak self] in
                 await previous?.value
                 guard !Task.isCancelled else { return }
@@ -251,7 +260,11 @@ class VoiceControlService: ObservableObject {
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
                 guard stillCurrent else { return }
-                await self.handleRoutingInput(input)
+                await self.handleRoutingInput(
+                    input,
+                    origin: capturedOrigin,
+                    selection: capturedSelection
+                )
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
@@ -350,23 +363,25 @@ class VoiceControlService: ObservableObject {
         await handleRoutingInput(.english(transcript: transcript))
     }
 
-    func handleRoutingInput(_ input: IntentRoutingInput) async {
+    /// - Parameters:
+    ///   - origin: the grace-window generation captured at the CALLBACK, before this turn queued.
+    ///     Not read here: by the time this runs, earlier work has completed and the window may
+    ///     have moved on.
+    ///   - selection: what selected the turn, captured at the same moment and for the same
+    ///     reason.
+    func handleRoutingInput(
+        _ input: IntentRoutingInput,
+        origin: Int? = nil,
+        selection: CloudConversationSelection? = nil
+    ) async {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
 
-        // The turn's origin and selection are captured HERE, with the input, and carried
-        // through routing. Reading them after the routing work returns would stamp the turn with
-        // whatever window is current *then* — so a turn that waited in the queue, or one whose
-        // window closed while it was being classified, would be attributed to a session it never
-        // belonged to. The selection is captured for the same reason: whether a wake or a
-        // follow-up selected this turn is a fact about the input, not about the state after the
-        // wait.
-        let capturedOrigin = gracePeriodSignal.currentGeneration()
-        let capturedSelection: CloudConversationSelection =
-            gracePeriodSignal.isActive ? .followUp : .wakeWord
+        let capturedOrigin = origin
+        let capturedSelection = selection
 
         // A bare wake is not a question: neither routed nor escalated, and it must
         // not spend the window's one dispatch. Without per-token timestamps ASR
