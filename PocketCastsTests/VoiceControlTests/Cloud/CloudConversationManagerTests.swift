@@ -183,16 +183,32 @@ final class CloudConversationManagerTests: XCTestCase {
     /// are identical — both arrive with `isActive == true` — so the distinction has to travel
     /// with the input, which is what this pins. The mutation it catches is a live `isActive`
     /// read: under that, this wake would be classified a follow-up and resume.
-    func testAWakeDuringActiveGraceStillCreates() {
+    func testAWakeDuringActiveGraceStillCreates() throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(1)
 
-        // The window is already open (grace active) when the wake fires.
-        let prepared = manager.prepare(selection: .wakeWord, origin: 1)
+        // A conversation must ALREADY EXIST, or "create" is inevitable and the case proves
+        // nothing — it would pass whether or not the wake rule is honoured. Opening a
+        // follow-up first puts a conversation in place that a wake could wrongly resume.
+        let existing = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: 1),
+            "the setup conversation was refused"
+        )
+        XCTAssertEqual(existing.mode, "create", "the first turn of a window creates")
+        let resumed = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1))
+        XCTAssertEqual(resumed.mode, "resume", "setup precondition: the conversation is open")
+        XCTAssertEqual(resumed.conversationId, existing.conversationId)
+
+        // Now a WAKE fires while that conversation is open and grace is active.
+        let afterWake = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
 
         XCTAssertEqual(
-            prepared?.mode, "create",
-            "a wake during active grace resumed instead of creating a new conversation"
+            afterWake.mode, "create",
+            "a wake during active grace resumed an open conversation instead of creating"
+        )
+        XCTAssertNotEqual(
+            afterWake.conversationId, existing.conversationId,
+            "a wake resumed the open conversation rather than starting a new one"
         )
     }
 
