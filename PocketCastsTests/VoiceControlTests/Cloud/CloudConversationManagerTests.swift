@@ -139,6 +139,33 @@ final class CloudConversationManagerTests: XCTestCase {
         XCTAssertEqual((context?["client_position_ms"] as? NSNumber)?.int64Value, 1_100)
     }
 
+    /// The frame must carry the PREPARED `request_id`, not one minted at serialization time.
+    /// A retry reuses the manager's prepared request; if the builder replaces its id, the server
+    /// sees a second logical turn and the reuse is defeated at the last step.
+    func testFrameCarriesThePreparedRequestId() throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(1)
+        let prepared = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
+
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
+            )
+        )
+
+        XCTAssertEqual(
+            frame["request_id"] as? String, prepared.requestId,
+            "the frame minted its own request_id instead of serializing the prepared one"
+        )
+        XCTAssertEqual(frame["conversation_id"] as? String, prepared.conversationId)
+        XCTAssertEqual(frame["conversation_mode"] as? String, "create")
+    }
+
     func testModeIsAlwaysLowercase() throws {
         for selection in [CloudConversationSelection.wakeWord, .followUp] {
             let prepared = try XCTUnwrap(manager.prepare(selection: selection, origin: 1))

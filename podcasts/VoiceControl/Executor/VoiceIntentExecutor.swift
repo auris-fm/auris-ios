@@ -186,9 +186,10 @@ class VoiceIntentExecutor {
                 request: cr.request,
                 tier: cr.tier,
                 context: context,
-                // The captured origin, not a live one: the turn belongs to the window it was
-                // issued under, and the conversation bound is expressed in that window.
-                origin: cr.generation
+                // The captured origin and selection, not live ones: the turn belongs to the
+                // window and the selection it was issued under.
+                origin: cr.generation,
+                selection: cr.selection
             )
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the

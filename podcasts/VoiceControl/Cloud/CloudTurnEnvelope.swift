@@ -156,7 +156,11 @@ enum CloudRouteRequestBuilder {
         var payload: [String: Any] = [
             "request": request,
             "context": contextObject,
-            "request_id": turn.requestId,
+            // The PREPARED request id when there is one. A retry of the same logical turn must
+            // present the same `request_id`, so minting a fresh one here would make the server
+            // see a second logical turn — which is what the manager's retry branch exists to
+            // avoid, and it would be defeated at the last step.
+            "request_id": turn.conversation?.requestId ?? turn.requestId,
         ]
         // The admission contract requires both on EVERY turn, first included. Carried at
         // the top level rather than inside `context`, and independent of episode

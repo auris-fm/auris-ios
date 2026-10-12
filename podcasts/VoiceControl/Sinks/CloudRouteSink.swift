@@ -175,7 +175,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         request: String,
         tier: CloudTier,
         context: PlaybackContext,
-        origin: Int?
+        origin: Int?,
+        selection: CloudConversationSelection?
     ) async -> CloudRouteResult {
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
@@ -205,7 +206,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // rather than sent with a replacement the user never opened. A replacement would also
         // take the live window's own conversation, stranding the follow-up that belonged to it.
         guard let conversation = conversationManager.prepare(
-            selection: conversationSelectionProvider(),
+            // The captured selection when the caller supplied one; the provider is the fallback
+            // for callers that did not, which is the late-reading behaviour this replaces.
+            selection: selection ?? conversationSelectionProvider(),
             origin: origin
         ) else {
             restoreTransientAudioState()

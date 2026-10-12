@@ -357,6 +357,17 @@ class VoiceControlService: ObservableObject {
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
 
+        // The turn's origin and selection are captured HERE, with the input, and carried
+        // through routing. Reading them after the routing work returns would stamp the turn with
+        // whatever window is current *then* — so a turn that waited in the queue, or one whose
+        // window closed while it was being classified, would be attributed to a session it never
+        // belonged to. The selection is captured for the same reason: whether a wake or a
+        // follow-up selected this turn is a fact about the input, not about the state after the
+        // wait.
+        let capturedOrigin = gracePeriodSignal.currentGeneration()
+        let capturedSelection: CloudConversationSelection =
+            gracePeriodSignal.isActive ? .followUp : .wakeWord
+
         // A bare wake is not a question: neither routed nor escalated, and it must
         // not spend the window's one dispatch. Without per-token timestamps ASR
         // keeps the wake phrase in the transcript, so this is where that case is
@@ -395,7 +406,11 @@ class VoiceControlService: ObservableObject {
                     request: route.request,
                     tier: route.tier,
                     origin: route.origin,
-                    generation: gracePeriodSignal.currentGeneration()
+                    // The origin captured with the INPUT, not read here: this point is after the
+                    // routing work, so a live read would attribute the turn to whichever window
+                    // happens to be current now.
+                    generation: capturedOrigin,
+                    selection: capturedSelection
                 )
             }
 

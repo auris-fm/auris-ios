@@ -229,6 +229,28 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// The selection the turn was created with must reach the sink, not be re-read there. A
+    /// re-read happens after routing, so a queued turn would be classified by whatever the
+    /// window looks like later rather than by what selected it.
+    func test_execute_forwardsTheCapturedSelectionToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "and then",
+            tier: .unknown,
+            generation: generation,
+            selection: .followUp
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastSelection, .followUp,
+            "the sink did not receive the selection captured with the input"
+        )
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)
@@ -523,14 +545,19 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The captured origin the executor passed, so a case can assert the turn carries the
     /// window it was dispatched under rather than a live one.
     var lastOrigin: Int?
+    /// The selection the executor captured, so a case can assert the turn carries what selected
+    /// it rather than whatever the window looks like later.
+    var lastSelection: CloudConversationSelection?
 
     func routeToCloud(
-        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?
+        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
+        selection: CloudConversationSelection?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
         lastOrigin = origin
+        lastSelection = selection
         return CloudRouteResult(response: response, outcome: outcome)
     }
 }
