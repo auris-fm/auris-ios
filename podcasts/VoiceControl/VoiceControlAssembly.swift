@@ -138,6 +138,14 @@ class VoiceControlAssembly {
                 conversationSelectionProvider: { [weak gracePeriodSignal] in
                     // A wake opens a window; a recognised command continues the current one.
                     (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
+                },
+                // The PRODUCTION binding for retry liveness. The same source that registers the
+                // conversation manager's live origin supplies the retry validator, so a retry can
+                // only re-drive a request whose window is still the current one — and when no
+                // window is live, `nil` makes it refuse rather than guess.
+                liveOriginForRetry: { [weak gracePeriodSignal] in
+                    guard let gracePeriodSignal, gracePeriodSignal.isActive else { return nil }
+                    return gracePeriodSignal.currentGeneration()
                 }
             ),
             playbackContextProvider: playbackContextProvider,

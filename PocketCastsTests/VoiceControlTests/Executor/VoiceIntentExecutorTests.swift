@@ -562,6 +562,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? { nil }
+    func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation) {}
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {

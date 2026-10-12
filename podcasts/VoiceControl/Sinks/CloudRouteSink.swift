@@ -171,7 +171,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// correct default while the owner is unwired: a retry that cannot establish its window must
     /// not re-drive, and failing closed is what makes the missing wiring visible instead of
     /// letting unowned retries through.
-    var liveOriginForRetry: () -> Int? = { nil }
+    private let liveOriginProviderForRetry: () -> Int?
+
+    /// The origin a retry must still belong to. Bound in production to the same source that
+    /// registers the conversation manager's live origin, so a retry can only re-drive a request
+    /// whose window is still current.
+    var liveOriginForRetry: () -> Int? { liveOriginProviderForRetry }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
         // Refuse BEFORE `route()`, which is where `activeTurn.cancel()` and the output
@@ -252,12 +257,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
-        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
+        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
+        /// Supplied by the assembly. Defaults to `nil`, which makes every retry refuse — the
+        /// correct default for a sink with no owner bound.
+        liveOriginForRetry: @escaping () -> Int? = { nil }
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
+        self.liveOriginProviderForRetry = liveOriginForRetry
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper

@@ -223,6 +223,7 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
     }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? { nil }
+    func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation) {}
 }
 
 private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {
