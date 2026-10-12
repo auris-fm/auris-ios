@@ -79,11 +79,23 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         //
         // The assembly's segmenter uses threshold 0.020, so the speech frames sit well above it,
         // and the silence tail is genuinely silent rather than merely quieter.
-        let speech = [Float](repeating: 0.05, count: 16_000)          // 1s at 16 kHz, above threshold
-        let silence = [Float](repeating: 0.0, count: 16_000)          // 1s of silence
-        capture.emit(samples: speech, at: nil)
-        capture.emit(samples: silence, at: nil)
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        // ONE FRAME PER CALL, because `minSpeechFrames` counts CALLS, not samples. The segmenter
+        // confirms speech only after 5 consecutive above-threshold frames, so a single large
+        // buffer is one frame and can never trigger — which is why the previous fixture produced
+        // no turn regardless of the envelope. The capture delivers buffer-sized chunks, so this
+        // matches what the real one does.
+        let frameSize = 1_600                                            // 100 ms at 16 kHz
+        for _ in 0..<20 {                                                // 2s of speech: > 5 frames
+            capture.emit(samples: [Float](repeating: 0.05, count: frameSize), at: nil)
+        }
+        // The silence window is WALL-CLOCK (`Date()`), not sample count, so the quiet frames have
+        // to be spread across real time. Delivering them back-to-back elapses microseconds and the
+        // 500 ms condition never becomes true — which is why the segment never emitted.
+        for _ in 0..<8 {                                                 // 800 ms of real silence
+            capture.emit(samples: [Float](repeating: 0.0, count: frameSize), at: nil)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
     }
 
     @MainActor
@@ -137,7 +149,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // read as covering the callback.
         await driveRegisteredCallback(capture: capture)
 
-        let delivered = await MainActor.run { sink.lastSelectionForTesting }
+        // The escalation runs on the service's SERIAL task, which is still awaiting routing when
+        // the emits return. Polling for the turn rather than checking once is what makes this a
+        // measurement of the path instead of a race with it.
+        var delivered: CloudConversationSelection?
+        let turnDeadline = Date().addingTimeInterval(10)
+        while Date() < turnDeadline {
+            delivered = await MainActor.run { sink.lastSelectionForTesting }
+            if delivered != nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
         if delivered == nil {
             XCTFail(
                 "the registered callback path produced no turn, so the provenance has not been "
