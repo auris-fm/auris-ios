@@ -20,6 +20,55 @@ final class FakeAudioCapture: AudioCaptureSource {
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
 final class ServiceSelectionProvenanceTests: XCTestCase {
+    /// The PRODUCTION FALLBACK repair, covered on its own.
+    ///
+    /// This is separate from the registered-callback case on purpose: converting that case to the
+    /// registered path REMOVED the only coverage this repair had, which is worse than the
+    /// misleading pass the conversion was meant to avoid. Coverage has to be added to, not moved.
+    ///
+    /// It asserts the repair directly — the input's own provenance is honoured when the caller
+    /// passes no parameter — so reverting `selection ?? input.selection` fails it.
+    @MainActor
+    func testTheInputProvenanceIsHonouredWhenTheParameterIsAbsent() async throws {
+        let capture = FakeAudioCapture()
+        let assembly = VoiceControlAssembly()
+        guard let service = assembly.buildVoiceControlService(capture: capture) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(
+            service.isListening,
+            "the gate did not reach .listening, so the handler would return at its own guard"
+        )
+
+        let readyDeadline = Date().addingTimeInterval(20)
+        while Date() < readyDeadline {
+            if service.intentRouterIsReadyForTesting { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try XCTSkipUnless(service.intentRouterIsReadyForTesting, "the router never became ready")
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "the window did not open")
+
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        // The PARAMETER is deliberately omitted: that is the caller shape the repair exists for.
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "what did the host mean by that remark",
+                selection: .wakeWord
+            )
+        )
+
+        let reached = await MainActor.run { sink.lastSelectionForTesting }
+        XCTAssertEqual(
+            reached, .wakeWord,
+            "the input's own provenance was discarded when no parameter was passed, so the turn "
+                + "fell through to the sink's live-state provider"
+        )
+    }
+
     /// Delivers audio through the capture so the REAL registered path runs rather than a direct
     /// handler call.
     private func driveRegisteredCallback(capture: FakeAudioCapture) async {
