@@ -53,7 +53,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
+        XCTAssertEqual(response.response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertTrue(playback.calls.contains(.pause))
         XCTAssertTrue(playback.calls.contains(.resume), "done must restore turn-owned auto-pause")
         XCTAssertEqual(playback.calls.filter { $0 == .seekTo(1200) }.count, 1)
@@ -81,7 +81,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .silent, "cloud answers are played as audio, not spoken")
+        XCTAssertEqual(response.response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertEqual(playback.calls.first, .pause)
         XCTAssertEqual(playback.calls.last, .resume)
         XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1)
@@ -109,7 +109,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .silent)
+        XCTAssertEqual(response.response, .silent)
         XCTAssertFalse(playback.calls.contains(.pause), "the user's own pause is not ours to retake")
         XCTAssertFalse(playback.calls.contains(.resume), "the user asked for it to stop; the turn must not undo that")
     }
@@ -154,7 +154,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .silent)
+        XCTAssertEqual(response.response, .silent)
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
         XCTAssertTrue(playback.calls.contains(.seekTo(900)))
         XCTAssertTrue(playback.calls.contains(.resume))
@@ -182,7 +182,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             context: sampleContext()
         )
 
-        XCTAssertEqual(response, .silent)
+        XCTAssertEqual(response.response, .silent)
         XCTAssertTrue(playback.calls.contains(.seekRelative(15, .forward)))
         // Previous position must be captured so "go back to where I was" works.
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 1)
@@ -268,7 +268,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
-        XCTAssertEqual(response, .spoken("rate limited"))
+        XCTAssertEqual(response.response, .spoken("rate limited"))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
         XCTAssertTrue(playback.calls.contains(.resume))
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
@@ -556,7 +556,85 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             previousReferencePositionMs: nil
         )
     }
+    // MARK: - Terminal outcome
+    //
+    // The turn's OUTCOME must be reported separately from how it is rendered. A spoken
+    // error and a silent success are both "no earcon", so any caller deciding what
+    // happened from the response shape gets these exactly backwards — which is how a
+    // failed turn was recorded as a completed cloud route and reopened the grace window.
+
+    func testDoneReportsCompleted() async {
+        self.pendingFixture = """
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+        """
+        let result = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext()
+        )
+        XCTAssertEqual(result.outcome, .completed)
+    }
+
+    func testSpokenServerErrorReportsFailureNotCompletion() async {
+        // An error with a localized line renders as .spoken — the response shape that
+        // the executor previously read as a completed cloud route.
+        self.pendingFixture = """
+        event: error
+        data: {"code":"rate_limited","message":"slow down"}
+
+        """
+        defaults.set("de", forKey: "AppleLanguages")   // a locale with a spoken template
+        let result = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext()
+        )
+        XCTAssertNotEqual(
+            result.outcome, .completed,
+            "a spoken server error was reported as a completed turn"
+        )
+        XCTAssertEqual(result.outcome, .failed(code: "rate_limited"))
+    }
+
+    func testStreamEndWithoutDoneReportsEarlyCloseNotCompletion() async {
+        // A stream that closes after tokens but never sends `done` is a truncated turn.
+        self.pendingFixture = """
+        event: token
+        data: {"text":"partial"}
+
+        """
+        let result = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext()
+        )
+        // The client surfaces a truncated stream as an explicit transport failure, so the
+        // outcome may be `failed(connection_lost)` rather than a bare early close. What
+        // must hold either way is that it is NOT a completion: an ended stream that never
+        // sent `done` must not restore the allowance as though the model answered.
+        XCTAssertNotEqual(
+            result.outcome, .completed,
+            "a stream that ended without done was reported as a completed turn"
+        )
+        if case .earlyClose = result.outcome {
+            // reached only when the client reports the close without a code
+        } else {
+            XCTAssertEqual(
+                result.outcome, .failed(code: "connection_lost"),
+                "an unterminated stream was classified as neither an early close nor a "
+                    + "transport failure: \(result.outcome)"
+            )
+        }
+    }
+
+    func testUnconfiguredReportsRefusedNotCompletion() async {
+        defaults.removeObject(forKey: CloudConfig.baseURLKey)
+        let result = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext()
+        )
+        XCTAssertEqual(
+            result.outcome, .refused,
+            "the coming-soon refusal was reported as a completed cloud turn"
+        )
+    }
 }
+
 
 private final class RecordingPlaybackSink: VoicePlaybackSink {
     /// Host playing at the moment the turn reads it. `pause()` and `resume()`
@@ -859,7 +937,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
-        XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
+        XCTAssertEqual(response.response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
     }
 
     func testCodeWithoutATemplateUsesTheErrorEarcon() async {
@@ -871,7 +949,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
-        XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
+        XCTAssertEqual(response.response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
     }
 
     private func makeSink() -> CloudRouteSink {
@@ -960,7 +1038,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
         let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
-        XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
+        XCTAssertEqual(response.response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
     }
 
     /// The default resolver discovers the user's own locale: in this test host that
@@ -978,7 +1056,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         // The test host's own bundle carries the en.lproj translation.
         let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
         let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
-        XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
+        XCTAssertEqual(response.response, .spoken("Connection lost. Please try again."))
     }
 }
 
@@ -1030,7 +1108,7 @@ final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
 
         let response = await sink.routeToCloud(request: "x", tier: .free, context: context)
 
-        XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
+        XCTAssertEqual(response.response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
     }
 }
 
@@ -1071,5 +1149,6 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
         // without resting on Foundation's script inference (PR #19 review).
         let resolver = SpokenTemplateResolver(locale: Locale(identifier: "fr-FR"))
         XCTAssertEqual(resolver.resolvedLocalization, "fr", "the bare-language candidate finds the shipped fr bundle")
-    }
+
+}
 }

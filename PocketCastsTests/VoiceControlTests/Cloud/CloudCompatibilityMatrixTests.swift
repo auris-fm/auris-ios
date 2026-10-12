@@ -43,7 +43,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
-        XCTAssertEqual(response, .spoken("token expired"))
+        XCTAssertEqual(response.response, .spoken("token expired"))
         XCTAssertTrue(playback.calls.contains(.resume), "the turn restores playback after a mid-session failure")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
     }
@@ -63,7 +63,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
         // `unauthorized` has no user-facing template, so the failure signal is
         // the error earcon — never silence, and never English prose for TTS.
-        XCTAssertEqual(response, .earcon(.error))
+        XCTAssertEqual(response.response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.resume))
     }
 
@@ -102,7 +102,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         // Asserting those two exact values (never `.silent`) keeps this pin able to
         // fail if the turn ever regressed to silence (PR #19 review).
         XCTAssertTrue(
-            response == .spoken("Connection lost. Please try again.") || response == .earcon(.error),
+            response.response == .spoken("Connection lost. Please try again.") || response.response == .earcon(.error),
             "expected a locale-appropriate failure signal, got \(response)"
         )
     }

@@ -215,8 +215,8 @@ private final class IntegrationPlaybackSink: VoicePlaybackSink {
 }
 
 private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
-        .spoken("Cloud response")
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> CloudRouteResult {
+        CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }
 }
 

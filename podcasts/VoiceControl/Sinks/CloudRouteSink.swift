@@ -6,6 +6,29 @@ import PocketCastsUtils
 /// Cloud answers arrive as synthesised audio streamed over the WebSocket; the
 /// client plays them directly through the shared audio output path. Text
 /// accumulation (`.token`) is removed — cloud answers are played, not spoken.
+/// How a cloud turn actually ended, reported separately from how it was rendered.
+///
+/// The rendered response cannot carry this: a spoken server error and a silent success
+/// are both "no earcon", so a caller deciding what happened from the response shape gets
+/// them backwards — which is how a failed turn was recorded as a completed cloud route
+/// and reopened the grace window for a turn that never happened.
+enum CloudRouteOutcome: Equatable {
+    /// The server sent `done`: the turn completed.
+    case completed
+    /// The server reported an error, or the route could not be dialled.
+    case failed(code: String?)
+    /// The stream ended without `done`: a truncated turn, not a completion.
+    case earlyClose
+    /// Cloud is not configured, so no turn was attempted.
+    case refused
+}
+
+/// A turn's terminal outcome together with the feedback it rendered.
+struct CloudRouteResult: Equatable {
+    let response: VoiceResponse
+    let outcome: CloudRouteOutcome
+}
+
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
 
@@ -135,12 +158,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> CloudRouteResult {
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
             let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
-            return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
+            return CloudRouteResult(
+                response: comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon),
+                outcome: .refused
+            )
         }
 
         let client = clientFactory()
@@ -229,7 +255,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 audioPlayer.finish()
-                return .silent
+                return CloudRouteResult(response: .silent, outcome: .completed)
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
@@ -248,18 +274,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
                 if spoken.isEmpty {
-                    return .earcon(.error)
+                    return CloudRouteResult(response: .earcon(.error), outcome: .failed(code: code))
                 }
-                return .spoken(spoken)
+                return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
             }
         }
 
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics.
-            return .silent
+            // The superseding turn owns pause/restore and analytics. Superseded is not a
+            // completion: the winner's turn decides the window, and reporting this one as
+            // completed would let a turn that was cancelled mid-stream reopen it.
+            return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
         restoreTransientAudioState()
-        return .silent
+        // The stream ended without `done`: the turn was truncated, which is not a
+        // completion and must not restore the allowance as though the model answered.
+        return CloudRouteResult(response: .silent, outcome: .earlyClose)
     }
 
     private func restoreTransientAudioState() {

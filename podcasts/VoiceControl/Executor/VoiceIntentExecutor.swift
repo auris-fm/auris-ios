@@ -150,6 +150,9 @@ class VoiceIntentExecutor {
 
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
         let response: VoiceResponse
+        // Set only by the cloud branch. Every other intent leaves it nil, so the generic
+        // response-shape rule below is untouched for them.
+        var cloudOutcome: CloudRouteOutcome?
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
         case let e as EffectsIntent: response = executeEffects(e)
@@ -165,11 +168,17 @@ class VoiceIntentExecutor {
                 response = .earcon(.error)
                 break
             }
-            response = await cloudRouteSink.routeToCloud(
+            let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
                 context: context
             )
+            response = result.response
+            // Carried out of the switch rather than inferred from `response` below: the
+            // rendered feedback cannot say what happened (a spoken error and a silent
+            // success are both "no earcon"), and reading it as the outcome is how a
+            // failed turn was recorded as a completed cloud route.
+            cloudOutcome = result.outcome
         default: response = .earcon(.error)
         }
 
@@ -177,7 +186,42 @@ class VoiceIntentExecutor {
         analytics?.recordCommand(intent, response: response)
 
         // Start grace period after any successful (non-error) command
-        if case .earcon(.error) = response {
+        if let outcome = cloudOutcome {
+            // The cloud turn's outcome decides this, not the response it rendered.
+            switch outcome {
+            case .completed:
+                break   // falls through to the window decision below
+            case .failed, .earlyClose, .refused:
+                FileLog.shared.addMessage("[VoicePipeline] Cloud turn did not complete — no grace period")
+                return response
+            }
+            guard let route = intent as? CloudRouteIntent else { return response }
+            // Only a turn the server completed reaches the window decision. A window
+            // without a generation cannot be attributed to any session, so it changes
+            // no grace state rather than falling through to the generic reset.
+            guard let generation = route.generation else {
+                FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
+                return response
+            }
+            switch route.origin {
+            case .modelCall:
+                // Restores the allowance, but only inside its own window. One atomic
+                // operation: checking then resetting separately leaves a gap in which
+                // a privacy close could be undone.
+                if gracePeriodSignal.recognizeCommandIfCurrentWindow(generation) {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud turn completed — grace period")
+                } else {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud turn completed for an ended window — ignored")
+                }
+            case .routingFailure:
+                // The conversation continues, but only for the window that issued
+                // this dispatch, and without restoring the allowance that permitted
+                // it (shared contract with Android).
+                FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
+                gracePeriodSignal.extendWindowKeepingEscalationSpent(underGeneration: generation)
+            }
+            return response
+        } else if case .earcon(.error) = response {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
         } else if let route = intent as? CloudRouteIntent {
             // A cloud completion may only touch the window it was issued under, so
