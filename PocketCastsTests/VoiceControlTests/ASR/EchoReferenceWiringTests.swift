@@ -2133,82 +2133,6 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
-}
-
-// MARK: - Harness
-
-/// Wires the engine the way `VoiceControlAssembly` does, so these cases exercise the
-/// production construction rather than a bespoke one.
-/// A stand-in for an audio node, so a placement record can be asserted without building an
-/// `AVAudioEngine`. Constructing an engine interferes with the process audio session that
-/// `NativeAudioCapture` activates, which makes a neighbouring case fail on shared state
-/// rather than on its own logic.
-/// A real, constructible audio node used as a stand-in for the output node.
-///
-/// **Not a subclass of `AVAudioNode`.** A subclass with no stored properties compiles but
-/// produces an unusable instance, because `AVAudioNode`'s initialiser is unavailable and the
-/// object comes back empty — which made an earlier version of the placement case compare
-/// `nil` against `nil`, report a placement before install, and fail for a reason unrelated to
-/// the code. A mixer node is a real node and is constructible.
-private func makeTestAudioNode() -> AVAudioNode {
-    AVAudioMixerNode()
-}
-
-
-private final class EchoWiringHarness {
-    let engine: VoiceAsrEngine
-    let backend = CountingAsrBackend()
-    let wakeWordDetector = RecordingWakeWordDetector()
-    let gracePeriodSignal = GracePeriodSignal()
-
-    let reference = PlaybackEchoReference()
-
-    init() {
-        engine = VoiceAsrEngine(
-            capture: NativeAudioCapture(),
-            segmenter: NativeVadSegmenter(threshold: 0.020),
-            backend: backend,
-            signalFilter: SignalFilter(),
-            wakeWordDetector: wakeWordDetector,
-            gracePeriodSignal: gracePeriodSignal
-        )
-        // Mirror production: the engine always has a reference once wired, so the
-        // route-scope cases exercise the same path the app does.
-        engine.setEchoReference(reference)
-    }
-}
-
-private final class CountingAsrBackend: AsrBackend {
-    private(set) var transcribeSamples: [[Float]] = []
-    var requiredModel: ModelSpec {
-        ModelSpec(id: "test", files: [], targetDir: "/tmp/test")
-    }
-    var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
-    }
-    func ensureReady() async -> Result<Void, Error> { .success(()) }
-    func release() {}
-    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
-        transcribeSamples.append(samples)
-        return AsrResult(text: "test", detectedLanguage: "en")
-    }
-}
-
-private final class RecordingWakeWordDetector: WakeWordDetectorProtocol {
-    private(set) var detectCount = 0
-    func release() {}
-    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
-        detectCount += 1
-        return .notDetected(confidence: 0)
-    }
-}
-
-
-/// A determinate clock, so alignment cases assert an instant rather than observe one.
-private final class FixedMonotonicClock: MonotonicClock {
-    private var time: MonotonicTime
-    init(time: MonotonicTime) { self.time = time }
-    func now() -> MonotonicTime { time }
 
     /// A render position is converted through the block that CONTAINS it, not through the
     /// latest append's origin.
@@ -2331,7 +2255,6 @@ private final class FixedMonotonicClock: MonotonicClock {
         )
     }
 
-
     /// Two producers with OVERLAPPING local ranges must not be confused for each other.
     ///
     /// Every producer counts from its own zero, so an earcon block spanning local 0..<400 and a
@@ -2386,7 +2309,6 @@ private final class FixedMonotonicClock: MonotonicClock {
             "the position was converted through the episode tap's block, which overlaps the earcon's local range"
         )
     }
-
 
     /// A restarted producer of the SAME kind must not be matched to its own earlier incarnation.
     ///
@@ -2447,7 +2369,6 @@ private final class FixedMonotonicClock: MonotonicClock {
         )
     }
 
-
     /// A restart retires the earcon's previous identity, in ONE handoff generation.
     ///
     /// An earlier version reset the handoff after the restart, which made the case prove
@@ -2488,13 +2409,32 @@ private final class FixedMonotonicClock: MonotonicClock {
         // The restarted producer publishes again. Its node clock began at zero, so this block's
         // producer-local range overlaps the first block's — which is what makes the two
         // identities confusable without the token.
+        //
+        // Submitted with its range directly: the earcon no longer reports a scheduling origin it
+        // cannot establish, so its own publishes carry no range and nothing could be matched
+        // under ANY identity — the case would then fail for a reason unrelated to the token.
         player.play(.listeningStart)
+        handoff.drain()
+        handoff.submit(
+            Array(repeating: 0.25, count: 400),
+            producer: player.currentIdentity,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 20,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
         handoff.drain()
         let afterSecondPublish = reference.streamIndex
         XCTAssertGreaterThan(
             afterSecondPublish, afterFirstPublish,
             "the post-restart publish recorded nothing, so no second block exists to confuse"
         )
+
+        // Clear the anchor the post-restart block's drain recorded: `recordRenderPosition`
+        // overwrites, so without this the block's own anchor is still present and a refusal is
+        // indistinguishable from an acceptance — the assertion below would pass either way.
+        reference.recordRenderPosition(nil)
+        XCTAssertNil(reference.currentRenderAnchor, "the clear did not take effect")
 
         // An observation carrying the PRE-restart local range. With correct rotation it belongs
         // to no retained block of the CURRENT identity, so nothing is recorded; a token that
@@ -2592,7 +2532,6 @@ private final class FixedMonotonicClock: MonotonicClock {
             "the rotation changed the producer KIND, so it is no longer the same producer"
         )
     }
-
 
     /// A position matched to a block whose samples have been TRIMMED is refused.
     ///
@@ -2694,9 +2633,19 @@ private final class FixedMonotonicClock: MonotonicClock {
         )
         buffer.frameLength = 800
 
-        // Incarnation 0: publish a block spanning local 0..<400.
-        player.loadForTesting(.listeningStart, buffer: buffer)
-        player.play(.listeningStart)
+        // Incarnation 0: a block spanning local 0..<400, submitted with its range so the
+        // mapping has something to convert through. Submitted directly rather than through the
+        // earcon: the earcon no longer reports a scheduling origin it cannot establish, so its
+        // blocks carry no range and an observation under ANY incarnation would be refused for
+        // that reason. Driving the range here is what keeps this case about the boundary.
+        handoff.submit(
+            Array(repeating: 0.25, count: 400),
+            producer: player.currentIdentity,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
         handoff.drain()
         let firstPublishEnd = reference.streamIndex
         XCTAssertGreaterThan(firstPublishEnd, 0, "the first publish recorded nothing")
@@ -2708,6 +2657,7 @@ private final class FixedMonotonicClock: MonotonicClock {
 
         // The real reset: the producer stops, rotates, and reports to the handoff itself.
         player.stop()
+        print("MEASURED before=\(identityBefore.incarnation) after=\(player.currentIdentity.incarnation)")
 
         // A late observation under the RETIRED incarnation: its numbers fall inside the
         // retained block, so only the active-incarnation boundary refuses it. Constructed by
@@ -2725,15 +2675,28 @@ private final class FixedMonotonicClock: MonotonicClock {
             )
         )
         handoff.drain()
-        XCTAssertNil(
-            reference.currentRenderAnchor,
-            "an observation under the retired incarnation was accepted"
-        )
+        // Clear whatever the block's drain recorded: `recordRenderPosition` overwrites, so
+        // without this the block's own anchor (400 frames) is still present and the retired
+        // observation's refusal is invisible — the assertion below would pass on the block's
+        // anchor no matter what the boundary did.
+        reference.recordRenderPosition(nil)
+        XCTAssertNil(reference.currentRenderAnchor, "the clear did not take effect")
 
-        // The CURRENT incarnation is what the producer now reports; publish again and observe
-        // under THAT identity. Both halves together: the retired is refused, the current is
-        // accepted and placed — a boundary that refuses everything cannot pass.
+        // The CURRENT incarnation is what the producer now reports; publish a range-bearing
+        // block under THAT identity. Both halves together: the retired is refused, the current
+        // is accepted and placed — a boundary that refuses everything cannot pass.
+        _ = player.currentIdentity   // the producer rotates only through its own lifecycle
         player.play(.listeningStart)
+        handoff.drain()
+        let identityAfter = player.currentIdentity
+        handoff.submit(
+            Array(repeating: 0.25, count: 400),
+            producer: identityAfter,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 30,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
         handoff.drain()
 
         handoff.submitRenderPosition(
@@ -2742,10 +2705,7 @@ private final class FixedMonotonicClock: MonotonicClock {
                 sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
                 hostTime: 30
             ),
-            producer: EchoReferenceHandoff.ProducerIdentity(
-                kind: identityBefore.kind,
-                incarnation: identityBefore.incarnation &+ 1
-            )
+            producer: identityAfter
         )
         handoff.drain()
         XCTAssertNotNil(
@@ -2753,6 +2713,96 @@ private final class FixedMonotonicClock: MonotonicClock {
             "the current incarnation's observation was refused along with the retired one"
         )
     }
+
+}
+
+// MARK: - Harness
+
+/// Wires the engine the way `VoiceControlAssembly` does, so these cases exercise the
+/// production construction rather than a bespoke one.
+/// A stand-in for an audio node, so a placement record can be asserted without building an
+/// `AVAudioEngine`. Constructing an engine interferes with the process audio session that
+/// `NativeAudioCapture` activates, which makes a neighbouring case fail on shared state
+/// rather than on its own logic.
+/// A real, constructible audio node used as a stand-in for the output node.
+///
+/// **Not a subclass of `AVAudioNode`.** A subclass with no stored properties compiles but
+/// produces an unusable instance, because `AVAudioNode`'s initialiser is unavailable and the
+/// object comes back empty — which made an earlier version of the placement case compare
+/// `nil` against `nil`, report a placement before install, and fail for a reason unrelated to
+/// the code. A mixer node is a real node and is constructible.
+private func makeTestAudioNode() -> AVAudioNode {
+    AVAudioMixerNode()
+}
+
+
+private final class EchoWiringHarness {
+    let engine: VoiceAsrEngine
+    let backend = CountingAsrBackend()
+    let wakeWordDetector = RecordingWakeWordDetector()
+    let gracePeriodSignal = GracePeriodSignal()
+
+    let reference = PlaybackEchoReference()
+
+    init() {
+        engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(threshold: 0.020),
+            backend: backend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: wakeWordDetector,
+            gracePeriodSignal: gracePeriodSignal
+        )
+        // Mirror production: the engine always has a reference once wired, so the
+        // route-scope cases exercise the same path the app does.
+        engine.setEchoReference(reference)
+    }
+}
+
+private final class CountingAsrBackend: AsrBackend {
+    private(set) var transcribeSamples: [[Float]] = []
+    var requiredModel: ModelSpec {
+        ModelSpec(id: "test", files: [], targetDir: "/tmp/test")
+    }
+    var capabilities: AsrCapabilities {
+        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+    }
+    func ensureReady() async -> Result<Void, Error> { .success(()) }
+    func release() {}
+    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        transcribeSamples.append(samples)
+        return AsrResult(text: "test", detectedLanguage: "en")
+    }
+}
+
+private final class RecordingWakeWordDetector: WakeWordDetectorProtocol {
+    private(set) var detectCount = 0
+    func release() {}
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        detectCount += 1
+        return .notDetected(confidence: 0)
+    }
+}
+
+
+/// A determinate clock, so alignment cases assert an instant rather than observe one.
+private final class FixedMonotonicClock: MonotonicClock {
+    private var time: MonotonicTime
+    init(time: MonotonicTime) { self.time = time }
+    func now() -> MonotonicTime { time }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
