@@ -252,4 +252,36 @@ final class CloudTurnContractTests: XCTestCase {
         capturedTasks.append(built.task)
         return built.client
     }
+    /// A send that TRANSMITS and then fails must NOT be classified never-submitted. The frame
+    /// demonstrably left the client, so its admission is possible and replaying it could duplicate
+    /// a turn — which is why submission is marked at ATTEMPT rather than on a successful return.
+    func testASendThatTransmitsThenThrowsIsNotNeverSubmitted() async {
+        let built = CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "")
+        let task = built.task
+        let client = built.client
+        task.transmitsThenThrows = true
+
+        var sawNeverSubmitted = false
+        var sawError = false
+        for await event in client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        ) {
+            if case .neverSubmitted = event { sawNeverSubmitted = true }
+            if case .error = event { sawError = true }
+        }
+
+        XCTAssertEqual(task.sent.count, 1, "the frame was not transmitted, so the case is vacuous")
+        XCTAssertFalse(
+            sawNeverSubmitted,
+            "a frame that WAS transmitted and then threw was reported as never submitted, so it "
+                + "would be replayed after possible admission"
+        )
+        XCTAssertTrue(sawError, "the failure was not surfaced at all")
+    }
+
 }

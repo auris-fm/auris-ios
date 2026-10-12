@@ -299,8 +299,14 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.init(textFrames.map { .string($0) })
     }
 
+    /// When set, a send RECORDS the frame and then throws — the transmit-then-fail case. The frame
+    /// demonstrably left, so a client that marked submission only on a successful return would
+    /// misclassify this as never-submitted and replay a turn that may have been admitted.
+    var transmitsThenThrows = false
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         sent.append(message)
+        if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
     /// Holds delivery until `release()`, so a test can keep one turn in flight

@@ -162,10 +162,11 @@ final class CloudRouteClient {
         // the connection held until the server's own idle timeout).
         defer { wsTask.cancel(with: .goingAway, reason: nil) }
 
-        // Whether this turn's request frame was actually handed to the socket. Everything below
-        // keys recovery on this and not on an error code: the code says what failed, not whether
-        // admission may already have happened.
-        var frameSubmitted = false
+        // Whether this turn's request frame was handed to the socket — set BEFORE the send is
+        // invoked, because a send may transmit and then throw. Everything below keys recovery on
+        // this and not on an error code: the code says what failed, not whether admission may
+        // already have happened.
+        var frameSendAttempted = false
 
         do {
             // Send authentication frame. The task's text message is a String,
@@ -179,8 +180,14 @@ final class CloudRouteClient {
             // SUBMISSION PROVENANCE. The flag is set only AFTER the send returns, so a failure
             // before this line is a frame that provably never left — the sole case where automatic
             // recovery cannot duplicate a turn. Anything past this line may have been admitted.
+            // SUBMISSION IS ATTEMPTED BEFORE THE CALL, not proven after it. A send can TRANSMIT
+            // and then throw or lose its completion, so a flag set only on return would classify
+            // that frame as never-submitted — and it would be replayed although it may have been
+            // admitted. The conservative reading is the correct one here: once the send is
+            // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
+            // never left.
+            frameSendAttempted = true
             try await wsTask.send(.string(authText))
-            frameSubmitted = true
 
             // Written by the receive loop and read by the timeout task, so the
             // flag is lock-protected rather than a plain `Bool` shared across
@@ -250,7 +257,7 @@ final class CloudRouteClient {
             // A failure BEFORE the send is a request that provably never left, so it is the one
             // case automatic recovery may re-drive. After the send it may have been admitted, and
             // the outcome is preserved rather than replayed.
-            if !frameSubmitted {
+            if !frameSendAttempted {
                 continuation.yield(.neverSubmitted(code: "connection_lost", message: ""))
                 continuation.finish()
                 return true
