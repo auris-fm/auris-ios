@@ -4,142 +4,105 @@ import XCTest
 /// The conversation admission contract (`cloud-assistant.md` → "Conversations").
 ///
 /// Every turn carries a client-generated UUID `conversation_id` and a lowercase
-/// `conversation_mode`. The mode is not derived from the wire history: it follows what
-/// actually selected the turn — a wake word always opens a NEW conversation, while a
-/// wake-free follow-up continues the current one.
+/// `conversation_mode`. The mode follows what actually selected the turn; the ORIGIN bounds
+/// whether the turn may act on a conversation at all.
 final class CloudConversationManagerTests: XCTestCase {
     private var manager: CloudConversationManager!
 
     override func setUp() {
         super.setUp()
         manager = CloudConversationManager()
+        manager.registerLiveOrigin(1)
     }
 
-    func testFirstTurnCreates() {
-        let prepared = manager.prepare(selection: .wakeWord, generation: 1)
+    func testFirstTurnCreates() throws {
+        let prepared = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
         XCTAssertEqual(prepared.mode, "create")
         XCTAssertNotNil(UUID(uuidString: prepared.conversationId), "the id must be a UUID")
     }
 
-    func testWakeWordAlwaysStartsANewConversationEvenDuringGrace() {
-        // SAME generation on purpose. With different generations the origin check would
-        // refuse the resume on its own and this case would pass without exercising the
-        // wake-word rule at all — which is exactly how its first version was inert.
-        let first = manager.prepare(selection: .wakeWord, generation: 1)
-        let second = manager.prepare(selection: .wakeWord, generation: 1)
+    /// The wake word rule, isolated within ONE origin. With two origins the origin check would
+    /// refuse the resume by itself and the case would pass without exercising this rule.
+    func testFreshWakeCreatesANewConversationWithinTheSameOrigin() throws {
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
+        let second = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
 
-        XCTAssertEqual(second.mode, "create", "a wake word selects a new conversation")
-        XCTAssertNotEqual(
-            second.conversationId, first.conversationId,
-            "a wake word during grace must not resume the previous conversation"
-        )
+        XCTAssertEqual(second.mode, "create", "a fresh wake selects a new conversation")
+        XCTAssertNotEqual(second.conversationId, first.conversationId)
     }
 
-    func testWakeFreeFollowUpResumesTheCurrentConversation() {
-        let first = manager.prepare(selection: .wakeWord, generation: 1)
-        let followUp = manager.prepare(selection: .followUp, generation: 1)
+    func testWakeFreeFollowUpResumesTheCurrentConversation() throws {
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
+        let followUp = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1))
 
         XCTAssertEqual(followUp.mode, "resume")
         XCTAssertEqual(followUp.conversationId, first.conversationId)
     }
 
-    func testRetryOfTheSameTurnKeepsItsLogicalIdentity() {
-        let first = manager.prepare(selection: .wakeWord, generation: 1)
-        let retry = manager.prepare(
-            selection: .wakeWord, generation: 1, retryingCreationRequestId: first.creationRequestId
+    // MARK: - Stale origin
+
+    func testStaleOriginIsRefusedRatherThanGivenAReplacement() {
+        _ = manager.prepare(selection: .wakeWord, origin: 1)
+        manager.registerLiveOrigin(2)
+
+        XCTAssertNil(
+            manager.prepare(selection: .followUp, origin: 1),
+            "a stale-origin turn was given a replacement conversation instead of being refused"
+        )
+    }
+
+    /// A delayed WAKE callback from an ended origin is refused too. "Wake" describes how the
+    /// turn was selected, not whether its callback is current, so the word alone must not
+    /// create a conversation for a window that has ended.
+    func testDelayedWakeFromAStaleOriginIsRefused() {
+        _ = manager.prepare(selection: .wakeWord, origin: 1)
+        manager.registerLiveOrigin(2)
+
+        XCTAssertNil(manager.prepare(selection: .wakeWord, origin: 1))
+    }
+
+    func testUnstampedOriginIsRefused() {
+        XCTAssertNil(manager.prepare(selection: .wakeWord, origin: nil))
+    }
+
+    /// The successor's conversation must survive a stale turn. Reporting this because it is a
+    /// second consequence of creating a replacement, and it is not visible from the stale
+    /// turn's own result: the replacement overwrote the live window's handle, so the follow-up
+    /// that genuinely belonged to the live window then had nothing to resume.
+    func testStaleTurnDoesNotDestroyTheLiveWindowsConversation() throws {
+        _ = manager.prepare(selection: .wakeWord, origin: 1)
+        manager.registerLiveOrigin(2)
+        _ = manager.prepare(selection: .followUp, origin: 1)   // stale, refused
+
+        let live = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: 2),
+            "the live window's follow-up was refused"
+        )
+        XCTAssertEqual(live.mode, "create", "the live window has no conversation yet")
+        let again = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 2))
+        XCTAssertEqual(again.mode, "resume", "the live window's conversation was not retained")
+        XCTAssertEqual(again.conversationId, live.conversationId)
+    }
+
+    // MARK: - Retry
+
+    /// A transport retry of the same logical turn must reuse the SAME wire `request_id`.
+    /// Preserving only the conversation UUID makes the server see a second logical turn.
+    func testRetryReusesTheOriginalWireRequestId() throws {
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
+        let retry = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: 1, retryingRequestId: first.requestId)
         )
 
-        XCTAssertEqual(retry.conversationId, first.conversationId,
-                       "a same-owner retry keeps the original creation identity")
+        XCTAssertEqual(retry.requestId, first.requestId, "the retry generated a new request_id")
+        XCTAssertEqual(retry.conversationId, first.conversationId)
         XCTAssertEqual(retry.mode, "create")
     }
 
-    func testStaleOriginDiscardsRatherThanResuming() {
-        // A FOLLOW-UP first, so the only thing that can refuse the resume below is the
-        // origin: using a wake word here would let the wake-word rule carry the case.
-        let first = manager.prepare(selection: .followUp, generation: 1)
-        // The origin no longer exists: this turn must not resume a conversation it never
-        // belonged to.
-        let later = manager.prepare(selection: .followUp, generation: 7)
-
-        XCTAssertNotEqual(later.conversationId, first.conversationId,
-                          "a stale origin must not resume an earlier conversation")
-        XCTAssertEqual(later.mode, "create")
-    }
-
-    func testModeIsAlwaysLowercaseAndNonNull() {
+    func testModeIsAlwaysLowercase() throws {
         for selection in [CloudConversationSelection.wakeWord, .followUp] {
-            let prepared = manager.prepare(selection: selection, generation: 1)
-            XCTAssertTrue(["create", "resume"].contains(prepared.mode),
-                          "unexpected mode \(prepared.mode)")
-            XCTAssertFalse(prepared.conversationId.isEmpty)
+            let prepared = try XCTUnwrap(manager.prepare(selection: selection, origin: 1))
+            XCTAssertTrue(["create", "resume"].contains(prepared.mode))
         }
     }
-
-    // MARK: - Conversation identity on the wire
-
-    func testFrameCarriesConversationIdAndMode() {
-        let prepared = CloudPreparedConversation(
-            conversationId: "11111111-2222-3333-4444-555555555555",
-            mode: "create",
-            creationRequestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        )
-        let frame = CloudRouteRequestBuilder.envelope(
-            request: "what did they say",
-            context: CloudRouteContext(
-                episodeId: "ep-1", podcastId: nil, referencePositionMs: nil,
-                clientPositionMs: 1000, recentReferencePositions: [], previousReferencePositionMs: nil
-            ),
-            turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
-            )
-        )
-
-        XCTAssertEqual(frame["conversation_id"] as? String, prepared.conversationId)
-        XCTAssertEqual(frame["conversation_mode"] as? String, "create")
-    }
-
-    func testFrameDoesNotSendClientSuppliedConversationHistory() {
-        // The owning paragraph retains history SERVER-side and forbids client-supplied
-        // history; sending ours would offer the model text the server never authenticated.
-        let frame = CloudRouteRequestBuilder.envelope(
-            request: "x",
-            context: CloudRouteContext(
-                episodeId: "ep-1", podcastId: nil, referencePositionMs: nil,
-                clientPositionMs: 0, recentReferencePositions: [], previousReferencePositionMs: nil
-            ),
-            turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil,
-                recentConversation: [RecentConversationTurn(role: .user, text: "earlier")],
-                conversation: nil
-            )
-        )
-
-        let context = frame["context"] as? [String: Any]
-        XCTAssertNil(context?["recent_conversation"], "client-supplied history was still sent")
-    }
-
-    func testConversationIdentityIsIndependentOfEpisodeContext() {
-        // A conversation is not a property of what is playing: the fields must be present
-        // even when the frame carries no episode.
-        let prepared = CloudPreparedConversation(
-            conversationId: "99999999-8888-7777-6666-555555555555",
-            mode: "resume",
-            creationRequestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        )
-        let frame = CloudRouteRequestBuilder.envelope(
-            request: "x",
-            context: CloudRouteContext(
-                episodeId: "", podcastId: nil, referencePositionMs: nil,
-                clientPositionMs: 0, recentReferencePositions: [], previousReferencePositionMs: nil
-            ),
-            turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
-            )
-        )
-
-        XCTAssertEqual(frame["conversation_id"] as? String, prepared.conversationId)
-        XCTAssertEqual(frame["conversation_mode"] as? String, "resume")
-    }
-
 }

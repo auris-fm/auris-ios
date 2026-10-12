@@ -177,6 +177,30 @@ final class VoiceIntentExecutorTests: XCTestCase {
                      "the coming-soon refusal was recorded as a completed cloud turn")
     }
 
+    /// The executor must hand the sink the origin the turn was DISPATCHED under. Without
+    /// this the sink can only default, and a default makes the conversation bound inert: the
+    /// origin is then a constant, so no turn can ever be stale and every turn reads as a
+    /// fresh `create`. Asserting the captured value reaches the sink is what keeps that
+    /// property real rather than described.
+    func test_execute_passesTheCapturedOriginToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastOrigin, generation,
+            "the sink did not receive the turn's captured origin, so the conversation bound "
+                + "cannot distinguish a live dispatc from a stale one"
+        )
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)
@@ -468,10 +492,17 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var outcome: CloudRouteOutcome = .completed
     var response: VoiceResponse = .spoken("Here's what I found")
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> CloudRouteResult {
+    /// The captured origin the executor passed, so a case can assert the turn carries the
+    /// window it was dispatched under rather than a live one.
+    var lastOrigin: Int?
+
+    func routeToCloud(
+        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?
+    ) async -> CloudRouteResult {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
+        lastOrigin = origin
         return CloudRouteResult(response: response, outcome: outcome)
     }
 }

@@ -44,7 +44,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// a conversation nobody opened would attach an utterance to someone else's history.
     private let conversationSelectionProvider: () -> CloudConversationSelection
     /// The origin the turn runs under, so a resume cannot cross an ended window.
-    private let generationProvider: () -> Int
+
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let playbackPositionMs: () -> Int64
@@ -124,9 +124,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
-        conversationManager: CloudConversationManager = CloudConversationManager(),
-        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
-        generationProvider: @escaping () -> Int = { 0 },
         audioPlayer: CloudAudioPlayer? = nil,
         playbackManager: PlaybackManager? = nil,
         playbackSink: VoicePlaybackSink,
@@ -138,13 +135,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
         recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
         resultsPresenter: DiscoveryResultsPresenting? = nil,
-        spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver()
+        spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
+        // Last so a call site can always supply them after whatever other defaults it uses.
+        conversationManager: CloudConversationManager = CloudConversationManager(),
+        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
-        self.generationProvider = generationProvider
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
@@ -172,7 +171,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> CloudRouteResult {
+    func routeToCloud(
+        request: String,
+        tier: CloudTier,
+        context: PlaybackContext,
+        origin: Int?
+    ) async -> CloudRouteResult {
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
@@ -195,18 +199,24 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // One envelope per logical turn: a fresh client-assigned `request_id`
         // that any transport retry of this turn must reuse, capabilities gated
         // on the renderer, a typed-only hint and a bounded prior conversation.
+        // Every turn carries its conversation identity, prepared from what selected it and
+        // the origin it was dispatched under. A nil result means the origin is NOT LIVE: this
+        // turn has no claim on any conversation, so it is refused BEFORE the socket is dialled
+        // rather than sent with a replacement the user never opened. A replacement would also
+        // take the live window's own conversation, stranding the follow-up that belonged to it.
+        guard let conversation = conversationManager.prepare(
+            selection: conversationSelectionProvider(),
+            origin: origin
+        ) else {
+            restoreTransientAudioState()
+            return CloudRouteResult(response: .silent, outcome: .refused)
+        }
+
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
             recentConversation: recentConversationProvider(),
-            // Every turn carries its conversation identity. The manager decides create vs
-            // resume from what selected this turn, and the origin it runs under bounds the
-            // resume — so a turn from an ended window cannot continue a conversation it
-            // never belonged to.
-            conversation: conversationManager.prepare(
-                selection: conversationSelectionProvider(),
-                generation: generationProvider()
-            )
+            conversation: conversation
         )
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`

@@ -17,6 +17,15 @@ class VoiceControlAssembly {
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
+        let conversationManager = CloudConversationManager()
+        // Keep the manager's live origin in step with the window that actually opens. The
+        // sink reads the origin from the INTENT (captured at dispatch), so this only supplies
+        // the value that decides whether a captured origin is still live.
+        let originCancellable = gracePeriodSignal.$isActive
+            .sink { active in
+                if active { conversationManager.registerLiveOrigin(gracePeriodSignal.currentGeneration()) }
+            }
+        cancellables.insert(originCancellable)
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
         let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
@@ -118,7 +127,14 @@ class VoiceControlAssembly {
                     Int64((playbackManager.currentTime() * 1000).rounded())
                 },
                 cloudPlaybackContextState: cloudPlaybackContextState,
-                analytics: voiceAnalytics
+                analytics: voiceAnalytics,
+                // The live origin is the grace window's generation: a turn dispatched under
+                // an older window is refused rather than given a replacement conversation.
+                conversationManager: conversationManager,
+                conversationSelectionProvider: { [weak gracePeriodSignal] in
+                    // A wake opens a window; a recognised command continues the current one.
+                    (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
+                }
             ),
             playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,

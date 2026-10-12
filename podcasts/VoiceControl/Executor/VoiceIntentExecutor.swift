@@ -171,7 +171,10 @@ class VoiceIntentExecutor {
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
-                context: context
+                context: context,
+                // The captured origin, not a live one: the turn belongs to the window it was
+                // issued under, and the conversation bound is expressed in that window.
+                origin: cr.generation
             )
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the
