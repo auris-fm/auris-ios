@@ -386,6 +386,34 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// COMPARE-AND-CLEAR: a successor that prepares the same key DURING the retry's await must
+    /// keep its handle. Clearing unconditionally would drop theirs, leaving a later retry naming
+    /// something that no longer exists.
+    func test_aSuccessorPreparingDuringTheRetryKeepsItsHandle() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        _ = await executor.execute(CloudRouteIntent(
+            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
+        ))
+
+        // The successor prepares the SAME key while the retry is suspended in its await.
+        mockCloudRouteSink.onRetryWillBeInvoked = {
+            self.mockCloudRouteSink.preparationHandle =
+                CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        }
+        _ = await executor.retryHeldCloudRequest(requestId: "req-A")
+
+        // The retry must not have cleared a handle it did not consume.
+        XCTAssertNil(
+            executor.heldCloudPreparation(forRequestId: "req-A"),
+            "the consumed handle was not cleared"
+        )
+    }
+
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
         _ = await executor.execute(PlaybackIntent.pause)
@@ -597,6 +625,9 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var preparationHandle: CloudRouteSink.RetainedPreparation?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
+    /// Runs at the START of a retry, so a case can interleave a successor's preparation into the
+    /// retry's await.
+    var onRetryWillBeInvoked: (() -> Void)?
 
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
@@ -613,6 +644,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
+        onRetryWillBeInvoked?()
         retriedRequestIds.append(requestId)
         return CloudRouteResult(response: .silent, outcome: .completed)
     }
