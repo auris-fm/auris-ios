@@ -10,6 +10,10 @@ CURRENT_PROJECT_VERSION = $(VERSION_LONG)
 // Define a root bundle identifier so that extensions can append to it
 PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris
 
+// The name the launcher shows. Configs that install alongside the base app
+// (staging, prototypes) override this so the two are distinguishable.
+APP_DISPLAY_NAME = Pocket Casts
+
 DEVELOPMENT_TEAM = 6LL2R2A55F
 
 // ONNX Runtime for wake word detection

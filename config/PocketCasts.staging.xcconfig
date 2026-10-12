@@ -3,4 +3,8 @@
 PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris.debug
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
+// Distinguishable from the base app: the hosted unit tests install the base
+// configuration alongside this one on a shared simulator.
+APP_DISPLAY_NAME = Pocket Casts Staging
+
 OTHER_SWIFT_FLAGS = -D STAGING -D DEBUG
