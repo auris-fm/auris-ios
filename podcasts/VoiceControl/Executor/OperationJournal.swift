@@ -14,6 +14,32 @@ enum OperationOutcome: String, Equatable, CaseIterable {
     case cancelled
     case unknown
 
+    /// Whether a turn with this outcome may be RE-DRIVEN.
+    ///
+    /// The admission predicate is `(unknown ∨ failed) ∧ idempotent` — **not**
+    /// `wasFailure(outcome)`. Stated by the cloud side from the turn contract:
+    ///
+    ///   * `succeeded` is a settled FACT. An empty state is a real answer ("the app looked and
+    ///     there is nothing"), not an absence, so replaying it contradicts an answer already given.
+    ///   * `refused` is a settled DECISION — the app declined BEFORE acting. Replaying contradicts
+    ///     its answer.
+    ///   * `failed` means the app TRIED and did not complete. A non-idempotent failed operation may
+    ///     already have had its effect, so `failed` alone is NOT a retry signal.
+    ///   * `unknown` is the one that says nothing was established — "do not reason as if it did or
+    ///     did not happen".
+    ///
+    /// The `idempotent` conjunct is what stops this being permissive in exactly the case where
+    /// permissiveness has consequences: a NON-IDEMPOTENT operation that failed.
+    func admitsReplay(isIdempotent: Bool) -> Bool {
+        guard isIdempotent else { return false }
+        switch self {
+        case .unknown, .failed:
+            return true
+        case .succeeded, .refused, .cancelled:
+            return false
+        }
+    }
+
     /// Whether recording this outcome must stop the operation from ever being executed again.
     ///
     /// True for every case, `unknown` included — and `unknown` is the case that matters, since

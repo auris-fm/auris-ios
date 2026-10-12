@@ -170,6 +170,48 @@ final class CloudConversationManagerTests: XCTestCase {
         XCTAssertEqual(frame["conversation_mode"] as? String, "create")
     }
 
+    // MARK: - Replay admission: (unknown ∨ failed) ∧ idempotent
+
+    /// The conjunct that matters: a NON-IDEMPOTENT operation that FAILED must not be replayed.
+    /// The app tried, so its effect may already have landed, and `failed` read as a bare label
+    /// would admit exactly that replay.
+    func testAFailedNonIdempotentOperationIsNotReplayed() {
+        XCTAssertFalse(
+            OperationOutcome.failed.admitsReplay(isIdempotent: false),
+            "a non-idempotent failed operation was admitted for replay"
+        )
+    }
+
+    func testAFailedIdempotentOperationMayBeReplayed() {
+        XCTAssertTrue(OperationOutcome.failed.admitsReplay(isIdempotent: true))
+    }
+
+    /// `unknown` is the case the predicate exists for: nothing was established.
+    func testAnUnknownOperationMayBeReplayedWhenIdempotent() {
+        XCTAssertTrue(OperationOutcome.unknown.admitsReplay(isIdempotent: true))
+    }
+
+    /// A `refused` is a settled DECISION — the app heard and said no.
+    func testARefusedOperationIsNeverReplayed() {
+        XCTAssertFalse(OperationOutcome.refused.admitsReplay(isIdempotent: true))
+        XCTAssertFalse(OperationOutcome.refused.admitsReplay(isIdempotent: false))
+    }
+
+    /// A `succeeded` empty state is a settled FACT, not an absence.
+    func testASucceededOperationIsNeverReplayed() {
+        XCTAssertFalse(OperationOutcome.succeeded.admitsReplay(isIdempotent: true))
+    }
+
+    /// Nothing is replayable without idempotence, whatever the outcome.
+    func testNothingIsReplayableWhenNotIdempotent() {
+        for outcome in OperationOutcome.allCases {
+            XCTAssertFalse(
+                outcome.admitsReplay(isIdempotent: false),
+                "\(outcome) was admitted for replay without idempotence"
+            )
+        }
+    }
+
     func testModeIsAlwaysLowercase() throws {
         for selection in [CloudConversationSelection.wakeWord, .followUp] {
             let prepared = try XCTUnwrap(manager.prepare(selection: selection, origin: 1))
