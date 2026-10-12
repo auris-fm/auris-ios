@@ -2071,6 +2071,68 @@ final class EchoReferenceWiringTests: XCTestCase {
             "a restarted node's position must move with the range, not stay on the old one"
         )
     }
+    /// The scheduling-origin question, answered against the real player node.
+    ///
+    /// The mapping needs the new buffer's local start in the node's clock. The tempting source
+    /// is the node's render position read before the schedule — this case measures that read on
+    /// the real node and records why it cannot serve.
+    ///
+    /// Both scenarios @spec named are exercised. The assertion is deliberately about what the
+    /// read IS, not about a threshold it happens to satisfy: an earlier draft asserted a bounded
+    /// drift and passed while the read was nil (drift computed as infinity only in the failure
+    /// path), which would have certified an origin that does not exist.
+    func test_schedulingOrigin_thePreScheduleRenderReadDoesNotEstablishTheBuffersStart() throws {
+        let player = EarconPlayer(engine: AVAudioEngine())
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: EarconPlayer.earconFormat(sampleRate: 24_000),
+                frameCapacity: 800
+            )
+        )
+        buffer.frameLength = 800
+
+        // Scenario 1: first play after stop — the read is unavailable.
+        player.loadForTesting(.listeningStart, buffer: buffer)
+        let beforeFirstPlay = player.nodeSampleTimeForTesting
+
+        // Scenario 2: immediately after a play — the read is not a buffer offset.
+        player.play(.listeningStart)
+        let afterPlay = player.nodeSampleTimeForTesting
+
+        // The evidence the decision rests on: no read here is a usable scheduling origin.
+        XCTAssertNil(
+            beforeFirstPlay,
+            "the pre-schedule read is expected to be unavailable; if it becomes readable this "
+                + "decision must be revisited against the new value"
+        )
+        if let afterPlay {
+            XCTAssertLessThanOrEqual(
+                afterPlay, 0,
+                "a post-play read was expected to be non-positive (measured -342); a positive "
+                    + "value would mean the read counts this buffer's frames and could serve"
+            )
+        }
+
+        // The decision itself. The clock read above cannot carry it: in this harness the node
+        // never renders, so the read is nil and a fabricated range would also be nil — the
+        // mutation was invisible here, which is how the first version passed while inert.
+        //
+        // A supplied clock makes it observable. With a readable value, the earcon must STILL
+        // submit no range, because a readable render position is not this buffer's origin.
+        let withClock = EarconPlayer(engine: AVAudioEngine())
+        let clockHandoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
+        withClock.handoff = clockHandoff
+        withClock.nodeSampleTimeOverride = 9_000
+        withClock.loadForTesting(.listeningStart, buffer: buffer)
+        withClock.play(.listeningStart)
+
+        XCTAssertNil(
+            withClock.lastSubmittedBlockRange,
+            "the earcon submitted a range derived from a render position that is not the "
+                + "buffer's origin (supplied clock read 9000, measured live -342/nil)"
+        )
+    }
+
 }
 
 // MARK: - Harness
@@ -2091,6 +2153,7 @@ final class EchoReferenceWiringTests: XCTestCase {
 private func makeTestAudioNode() -> AVAudioNode {
     AVAudioMixerNode()
 }
+
 
 private final class EchoWiringHarness {
     let engine: VoiceAsrEngine
@@ -2690,5 +2753,7 @@ private final class FixedMonotonicClock: MonotonicClock {
             "the current incarnation's observation was refused along with the retired one"
         )
     }
+
+
 
 }

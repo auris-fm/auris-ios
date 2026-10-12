@@ -136,20 +136,28 @@ open class EarconPlayer {
         // for the retire path; publishing goes through the handoff or not at all.
         guard let handoff else { return }
 
-        // The block's producer-local range, captured from the node's own clock: the count when
-        // these samples begin, plus their length. Carrying it is what lets the handoff map a
-        // later position observation against this block — without a retained range there is
-        // nothing to convert through, and an observation is refused rather than guessed at.
-        // A node clock that is not yet readable leaves the metadata nil, honestly: an
-        // unmappable block is better than one anchored at an invented zero.
-        let blockStart = nodeSampleTime()
+        // No block range is submitted, and that is a measured decision rather than an omission.
+        //
+        // The mapping needs the new buffer's local start in the node's clock. Reading the node's
+        // render position before the schedule does not give it: measured against the real node,
+        // that read is nil on a first play after stop and NEGATIVE (-342 frames) immediately
+        // after a play. Neither value is "where this buffer begins" — the pre-schedule read
+        // describes the previous render, and the post-schedule one is an artefact of the node's
+        // render-time arithmetic, not a buffer offset.
+        //
+        // Submitting either would anchor a later observation to PCM it does not describe — the
+        // exact mismatch this mapping exists to prevent. An observation whose block cannot be
+        // placed is therefore refused, and the earcon's audio stays unalignable in the filter
+        // rather than misalignable. Establishing the true scheduling origin (e.g. from a
+        // render-thread timestamp whose provenance is verified) is a separate change.
+        lastSubmittedBlockRange = nil
         handoff.submit(
             frame,
             producer: producerIdentity,
             sampleRate: buffer.format.sampleRate,
             renderedAt: nil,
-            renderedFramesInProducer: blockStart.map { $0 + Double(frame.count) },
-            producerBlockStart: blockStart
+            renderedFramesInProducer: lastSubmittedBlockRange?.renderedFramesInProducer,
+            producerBlockStart: lastSubmittedBlockRange?.producerBlockStart
         )
     }
 
@@ -183,6 +191,7 @@ open class EarconPlayer {
     /// no-graph path there is no render clock, and nil metadata is the honest answer: the
     /// samples are published, but nothing has rendered that a position could describe.
     private func nodeSampleTime() -> Double? {
+        if let override = nodeSampleTimeOverride { return override }
         guard engine != nil else { return nil }
         guard let lastRender = player.lastRenderTime,
               lastRender.isSampleTimeValid,
@@ -230,6 +239,25 @@ open class EarconPlayer {
     private func rotateNodeIncarnation() {
         nodeIncarnation &+= 1
     }
+
+    /// The node's current frame count, readable so a test can measure the scheduling origin
+    /// against the real node rather than asserting over an unverified assumption.
+    var nodeSampleTimeForTesting: Double? { nodeSampleTime() }
+
+    /// Test-only: the value `nodeSampleTime()` should report instead of reading the node.
+    ///
+    /// The harness's node never renders, so its clock is unreadable there and a fabricated
+    /// range would be nil and thus invisible. Injecting a readable clock is what makes the
+    /// withdrawal observable at all: with a value supplied, a submission that uses it differs
+    /// from one that withholds it.
+    var nodeSampleTimeOverride: Double?
+
+    /// The producer-local range the last publish submitted, or nil when it submitted none.
+    ///
+    /// Exists so the withdrawal is covered as a decision rather than inferred from the node
+    /// clock: a case that only reads the clock passes whether or not the earcon submits a
+    /// range, which is how the first version of this coverage came to be inert.
+    private(set) var lastSubmittedBlockRange: (renderedFramesInProducer: Double, producerBlockStart: Double)?
 
     /// The identity this producer is currently submitting under.
     ///
