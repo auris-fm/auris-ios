@@ -59,7 +59,12 @@ final class KeychainScopeProbeTests: XCTestCase {
         // The access group is SPECIFIED, because that is the whole question: a query without it
         // finds an item wherever the caller happens to see it, so a success proves only that some
         // scope can read SOME item — not that the intended group is visible to this signer.
-        let group = Bundle.main.object(forInfoDictionaryKey: "AurisKeychainAccessGroup") as? String
+        // The group is settable for the probe run, because "which group" IS the thing under test:
+        // running with an unspecified group answers only that SOME scope sees SOME item. The
+        // owner's group is named here as the control's input, on a scratch device, so the answer
+        // is about THAT group rather than about whatever the caller defaults to.
+        let group = ProcessInfo.processInfo.environment["AURIS_PROBE_ACCESS_GROUP"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "AurisKeychainAccessGroup") as? String
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
