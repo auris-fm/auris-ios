@@ -114,10 +114,14 @@ final class CloudConversationManagerTests: XCTestCase {
             )
         )
 
-        let context = frame["context"] as? [String: Any]
-        XCTAssertNil(context?["episode_id"], "an invented episode id was sent")
-        XCTAssertNil(context?["client_position_ms"], "an invented position was sent")
-        XCTAssertNotNil(context, "the context object itself must still be present")
+        // EVERY position key, not just the two I first checked. Asserting only the id and the
+        // client position let an unconditional `recent_reference_positions: []` through, which
+        // still claims a position history for a turn with no episode.
+        let context = (frame["context"] as? [String: Any]) ?? [:]
+        for key in ["episode_id", "client_position_ms", "recent_reference_positions",
+                    "reference_position_ms", "previous_reference_position_ms", "podcast_id"] {
+            XCTAssertNil(context[key], "\(key) was sent for a turn with no episode context")
+        }
     }
 
     func testFrameStillSendsEpisodeFieldsWhenOneExists() {

@@ -136,10 +136,16 @@ enum CloudRouteRequestBuilder {
         // `episode_id` is an ID that names nothing, and a zero position is a measurement the
         // client did not make. Both read as real to the server, so the discovery turn — the
         // app's normal first interaction, with nothing playing — must send neither.
-        var contextObject: [String: Any] = [
-            "recent_reference_positions": context.recentReferencePositions,
-        ]
-        if let episodeId = context.episodeId { contextObject["episode_id"] = episodeId }
+        var contextObject: [String: Any] = [:]
+        // EVERY playback-position key is omitted when there is no episode context — not just
+        // the id and the client position. `recent_reference_positions` is a position key too:
+        // sending an empty array still asserts that the client has a position history for a
+        // turn where no current episode exists, and the contract says to omit playback positions
+        // entirely in that case. An empty array is not "absent" on the wire.
+        if let episodeId = context.episodeId {
+            contextObject["episode_id"] = episodeId
+            contextObject["recent_reference_positions"] = context.recentReferencePositions
+        }
         if let clientPositionMs = context.clientPositionMs {
             contextObject["client_position_ms"] = clientPositionMs
         }
