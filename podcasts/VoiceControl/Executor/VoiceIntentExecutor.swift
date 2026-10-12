@@ -166,6 +166,9 @@ class VoiceIntentExecutor {
         // Set only by the cloud branch. Every other intent leaves it nil, so the generic
         // response-shape rule below is untouched for them.
         var cloudOutcome: CloudRouteOutcome?
+        /// The handle to the request THIS execute call prepared, if any. Held per call so a retry
+        /// names the request the caller actually made.
+        var cloudPreparationHandle: CloudRouteSink.RetainedPreparation?
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
         case let e as EffectsIntent: response = executeEffects(e)
@@ -197,6 +200,10 @@ class VoiceIntentExecutor {
             // success are both "no earcon"), and reading it as the outcome is how a
             // failed turn was recorded as a completed cloud route.
             cloudOutcome = result.outcome
+            // The handle for THIS call's preparation, taken from the result rather than from a
+            // published slot: a slot could have been replaced by a successor by the time this
+            // line runs, and the caller would then retry a request it never made.
+            cloudPreparationHandle = result.retainedPreparation
         default: response = .earcon(.error)
         }
 

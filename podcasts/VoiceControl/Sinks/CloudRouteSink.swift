@@ -27,6 +27,13 @@ enum CloudRouteOutcome: Equatable {
 struct CloudRouteResult: Equatable {
     let response: VoiceResponse
     let outcome: CloudRouteOutcome
+    /// The handle to the request THIS call prepared, returned WITH the outcome.
+    ///
+    /// A published "last handle" slot would let a successor replace it before an older caller
+    /// read it, so the older caller would retry the wrong request — the "last" problem again, one
+    /// level up. Riding on the result means a caller can only hold the handle for the call it
+    /// actually made. Nil when no request was prepared (refused before preparation, or a re-drive).
+    var retainedPreparation: CloudRouteSink.RetainedPreparation?
 }
 
 final class CloudRouteSink: VoiceCloudRouteSink,
@@ -140,15 +147,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// by the id the caller is retrying, a request can only be re-driven by naming it.
     private var preparedRequests: [String: PreparedRequest] = [:]
 
-    /// The handle for the request most recently prepared, returned to the owner so it can retry
-    /// THAT request by name.
-    private(set) var lastRetainedHandle: RetainedPreparation?
-
     /// Drops a retained request when its owning lifecycle ends, so a later retry of it refuses
     /// instead of re-driving a request that no longer belongs to anything.
     func invalidateRetained(_ handle: RetainedPreparation) {
         preparedRequests.removeValue(forKey: handle.requestId)
-        if lastRetainedHandle == handle { lastRetainedHandle = nil }
     }
 
     /// Re-drives the last prepared logical request, preserving its `request_id`, conversation id
@@ -345,6 +347,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // token, action, result, done and error in one place, and a parallel path would diverge
         // from it the moment either changed.
         let conversation: CloudPreparedConversation
+        // The handle for THIS call's preparation, returned with the outcome. Nil on a re-drive,
+        // which prepares nothing.
+        var preparationHandle: RetainedPreparation?
         if let retainedTurn, let retainedConversation = retainedTurn.conversation {
             conversation = retainedConversation
         } else {
@@ -358,6 +363,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }
             conversation = prepared
+            preparationHandle = RetainedPreparation(requestId: prepared.requestId)
         }
 
         let client = clientFactory()
@@ -382,7 +388,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // There is deliberately NO blanket retry loop here. The identity requirement does not
         // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
         // before admission is safe to re-drive, and that decision belongs to an explicit caller.
-        lastRetainedHandle = RetainedPreparation(requestId: turn.requestId)
         preparedRequests[turn.requestId] = PreparedRequest(
             turn: turn,
             request: request,
@@ -460,7 +465,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 audioPlayer.finish()
-                return CloudRouteResult(response: .silent, outcome: .completed)
+                return CloudRouteResult(response: .silent, outcome: .completed,
+                                    retainedPreparation: preparationHandle)
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
@@ -479,9 +485,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
                 if spoken.isEmpty {
-                    return CloudRouteResult(response: .earcon(.error), outcome: .failed(code: code))
+                    return CloudRouteResult(response: .earcon(.error), outcome: .failed(code: code),
+                                            retainedPreparation: preparationHandle)
                 }
-                return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
+                return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code),
+                                        retainedPreparation: preparationHandle)
             }
         }
 
@@ -489,12 +497,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // The superseding turn owns pause/restore and analytics. Superseded is not a
             // completion: the winner's turn decides the window, and reporting this one as
             // completed would let a turn that was cancelled mid-stream reopen it.
-            return CloudRouteResult(response: .silent, outcome: .earlyClose)
+            return CloudRouteResult(response: .silent, outcome: .earlyClose,
+                                    retainedPreparation: preparationHandle)
         }
         restoreTransientAudioState()
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
-        return CloudRouteResult(response: .silent, outcome: .earlyClose)
+        return CloudRouteResult(response: .silent, outcome: .earlyClose,
+                                retainedPreparation: preparationHandle)
     }
 
     private func restoreTransientAudioState() {
