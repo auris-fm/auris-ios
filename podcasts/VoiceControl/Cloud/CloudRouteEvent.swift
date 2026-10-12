@@ -140,10 +140,13 @@ enum CloudRouteJSONValue: Equatable {
 
 /// Request context body for `/api/v1/cloud/route`.
 struct CloudRouteContext: Equatable, Encodable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: an empty id names nothing
+    /// but still reads as a supplied value, and the contract forbids inventing one.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to have a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 
@@ -166,10 +169,10 @@ struct CloudRouteContext: Equatable, Encodable {
     }
 
     init(
-        episodeId: String,
+        episodeId: String?,
         podcastId: String? = nil,
         referencePositionMs: Int64? = nil,
-        clientPositionMs: Int64,
+        clientPositionMs: Int64?,
         recentReferencePositions: [Int64] = [],
         previousReferencePositionMs: Int64? = nil
     ) {

@@ -131,11 +131,18 @@ enum CloudRouteRequestBuilder {
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
     ) -> [String: Any] {
+        // Omitted when absent, never invented. The owning contract scopes the episode and its
+        // position to "when a current episode exists" and forbids inventing either: an empty
+        // `episode_id` is an ID that names nothing, and a zero position is a measurement the
+        // client did not make. Both read as real to the server, so the discovery turn — the
+        // app's normal first interaction, with nothing playing — must send neither.
         var contextObject: [String: Any] = [
-            "episode_id": context.episodeId,
-            "client_position_ms": context.clientPositionMs,
             "recent_reference_positions": context.recentReferencePositions,
         ]
+        if let episodeId = context.episodeId { contextObject["episode_id"] = episodeId }
+        if let clientPositionMs = context.clientPositionMs {
+            contextObject["client_position_ms"] = clientPositionMs
+        }
         if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
         if let referencePositionMs = context.referencePositionMs { contextObject["reference_position_ms"] = referencePositionMs }
         if let previousReferencePositionMs = context.previousReferencePositionMs { contextObject["previous_reference_position_ms"] = previousReferencePositionMs }

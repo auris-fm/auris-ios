@@ -201,6 +201,34 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// With nothing playing — the app's normal first interaction — the cloud turn must still be
+    /// dispatched with an ABSENT context, not refused locally. Refusing here is what made the
+    /// discovery turn unreachable on the client while the server had already been corrected.
+    func test_execute_dispatchesTheCloudTurnWithNoCurrentEpisode() async {
+        mockPlaybackContextProvider.context = nil
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what should I listen to",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertTrue(
+            mockCloudRouteSink.routeToCloudCalled,
+            "the turn was refused locally instead of being dispatched with absent context"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.episodeId,
+            "an episode id was invented for a turn with nothing playing"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.clientPositionMs,
+            "a position was invented for a turn with nothing playing"
+        )
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)

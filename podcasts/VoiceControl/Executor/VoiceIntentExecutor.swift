@@ -52,6 +52,19 @@ final class CloudPlaybackContextState {
     }
 }
 
+extension PlaybackContext {
+    /// A turn with no current episode: no id, no position. The cloud fields above are what
+    /// carry the conversation identity, which is independent of episode availability.
+    static let absent = PlaybackContext(
+        episodeId: nil,
+        podcastId: nil,
+        referencePositionMs: nil,
+        clientPositionMs: nil,
+        recentReferencePositions: [],
+        previousReferencePositionMs: nil
+    )
+}
+
 struct DefaultPlaybackContextProvider: PlaybackContextProvider {
     let playbackState: PlaybackStateProviding
     let fingerprintMapper: FingerprintMappingProviding
@@ -164,10 +177,11 @@ class VoiceIntentExecutor {
         case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
         case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
         case let cr as CloudRouteIntent:
-            guard let context = playbackContextProvider.current() else {
-                response = .earcon(.error)
-                break
-            }
+            // An absent context is a representable turn, not a refusal: the app's normal first
+            // interaction has nothing playing, and the contract describes that as absent
+            // context rather than as an invented episode and position. Refusing here is what
+            // made the discovery turn unreachable on the client.
+            let context = playbackContextProvider.current() ?? PlaybackContext.absent
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,

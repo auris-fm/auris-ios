@@ -151,10 +151,14 @@ enum CloudTier: String, Equatable {
 }
 
 struct PlaybackContext: Equatable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: the contract forbids
+    /// inventing an ID, and the discovery turn — nothing playing — must represent that as
+    /// absence rather than as an id that names nothing.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to hold a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 }

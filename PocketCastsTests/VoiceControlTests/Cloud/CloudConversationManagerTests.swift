@@ -99,6 +99,46 @@ final class CloudConversationManagerTests: XCTestCase {
         XCTAssertEqual(retry.mode, "create")
     }
 
+    /// A turn with no current episode must OMIT the episode fields, not send empty or zero
+    /// ones. An empty id names nothing and a zero position is a measurement the client never
+    /// made; both read as supplied values to the server, which forbids inventing either.
+    func testFrameOmitsEpisodeFieldsWhenThereIsNoCurrentEpisode() {
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "what should I listen to",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil, recentConversation: [], conversation: nil
+            )
+        )
+
+        let context = frame["context"] as? [String: Any]
+        XCTAssertNil(context?["episode_id"], "an invented episode id was sent")
+        XCTAssertNil(context?["client_position_ms"], "an invented position was sent")
+        XCTAssertNotNil(context, "the context object itself must still be present")
+    }
+
+    func testFrameStillSendsEpisodeFieldsWhenOneExists() {
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: "ep-1", podcastId: "pod-1", referencePositionMs: nil,
+                clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil, recentConversation: [], conversation: nil
+            )
+        )
+
+        let context = frame["context"] as? [String: Any]
+        XCTAssertEqual(context?["episode_id"] as? String, "ep-1")
+        // Int64 boxes as NSNumber, so an  cast of a stored Int64 is nil — read it as a
+        // number and compare, or the case fails on the cast rather than on the value.
+        XCTAssertEqual((context?["client_position_ms"] as? NSNumber)?.int64Value, 1_100)
+    }
+
     func testModeIsAlwaysLowercase() throws {
         for selection in [CloudConversationSelection.wakeWord, .followUp] {
             let prepared = try XCTUnwrap(manager.prepare(selection: selection, origin: 1))
