@@ -284,29 +284,10 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertTrue(sawError, "the failure was not surfaced at all")
     }
 
-    /// The never-submitted branch is UNREACHABLE in the production client as it stands, and this
-    /// case is what established that rather than assuming it.
-    ///
-    /// Two facts together: the only failure that can precede the send INVOCATION is frame
-    /// construction, which yields `invalid_request` and returns before the flag is touched; and
-    /// the attempt flag is set immediately before invoking `send`, so a throw from inside `send`
-    /// correctly counts as ATTEMPTED — which is the conservative reading the cloud lane required.
-    ///
-    /// So no input reaches the never-submitted branch today. That is not a failure of the branch;
-    /// it means eligible automatic recovery cannot currently be reached, which is exactly what the
-    /// outstanding "eligible caller" work has to supply. Kept as a documented disposition instead
-    /// of a test that cannot fire: an unreachable case would pass for the wrong reason and would
-    /// hide this.
-    func testTheNeverSubmittedBranchIsUnreachableWithTheCurrentTransport() {
-        XCTAssertTrue(
-            true,
-            "documented disposition — see the note above; the branch has no reachable producer yet"
-        )
-    }
-
-    /// The PRODUCTION task must not be left suspended. A `URLSessionWebSocketTask` does not connect
-    /// until `resume()`, and every send on a suspended task fails — so without it the app could
-    /// not complete a turn at all.
+    /// The PRODUCTION task must not be left suspended. A `URLSessionWebSocketTask` starts suspended
+    /// and must be resumed to begin connecting; without the resume the task never reached startup,
+    /// so a turn could not begin. (Startup is the observed requirement; "every suspended send
+    /// fails" was not measured and is not claimed.)
     ///
     /// This case deliberately does NOT inject `webSocketTaskFactory`: injecting it bypasses the
     /// default path, which is exactly how the missing resume survived the entire suite. It drives
@@ -332,8 +313,8 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertNotNil(state, "the production path never created a task, so this case is vacuous")
         XCTAssertNotEqual(
             state, .suspended,
-            "the production WebSocket task was left SUSPENDED, so it never connects and every "
-                + "send on it fails — the app cannot complete a turn"
+            "the production WebSocket task was left SUSPENDED, so it never began connecting and "
+                + "a turn could not start"
         )
     }
 

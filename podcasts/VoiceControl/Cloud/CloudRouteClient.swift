@@ -162,11 +162,12 @@ final class CloudRouteClient {
             // A test double. It owns its own readiness, so nothing is resumed here.
             wsTask = injected
         } else {
-            // PRODUCTION PATH. A `URLSessionWebSocketTask` is created SUSPENDED: it does not
-            // connect until `resume()` is called, and every send on a suspended task fails. The
-            // controlled tests inject a factory and therefore never exercised this line, so the
-            // missing resume was invisible to them — a reminder that a double bypasses the code
-            // it stands in for.
+            // PRODUCTION PATH. A `URLSessionWebSocketTask` starts SUSPENDED and must be resumed to
+            // begin its connection: without this the task never reached startup, so a turn could
+            // not begin. (The observable is startup, not a claim about every send's behaviour —
+            // that stronger statement was not measured and is not made.) The controlled tests
+            // inject a factory and so never exercised this line, which is how the omission
+            // survived: a double bypasses the code it stands in for.
             let task = session.webSocketTask(with: req)
             task.resume()
             // Exposed so a test can verify the PRODUCTION task is not left suspended. A test that
