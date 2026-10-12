@@ -15,19 +15,34 @@ import PocketCastsUtils
 final class KeychainScopeProbeTests: XCTestCase {
     private let probeKey = "__scope_probe__"
 
+    /// Explicit enablement, read by EVERY hook that can touch the store.
+    ///
+    /// `setUp` and `tearDown` run even when the test body skips, so an ungated remove here means
+    /// a disabled shared-suite run still WRITES to the keychain of whatever device it runs on.
+    /// The gate therefore has to cover the hooks, not just the body — skip semantics do not
+    /// protect the store.
+    private var probeEnabled: Bool {
+        ProcessInfo.processInfo.environment["AURIS_KEYCHAIN_SCOPE_PROBE"] == "1"
+    }
+
     override func setUp() {
         super.setUp()
+        guard probeEnabled else { return }
         _ = KeychainHelper.removeKey(probeKey)
     }
 
     override func tearDown() {
+        guard probeEnabled else {
+            super.tearDown()
+            return
+        }
         _ = KeychainHelper.removeKey(probeKey)
         super.tearDown()
     }
 
     func testSyntheticEntryIsReadableByAttributesOnly() throws {
         try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["AURIS_KEYCHAIN_SCOPE_PROBE"] == "1",
+            probeEnabled,
             "scope probe runs only when explicitly enabled on a scratch simulator"
         )
 
