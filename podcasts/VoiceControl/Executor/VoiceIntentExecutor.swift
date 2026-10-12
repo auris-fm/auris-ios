@@ -197,6 +197,22 @@ class VoiceIntentExecutor {
     ///
     /// Returns nil when nothing is held, so an absent holder cannot be mistaken for a retry.
     func retryHeldCloudRequest(requestId: String) async -> CloudRouteResult? {
+        // CLOSED BEFORE ANY TRANSPORT OR OUTPUT EFFECT (@spec).
+        //
+        // There is no producer that can establish eligibility: this transport cannot report a frame
+        // as provably never submitted, so nothing is eligible to re-drive. An entry point that
+        // keeps working in that state is an accessible replay path after possible admission, which
+        // is precisely what must not exist. It therefore REFUSES UNCONDITIONALLY — no handle
+        // lookup, no sink call, no cancel, no output registration — and the seam remains only so a
+        // future producer has somewhere to attach.
+        //
+        // When that producer exists, this guard is the line to replace; until then it is the
+        // boundary that keeps automatic turn retry unavailable by design.
+        return nil
+    }
+
+    /// Kept for the seam but unreachable: the body above refuses before looking anything up.
+    private func retryHeldCloudRequestUnreachable(requestId: String) async -> CloudRouteResult? {
         guard let held = cloudPreparations[requestId] else { return nil }
         let result = await cloudRouteSink.retryLastPreparedRequest(requestId: held.requestId)
         // COMPARE-AND-CLEAR. The await above is a suspension point, so a successor can prepare

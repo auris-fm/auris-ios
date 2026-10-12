@@ -377,19 +377,26 @@ final class VoiceIntentExecutorTests: XCTestCase {
             "B's own handle is not held either"
         )
 
-        // The explicit A retry names A, not the most recent preparation.
+        // The retry entry point now REFUSES UNCONDITIONALLY, because no producer can establish
+        // eligibility — so it must not reach the sink at all. That is the closed replay access,
+        // asserted rather than assumed.
         mockCloudRouteSink.retriedRequestIds.removeAll()
-        _ = await executor.retryHeldCloudRequest(requestId: "req-A")
-        XCTAssertEqual(
-            mockCloudRouteSink.retriedRequestIds, ["req-A"],
-            "the retry did not name A's request"
+        let refused = await executor.retryHeldCloudRequest(requestId: "req-A")
+        XCTAssertNil(refused, "the retry entry point did not refuse")
+        XCTAssertTrue(
+            mockCloudRouteSink.retriedRequestIds.isEmpty,
+            "the retry reached the transport despite refusing — replay access is not closed"
         )
     }
 
-    /// COMPARE-AND-CLEAR: a successor that prepares the same key DURING the retry's await must
-    /// keep its handle. Clearing unconditionally would drop theirs, leaving a later retry naming
-    /// something that no longer exists.
-    func test_aSuccessorPreparingDuringTheRetryKeepsItsHandle() async {
+    /// The replay access is CLOSED: the retry entry point refuses before any transport or output
+    /// effect, with no producer able to establish eligibility.
+    ///
+    /// The barrier-gated compare-and-clear case that used to live here exercised the retry's
+    /// INTERNAL body. That body is now unreachable by design, so the case was replaced rather than
+    /// kept passing on a path no caller can take — the same reasoning as the removed
+    /// `neverSubmitted` branch. What must hold instead is the refusal itself.
+    func testTheRetryEntryPointRefusesWithoutReachingTheTransport() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         let generation = gracePeriodSignal.currentGeneration()
@@ -399,38 +406,22 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
         ))
-
-        // HOLD THE RETRY AT AN EXPLICIT BARRIER. A synchronous hook cannot do this: it returns,
-        // the retry proceeds, and the successor is installed by a retry that already finished —
-        // the interleaving the case claims to test never happens.
-        let suspended = expectation(description: "retry suspended")
-        let release = AsyncStream<Void>.makeStream()
-        mockCloudRouteSink.onRetrySuspended = { suspended.fulfill() }
-        mockCloudRouteSink.retryGate = { for await _ in release.stream { return } }
-
-        let retry = Task { await executor.retryHeldCloudRequest(requestId: "req-A") }
-        await fulfillment(of: [suspended], timeout: 5)
-
-        // The retry is now DEMONSTRABLY suspended. Install the successor THROUGH THE EXECUTOR.
-        let successor = CloudRouteSink.RetainedPreparation(requestId: "req-A", ownershipToken: UUID())
-        mockCloudRouteSink.preparationHandle = successor
-        _ = await executor.execute(CloudRouteIntent(
-            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
-        ))
         XCTAssertNotNil(
             executor.heldCloudPreparation(forRequestId: "req-A"),
-            "the successor's preparation did not install, so the case cannot observe the interleave"
+            "the preparation was not held, so the case cannot show the refusal is not a lookup miss"
         )
 
-        // Release the retry: its compare-and-clear must NOT drop the successor's entry.
-        release.continuation.yield(())
-        release.continuation.finish()
-        _ = await retry.value
+        mockCloudRouteSink.retriedRequestIds.removeAll()
+        let result = await executor.retryHeldCloudRequest(requestId: "req-A")
 
+        XCTAssertNil(result, "the retry entry point did not refuse")
+        XCTAssertTrue(
+            mockCloudRouteSink.retriedRequestIds.isEmpty,
+            "the retry reached the transport, so the replay access is not closed"
+        )
         XCTAssertNotNil(
             executor.heldCloudPreparation(forRequestId: "req-A"),
-            "a retry that consumed an EARLIER preparation cleared the successor's entry of the "
-                + "same request — the compare-and-clear could not tell two preparations apart"
+            "a refusing retry must not consume the held handle either"
         )
     }
 
