@@ -341,6 +341,51 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.lastContext, context)
     }
 
+    /// A preparation -> B preparation -> explicit A retry. The control that proves a successor
+    /// cannot overwrite the handle an earlier turn holds.
+    ///
+    /// Moving a single held slot from the sink to the executor did not fix this: one slot is one
+    /// slot, so B's preparation replaced A's and a retry for A would have re-driven B. Keyed by the
+    /// logical request, A's handle is still A's after B is prepared.
+    func test_aSuccessorPreparationDoesNotReplaceAnEarlierHeldHandle() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        // A: prepared first, and its handle must survive B.
+        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        _ = await executor.execute(CloudRouteIntent(
+            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
+        ))
+        let heldA = executor.heldCloudPreparation(forRequestId: "req-A")
+        XCTAssertEqual(heldA?.requestId, "req-A", "A's handle was not held")
+
+        // B: a successor prepares, which must NOT displace A.
+        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-B")
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        _ = await executor.execute(CloudRouteIntent(
+            request: "B's question", tier: .unknown, generation: generation, selection: .followUp
+        ))
+
+        XCTAssertEqual(
+            executor.heldCloudPreparation(forRequestId: "req-A")?.requestId, "req-A",
+            "B's preparation replaced A's handle, so an A retry would re-drive B"
+        )
+        XCTAssertEqual(
+            executor.heldCloudPreparation(forRequestId: "req-B")?.requestId, "req-B",
+            "B's own handle is not held either"
+        )
+
+        // The explicit A retry names A, not the most recent preparation.
+        mockCloudRouteSink.retriedRequestIds.removeAll()
+        _ = await executor.retryHeldCloudRequest(requestId: "req-A")
+        XCTAssertEqual(
+            mockCloudRouteSink.retriedRequestIds, ["req-A"],
+            "the retry did not name A's request"
+        )
+    }
+
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
         _ = await executor.execute(PlaybackIntent.pause)
@@ -548,6 +593,10 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The selection the executor captured, so a case can assert the turn carries what selected
     /// it rather than whatever the window looks like later.
     var lastSelection: CloudConversationSelection?
+    /// The handle this sink returns, so a case can drive the A/B arrangement.
+    var preparationHandle: CloudRouteSink.RetainedPreparation?
+    /// The request ids a retry named, in order.
+    var retriedRequestIds: [String] = []
 
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
@@ -558,10 +607,15 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         lastContext = context
         lastOrigin = origin
         lastSelection = selection
-        return CloudRouteResult(response: response, outcome: outcome)
+        return CloudRouteResult(
+            response: response, outcome: outcome, retainedPreparation: preparationHandle
+        )
     }
 
-    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? { nil }
+    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
+        retriedRequestIds.append(requestId)
+        return CloudRouteResult(response: .silent, outcome: .completed)
+    }
     func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation) {}
 }
 

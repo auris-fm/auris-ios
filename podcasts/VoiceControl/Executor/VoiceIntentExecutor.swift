@@ -130,11 +130,22 @@ class VoiceIntentExecutor {
     /// A local dies when the call returns, so a later retry/recovery action would have nothing to
     /// name — the holder has to survive into the action that uses it. It is per-EXECUTOR rather
     /// than per-sink so a successor's turn cannot overwrite a handle belonging to an older one.
-    private(set) var heldCloudPreparation: CloudRouteSink.RetainedPreparation?
+    /// Handles keyed by the LOGICAL REQUEST they belong to.
+    ///
+    /// A single "held" slot — on the sink first, then on the executor — is the same bug at a third
+    /// level: a successor's turn overwrites the slot, so an action for turn A finds turn B's
+    /// handle. Keying by the request id means an action can only reach the handle for the request
+    /// it names, whatever else has been prepared since.
+    private(set) var cloudPreparations: [String: CloudRouteSink.RetainedPreparation] = [:]
 
-    /// The turn the held handle belongs to, so a retry can confirm it is acting on the request it
-    /// holds rather than on a later one.
-    private(set) var heldCloudTurnRequest: String?
+    /// The request text for each held handle, so an action can confirm it is retrying the request
+    /// it believes it is.
+    private(set) var cloudPreparationRequests: [String: String] = [:]
+
+    /// The handle for a specific logical request, or nil when none is held for it.
+    func heldCloudPreparation(forRequestId requestId: String) -> CloudRouteSink.RetainedPreparation? {
+        cloudPreparations[requestId]
+    }
 
     /// The sink this executor routes cloud playback through, so a test can reach the real
     /// producer the app built rather than constructing its own.
@@ -185,24 +196,24 @@ class VoiceIntentExecutor {
     /// refuses when the request's origin is no longer live.
     ///
     /// Returns nil when nothing is held, so an absent holder cannot be mistaken for a retry.
-    func retryHeldCloudRequest() async -> CloudRouteResult? {
-        guard let held = heldCloudPreparation else { return nil }
+    func retryHeldCloudRequest(requestId: String) async -> CloudRouteResult? {
+        guard let held = cloudPreparations[requestId] else { return nil }
         let result = await cloudRouteSink.retryLastPreparedRequest(requestId: held.requestId)
-        // The handle is spent once used: the sink retires the request, so holding it afterwards
-        // would name something that no longer exists.
-        heldCloudPreparation = nil
-        heldCloudTurnRequest = nil
+        // Spent once used: the sink retires the request, so holding it afterwards would name
+        // something that no longer exists.
+        cloudPreparations[requestId] = nil
+        cloudPreparationRequests[requestId] = nil
         return result
     }
 
     /// Drops the held handle AND the sink's retained request for it, called when the owning
     /// session ends.
     func invalidateHeldCloudRequest() {
-        if let held = heldCloudPreparation {
+        for (_, held) in cloudPreparations {
             cloudRouteSink.invalidateRetained(held)
         }
-        heldCloudPreparation = nil
-        heldCloudTurnRequest = nil
+        cloudPreparations.removeAll()
+        cloudPreparationRequests.removeAll()
     }
 
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
@@ -247,8 +258,10 @@ class VoiceIntentExecutor {
             // The handle for THIS call's preparation, taken from the result rather than from a
             // published slot: a slot could have been replaced by a successor by the time this
             // line runs, and the caller would then retry a request it never made.
-            heldCloudPreparation = result.retainedPreparation
-            heldCloudTurnRequest = result.retainedPreparation == nil ? nil : cr.request
+            if let handle = result.retainedPreparation {
+                cloudPreparations[handle.requestId] = handle
+                cloudPreparationRequests[handle.requestId] = cr.request
+            }
         default: response = .earcon(.error)
         }
 
