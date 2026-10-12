@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import PocketCastsDataModel
 
+@MainActor
 protocol AnalyticsSourceProvider {
     /// Used to define the source view for the various analytics actions
     var analyticsSource: AnalyticsSource { get }
@@ -19,7 +20,6 @@ enum AnalyticsSource: String, AnalyticsDescribable {
     case discoverEpisodeList = "discover_episode_list"
     case discoverRankedList = "discover_ranked_list"
     case downloads
-    case downloadStatus = "download_status"
     case episodeDetail = "episode_detail"
     case episodeStatus = "episode_status"
     case episodeTranscript = "episode_transcript"
@@ -30,7 +30,6 @@ enum AnalyticsSource: String, AnalyticsDescribable {
     case incomingShareList = "incoming_share_list"
     case listeningHistory = "listening_history"
     case liveActivity = "live_activity"
-    case mediaType = "media_type"
     case miniplayer
     case noFiles = "no_files"
     case noFilters = "no_filters"
@@ -46,7 +45,6 @@ enum AnalyticsSource: String, AnalyticsDescribable {
     case podcastSettings = "podcast_settings"
     case podcastsList = "podcasts_list"
     case profile
-    case releaseDate = "release_date"
     case siri
     case starred
     case sync
@@ -94,7 +92,8 @@ class AnalyticsCoordinator {
         }
 
         #if !os(watchOS) && !APPCLIP
-        return topAnalyticsSourceProvider()?.analyticsSource ?? .unknown
+        guard Thread.isMainThread else { return .unknown }
+        return MainActor.assumeIsolated { topAnalyticsSourceProvider()?.analyticsSource } ?? .unknown
         #else
         return .unknown
         #endif
@@ -115,7 +114,8 @@ class AnalyticsCoordinator {
             Analytics.track(event, properties: mergedProperties)
         }
 
-    func getTopViewController(base: UIViewController? = SceneHelper.rootViewController()) -> UIViewController? {
+    @MainActor
+    func getTopViewController(base: UIViewController?) -> UIViewController? {
             guard UIApplication.shared.applicationState == .active else {
                 return nil
             }
@@ -130,8 +130,9 @@ class AnalyticsCoordinator {
             return base
         }
 
+    @MainActor
     func topAnalyticsSourceProvider() -> AnalyticsSourceProvider? {
-        guard let topViewController = getTopViewController() else { return nil }
+        guard let topViewController = getTopViewController(base: SceneHelper.rootViewController()) else { return nil }
 
         var candidate: UIViewController? = topViewController
         while let viewController = candidate {

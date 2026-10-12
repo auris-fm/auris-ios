@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// 🍞 Toast - A lightweight way to display informative overlay messages
 ///
@@ -12,20 +13,21 @@ import Foundation
 ///          print("Hello World!")
 ///     })])
 ///
+@MainActor
 class Toast {
-    private static var shared = Toast()
+    private static let shared = Toast()
 
     /// Retain the visible window
     private var window: UIWindow? = nil
 
     /// Display the toast message with the given title and actions
-    static func show<Style: ToastTheme>(_ title: String, actions: [Action]? = nil, dismissAfter: ToastViewDismissPolicy = .interval(5.0), theme: Style = .defaultTheme, aboveMiniPlayer: Bool = false) {
+    static func show<Style: ToastTheme>(_ title: String, actions: [Action]? = nil, dismissAfter: ToastViewDismissPolicy = .interval(5.0), theme: Style = .defaultTheme, aboveMiniPlayer: Bool = false, bottomInset: CGFloat = 0) {
         // Hide any active toasts
         shared.toastDismissed()
 
         guard let scene = SceneHelper.connectedScene() else { return }
 
-        let viewModel = ToastViewModel(coordinator: shared, title: title, actions: actions, dismissPolicy: dismissAfter, aboveMiniPlayer: aboveMiniPlayer)
+        let viewModel = ToastViewModel(coordinator: shared, title: title, actions: actions, dismissPolicy: dismissAfter, aboveMiniPlayer: aboveMiniPlayer, bottomInset: bottomInset)
         let view = ToastView(viewModel: viewModel, style: theme)
         let controller = ThemedHostingController(rootView: view)
 
@@ -43,7 +45,7 @@ class Toast {
 
     struct Action: Identifiable {
         let title: String
-        let action: () -> Void
+        let action: @MainActor () -> Void
 
         var id: String { title }
     }
@@ -73,6 +75,7 @@ private class ToastWindow: UIWindow {
         rootViewController = controller
         windowLevel = .alert
         backgroundColor = .clear
+        applyInterfaceStyleForActiveTheme()
     }
 
     // MARK: - Overridden

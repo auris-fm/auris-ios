@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 class GridHelper {
     private static let bigDevicePortraitWidth: CGFloat = 600
@@ -27,7 +28,7 @@ class GridHelper {
     func configureLayout(collectionView: UICollectionView) {
         guard let flowLayout = collectionView.collectionViewLayout as? ReorderableFlowLayout else { return }
 
-        let gridType = Settings.libraryType()
+        let gridType = Settings.libraryType
         let spacing = gridType == .list ? 0 : self.spacing
         // Blocks horizontal scrolling on the collection view
         collectionView.contentSize.width = collectionView.bounds.width - 1
@@ -40,8 +41,8 @@ class GridHelper {
     }
 
     func collectionView(_ collectionView: UICollectionView, sizeForItemAt indexPath: IndexPath, itemCount: Int) -> CGSize {
-        let gridType = Settings.libraryType()
-        let viewWidth = collectionView.bounds.width - collectionView.contentInset.left - collectionView.contentInset.right
+        let gridType = Settings.libraryType
+        let viewWidth = collectionView.bounds.width - collectionView.adjustedContentInset.left - collectionView.adjustedContentInset.right
         let viewHeight = collectionView.bounds.height
 
         let largerSizes = Set<UIContentSizeCategory>([.accessibilityExtraLarge, .accessibilityExtraExtraLarge, .accessibilityExtraExtraExtraLarge])

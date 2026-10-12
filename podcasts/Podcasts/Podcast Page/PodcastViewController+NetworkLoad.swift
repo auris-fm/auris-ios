@@ -33,7 +33,7 @@ extension PodcastViewController {
     }
 
     private func processPodcastAdded(added: Bool, uuid: String?) {
-        guard let uuid, let podcast = DataManager.sharedManager.findPodcast(uuid: uuid, includeUnsubscribed: true) else {
+        guard let uuid, let podcast = DataManager.shared.findPodcast(uuid: uuid, includeUnsubscribed: true) else {
             loadingEnded(successfully: false)
 
             return
@@ -46,7 +46,7 @@ extension PodcastViewController {
 
         if SyncManager.isUserLoggedIn() {
             if let episodes = ApiServerHandler.shared.retrieveEpisodeTaskSynchronouusly(podcastUuid: uuid) {
-                DataManager.sharedManager.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
+                DataManager.shared.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
             } else {
                 // A failed/stalled episode sync must not hang the details page on the
                 // spinner (task #1: the sync leg previously returned early, leaving the

@@ -11,7 +11,6 @@ import PocketCastsServer
 @MainActor
 class NowPlayingPlayerItemViewController: PlayerItemViewController {
     var showingCustomImage = false
-    var lastChapterIndexRendered = -1
 
     /// Low-res artwork handed over from the mini player when opening the full
     /// screen player.
@@ -22,7 +21,7 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     // Detect Display Zoom (zoomed display makes UI elements appear larger).
     // Scale controls down slightly when zoomed to avoid oversized buttons.
     private var isZoomed: Bool {
-        A11y.isDisplayZoomed
+        view.window?.windowScene?.screen.isDisplayZoomed ?? false
     }
 
     var videoViewController: VideoViewController?
@@ -30,12 +29,14 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     @IBOutlet var skipBackBtn: SkipButton! {
         didSet {
             skipBackBtn.skipBack = true
+            skipBackBtn.semanticContentAttribute = .playback
         }
     }
 
     @IBOutlet var skipFwdBtn: SkipButton! {
         didSet {
             skipFwdBtn.skipBack = false
+            skipFwdBtn.semanticContentAttribute = .playback
             skipFwdBtn.longPressed = { [weak self] in
                 self?.skipForwardLongPressed()
             }
@@ -43,6 +44,12 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     }
 
     @IBOutlet var playPauseBtn: PlayPauseButton!
+
+    @IBOutlet var playSkipStackView: UIStackView! {
+        didSet {
+            playSkipStackView.semanticContentAttribute = .playback
+        }
+    }
 
     @IBOutlet var episodeImage: UIImageView! {
         didSet {
@@ -103,6 +110,10 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             tapGesture.numberOfTapsRequired = 1
             tapGesture.numberOfTouchesRequired = 1
             floatingVideoView.addGestureRecognizer(tapGesture)
+
+            floatingVideoView.onFullScreenTapped = { [weak self] in
+                self?.videoTapped()
+            }
         }
     }
 
@@ -111,12 +122,14 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     @IBOutlet var chapterSkipBackBtn: UIButton! {
         didSet {
             chapterSkipBackBtn.tintColor = ThemeColor.playerContrast01()
+            chapterSkipBackBtn.accessibilityLabel = L10n.siriShortcutPreviousChapter
         }
     }
 
     @IBOutlet var chapterSkipFwdBtn: UIButton! {
         didSet {
             chapterSkipFwdBtn.tintColor = ThemeColor.playerContrast01()
+            chapterSkipFwdBtn.accessibilityLabel = L10n.siriShortcutNextChapter
         }
     }
 
@@ -169,7 +182,11 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
 
     @IBOutlet var playerControlsStackView: UIStackView!
 
-    @IBOutlet var timeSliderHolderView: UIView!
+    @IBOutlet var timeSliderHolderView: UIView! {
+        didSet {
+            timeSliderHolderView.semanticContentAttribute = .playback
+        }
+    }
 
     @IBOutlet var timeElapsed: ThemeableLabel! {
         didSet {
@@ -244,6 +261,9 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
 
     private var bannerAdHostingController: PCHostingController<AnyView>?
     private var bannerAdHeightConstraint: NSLayoutConstraint?
+    #if !APPCLIP
+    private var bannerAdModel: BannerAdModel?
+    #endif
 
     private let analyticsPlaybackHelper = AnalyticsPlaybackHelper.shared
 
@@ -259,7 +279,16 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             controller.updateSize()
         }
 
+        registerForTraitChanges([UITraitDisplayScale.self]) { (controller: NowPlayingPlayerItemViewController, _) in
+            controller.resizeControls()
+            #if !APPCLIP
+            controller.updateBannerAdDisplayZoom()
+            #endif
+        }
+
         setUpArtworkImageView()
+        letTitleInfoGrow()
+        limitShelfWidth()
 
         #if !APPCLIP
         let upNextPan = UIPanGestureRecognizer(target: self, action: #selector(panGestureRecognizerHandler(_:)))
@@ -293,6 +322,16 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
         loadBannerAd()
     }
 
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+
+        // Layout and the banner can run before the view has a window to read Display Zoom from.
+        resizeControls()
+        #if !APPCLIP
+        updateBannerAdDisplayZoom()
+        #endif
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         bannerTask?.cancel()
@@ -313,6 +352,15 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             toggleTranscript()
 #endif
         }
+    }
+
+    /// Selects the transcript tab when it's next to Now Playing, and covers Now Playing with
+    /// the transcript otherwise.
+    func openTranscript() {
+        if playerContainer?.showTranscriptTab() == true {
+            return
+        }
+        displayTranscript = true
     }
 
     private func loadBannerAd() {
@@ -336,8 +384,16 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
 #endif
     }
 
+    /// The parent, or, in the large screen layout, the parent of the pane it's shown in.
     private var playerContainer: PlayerContainerViewController? {
-        parent as? PlayerContainerViewController
+        var ancestor = parent
+        while let controller = ancestor {
+            if let playerContainer = controller as? PlayerContainerViewController {
+                return playerContainer
+            }
+            ancestor = controller.parent
+        }
+        return nil
     }
 
     override func viewDidLayoutSubviews() {
@@ -347,6 +403,8 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             // Render the shelf as a proper pill instead of the default rounded rectangle.
             shelfBg.layer.cornerRadius = shelfBg.bounds.height / 2
         }
+
+        updateShelfSpacing()
 
         // there's some expensive operations in resizeControls,
         // so only do them if the bounds has actually changed
@@ -386,6 +444,61 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
         skipFwdBtn.changeSize(to: skipSize)
 
         view.layoutIfNeeded()
+    }
+
+    /// Lets the episode title and podcast name in the large screen player take the room they need
+    /// at large text sizes, with some space around them, instead of overflowing their fixed height
+    /// into the artwork and the scrubber.
+    private func letTitleInfoGrow() {
+        guard usesLargeScreenStyle,
+              let titleInfoView = episodeInfoView.superview,
+              let titleView = episodeInfoView.subviews.first,
+              let fixedHeight = titleInfoView.constraints.first(where: { $0.firstItem === titleInfoView && $0.firstAttribute == .height && $0.secondItem == nil }) else { return }
+
+        let preferredHeight = titleInfoView.heightAnchor.constraint(equalToConstant: fixedHeight.constant)
+        preferredHeight.priority = .defaultHigh - 1
+        fixedHeight.isActive = false
+        NSLayoutConstraint.activate([
+            preferredHeight,
+            titleInfoView.heightAnchor.constraint(greaterThanOrEqualToConstant: fixedHeight.constant),
+            titleView.topAnchor.constraint(greaterThanOrEqualTo: episodeInfoView.topAnchor, constant: 12)
+        ])
+    }
+
+    /// Keeps the shelf in the large screen player from stretching across a wide Now Playing, as
+    /// on iPad, by letting it be narrower than the edges it's pinned to. It stays centered.
+    private func limitShelfWidth() {
+        guard usesLargeScreenStyle,
+              let shelfStackView = shelfBg.superview,
+              let leading = shelfStackView.constraints.first(where: { $0.firstItem === shelfBg && $0.firstAttribute == .leading && $0.secondAttribute == .leadingMargin }),
+              let trailing = shelfStackView.constraints.first(where: { $0.secondItem === shelfBg && $0.secondAttribute == .trailing && $0.firstAttribute == .trailingMargin }) else { return }
+
+        let preferredWidth = shelfBg.widthAnchor.constraint(equalToConstant: 440)
+        preferredWidth.priority = .defaultHigh
+        NSLayoutConstraint.deactivate([leading, trailing])
+        NSLayoutConstraint.activate([
+            shelfBg.leadingAnchor.constraint(greaterThanOrEqualTo: shelfStackView.layoutMarginsGuide.leadingAnchor, constant: leading.constant),
+            shelfStackView.layoutMarginsGuide.trailingAnchor.constraint(greaterThanOrEqualTo: shelfBg.trailingAnchor, constant: trailing.constant),
+            preferredWidth
+        ])
+    }
+
+    /// Gives each shelf button the same space on both sides in the large screen player, where the
+    /// shelf is wide, instead of pushing the first and last ones to its edges.
+    private func updateShelfSpacing() {
+        guard usesLargeScreenStyle else { return }
+
+        let buttons = playerControlsStackView.arrangedSubviews.filter { !$0.isHidden }
+        guard !buttons.isEmpty, shelfBg.bounds.width > 0 else { return }
+
+        let buttonsWidth = CGFloat(buttons.count) * shelfIconSize
+        let shelfInset = (shelfBg.bounds.width - playerControlsStackView.bounds.width) / 2
+        let buttonInset = (shelfBg.bounds.width - buttonsWidth) / CGFloat(2 * buttons.count)
+        let margin = max(0, buttonInset - shelfInset)
+        guard playerControlsStackView.directionalLayoutMargins.leading != margin else { return }
+
+        playerControlsStackView.isLayoutMarginsRelativeArrangement = true
+        playerControlsStackView.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: margin, bottom: 0, trailing: margin)
     }
 
     private var artworkCornerRadius: CGFloat {
@@ -605,13 +718,19 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     }
 
     @objc private func videoTapped() {
-        guard PlaybackManager.shared.currentEpisode != nil else { return }
+        guard PlaybackManager.shared.currentEpisode != nil, presentedViewController == nil else { return }
 
         if PlaybackManager.shared.shouldRenderVideo() {
             let videoController = VideoViewController()
             videoViewController = videoController
-            videoViewController?.modalTransitionStyle = .crossDissolve
             videoViewController?.modalPresentationStyle = .fullScreen
+            if #available(iOS 18.0, *) {
+                videoViewController?.preferredTransition = .zoom { [weak self] _ in
+                    self?.floatingVideoView
+                }
+            } else {
+                videoViewController?.modalTransitionStyle = .crossDissolve
+            }
             videoViewController?.willAttachPlayer = { [weak self] in
                 self?.floatingVideoView.player = nil
             }
@@ -658,7 +777,7 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     @objc func googleCastTapped() {
         shelfButtonTapped(.chromecast)
 
-        let themeOverride = Theme.sharedTheme.activeTheme.isDark ? Theme.sharedTheme.activeTheme : .dark
+        let themeOverride = Theme.shared.activeTheme.isDark ? Theme.shared.activeTheme : .dark
         let castController = CastToViewController(themeOverride: themeOverride)
         let navController = SJUIUtils.navController(for: castController, themeOverride: themeOverride)
         navController.modalPresentationStyle = .fullScreen
@@ -669,8 +788,9 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
     private func toggleTranscript() {
         let isShowing = displayTranscript
 
-        skipBackBtn.prepareForAnimateTransition(withBackground: view.backgroundColor)
-        skipFwdBtn.prepareForAnimateTransition(withBackground: view.backgroundColor)
+        let transitionBackground = usesLargeScreenStyle ? PlayerColorHelper.playerBackgroundColor01() : view.backgroundColor
+        skipBackBtn.prepareForAnimateTransition(withBackground: transitionBackground)
+        skipFwdBtn.prepareForAnimateTransition(withBackground: transitionBackground)
         playPauseBtn.prepareForAnimateTransition()
 
         playerContainer?.transcriptContainerView.layer.opacity = isShowing ? 0 : 1
@@ -681,7 +801,7 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             playerContainer?.showTranscript()
         }
 
-        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.75, initialSpringVelocity: 1, animations: { [weak self] in
+        UIView.animate(springDuration: 0.35, bounce: 0, animations: { [weak self] in
             guard let self else { return }
 
             // Hide/show shelf
@@ -738,8 +858,7 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
             UIApplication.shared.openSafariVCIfPossible(promotion.urlApple)
         }
 
-        let adView = BannerAdView(model: model, colors: .playerColors(Theme.sharedTheme)).padding(16)
-        let hostingController = PCHostingController(rootView: AnyView(adView))
+        let hostingController = PCHostingController(rootView: bannerAdView(model: model))
 
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         hostingController.view.backgroundColor = .clear
@@ -764,6 +883,7 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
         hostingController.didMove(toParent: self)
         bannerAdHostingController = hostingController
         bannerAdHeightConstraint = heightConstraint
+        bannerAdModel = model
 
         view.layoutIfNeeded()
 
@@ -792,6 +912,18 @@ class NowPlayingPlayerItemViewController: PlayerItemViewController {
         hostingController.removeFromParent()
         bannerAdHostingController = nil
         bannerAdHeightConstraint = nil
+        bannerAdModel = nil
+    }
+
+    private func bannerAdView(model: BannerAdModel) -> AnyView {
+        AnyView(BannerAdView(model: model, colors: .playerColors(Theme.shared), isDisplayZoomed: isZoomed).padding(16))
+    }
+
+    private func updateBannerAdDisplayZoom() {
+        guard let hostingController = bannerAdHostingController, let bannerAdModel else { return }
+
+        hostingController.rootView = .init(content: bannerAdView(model: bannerAdModel), modifier: hostingController.rootView.modifier)
+        updateBannerAdHeight()
     }
 
     private func updateBannerAdHeight() {
