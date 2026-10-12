@@ -2730,8 +2730,13 @@ final class EchoReferenceWiringTests: XCTestCase {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
 
-        let oldIdentity = EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 0)
-        let newIdentity = EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 1)
+        let player = EarconPlayer(engine: nil)
+        player.handoff = handoff
+        let oldIdentity = player.currentIdentity
+        let newIdentity = EchoReferenceHandoff.ProducerIdentity(
+            kind: oldIdentity.kind,
+            incarnation: oldIdentity.incarnation &+ 1
+        )
 
         // The OLD identity's block: resident, range-bearing, spanning local 0..<400.
         handoff.submit(
@@ -2754,8 +2759,15 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
         handoff.drain()
 
-        // The producer's own reset notification: the old identity is now retired.
-        handoff.rotateIncarnation(for: .earcon, to: 1)
+        // The producer's own reset notification — driven through the REAL producer path, not a
+        // direct handoff call, so this case covers the production notification and not only the
+        // handoff's reaction to it. `stop()` is what the app calls; it rotates the node
+        // incarnation and reports it to the handoff itself.
+        player.stop()
+        XCTAssertEqual(
+            player.currentIdentity.incarnation, newIdentity.incarnation,
+            "the producer's stop did not advance to the identity this case's current block uses"
+        )
 
         // Clear whatever the blocks' drains recorded, so a refusal is observable at all:
         // `recordRenderPosition` overwrites, and the old block's own anchor would otherwise be
