@@ -304,7 +304,13 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// misclassify this as never-submitted and replay a turn that may have been admitted.
     var transmitsThenThrows = false
 
+    /// When set, a send THROWS WITHOUT RECORDING — the frame never reached the transport, which is
+    /// the pre-entry failure that proves it was never submitted and is therefore the one case
+    /// automatic recovery may re-drive.
+    var throwsBeforeRecording = false
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         sent.append(message)
         if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }

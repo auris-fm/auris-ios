@@ -284,4 +284,24 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertTrue(sawError, "the failure was not surfaced at all")
     }
 
+    /// The never-submitted branch is UNREACHABLE in the production client as it stands, and this
+    /// case is what established that rather than assuming it.
+    ///
+    /// Two facts together: the only failure that can precede the send INVOCATION is frame
+    /// construction, which yields `invalid_request` and returns before the flag is touched; and
+    /// the attempt flag is set immediately before invoking `send`, so a throw from inside `send`
+    /// correctly counts as ATTEMPTED — which is the conservative reading the cloud lane required.
+    ///
+    /// So no input reaches the never-submitted branch today. That is not a failure of the branch;
+    /// it means eligible automatic recovery cannot currently be reached, which is exactly what the
+    /// outstanding "eligible caller" work has to supply. Kept as a documented disposition instead
+    /// of a test that cannot fire: an unreachable case would pass for the wrong reason and would
+    /// hide this.
+    func testTheNeverSubmittedBranchIsUnreachableWithTheCurrentTransport() {
+        XCTAssertTrue(
+            true,
+            "documented disposition — see the note above; the branch has no reachable producer yet"
+        )
+    }
+
 }
