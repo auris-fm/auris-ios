@@ -140,8 +140,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// Returns nil when there is nothing retained to re-drive, so a caller cannot mistake an
     /// absent request for a successful retry.
-    /// The origin a retry must still belong to. Supplied by the owner; `nil` when unknown, in
-    /// which case a captured origin cannot be validated and the retry refuses rather than guess.
+    /// The origin a retry must still belong to, supplied by the OWNER (the executor, which knows
+    /// the turn's window). `nil` means liveness cannot be established, and the retry refuses.
+    ///
+    /// There is no production binding yet, so today this refuses every retry — which is the
+    /// correct default while the owner is unwired: a retry that cannot establish its window must
+    /// not re-drive, and failing closed is what makes the missing wiring visible instead of
+    /// letting unowned retries through.
     var liveOriginForRetry: () -> Int? = { nil }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
@@ -151,9 +156,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         guard let prepared = preparedRequests.removeValue(forKey: requestId) else { return nil }
         // A retired origin cannot re-drive: the request belonged to a window that is gone, and
         // re-driving it would attribute the turn to whatever window is current now.
-        if let requestOrigin = prepared.origin, requestOrigin != liveOriginForRetry() {
-            return nil
-        }
+        // FAIL CLOSED on an unestablished origin. An earlier version skipped this guard when the
+        // captured origin was nil, which means "we do not know what window this belonged to" was
+        // treated as permission to re-drive it — the opposite reading. Liveness must be
+        // ESTABLISHED, and an unknown live origin cannot establish anything.
+        guard let requestOrigin = prepared.origin,
+              let liveOrigin = liveOriginForRetry(),
+              requestOrigin == liveOrigin
+        else { return nil }
         // Re-enters the single-attempt path with the RETAINED envelope, so the ids on the wire are
         // the originals by construction. Passing the retained turn through means the retry cannot
         // mint a fresh id even by mistake.
@@ -303,18 +313,29 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // `activeTurn` after that would disturb a successor for a turn that already has its own
         // identity. The retained envelope already carries the conversation it was admitted under,
         // so a re-drive uses that and touches none of the preparation path.
-        if let retainedTurn {
-            return await driveRetained(retainedTurn, request: request, context: context,
-                                       origin: origin, selection: selection)
-        }
-
-        guard let conversation = conversationManager.prepare(
-            // The captured selection when the caller supplied one; the provider is the fallback
-            // for callers that did not, which is the late-reading behaviour this replaces.
-            selection: effectiveSelection,
-            origin: origin
-        ) else {
-            return CloudRouteResult(response: .silent, outcome: .refused)
+        // A RETRY does not re-prepare: `prepare` can select or mint a conversation, and cancelling
+        // `activeTurn` after that would disturb a successor for a turn that already has its own
+        // identity. The retained envelope names its conversation, so a re-drive takes it from
+        // there — and then flows into the SAME event loop below, because a retry that handled a
+        // subset of events would report success while delivering none of the answer.
+        //
+        // There is deliberately NO second event loop: `route` handles connected/codec, audioFrame,
+        // token, action, result, done and error in one place, and a parallel path would diverge
+        // from it the moment either changed.
+        let conversation: CloudPreparedConversation
+        if let retainedTurn, let retainedConversation = retainedTurn.conversation {
+            conversation = retainedConversation
+        } else {
+            guard let prepared = conversationManager.prepare(
+                // The captured selection when the caller supplied one; the provider is the
+                // fallback for callers that did not, which is the late-reading behaviour this
+                // replaces.
+                selection: effectiveSelection,
+                origin: origin
+            ) else {
+                return CloudRouteResult(response: .silent, outcome: .refused)
+            }
+            conversation = prepared
         }
 
         let client = clientFactory()
@@ -450,39 +471,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         restoreTransientAudioState()
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
-        return CloudRouteResult(response: .silent, outcome: .earlyClose)
-    }
-
-    /// Re-drives a retained request WITHOUT the preparation path. It still owns a turn token and
-    /// the transport, so cancellation and supersede semantics are unchanged — what it does not do
-    /// is choose or create a conversation, because the retained request already names one.
-    private func driveRetained(
-        _ turn: CloudTurnEnvelope,
-        request: String,
-        context: PlaybackContext,
-        origin: Int?,
-        selection: CloudConversationSelection?
-    ) async -> CloudRouteResult {
-        let client = clientFactory()
-        let routeContext = CloudRouteContext(from: context)
-        let turnToken = CloudTurnToken()
-        activeTurn?.cancel()
-        activeTurn = turnToken
-        for await event in client.route(request: request, context: routeContext, turn: turn) {
-            if turnToken.isCancelled { break }
-            if case .done = event {
-                audioPlayer.finish()
-                return CloudRouteResult(response: .silent, outcome: .completed)
-            }
-            if case let .error(code, _) = event {
-                return CloudRouteResult(
-                    response: .earcon(.error), outcome: .failed(code: code)
-                )
-            }
-        }
-        if turnToken.isCancelled {
-            return CloudRouteResult(response: .silent, outcome: .earlyClose)
-        }
         return CloudRouteResult(response: .silent, outcome: .earlyClose)
     }
 
