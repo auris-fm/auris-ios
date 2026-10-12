@@ -561,7 +561,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         return CloudRouteResult(response: response, outcome: outcome)
     }
 
-    func retryLastPreparedRequest() async -> CloudRouteResult? { nil }
+    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? { nil }
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {

@@ -106,9 +106,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The last prepared logical request, retained so an EXPLICIT retry can re-drive it with the
     /// same ids. Retaining the envelope rather than rebuilding it is what makes identity
     /// preservation structural: a retry has no other source for its `request_id`.
-    private var lastPreparedTurn: CloudTurnEnvelope?
-    private var lastPreparedContext: CloudRouteContext?
-    private var lastPreparedRequest: String?
+    private struct PreparedRequest {
+        let turn: CloudTurnEnvelope
+        let context: CloudRouteContext
+        let request: String
+        /// The origin captured when the request was prepared. A retry must be validated against
+        /// the origin it belonged to, not whatever is current when the retry is invoked.
+        let origin: Int?
+    }
+
+    /// Prepared requests keyed by their `request_id`, NOT a single "last" slot.
+    ///
+    /// A global "last" would let an OLDER retry select a SUCCESSOR: the successor is prepared
+    /// later, so it would be the one a "last" lookup returned, and the retry would re-drive a turn
+    /// the caller never named — with the wrong identity, which is the opposite of the point. Keyed
+    /// by the id the caller is retrying, a request can only be re-driven by naming it.
+    private var preparedRequests: [String: PreparedRequest] = [:]
 
     /// Re-drives the last prepared logical request, preserving its `request_id`, conversation id
     /// and mode.
@@ -121,22 +134,33 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// Returns nil when there is nothing retained to re-drive, so a caller cannot mistake an
     /// absent request for a successful retry.
-    func retryLastPreparedRequest() async -> CloudRouteResult? {
-        guard let turn = lastPreparedTurn,
-              let context = lastPreparedContext,
-              let request = lastPreparedRequest
-        else { return nil }
+    /// The origin a retry must still belong to. Supplied by the owner; `nil` when unknown, in
+    /// which case a captured origin cannot be validated and the retry refuses rather than guess.
+    var liveOriginForRetry: () -> Int? = { nil }
+
+    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
+        // Refuse BEFORE `route()`, which is where `activeTurn.cancel()` and the output
+        // registration happen: an absent or retired retry must not disturb a successor. Retiring
+        // the entry on use also stops a second retry of the same turn re-driving it again.
+        guard let prepared = preparedRequests.removeValue(forKey: requestId) else { return nil }
+        // A retired origin cannot re-drive: the request belonged to a window that is gone, and
+        // re-driving it would attribute the turn to whatever window is current now.
+        if let requestOrigin = prepared.origin, requestOrigin != liveOriginForRetry() {
+            return nil
+        }
         // Re-enters the single-attempt path with the RETAINED envelope, so the ids on the wire are
         // the originals by construction. Passing the retained turn through means the retry cannot
         // mint a fresh id even by mistake.
-        _ = context
+        // The CAPTURED origin, not nil: a retry belongs to the window its request was prepared
+        // under, and passing nil would drop it to the sink's live-state fallback — reintroducing
+        // the very attribution error the captured origin exists to prevent.
         return await route(
-            request: request,
+            request: prepared.request,
             tier: .unknown,
             context: PlaybackContext.absent,
-            origin: nil,
+            origin: prepared.origin,
             selection: nil,
-            retainedTurn: turn      // the RETAINED envelope: same request_id, same conversation id
+            retainedTurn: prepared.turn   // retained: same request_id, same conversation id
         )
     }
 
@@ -300,9 +324,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // There is deliberately NO blanket retry loop here. The identity requirement does not
         // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
         // before admission is safe to re-drive, and that decision belongs to an explicit caller.
-        lastPreparedTurn = turn
-        lastPreparedContext = routeContext
-        lastPreparedRequest = request
+        preparedRequests[turn.requestId] = PreparedRequest(
+            turn: turn, context: routeContext, request: request, origin: origin
+        )
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's
