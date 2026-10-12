@@ -1,5 +1,9 @@
 #include "PocketCasts.base.xcconfig"
 
+// The hosted unit tests install the app built from this configuration onto a shared
+// simulator, so its launcher name is distinct from the staging install the owner tests with.
+APP_DISPLAY_NAME = Auris Tests
+
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
 OTHER_SWIFT_FLAGS = -D DEBUG
