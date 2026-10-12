@@ -304,4 +304,37 @@ final class CloudTurnContractTests: XCTestCase {
         )
     }
 
+    /// The PRODUCTION task must not be left suspended. A `URLSessionWebSocketTask` does not connect
+    /// until `resume()`, and every send on a suspended task fails — so without it the app could
+    /// not complete a turn at all.
+    ///
+    /// This case deliberately does NOT inject `webSocketTaskFactory`: injecting it bypasses the
+    /// default path, which is exactly how the missing resume survived the entire suite. It drives
+    /// the real factory and reads the state of the task that factory produced.
+    func testTheProductionWebSocketTaskIsNotLeftSuspended() async {
+        let client = CloudRouteClient(baseURL: "wss://cloud.test", userId: "user_test")
+        // Drive the production path far enough to create its task. The connection itself cannot
+        // succeed here, which is fine: the assertion is about the task's STATE, not its outcome.
+        let stream = client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        )
+        let consumer = Task { for await _ in stream {} }
+        // Give the production path a moment to create and resume its task.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        consumer.cancel()
+
+        let state = client.lastProductionTaskStateForTesting
+        XCTAssertNotNil(state, "the production path never created a task, so this case is vacuous")
+        XCTAssertNotEqual(
+            state, .suspended,
+            "the production WebSocket task was left SUSPENDED, so it never connects and every "
+                + "send on it fails — the app cannot complete a turn"
+        )
+    }
+
 }

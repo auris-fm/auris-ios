@@ -31,6 +31,10 @@ final class CloudRouteClient {
     /// uses the session's real web socket.
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
 
+    /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
+    /// injected-factory tests bypass the default path entirely.
+    private(set) var lastProductionTaskStateForTesting: URLSessionTask.State?
+
     /// Codecs advertised to the server in the authenticate frame.
     ///
     /// PCM only. `CloudAudioPlayer` copies frames as raw Int16 PCM and has no
@@ -165,6 +169,10 @@ final class CloudRouteClient {
             // it stands in for.
             let task = session.webSocketTask(with: req)
             task.resume()
+            // Exposed so a test can verify the PRODUCTION task is not left suspended. A test that
+            // injects a factory cannot reach this line at all, which is how the missing resume
+            // survived the whole suite.
+            lastProductionTaskStateForTesting = task.state
             wsTask = task
         }
 
