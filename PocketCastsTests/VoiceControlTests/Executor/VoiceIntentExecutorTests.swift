@@ -400,35 +400,37 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
         ))
 
-        // The successor ACTUALLY PREPARES THROUGH THE EXECUTOR during the retry's await, so the
-        // executor's own state changes. An earlier version changed only the MOCK's handle, which
-        // left the case unable to observe the interleaving at all — it proved nothing about the
-        // compare-and-clear, only that the mock can be assigned to.
-        let successor = CloudRouteSink.RetainedPreparation(
-            requestId: "req-A", ownershipToken: UUID()
-        )
-        let retryStarted = expectation(description: "retry in flight")
-        mockCloudRouteSink.onRetryWillBeInvoked = { [weak self] in
-            guard let self else { return }
-            retryStarted.fulfill()
-        }
-        let retry = Task { await executor.retryHeldCloudRequest(requestId: "req-A") }
-        await fulfillment(of: [retryStarted], timeout: 5)
+        // HOLD THE RETRY AT AN EXPLICIT BARRIER. A synchronous hook cannot do this: it returns,
+        // the retry proceeds, and the successor is installed by a retry that already finished —
+        // the interleaving the case claims to test never happens.
+        let suspended = expectation(description: "retry suspended")
+        let release = AsyncStream<Void>.makeStream()
+        mockCloudRouteSink.onRetrySuspended = { suspended.fulfill() }
+        mockCloudRouteSink.retryGate = { for await _ in release.stream { return } }
 
-        // The successor prepares A's id again: same logical request, DIFFERENT preparation.
+        let retry = Task { await executor.retryHeldCloudRequest(requestId: "req-A") }
+        await fulfillment(of: [suspended], timeout: 5)
+
+        // The retry is now DEMONSTRABLY suspended. Install the successor THROUGH THE EXECUTOR.
+        let successor = CloudRouteSink.RetainedPreparation(requestId: "req-A", ownershipToken: UUID())
         mockCloudRouteSink.preparationHandle = successor
         _ = await executor.execute(CloudRouteIntent(
             request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
         ))
-
-        _ = await retry.value
-
-        // The retry consumed the FIRST preparation; the successor's entry must survive, because a
-        // compare-and-clear on the request id alone would have mistaken them for the same one.
         XCTAssertNotNil(
             executor.heldCloudPreparation(forRequestId: "req-A"),
-            "the successor's preparation was cleared by a retry that did not consume it — the "
-                + "compare-and-clear could not tell two preparations of the same request apart"
+            "the successor's preparation did not install, so the case cannot observe the interleave"
+        )
+
+        // Release the retry: its compare-and-clear must NOT drop the successor's entry.
+        release.continuation.yield(())
+        release.continuation.finish()
+        _ = await retry.value
+
+        XCTAssertNotNil(
+            executor.heldCloudPreparation(forRequestId: "req-A"),
+            "a retry that consumed an EARLIER preparation cleared the successor's entry of the "
+                + "same request — the compare-and-clear could not tell two preparations apart"
         )
     }
 
@@ -656,9 +658,12 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var preparationHandle: CloudRouteSink.RetainedPreparation?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
-    /// Runs at the START of a retry, so a case can interleave a successor's preparation into the
-    /// retry's await.
-    var onRetryWillBeInvoked: (() -> Void)?
+    /// A barrier the retry SUSPENDS on, so a case can install a successor while the retry is
+    /// demonstrably in flight. A synchronous hook cannot do that: it returns, the retry proceeds,
+    /// and the interleaving never happens.
+    var retryGate: (() async -> Void)?
+    /// Fired once the retry has entered its suspension, so the case knows it is in flight.
+    var onRetrySuspended: (() -> Void)?
 
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
@@ -675,8 +680,10 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
-        onRetryWillBeInvoked?()
         retriedRequestIds.append(requestId)
+        onRetrySuspended?()
+        // SUSPEND here until the case releases.
+        await retryGate?()
         return CloudRouteResult(response: .silent, outcome: .completed)
     }
     func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation) {}
