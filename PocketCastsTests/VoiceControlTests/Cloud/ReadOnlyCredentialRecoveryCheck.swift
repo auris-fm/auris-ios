@@ -22,11 +22,13 @@ import XCTest
 final class ReadOnlyCredentialRecoveryCheck: XCTestCase {
     /// The group the installed app's entries carry, and the service names it stores.
     private static let ownerGroup = "6LL2R2A55F.fm.auris.debug"
+    /// The ASSIGNED names only: the access and refresh credentials. An earlier version added
+    /// `SJSyncingEmail`/`SJSyncingPwd` on my own reasoning, which is scope the assignment did not
+    /// give — a recovery check that reads more than it was asked to is the over-reach the hold
+    /// exists to prevent.
     private static let serviceKeys = [
         "SJSyncV2Token",        // access credential
         "SJRefreshToken",       // refresh credential
-        "SJSyncingEmail",       // password-path material
-        "SJSyncingPwd",
     ]
 
     private var enabled: Bool {
@@ -67,7 +69,14 @@ final class ReadOnlyCredentialRecoveryCheck: XCTestCase {
                 let group = attrs[kSecAttrAccessGroup as String] as? String ?? "(none)"
                 lines.append("  \(key): PRESENT group=\(group)")
             case errSecItemNotFound:
-                lines.append("  \(key): absent (and the group was ADDRESSABLE — not a refusal)")
+                // NOT "absent". Not-found is inconclusive until a same-reader POSITIVE CONTROL
+                // independently establishes that this reader can reach the group: a reader that
+                // cannot address a group also reports not-found. Saying "addressable" here claimed
+                // exactly the thing that has not been shown.
+                lines.append(
+                    "  \(key): not found — INCONCLUSIVE. This reader's access to the group is not "
+                        + "established, so not-found cannot be read as absence."
+                )
             default:
                 // A refusal is NOT absence, and must never be reported as one.
                 lines.append("  \(key): UNREADABLE status=\(status) — the reader cannot address "
