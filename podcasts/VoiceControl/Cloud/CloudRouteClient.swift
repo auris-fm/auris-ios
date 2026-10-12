@@ -153,7 +153,20 @@ final class CloudRouteClient {
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        let wsTask: WebSocketTasking = webSocketTaskFactory?(req) ?? session.webSocketTask(with: req)
+        let wsTask: WebSocketTasking
+        if let injected = webSocketTaskFactory?(req) {
+            // A test double. It owns its own readiness, so nothing is resumed here.
+            wsTask = injected
+        } else {
+            // PRODUCTION PATH. A `URLSessionWebSocketTask` is created SUSPENDED: it does not
+            // connect until `resume()` is called, and every send on a suspended task fails. The
+            // controlled tests inject a factory and therefore never exercised this line, so the
+            // missing resume was invisible to them — a reminder that a double bypasses the code
+            // it stands in for.
+            let task = session.webSocketTask(with: req)
+            task.resume()
+            wsTask = task
+        }
 
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so
