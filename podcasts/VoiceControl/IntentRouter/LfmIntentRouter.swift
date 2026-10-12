@@ -204,7 +204,8 @@ final class LfmIntentRouter {
                     sourceTranscript: input.sourceTranscript,
                     sourceLanguage: input.sourceLanguage,
                     routerTranscript: trimmed,
-                    translationKind: input.translationKind
+                    translationKind: input.translationKind,
+                    selection: input.selection
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)

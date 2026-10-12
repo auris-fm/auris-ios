@@ -9,13 +9,37 @@ struct IntentRoutingInput: Equatable {
     let routerTranscript: String
     let translationKind: TranslationKind
 
+    /// What SELECTED this utterance, carried from the gate decision that produced it.
+    ///
+    /// Read from live state instead, a wake that fires during grace and a follow-up inside the
+    /// same grace are indistinguishable — both see `isActive == true` — so the two inputs cannot
+    /// be told apart from the window they arrive in. The gate already computes the distinction
+    /// (`detected` true/false) and it is a property of the INPUT, so it travels with it.
+    let selection: CloudConversationSelection?
+
     /// Same source/router text with `.none` (native English path).
-    static func english(transcript: String, language: String? = "en") -> IntentRoutingInput {
+    static func english(
+        transcript: String,
+        language: String? = "en",
+        selection: CloudConversationSelection? = nil
+    ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
             sourceLanguage: language,
             routerTranscript: transcript,
-            translationKind: .none
+            translationKind: .none,
+            selection: selection
+        )
+    }
+
+    /// A copy carrying the selection, for a caller that learns it after construction.
+    func withSelection(_ selection: CloudConversationSelection?) -> IntentRoutingInput {
+        IntentRoutingInput(
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage,
+            routerTranscript: routerTranscript,
+            translationKind: translationKind,
+            selection: selection
         )
     }
 }

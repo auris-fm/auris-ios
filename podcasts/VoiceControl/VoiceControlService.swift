@@ -250,8 +250,10 @@ class VoiceControlService: ObservableObject {
             // behind earlier work would be stamped with whatever window is current by the time it
             // runs, and classified by the window state then rather than by what selected it.
             let capturedOrigin = self.gracePeriodSignal.currentGeneration()
-            let capturedSelection: CloudConversationSelection =
-                self.gracePeriodSignal.isActive ? .followUp : .wakeWord
+            // The INPUT's own provenance, not a live read. `isActive` cannot tell a wake that
+            // fired during grace from a follow-up inside the same grace — both arrive with grace
+            // active — so the answer has to come from the gate decision that produced this input.
+            let capturedSelection = input.selection
             let task = Task { [weak self] in
                 await previous?.value
                 guard !Task.isCancelled else { return }

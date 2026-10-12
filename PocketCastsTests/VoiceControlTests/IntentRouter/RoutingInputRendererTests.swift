@@ -14,7 +14,8 @@ final class RoutingInputRendererTests: XCTestCase {
             sourceTranscript: source,
             sourceLanguage: language,
             routerTranscript: router,
-            translationKind: kind
+            translationKind: kind,
+            selection: nil
         )
     }
 

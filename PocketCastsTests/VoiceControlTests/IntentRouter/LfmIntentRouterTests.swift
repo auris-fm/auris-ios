@@ -268,8 +268,8 @@ final class LfmIntentRouterTests: XCTestCase {
             sourceTranscript: "倒回去3分钟。",
             sourceLanguage: "zh",
             routerTranscript: "Go back to 3 minutes.",
-            translationKind: .platform
-        )
+            translationKind: .platform,
+            selection: nil)
         _ = router.classify(input: input)
 
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeNoIntent)

@@ -299,6 +299,11 @@ class VoiceAsrEngine {
 
         let detectedConfidence: Float?
         let completionSample: Int
+        // What SELECTED this utterance, captured from the gate's own decision. A detected wake
+        // is a new conversation even during grace; a non-detected pass is a follow-up continuing
+        // the current one. Read from live `isActive` instead, the two are identical — both arrive
+        // with grace active — so the distinction has to come from here, where it is actually made.
+        let selection: CloudConversationSelection
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
@@ -311,10 +316,12 @@ class VoiceAsrEngine {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)
                 completionSample = self.completionSample(of: result)
+                selection = .wakeWord
                 FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → ASR (hit, mode=\(listeningMode))")
             } else {
                 detectedConfidence = nil
                 completionSample = 0
+                selection = .followUp
                 FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → ASR (grace/continuous)")
             }
         }
@@ -387,7 +394,8 @@ class VoiceAsrEngine {
         onRoutingInput?(Self.makeRoutingInput(
             source: trimmedResult,
             routerText: finalized.text,
-            translateNote: translateNote
+            translateNote: translateNote,
+            selection: selection
         ))
     }
 
@@ -396,14 +404,16 @@ class VoiceAsrEngine {
     static func makeRoutingInput(
         source: AsrResult,
         routerText: String,
-        translateNote: String?
+        translateNote: String?,
+        selection: CloudConversationSelection? = nil
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
                 sourceTranscript: nil,
                 sourceLanguage: source.detectedLanguage,
                 routerTranscript: routerText,
-                translationKind: .backend
+                translationKind: .backend,
+                selection: selection
             )
         }
         if let translateNote,
@@ -413,12 +423,14 @@ class VoiceAsrEngine {
                 sourceTranscript: source.text,
                 sourceLanguage: source.detectedLanguage,
                 routerTranscript: routerText,
-                translationKind: .platform
+                translationKind: .platform,
+                selection: selection
             )
         }
         return IntentRoutingInput.english(
             transcript: routerText,
-            language: source.detectedLanguage ?? "en"
+            language: source.detectedLanguage ?? "en",
+            selection: selection
         )
     }
 

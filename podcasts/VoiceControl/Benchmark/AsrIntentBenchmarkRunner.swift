@@ -55,7 +55,9 @@ final class AsrIntentBenchmarkRunner {
                 sourceTranscript: benchmarkCase.nativeText,
                 sourceLanguage: benchmarkCase.language,
                 routerTranscript: english,
-                translationKind: benchmarkCase.language == "en" ? .none : .platform
+                translationKind: benchmarkCase.language == "en" ? .none : .platform,
+                // A benchmark utterance is not a conversation turn.
+                selection: nil
             )
         case variantE:
             // E (dual_v1): router renders from native + English transcript.
@@ -63,7 +65,9 @@ final class AsrIntentBenchmarkRunner {
                 sourceTranscript: benchmarkCase.nativeText,
                 sourceLanguage: benchmarkCase.language,
                 routerTranscript: english,
-                translationKind: benchmarkCase.language == "en" ? .none : .platform
+                translationKind: benchmarkCase.language == "en" ? .none : .platform,
+                // A benchmark utterance is not a conversation turn.
+                selection: nil
             )
         default:
             throw BenchmarkVariantError.unknown(variant)

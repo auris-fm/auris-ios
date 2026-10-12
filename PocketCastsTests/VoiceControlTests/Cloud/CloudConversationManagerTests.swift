@@ -176,4 +176,40 @@ final class CloudConversationManagerTests: XCTestCase {
             XCTAssertTrue(["create", "resume"].contains(prepared.mode))
         }
     }
+
+
+
+    /// A wake that fires WHILE GRACE IS ACTIVE must still CREATE. Read from live state the two
+    /// are identical — both arrive with `isActive == true` — so the distinction has to travel
+    /// with the input, which is what this pins. The mutation it catches is a live `isActive`
+    /// read: under that, this wake would be classified a follow-up and resume.
+    func testAWakeDuringActiveGraceStillCreates() {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(1)
+
+        // The window is already open (grace active) when the wake fires.
+        let prepared = manager.prepare(selection: .wakeWord, origin: 1)
+
+        XCTAssertEqual(
+            prepared?.mode, "create",
+            "a wake during active grace resumed instead of creating a new conversation"
+        )
+    }
+
+    /// A queued follow-up keeps the window it was registered under. Once that window is replaced,
+    /// the turn is refused rather than attached to the window that happens to be current when it
+    /// finally runs — which is what a late read of the generation would do.
+    func testAQueuedFollowUpWhoseWindowWasReplacedIsRefused() {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(1)
+        _ = manager.prepare(selection: .wakeWord, origin: 1)
+
+        // The queued turn was registered under origin 1; the window is replaced before it runs.
+        manager.registerLiveOrigin(2)
+
+        XCTAssertNil(
+            manager.prepare(selection: .followUp, origin: 1),
+            "a queued follow-up was admitted under a window that no longer exists"
+        )
+    }
 }
