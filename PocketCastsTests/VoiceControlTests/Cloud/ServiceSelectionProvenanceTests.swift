@@ -23,9 +23,18 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// Delivers audio through the capture so the REAL registered path runs rather than a direct
     /// handler call.
     private func driveRegisteredCallback(capture: FakeAudioCapture) async {
-        // Two seconds of signal at the engine rate, enough to close a VAD segment.
-        capture.emit(samples: [Float](repeating: 0.05, count: 16_000 * 2), at: nil)
-        try? await Task.sleep(nanoseconds: 800_000_000)
+        // A VAD-closing envelope: ENERGY ABOVE THRESHOLD for long enough to confirm speech, then
+        // a real SILENCE tail. A constant tone never closes a segment — the segmenter only emits
+        // once silence has persisted past `silenceTimeoutMs` — so emitting one would leave the
+        // case asserting about a turn that could not exist.
+        //
+        // The assembly's segmenter uses threshold 0.020, so the speech frames sit well above it,
+        // and the silence tail is genuinely silent rather than merely quieter.
+        let speech = [Float](repeating: 0.05, count: 16_000)          // 1s at 16 kHz, above threshold
+        let silence = [Float](repeating: 0.0, count: 16_000)          // 1s of silence
+        capture.emit(samples: speech, at: nil)
+        capture.emit(samples: silence, at: nil)
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
     }
 
     @MainActor
