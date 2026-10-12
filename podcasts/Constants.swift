@@ -19,6 +19,7 @@ struct Constants {
         static let playbackTrackChanged = NSNotification.Name(rawValue: "SJTrackChanged")
         static let podcastChaptersDidUpdate = NSNotification.Name(rawValue: "SJChaptersChanged")
         static let podcastChapterChanged = NSNotification.Name(rawValue: "SJChapterChanged")
+        static let chapterSelectionChanged = NSNotification.Name(rawValue: "SJChapterSelectionChanged")
         static let podcastColorsDownloaded = NSNotification.Name(rawValue: "SJPodcastColorsReady")
         static let playbackEnded = NSNotification.Name(rawValue: "SJPlaybackEnd")
         static let playbackFailed = NSNotification.Name(rawValue: "playbackFailed")
@@ -26,7 +27,6 @@ struct Constants {
         static let viewWillTransitionToSize = NSNotification.Name(rawValue: "SJViewSizeChange")
         static let googleCastStatusChanged = NSNotification.Name(rawValue: "SJGCStatusChanged")
         static let googleCastMultiZoneStatusChanged = NSNotification.Name(rawValue: "SJGCMultiStatusChanged")
-        static let dimmingViewTapped = NSNotification.Name(rawValue: "SJDimViewTapped")
         static let downloadProgress = NSNotification.Name(rawValue: "SJDwnProg")
         static let podcastImageReCacheRequired = NSNotification.Name(rawValue: "PCPodcastImageReCacheRequired")
 
@@ -39,9 +39,6 @@ struct Constants {
         static let playlistChanged = NSNotification.Name(rawValue: "FilterChanged")
         static let statusBarHeightChanged = NSNotification.Name(rawValue: "SJBarHeightChanged")
         static let podcastSearchRequest = NSNotification.Name(rawValue: "PodcastSearchRequest")
-        static let podcastSearchCancelled = NSNotification.Name(rawValue: "PodcastSearchCancelled")
-        static let removeUpcomingFromCell = NSNotification.Name(rawValue: "RemoveUpcomingFromCell")
-        static let sideConstraintUpdated = NSNotification.Name(rawValue: "SJSideConstraintUpdated")
         static let themeChanged = NSNotification.Name(rawValue: "ThemeChanged")
         static let systemThemeMayHaveChanged = NSNotification.Name(rawValue: "SystemThemeChanged")
         static let followSystemThemeTurnedOn = NSNotification.Name(rawValue: "FollowSystemThemeTurnedOn")
@@ -123,7 +120,6 @@ struct Constants {
         static let loadEmbeddedImages = "SJLoadEmbeddedArt"
         static let appBadge = "SJEppBadgeShows"
         static let pushEnabled = "PushEnabled"
-        static let globalEpisodesToKeep = "SJPodcastsToKeep"
         static let openLinksInExternalBrowser = "SJOpenLinksInExternalBrowser"
 
         static let appBadgeFilterUuid = "SJEppBadgeFilterId"
@@ -133,7 +129,6 @@ struct Constants {
         static let cleanupInProgress = "CleanupInProgress"
         static let cleanupPlayed = "CleanupPlayed"
 
-        static let upNextLastModified = "SJUpNextLastModified"
         static let cleanupStarred = "CleanupStarred"
         static let lastFilterShown = "SJLastFilter"
         static let lastTabOpened = "SJLastTabOpened"
@@ -226,7 +221,6 @@ struct Constants {
         }
 
         enum referrals {
-            static let showTip = "referrals.showtip"
             static let claimURL = "referrals.claimURL"
         }
 
@@ -261,14 +255,9 @@ struct Constants {
     }
 
     enum Values {
-        static let maxWidthForCompactView = 1000 as CGFloat
-        static let sideBarWidthCompact = 88 as CGFloat
-        static let sideBarWidthExpanded = 320 as CGFloat
-
         static let miniPlayerOffset = 80 as CGFloat
         static let extraShowNotesVerticalSpacing: CGFloat = 60
         static let defaultPlaylistDownloadLimit = 10 as Int32
-        static let siriArtworkSize = 680
 
         static let minTimeBetweenPodcastImageUpdates = 4.weeks
 
@@ -309,8 +298,6 @@ struct Constants {
 
     enum Animation {
         static let defaultAnimationTime = 0.3 as TimeInterval
-        static let bottomCardAnimationTime = 0.2 as TimeInterval
-        static let playerDragLineFadeTime = 0.6 as TimeInterval
         static let multiSelectStatusDelayTime = 0.8 as TimeInterval
 
         static let playerTabSwitch: TimeInterval = 0.2
@@ -451,7 +438,7 @@ enum PlusUpgradeViewSource: String {
     case deselectChapters = "deselect_chapters"
     case headphoneSettings =  "headphone_settings"
     case bookmarksShelfAction = "bookmarks_shelf_action"
-    case whatsNew
+    case whatsNew = "whats_new"
     case sonosLink = "sonos_link"
     case deepLink
     case deviceApproval = "device_approval"
@@ -459,25 +446,6 @@ enum PlusUpgradeViewSource: String {
     /// Purchase completed with no record of its originating source (e.g. StoreKit re-delivering a
     /// deferred/pending transaction). Keeps `source` defined and distinct from a real `unknown`.
     case unattributed
-
-    /// Converts the enum into a Firebase promotionId, this matches the values set on Android
-    func promotionId() -> String {
-        return rawValue.uppercased()
-    }
-
-    /// Converts the enum into a Firebase promotion name, this matches the values set on Android
-    func promotionName() -> String {
-        switch self {
-        case .profile, .appearance:
-            return "Upgrade to Plus from \(rawValue)"
-
-        case .unknown:
-            return "Unknown"
-
-        default:
-            return "Upgrade to Plus for \(rawValue)"
-        }
-    }
 
     func isEligibleForExperiment() -> Bool {
         switch self {

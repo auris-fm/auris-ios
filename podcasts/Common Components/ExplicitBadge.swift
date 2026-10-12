@@ -24,7 +24,7 @@ enum ExplicitBadgeHelper {
             cacheSize = fontSize
             imageCache.removeAll()
         }
-        let resolvedTheme = theme ?? Theme.sharedTheme.activeTheme
+        let resolvedTheme = theme ?? Theme.shared.activeTheme
         if let cached = imageCache[resolvedTheme] {
             return cached
         }
@@ -85,5 +85,12 @@ enum ExplicitBadgeHelper {
         result.append(NSAttributedString(attachment: attachment))
 
         return result
+    }
+
+    static func accessibilityTitle(_ title: String) -> String {
+        guard FeatureFlag.showExplicitBadges.enabled else {
+            return title
+        }
+        return [title, L10n.podcastExplicitContent].joined(separator: ", ")
     }
 }
