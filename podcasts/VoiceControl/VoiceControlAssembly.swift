@@ -10,10 +10,14 @@ class VoiceControlAssembly {
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
+    /// - Parameter injectedCapture: the microphone source. `nil` keeps the real one; a test
+    ///   substitutes it so the service can be driven through its REAL assembly and start path
+    ///   without opening the microphone. This is the only injection point — everything else is
+    ///   built as the app does.
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
-        capture: NativeAudioCapture? = nil,
+        capture injectedCapture: (any AudioCaptureSource)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
@@ -63,7 +67,7 @@ class VoiceControlAssembly {
         let cloudAudioPlayer = CloudAudioPlayer()
 
         let asrEngine = VoiceAsrEngine(
-            capture: capture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
+            capture: injectedCapture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
             segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: asrBackend,
             signalFilter: SignalFilter(),

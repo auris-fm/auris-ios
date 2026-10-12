@@ -191,6 +191,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         origin: Int?,
         selection: CloudConversationSelection?
     ) async -> CloudRouteResult {
+        // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
+        // whether the sink happens to be configured. Recording after the configured check made
+        // the seam blind to exactly the refused turns a caller-level case most needs to observe.
+        MainActor.assumeIsolated {
+            lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
+        }
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
@@ -208,7 +214,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
         // leave the sink pointing at a token nobody will ever complete.
         let effectiveSelection = selection ?? conversationSelectionProvider()
-        MainActor.assumeIsolated { lastSelectionForTesting = effectiveSelection }
         guard let conversation = conversationManager.prepare(
             // The captured selection when the caller supplied one; the provider is the fallback
             // for callers that did not, which is the late-reading behaviour this replaces.

@@ -57,6 +57,10 @@ class VoiceControlService: ObservableObject {
 
     /// The executor this service routes validated intents through.
     var executorForTesting: VoiceIntentExecutor { executor }
+
+    /// Whether the intent router has its model, so a test can wait for the real sequencing rather
+    /// than dispatching into a router that is not ready and asserting about a dropped turn.
+    var intentRouterIsReadyForTesting: Bool { intentRouter.isReady }
     private let analytics: VoiceAnalytics
     /// Whether the app is playing through the shared `AVAudioSession`. Used so a
     /// failed/cancelled acquisition never deactivates the session playback owns.
@@ -383,7 +387,11 @@ class VoiceControlService: ObservableObject {
         let transcript = input.routerTranscript
 
         let capturedOrigin = origin
-        let capturedSelection = selection
+        // The INPUT's own provenance, falling back to the parameter. The parameter exists for the
+        // serial-callback path, which captures before queuing; but a caller that stamps the input
+        // — which is where the gate decision actually lands — had its provenance SILENTLY
+        // DISCARDED here, so the turn fell through to the sink's live-state provider.
+        let capturedSelection = selection ?? input.selection
 
         // A bare wake is not a question: neither routed nor escalated, and it must
         // not spend the window's one dispatch. Without per-token timestamps ASR
@@ -531,7 +539,12 @@ class VoiceControlService: ObservableObject {
                         request: transcript,
                         tier: .unknown,
                         origin: .routingFailure,
-                        generation: dispatchGeneration
+                        generation: dispatchGeneration,
+                        // The turn's own provenance, carried as it is on the model-chosen path.
+                        // Omitting it dropped the turn to the sink's provider fallback, so an
+                        // escalated turn was classified by live window state rather than by what
+                        // selected it — the exact defect the caller-level control exists to catch.
+                        selection: capturedSelection
                     )
                 )
                 audioRenderer.render(response)
