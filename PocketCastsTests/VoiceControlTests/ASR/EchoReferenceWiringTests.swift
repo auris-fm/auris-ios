@@ -2714,6 +2714,91 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+
+    /// The boundary's original scenario, built as @spec specified: BOTH identities'
+    /// range-bearing blocks retained in the SAME generation, with overlapping producer-local
+    /// ranges and resident PCM, then the late old observation delivered after the producer's
+    /// own reset notification.
+    ///
+    /// This is the arrangement the full-identity lookup cannot separate. The lookup matches a
+    /// range by `range.producer == producer`, so if the OLD identity's block is still resident
+    /// and its local range contains the observation, the lookup finds it and places the window
+    /// in a clock that has already been replaced. Only the active-incarnation boundary refuses
+    /// it — which is why the boundary is not redundant, contrary to what I reported when I had
+    /// only ever retained one identity at a time.
+    func test_theRetiredIdentitiesResidentBlockIsRefusedByTheBoundaryNotTheLookup() throws {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        let oldIdentity = EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 0)
+        let newIdentity = EchoReferenceHandoff.ProducerIdentity(kind: .earcon, incarnation: 1)
+
+        // The OLD identity's block: resident, range-bearing, spanning local 0..<400.
+        handoff.submit(
+            Array(repeating: 0.25, count: 400),
+            producer: oldIdentity,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 10,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        // The CURRENT identity's block, submitted in the same generation with an OVERLAPPING
+        // local range — this is what makes the two indistinguishable by range alone.
+        handoff.submit(
+            Array(repeating: 0.25, count: 400),
+            producer: newIdentity,
+            sampleRate: PlaybackEchoReference.pipelineSampleRate,
+            renderedAt: 12,
+            renderedFramesInProducer: 400,
+            producerBlockStart: 0
+        )
+        handoff.drain()
+
+        // The producer's own reset notification: the old identity is now retired.
+        handoff.rotateIncarnation(for: .earcon, to: 1)
+
+        // Clear whatever the blocks' drains recorded, so a refusal is observable at all:
+        // `recordRenderPosition` overwrites, and the old block's own anchor would otherwise be
+        // present and the assertion would pass on it whatever this path did.
+        reference.recordRenderPosition(nil)
+        XCTAssertNil(reference.currentRenderAnchor, "the clear did not take effect")
+
+        // A late observation under the RETIRED identity. Its local range falls inside the old
+        // identity's RESIDENT block, so the full-identity lookup WOULD match it; the boundary
+        // must refuse it first.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 20
+            ),
+            producer: oldIdentity
+        )
+        handoff.drain()
+
+        XCTAssertNil(
+            reference.currentRenderAnchor,
+            "the retired identity's late observation was placed — the lookup matched its resident "
+                + "block, so the active-incarnation boundary did not refuse it first"
+        )
+
+        // And the CURRENT identity is still accepted, so a boundary that refuses everything
+        // cannot pass this case.
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 100,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 30
+            ),
+            producer: newIdentity
+        )
+        handoff.drain()
+        XCTAssertNotNil(
+            reference.currentRenderAnchor,
+            "the current identity's observation was refused too — the boundary is too broad"
+        )
+    }
+
 }
 
 // MARK: - Harness
