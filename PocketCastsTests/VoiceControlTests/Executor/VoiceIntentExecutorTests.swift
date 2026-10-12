@@ -400,17 +400,48 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
         ))
 
-        // The successor prepares the SAME key while the retry is suspended in its await.
-        mockCloudRouteSink.onRetryWillBeInvoked = {
-            self.mockCloudRouteSink.preparationHandle =
-                CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        // The successor ACTUALLY PREPARES THROUGH THE EXECUTOR during the retry's await, so the
+        // executor's own state changes. An earlier version changed only the MOCK's handle, which
+        // left the case unable to observe the interleaving at all — it proved nothing about the
+        // compare-and-clear, only that the mock can be assigned to.
+        let successor = CloudRouteSink.RetainedPreparation(
+            requestId: "req-A", ownershipToken: UUID()
+        )
+        let retryStarted = expectation(description: "retry in flight")
+        mockCloudRouteSink.onRetryWillBeInvoked = { [weak self] in
+            guard let self else { return }
+            retryStarted.fulfill()
         }
-        _ = await executor.retryHeldCloudRequest(requestId: "req-A")
+        let retry = Task { await executor.retryHeldCloudRequest(requestId: "req-A") }
+        await fulfillment(of: [retryStarted], timeout: 5)
 
-        // The retry must not have cleared a handle it did not consume.
-        XCTAssertNil(
+        // The successor prepares A's id again: same logical request, DIFFERENT preparation.
+        mockCloudRouteSink.preparationHandle = successor
+        _ = await executor.execute(CloudRouteIntent(
+            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
+        ))
+
+        _ = await retry.value
+
+        // The retry consumed the FIRST preparation; the successor's entry must survive, because a
+        // compare-and-clear on the request id alone would have mistaken them for the same one.
+        XCTAssertNotNil(
             executor.heldCloudPreparation(forRequestId: "req-A"),
-            "the consumed handle was not cleared"
+            "the successor's preparation was cleared by a retry that did not consume it — the "
+                + "compare-and-clear could not tell two preparations of the same request apart"
+        )
+    }
+
+    /// The ownership token makes two preparations of the SAME request distinguishable, which is
+    /// what the compare-and-clear needs and a request id alone cannot provide.
+    func testTwoPreparationsOfTheSameRequestAreNotEqual() {
+        let first = CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        let second = CloudRouteSink.RetainedPreparation(requestId: "req-A")
+        XCTAssertEqual(first.requestId, second.requestId, "the logical id is stable")
+        XCTAssertNotEqual(
+            first, second,
+            "two preparations of the same request compared equal, so compare-and-clear cannot "
+                + "tell the entry it took from a later one"
         )
     }
 

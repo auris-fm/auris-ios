@@ -121,7 +121,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// invalidates it: `invalidateRetained(_:)` drops the entry, and a handle whose entry is gone
     /// refuses rather than re-driving something else.
     struct RetainedPreparation: Equatable {
+        /// The STABLE logical/wire request id — preserved across a retry.
         let requestId: String
+        /// A distinct OWNERSHIP TOKEN for THIS preparation.
+        ///
+        /// `requestId` alone is not enough to identify a preparation: two preparations can share a
+        /// logical id (a fresh attempt at the same turn), and then equality on the id cannot tell
+        /// them apart — so a compare-and-clear would mistake the second for the first and drop a
+        /// handle that belongs to a later preparation. The token is what makes "the entry I took"
+        /// distinguishable from "an entry with the same request id".
+        let ownershipToken: UUID
+
+        init(requestId: String, ownershipToken: UUID = UUID()) {
+            self.requestId = requestId
+            self.ownershipToken = ownershipToken
+        }
     }
 
     /// The COMPLETE prepared logical request. Every field the original attempt used is retained,
