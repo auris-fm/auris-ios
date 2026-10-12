@@ -63,17 +63,26 @@ final class KeychainScopeProbeTests: XCTestCase {
         // running with an unspecified group answers only that SOME scope sees SOME item. The
         // owner's group is named here as the control's input, on a scratch device, so the answer
         // is about THAT group rather than about whatever the caller defaults to.
-        let group = ProcessInfo.processInfo.environment["AURIS_PROBE_ACCESS_GROUP"]
-            ?? Bundle.main.object(forInfoDictionaryKey: "AurisKeychainAccessGroup") as? String
+        // REQUIRED in the enabled path. Without this the probe silently queried unspecified and
+        // PASSED while the very misconfiguration it exists to find was present — a pass condition
+        // weaker than the claim it supports.
+        guard let group = (
+            ProcessInfo.processInfo.environment["AURIS_PROBE_ACCESS_GROUP"]
+                ?? Bundle.main.object(forInfoDictionaryKey: "AurisKeychainAccessGroup") as? String
+        ), !group.isEmpty else {
+            XCTFail(
+                "the scope probe requires a configured group; without one it queries unspecified "
+                    + "and cannot test the intended scope"
+            )
+            return
+        }
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        if let group, !group.isEmpty {
-            query[kSecAttrAccessGroup as String] = group
-        }
+        query[kSecAttrAccessGroup as String] = group
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
@@ -87,6 +96,11 @@ final class KeychainScopeProbeTests: XCTestCase {
             "SCOPE-PROBE status=\(status) service=\(service) requestedGroup=\(group ?? "(unspecified)")"
                 + " actualGroup=\(actualGroup) attributes=[\(disclosed)]"
         )
-        XCTAssertNotNil(attributes[kSecAttrAccessGroup as String], "no access group disclosed")
+        // EQUALITY, not mere existence: an actual group that merely exists says nothing about
+        // whether the requested group was honoured, which is the whole question.
+        XCTAssertEqual(
+            actualGroup, group,
+            "the store returned a different group than requested, so the requested scope was not honoured"
+        )
     }
 }
