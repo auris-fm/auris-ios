@@ -16,6 +16,10 @@ struct CloudTurnEnvelope: Equatable {
     let capabilities: [String]
     let routeHint: CloudRouteHint?
     let recentConversation: [RecentConversationTurn]
+    /// The conversation identity this turn carries. Required by the admission contract on
+    /// every turn; nothing is sent when it is absent, so a caller that forgets it produces a
+    /// frame the server must refuse rather than a silently stateless turn.
+    let conversation: CloudPreparedConversation?
 
     /// Builds an envelope for one logical turn: a fresh `request_id` (reuse the
     /// returned envelope for transport retries of the same turn) and a bounded
@@ -23,13 +27,15 @@ struct CloudTurnEnvelope: Equatable {
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
-        recentConversation: [RecentConversationTurn]
+        recentConversation: [RecentConversationTurn],
+        conversation: CloudPreparedConversation? = nil
     ) -> CloudTurnEnvelope {
         CloudTurnEnvelope(
             requestId: UUID().uuidString,
             capabilities: capabilities,
             routeHint: routeHint,
-            recentConversation: RecentConversation.bounded(recentConversation)
+            recentConversation: RecentConversation.bounded(recentConversation),
+            conversation: conversation
         )
     }
 }
@@ -133,17 +139,25 @@ enum CloudRouteRequestBuilder {
         if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
         if let referencePositionMs = context.referencePositionMs { contextObject["reference_position_ms"] = referencePositionMs }
         if let previousReferencePositionMs = context.previousReferencePositionMs { contextObject["previous_reference_position_ms"] = previousReferencePositionMs }
-        if !turn.recentConversation.isEmpty {
-            contextObject["recent_conversation"] = turn.recentConversation.map {
-                ["role": $0.role.rawValue, "text": $0.text]
-            }
-        }
+
+        // No `recent_conversation`. The owning paragraph retains conversation history
+        // SERVER-side and forbids client-supplied history in the frame, so sending ours
+        // would offer the model text the server never authenticated. Local memory stays
+        // local; the conversation identity below is what makes the server's own history
+        // reachable.
 
         var payload: [String: Any] = [
             "request": request,
             "context": contextObject,
             "request_id": turn.requestId,
         ]
+        // The admission contract requires both on EVERY turn, first included. Carried at
+        // the top level rather than inside `context`, and independent of episode
+        // availability: a conversation is not a property of what is playing.
+        if let conversation = turn.conversation {
+            payload["conversation_id"] = conversation.conversationId
+            payload["conversation_mode"] = conversation.mode
+        }
         // Omitted (not empty) when nothing is advertised: the server's fallback
         // path is the absence of the capability.
         if !turn.capabilities.isEmpty {

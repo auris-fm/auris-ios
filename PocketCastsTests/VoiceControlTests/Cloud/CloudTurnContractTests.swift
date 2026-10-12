@@ -176,7 +176,13 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertNil(context["recent_conversation"])
     }
 
-    func testRecentConversationSerializesRoleAndText() async throws {
+    /// Superseded by the owning paragraph, which retains history server-side and forbids
+    /// client-supplied history in the frame. This case asserted the OLD contract — that the
+    /// client serialized `context.recent_conversation` — and it held the frame to a shape the
+    /// spec now refuses, so it is inverted rather than deleted: the field must be absent even
+    /// when the client still holds local context, or the model would receive text the server
+    /// never authenticated.
+    func testRecentConversationIsNeverSerializedIntoTheFrame() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
@@ -184,10 +190,10 @@ final class CloudTurnContractTests: XCTestCase {
         )
         let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
-        let conversation = try XCTUnwrap(context["recent_conversation"] as? [[String: Any]])
-        XCTAssertEqual(conversation.count, 1)
-        XCTAssertEqual(conversation[0]["role"] as? String, "user")
-        XCTAssertEqual(conversation[0]["text"] as? String, "who is speaking?")
+        XCTAssertNil(
+            context["recent_conversation"],
+            "client-supplied conversation history was sent; the server retains history itself"
+        )
     }
 
     // MARK: - existing contract preserved

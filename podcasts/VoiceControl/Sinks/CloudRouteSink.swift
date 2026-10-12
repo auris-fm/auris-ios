@@ -37,6 +37,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
+    /// Prepares the conversation identity for each turn.
+    private let conversationManager: CloudConversationManager
+    /// What selected the current turn. Defaults to a wake word: a turn with no reported
+    /// selection is a new user act, and create-then-resume is the safe direction — resuming
+    /// a conversation nobody opened would attach an utterance to someone else's history.
+    private let conversationSelectionProvider: () -> CloudConversationSelection
+    /// The origin the turn runs under, so a resume cannot cross an ended window.
+    private let generationProvider: () -> Int
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let playbackPositionMs: () -> Int64
@@ -116,6 +124,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         },
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
+        conversationManager: CloudConversationManager = CloudConversationManager(),
+        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
+        generationProvider: @escaping () -> Int = { 0 },
         audioPlayer: CloudAudioPlayer? = nil,
         playbackManager: PlaybackManager? = nil,
         playbackSink: VoicePlaybackSink,
@@ -131,6 +142,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
+        self.conversationManager = conversationManager
+        self.conversationSelectionProvider = conversationSelectionProvider
+        self.generationProvider = generationProvider
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
@@ -184,7 +198,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
-            recentConversation: recentConversationProvider()
+            recentConversation: recentConversationProvider(),
+            // Every turn carries its conversation identity. The manager decides create vs
+            // resume from what selected this turn, and the origin it runs under bounds the
+            // resume — so a turn from an ended window cannot continue a conversation it
+            // never belonged to.
+            conversation: conversationManager.prepare(
+                selection: conversationSelectionProvider(),
+                generation: generationProvider()
+            )
         )
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`

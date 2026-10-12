@@ -75,4 +75,71 @@ final class CloudConversationManagerTests: XCTestCase {
             XCTAssertFalse(prepared.conversationId.isEmpty)
         }
     }
+
+    // MARK: - Conversation identity on the wire
+
+    func testFrameCarriesConversationIdAndMode() {
+        let prepared = CloudPreparedConversation(
+            conversationId: "11111111-2222-3333-4444-555555555555",
+            mode: "create",
+            creationRequestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "what did they say",
+            context: CloudRouteContext(
+                episodeId: "ep-1", podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: 1000, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
+            )
+        )
+
+        XCTAssertEqual(frame["conversation_id"] as? String, prepared.conversationId)
+        XCTAssertEqual(frame["conversation_mode"] as? String, "create")
+    }
+
+    func testFrameDoesNotSendClientSuppliedConversationHistory() {
+        // The owning paragraph retains history SERVER-side and forbids client-supplied
+        // history; sending ours would offer the model text the server never authenticated.
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: "ep-1", podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: 0, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil,
+                recentConversation: [RecentConversationTurn(role: .user, text: "earlier")],
+                conversation: nil
+            )
+        )
+
+        let context = frame["context"] as? [String: Any]
+        XCTAssertNil(context?["recent_conversation"], "client-supplied history was still sent")
+    }
+
+    func testConversationIdentityIsIndependentOfEpisodeContext() {
+        // A conversation is not a property of what is playing: the fields must be present
+        // even when the frame carries no episode.
+        let prepared = CloudPreparedConversation(
+            conversationId: "99999999-8888-7777-6666-555555555555",
+            mode: "resume",
+            creationRequestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        let frame = CloudRouteRequestBuilder.envelope(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: "", podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: 0, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(
+                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
+            )
+        )
+
+        XCTAssertEqual(frame["conversation_id"] as? String, prepared.conversationId)
+        XCTAssertEqual(frame["conversation_mode"] as? String, "resume")
+    }
+
 }
