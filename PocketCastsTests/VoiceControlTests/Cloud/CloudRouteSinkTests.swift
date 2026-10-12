@@ -551,6 +551,46 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
+    /// A refused stale turn must not disturb the successor's state. The refusal used to happen
+    /// AFTER the supersede block, so a stale dispatch cancelled a live successor, claimed
+    /// `activeTurn`, and left the sink pointing at a token nobody would complete — and the user
+    /// paused, because the turn also ran the auto-pause hold before refusing.
+    func testARefusedStaleTurnDoesNotCancelTheLiveSuccessor() async {
+        let sink = makeSink()
+
+        // A live turn takes the hold and becomes the active token.
+        _ = await sink.routeToCloud(
+            request: "live", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+
+        // A stale turn arrives: same origin, but the manager's live origin has moved on.
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        let staleSink = CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "").client
+            },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            conversationManager: manager
+        )
+        playback.calls.removeAll()
+
+        let result = await staleSink.routeToCloud(
+            request: "stale", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp
+        )
+
+        XCTAssertEqual(result.outcome, .refused)
+        XCTAssertFalse(
+            playback.calls.contains(.pause),
+            "a refused stale turn took the auto-pause hold, so the user is left paused"
+        )
+    }
+
     private func sampleContext() -> PlaybackContext {
         PlaybackContext(
             episodeId: "ep",

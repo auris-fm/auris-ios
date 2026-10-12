@@ -188,32 +188,29 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         }
 
-        let client = clientFactory()
-        let routeContext = CloudRouteContext(from: context)
-
-        // Supersede any in-flight turn (double wake / barge-in) before touching
-        // shared per-turn state.
-        let turnToken = CloudTurnToken()
-        activeTurn?.cancel()
-        activeTurn = turnToken
-
-        // One envelope per logical turn: a fresh client-assigned `request_id`
-        // that any transport retry of this turn must reuse, capabilities gated
-        // on the renderer, a typed-only hint and a bounded prior conversation.
-        // Every turn carries its conversation identity, prepared from what selected it and
-        // the origin it was dispatched under. A nil result means the origin is NOT LIVE: this
-        // turn has no claim on any conversation, so it is refused BEFORE the socket is dialled
-        // rather than sent with a replacement the user never opened. A replacement would also
-        // take the live window's own conversation, stranding the follow-up that belonged to it.
+        // The conversation identity is prepared FIRST, before anything this turn can disturb.
+        // A nil result means the origin is NOT LIVE: this turn has no claim on any conversation,
+        // so it is refused — and it must be refused before touching successor-owned state. The
+        // supersede block below cancels the in-flight turn and claims `activeTurn`; running that
+        // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
+        // leave the sink pointing at a token nobody will ever complete.
         guard let conversation = conversationManager.prepare(
             // The captured selection when the caller supplied one; the provider is the fallback
             // for callers that did not, which is the late-reading behaviour this replaces.
             selection: selection ?? conversationSelectionProvider(),
             origin: origin
         ) else {
-            restoreTransientAudioState()
             return CloudRouteResult(response: .silent, outcome: .refused)
         }
+
+        let client = clientFactory()
+        let routeContext = CloudRouteContext(from: context)
+
+        // Supersede any in-flight turn (double wake / barge-in) before touching
+        // shared per-turn state. Only a turn that will actually run supersedes.
+        let turnToken = CloudTurnToken()
+        activeTurn?.cancel()
+        activeTurn = turnToken
 
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
