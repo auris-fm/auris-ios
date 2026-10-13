@@ -55,6 +55,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     func enqueue(_ frame: CloudAudioFrame) {
         bufferLock.lock()
         buffer.append(frame)
+        // A CUMULATIVE record of every frame this player was actually handed. `bufferedFrameCount`
+        // is a current depth that drains, so after a turn ends it cannot distinguish "audio was
+        // delivered and played" from "audio never arrived" — which made an output assertion
+        // vacuous. This counts arrivals and never decreases.
+        framesEnqueued += 1
         bufferLock.unlock()
 
         // Wake the runner: `runnerRunning` is "there is work to do", and the
@@ -541,6 +546,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Buffered frame count, for tests that assert the runner actually consumes
     /// frames (a player that buffers forever plays nothing).
     var bufferedFrameCountForTesting: Int { bufferedFrameCount }
+
+    /// Cumulative count of frames handed to this player, for asserting that audio actually
+    /// ARRIVED rather than merely that nothing is pending at the end.
+    var framesEnqueuedForTesting: Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return framesEnqueued
+    }
+
+    private var framesEnqueued = 0
 
     /// Whether this player holds nothing left to play. A turn that produced no
     /// audio can restore immediately; one that is still draining restores when

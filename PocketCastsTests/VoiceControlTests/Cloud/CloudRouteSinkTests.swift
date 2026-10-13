@@ -872,13 +872,21 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// `pendingFixture` handoff would let the second overwrite the first's.
     private var nextTurnFixture: String?
 
+    /// OPT-IN binary audio for the next built turn, mirroring `nextTurnFixture`. Empty means the
+    /// turn carries no audio, so every existing case is unaffected.
+    private var nextTurnAudioPayloads: [Data] = []
+
     private func makeSink(conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
                 let fixture = self.nextTurnFixture ?? self.nextFixture()
                 self.nextTurnFixture = nil
-                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture)
+                let audio = self.nextTurnAudioPayloads
+                self.nextTurnAudioPayloads = []
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: audio
+                )
                 if let gate = self.pendingHeldGate {
                     // The held turn waits for frames; the test releases it later.
                     built.task.holdUntilReleased(gate)
@@ -1112,6 +1120,79 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         throw BarrierNotReached(label: description)
     }
+
+    /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
+    /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
+    /// be distinguished from "no audio ever arrived", which is exactly how the first version of
+    /// the output assertion was vacuous.
+    func testATurnCarryingBinaryAudioActuallyReachesThePlayer() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let sink = makeSink()
+
+        _ = await sink.routeToCloud(
+            request: "audio", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+
+        // The player must have been given audio: the enqueue path ran, and by the end of the turn
+        // the audio has drained rather than been dropped.
+        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
+        XCTAssertTrue(
+            (enqueued ?? 0) > 0,
+            "binary audio must reach the player — otherwise an output assertion proves nothing"
+        )
+        XCTAssertEqual(pending, false, "the turn completed, so its audio must have drained")
+    }
+
+    /// A refused STALE turn must leave the held live successor's AUDIO OUTPUT intact.
+    ///
+    /// Distinct from `testARefusedStaleTurnDoesNotCancelTheHeldLiveSuccessor`, which asserts the
+    /// successor still COMPLETES. Completion is not output: a successor could finish while its
+    /// audio was never delivered or was discarded.
+    func testARefusedStaleTurnLeavesTheHeldSuccessorsAudioOutputIntact() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let gate = holdNextTurn()
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        let live = Task {
+            await sink.routeToCloud(
+                request: "live", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord
+            )
+        }
+        let maybeHeld = await waitForHeldTurn()
+        _ = try XCTUnwrap(maybeHeld, "the live turn never reached the socket")
+
+        // The window moves on, so the next turn's captured origin is genuinely stale.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        let staleResult = await sink.routeToCloud(
+            request: "stale", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp
+        )
+        XCTAssertEqual(staleResult.outcome, .refused, "the stale turn must be refused")
+
+        gate.release()
+        let liveResult = await live.value
+        XCTAssertEqual(liveResult.outcome, .completed, "the held successor must still complete")
+
+        // THE OUTPUT ASSERTION: the successor's audio actually reached the player and drained,
+        // so the stale refusal neither suppressed nor discarded the live turn's output.
+        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
+        XCTAssertTrue(
+            (enqueued ?? 0) > 0,
+            "the held successor's audio must have reached the player despite the stale refusal"
+        )
+        XCTAssertEqual(pending, false, "the successor's audio must have drained, not been dropped")
+    }
+
+    /// A small, valid binary payload: the transport treats any `.data` frame as audio.
+    static let audioPayload = Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an

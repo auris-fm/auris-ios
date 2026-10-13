@@ -209,9 +209,22 @@ extension CloudRouteClient {
         baseURL: String = "https://cloud.test",
         userId: String = "user_test",
         token: String? = "test_token",
-        fixture: String
+        fixture: String,
+        /// OPT-IN binary audio. The transport delivers audio as `.data` frames
+        /// (`CloudRouteClient` maps `case .data` to `.audioFrame`), but this factory built only
+        /// text frames, so no case could put real audio in front of the player and an assertion
+        /// about audio output was vacuous. Each entry becomes one `.string`-after-`.data` pair:
+        /// the binary payload the transport treats as audio, followed by the text event that
+        /// follows it. Empty by default, so every existing text fixture behaves exactly as before.
+        audioPayloads: [Data] = []
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
-        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
+        var messages: [URLSessionWebSocketTask.Message] = []
+        let textFrames = StubWebSocketTask.frames(fromFixture: fixture)
+        // Interleave: deliver each audio payload, then the text frames that follow it. With no
+        // payloads this is exactly the previous text-only behaviour.
+        messages.append(contentsOf: audioPayloads.map { .data($0) })
+        messages.append(contentsOf: textFrames.map { .string($0) })
+        let task = StubWebSocketTask(messages)
         let client = CloudRouteClient(
             baseURL: baseURL,
             userId: userId,
