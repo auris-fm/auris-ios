@@ -979,6 +979,111 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // assertion reading a state the case does not control. The successor's OUTCOME above is
         // the discriminator that does separate the two orderings.
     }
+
+    /// POSITIVE CONTROL: with the mapper configured and the turn NOT superseded, the same fixture
+    /// DOES seek. Without this, "no seek happened" cannot be distinguished from "the mapping was
+    /// missing, so the action was refused before any seek" — which is exactly why the earlier
+    /// late-action assertion could not discriminate.
+    func testTheLateActionFixtureActuallySeeksWhenNotSuperseded() async throws {
+        mapper.playbackSecondsForReference = [100.0: 110.0]
+        self.nextTurnFixture = Self.actionThenDoneFixture
+        let sink = makeSink()
+        _ = await sink.routeToCloud(
+            request: "solo", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+        XCTAssertTrue(
+            playback.calls.contains(.seekTo(110)),
+            "the fixture must produce a real seek when the turn is not superseded, otherwise the "
+            + "absence of a seek proves nothing"
+        )
+    }
+
+    /// A superseded turn's LATE ACTION must be suppressed, observed on the ACTION OUTPUT.
+    ///
+    /// Ordering is CONTROLLED: A's output is held, the case waits on an EXPLICIT BARRIER until B
+    /// has reached the transport, then releases A — so A's action arrives after A lost the turn.
+    /// A's stream is fed one event per receive, so releasing A delivers its ACTION.
+    func testSupersededTurnsLateActionIsSuppressedAfterSuccessorInstallsItsToken() async throws {
+        defer { self.heldTurn = nil }
+
+        // A VALID mapping, so the action would seek if it were allowed to run.
+        mapper.playbackSecondsForReference = [100.0: 110.0]
+        self.nextTurnFixture = Self.actionThenDoneFixture
+        let gate = holdNextTurn()
+        let sink = makeSink()
+
+        let a = Task {
+            await sink.routeToCloud(
+                request: "A", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord
+            )
+        }
+        let maybeHeld = await waitForHeldTurn()
+        let heldA = try XCTUnwrap(maybeHeld, "turn A never reached the socket")
+        XCTAssertFalse(heldA.task.sentTextFrames.isEmpty, "A must have submitted its frame")
+
+        // B replaces the active turn while A is still held.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let b = Task {
+            await sink.routeToCloud(
+                request: "B", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp
+            )
+        }
+        try await waitUntil("B reached the transport") {
+            CloudRouteTestURLProtocol.requestCount >= 2
+        }
+
+        gate.release()
+        _ = await a.value
+        _ = await b.value
+
+        XCTAssertFalse(
+            playback.calls.contains(.seekTo(110)),
+            "a superseded turn's late action must not execute, though the same fixture seeks when "
+            + "the turn is not superseded (see the positive control)"
+        )
+    }
+
+    // MARK: - Fixtures and barriers for the controlled-ordering cases
+
+    /// An action followed by a terminal event: the action is the late output under test.
+    static let actionThenDoneFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+
+    static let doneOnlyFixture = """
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+
+    /// Polls the harness's held-turn state rather than sleeping a fixed interval.
+    private func waitForHeldTurn(timeout: TimeInterval = 2) async -> (task: StubWebSocketTask, gate: Gate)? {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if let held = heldTurn { return held }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return nil
+    }
+
+    /// Polls `condition` until it holds: an EXPLICIT BARRIER, not an elapsed sleep.
+    @discardableResult
+    private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return condition()
+    }
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
