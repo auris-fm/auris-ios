@@ -130,23 +130,6 @@ class VoiceIntentExecutor {
     /// A local dies when the call returns, so a later retry/recovery action would have nothing to
     /// name — the holder has to survive into the action that uses it. It is per-EXECUTOR rather
     /// than per-sink so a successor's turn cannot overwrite a handle belonging to an older one.
-    /// Handles keyed by the LOGICAL REQUEST they belong to.
-    ///
-    /// A single "held" slot — on the sink first, then on the executor — is the same bug at a third
-    /// level: a successor's turn overwrites the slot, so an action for turn A finds turn B's
-    /// handle. Keying by the request id means an action can only reach the handle for the request
-    /// it names, whatever else has been prepared since.
-    private(set) var cloudPreparations: [String: CloudRouteSink.RetainedPreparation] = [:]
-
-    /// The request text for each held handle, so an action can confirm it is retrying the request
-    /// it believes it is.
-    private(set) var cloudPreparationRequests: [String: String] = [:]
-
-    /// The handle for a specific logical request, or nil when none is held for it.
-    func heldCloudPreparation(forRequestId requestId: String) -> CloudRouteSink.RetainedPreparation? {
-        cloudPreparations[requestId]
-    }
-
     /// The sink this executor routes cloud playback through, so a test can reach the real
     /// producer the app built rather than constructing its own.
     var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
@@ -211,20 +194,6 @@ class VoiceIntentExecutor {
         return nil
     }
 
-    /// Drops every held preparation, called when the owning session ends.
-    ///
-    /// Still live and still meaningful even though nothing can retry: the HELD HANDLES are state a
-    /// caller reads (`heldCloudPreparation(forRequestId:)`), so an ended session must not leave
-    /// stale handles readable. This is lifecycle cleanup, not a replay path — it removes state and
-    /// reaches no transport.
-    func invalidateHeldCloudRequest() {
-        for (_, held) in cloudPreparations {
-            cloudRouteSink.invalidateRetained(held)
-        }
-        cloudPreparations.removeAll()
-        cloudPreparationRequests.removeAll()
-    }
-
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
         let response: VoiceResponse
         // Set only by the cloud branch. Every other intent leaves it nil, so the generic
@@ -264,13 +233,6 @@ class VoiceIntentExecutor {
             // success are both "no earcon"), and reading it as the outcome is how a
             // failed turn was recorded as a completed cloud route.
             cloudOutcome = result.outcome
-            // The handle for THIS call's preparation, taken from the result rather than from a
-            // published slot: a slot could have been replaced by a successor by the time this
-            // line runs, and the caller would then retry a request it never made.
-            if let handle = result.retainedPreparation {
-                cloudPreparations[handle.requestId] = handle
-                cloudPreparationRequests[handle.requestId] = cr.request
-            }
         default: response = .earcon(.error)
         }
 

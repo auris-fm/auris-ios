@@ -341,89 +341,9 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.lastContext, context)
     }
 
-    /// A preparation -> B preparation -> explicit A retry. The control that proves a successor
-    /// cannot overwrite the handle an earlier turn holds.
-    ///
-    /// Moving a single held slot from the sink to the executor did not fix this: one slot is one
-    /// slot, so B's preparation replaced A's and a retry for A would have re-driven B. Keyed by the
-    /// logical request, A's handle is still A's after B is prepared.
-    func test_aSuccessorPreparationDoesNotReplaceAnEarlierHeldHandle() async {
-        mockPlaybackContextProvider.context = Self.context
-        gracePeriodSignal.onWakeWordDetected()
-        let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
 
-        // A: prepared first, and its handle must survive B.
-        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-A")
-        _ = await executor.execute(CloudRouteIntent(
-            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
-        ))
-        let heldA = executor.heldCloudPreparation(forRequestId: "req-A")
-        XCTAssertEqual(heldA?.requestId, "req-A", "A's handle was not held")
 
-        // B: a successor prepares, which must NOT displace A.
-        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-B")
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
-        _ = await executor.execute(CloudRouteIntent(
-            request: "B's question", tier: .unknown, generation: generation, selection: .followUp
-        ))
 
-        XCTAssertEqual(
-            executor.heldCloudPreparation(forRequestId: "req-A")?.requestId, "req-A",
-            "B's preparation replaced A's handle, so an A retry would re-drive B"
-        )
-        XCTAssertEqual(
-            executor.heldCloudPreparation(forRequestId: "req-B")?.requestId, "req-B",
-            "B's own handle is not held either"
-        )
-
-        // The retry entry point now REFUSES UNCONDITIONALLY, because no producer can establish
-        // eligibility — so it must not reach the sink at all. That is the closed replay access,
-        // asserted rather than assumed.
-        mockCloudRouteSink.retriedRequestIds.removeAll()
-        let refused = await executor.retryHeldCloudRequest(requestId: "req-A")
-        XCTAssertNil(refused, "the retry entry point did not refuse")
-        XCTAssertTrue(
-            mockCloudRouteSink.retriedRequestIds.isEmpty,
-            "the retry reached the transport despite refusing — replay access is not closed"
-        )
-    }
-
-    /// The replay access is CLOSED: the retry entry point refuses before any transport or output
-    /// effect, with no producer able to establish eligibility.
-    ///
-    /// The barrier-gated compare-and-clear case that used to live here exercised the retry's
-    /// INTERNAL body. That body is now unreachable by design, so the case was replaced rather than
-    /// kept passing on a path no caller can take — the same reasoning as the removed
-    /// `neverSubmitted` branch. What must hold instead is the refusal itself.
-    func testTheRetryEntryPointRefusesWithoutReachingTheTransport() async {
-        mockPlaybackContextProvider.context = Self.context
-        gracePeriodSignal.onWakeWordDetected()
-        let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
-
-        mockCloudRouteSink.preparationHandle = CloudRouteSink.RetainedPreparation(requestId: "req-A")
-        _ = await executor.execute(CloudRouteIntent(
-            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
-        ))
-        XCTAssertNotNil(
-            executor.heldCloudPreparation(forRequestId: "req-A"),
-            "the preparation was not held, so the case cannot show the refusal is not a lookup miss"
-        )
-
-        mockCloudRouteSink.retriedRequestIds.removeAll()
-        let result = await executor.retryHeldCloudRequest(requestId: "req-A")
-
-        XCTAssertNil(result, "the retry entry point did not refuse")
-        XCTAssertTrue(
-            mockCloudRouteSink.retriedRequestIds.isEmpty,
-            "the retry reached the transport, so the replay access is not closed"
-        )
-        XCTAssertNotNil(
-            executor.heldCloudPreparation(forRequestId: "req-A"),
-            "a refusing retry must not consume the held handle either"
-        )
-    }
 
     /// The ownership token makes two preparations of the SAME request distinguishable, which is
     /// what the compare-and-clear needs and a request id alone cannot provide.

@@ -346,16 +346,6 @@ class VoiceControlService: ObservableObject {
         }
     }
 
-    /// Drops any retained cloud request when the session ends.
-    ///
-    /// Lifecycle invalidation in production: once the window is closed, a request prepared under
-    /// it belongs to nothing, and a later retry must refuse rather than re-drive it into whatever
-    /// window is current. Removing the entry at INVOCATION is not this — that only stops a second
-    /// use of something already spent.
-    func invalidateRetainedCloudRequests() {
-        executor.invalidateHeldCloudRequest()
-    }
-
     func stop() {
         guard isListening else { return }
         FileLog.shared.addMessage("[VoicePipeline] stop listening")
