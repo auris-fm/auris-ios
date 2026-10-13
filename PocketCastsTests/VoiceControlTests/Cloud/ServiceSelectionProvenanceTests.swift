@@ -890,4 +890,109 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "is passing because the queue never runs"
         )
     }
+
+    /// MODEL-CHOSEN ROUTING: a turn the ROUTER PARSES into `cloud_route` (not an escalation) is
+    /// stamped with the window it was dispatched under, and its completion must be judged against
+    /// THAT window. If the window is retired while the turn is in flight, the completion must not
+    /// re-arm the window that replaced it.
+    ///
+    /// The label is `cloud_route:route` with a matching tool call, which is what makes the router
+    /// actually MAP a `CloudRouteIntent` — `cloud_route:` alone the mapper rejects, and the turn then
+    /// takes the escalation path instead, which is a different contract.
+    @MainActor
+    func testAParsedModelChosenRouteRetiredInFlightCannotRearmTheSuccessor() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "model_route_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // The parsed turn is HELD open on its socket, so it is still in flight when the window is
+        // retired. An ASYNC hold, so the main actor the test runs on stays free.
+        let gate = Gate()
+        var heldOnce = false
+        var turnsBuilt = 0
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                turnsBuilt += 1
+                if !heldOnce {
+                    heldOnce = true
+                    built.task.holdUntilReleased(gate)
+                }
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+        XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
+
+        let signal = service.gracePeriodSignalForTesting
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        // The parsed model-chosen turn is dispatched under its own window and HELD in flight.
+        signal.onWakeWordDetected()
+        let turnWindow = signal.currentGeneration()
+        installed?(IntentRoutingInput.english(
+            transcript: "what did the host mean by that remark",
+            selection: .wakeWord
+        ))
+        let builtDeadline = Date().addingTimeInterval(8)
+        while Date() < builtDeadline && turnsBuilt == 0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(
+            turnsBuilt, 1,
+            "the parsed model-chosen turn must have reached the transport and be held there; if it "
+                + "did not, the router did not MAP a cloud route and this is not the parsed path"
+        )
+
+        // PRIVACY CLOSE, then a SUCCESSOR window. The successor SPENDS its allowance, so a
+        // completion that re-armed the old window would visibly restore it.
+        signal.onAppBackgrounded()
+        signal.onWakeWordDetected()
+        let successor = signal.currentGeneration()
+        XCTAssertNotEqual(turnWindow, successor, "the successor must be a different window")
+        XCTAssertNotNil(signal.claimEscalationBudget(), "the successor's allowance is spent here")
+
+        // RELEASE the in-flight parsed turn. Its completion lands under a RETIRED window.
+        gate.release()
+        let settleDeadline = Date().addingTimeInterval(10)
+        while Date() < settleDeadline && turnsBuilt < 2 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // Let the completion's window decision run.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertNil(
+            signal.claimEscalationBudget(),
+            "a parsed model-chosen route landing after its window was retired must NOT re-arm the "
+                + "successor's allowance; a value here means the successor was reset"
+        )
+    }
 }
