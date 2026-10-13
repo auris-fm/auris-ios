@@ -565,16 +565,8 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The selection the executor captured, so a case can assert the turn carries what selected
     /// it rather than whatever the window looks like later.
     var lastSelection: CloudConversationSelection?
-    /// The handle this sink returns, so a case can drive the A/B arrangement.
-    var preparationHandle: CloudRouteSink.RetainedPreparation?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
-    /// A barrier the retry SUSPENDS on, so a case can install a successor while the retry is
-    /// demonstrably in flight. A synchronous hook cannot do that: it returns, the retry proceeds,
-    /// and the interleaving never happens.
-    var retryGate: (() async -> Void)?
-    /// Fired once the retry has entered its suspension, so the case knows it is in flight.
-    var onRetrySuspended: (() -> Void)?
 
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
@@ -585,19 +577,9 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         lastContext = context
         lastOrigin = origin
         lastSelection = selection
-        return CloudRouteResult(
-            response: response, outcome: outcome, retainedPreparation: preparationHandle
-        )
+        return CloudRouteResult(response: response, outcome: outcome)
     }
 
-    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
-        retriedRequestIds.append(requestId)
-        onRetrySuspended?()
-        // SUSPEND here until the case releases.
-        await retryGate?()
-        return CloudRouteResult(response: .silent, outcome: .completed)
-    }
-    func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation) {}
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {

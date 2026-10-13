@@ -15,10 +15,5 @@ protocol VoiceCloudRouteSink {
         selection: CloudConversationSelection?
     ) async -> CloudRouteResult
 
-    /// Re-drives the last prepared logical request, preserving its ids. Only for a transport that
-    /// dropped BEFORE admission — never a blanket replay after an unknown outcome.
-    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult?
 
-    /// Drops a retained request when its owning lifecycle ends.
-    func invalidateRetained(_ handle: CloudRouteSink.RetainedPreparation)
 }

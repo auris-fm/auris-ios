@@ -118,7 +118,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// Holding the id (rather than letting the caller reach for whatever was prepared most
     /// recently) is what stops an older retry selecting a successor. The owning lifecycle
-    /// invalidates it: `invalidateRetained(_:)` drops the entry, and a handle whose entry is gone
+    /// is identity only.
     /// refuses rather than re-driving something else.
     struct RetainedPreparation: Equatable {
         /// The STABLE logical/wire request id — preserved across a retry.
@@ -138,72 +138,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
-    /// The COMPLETE prepared logical request. Every field the original attempt used is retained,
-    /// because re-driving with substitutes would send a DIFFERENT request under the same ids — the
-    /// ids would be preserved while the request was not, which is worse than not retrying.
-    private struct PreparedRequest {
-        let turn: CloudTurnEnvelope
-        let request: String
-        let tier: CloudTier
-        let playbackContext: PlaybackContext
-        /// The origin captured when the request was prepared. A retry must be validated against
-        /// the origin it belonged to, not whatever is current when the retry is invoked.
-        let origin: Int?
-        /// The selection captured with the request, for the same reason.
-        let selection: CloudConversationSelection?
-    }
 
-    /// Prepared requests keyed by their `request_id`, NOT a single "last" slot.
-    ///
-    /// A global "last" would let an OLDER retry select a SUCCESSOR: the successor is prepared
-    /// later, so it would be the one a "last" lookup returned, and the retry would re-drive a turn
-    /// the caller never named — with the wrong identity, which is the opposite of the point. Keyed
-    /// by the id the caller is retrying, a request can only be re-driven by naming it.
-    private var preparedRequests: [String: PreparedRequest] = [:]
 
-    /// Drops a retained request when its owning lifecycle ends, so a later retry of it refuses
-    /// instead of re-driving a request that no longer belongs to anything.
-    func invalidateRetained(_ handle: RetainedPreparation) {
-        preparedRequests.removeValue(forKey: handle.requestId)
-    }
 
-    /// Re-drives the last prepared logical request, preserving its `request_id`, conversation id
-    /// and mode.
-    ///
-    /// **Only call this for a transport that dropped BEFORE admission.** The identity requirement
-    /// does not authorize replaying a turn after an unknown outcome: a turn whose admission may
-    /// have landed is not safe to resubmit, and the failure that reaches here must be one the
-    /// caller has established as pre-admission. That is why this is an explicit entry point rather
-    /// than a loop around `client.route`.
-    ///
-    /// Returns nil when there is nothing retained to re-drive, so a caller cannot mistake an
-    /// absent request for a successful retry.
-    /// The origin a retry must still belong to, supplied by the OWNER (the executor, which knows
-    /// the turn's window). `nil` means liveness cannot be established, and the retry refuses.
-    ///
-    /// There is no production binding yet, so today this refuses every retry — which is the
-    /// correct default while the owner is unwired: a retry that cannot establish its window must
-    /// not re-drive, and failing closed is what makes the missing wiring visible instead of
-    /// letting unowned retries through.
-    private let liveOriginProviderForRetry: () -> Int?
-
-    /// The origin a retry must still belong to. Bound in production to the same source that
-    /// registers the conversation manager's live origin, so a retry can only re-drive a request
-    /// whose window is still current.
-    var liveOriginForRetry: () -> Int? { liveOriginProviderForRetry }
-
-    func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
-        // CLOSED. @spec: a disabled executor alone must not leave another callable replay API.
-        //
-        // This entry refused only on missing/retired handles and an unestablished origin — but a
-        // handle that a completion left RETAINED, under a still-live origin, passed both guards and
-        // would have been RE-DRIVEN. Since no producer can establish that a frame was never
-        // submitted, nothing is eligible, and the honest state is that this cannot dispatch at all.
-        //
-        // The seam stays so a future producer has somewhere to attach; this is the line to replace
-        // when it does.
-        return nil
-    }
 
     /// Cancellation handle for one logical turn.
     final class CloudTurnToken {
@@ -256,13 +193,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
         /// Supplied by the assembly. Defaults to `nil`, which makes every retry refuse — the
         /// correct default for a sink with no owner bound.
-        liveOriginForRetry: @escaping () -> Int? = { nil }
+
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
-        self.liveOriginProviderForRetry = liveOriginForRetry
+
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
@@ -291,7 +228,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// - Parameter retainedTurn: a previously prepared logical request to re-drive. Passed ONLY by
-    ///   `retryLastPreparedRequest`, so the ids on the wire are the originals rather than freshly
+    ///   the originals rather than freshly
     ///   minted — the identity requirement is then structural, not a convention each caller must
     ///   remember.
     func routeToCloud(
