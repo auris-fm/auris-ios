@@ -267,8 +267,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
+                // SNAPSHOT AT THE CLAIM: taken here, alongside clearing the flag and BEFORE the
+                // lock is released, because this is the moment the runner claims this drain.
+                let claimedEpoch = drainEpoch
                 runnerLock.unlock()
-                drainAndStop()
+                drainAndStop(claimedEpoch: claimedEpoch)
                 continue
             }
 
@@ -623,11 +626,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     // MARK: - Drain
 
-    private func drainAndStop() {
-        // Snapshot the identity under runnerLock: this drain belongs to the schedule that pinned it.
-        runnerLock.lock()
-        let scheduledEpoch = drainEpoch
-        runnerLock.unlock()
+    private func drainAndStop(claimedEpoch: Int) {
+        // `claimedEpoch` was snapshotted at the CLAIM, under the lock, in the drainRemaining
+        // branch. Re-reading the identity here would be after the claim boundary.
         parkIfHeld()
         // Play any remaining frames.
         while true {
@@ -637,7 +638,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopEngine()
         isPlaying = false
         paused = false
-        notifyDidStop(epoch: scheduledEpoch)
+        notifyDidStop(epoch: claimedEpoch)
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
