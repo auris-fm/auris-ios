@@ -359,16 +359,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// underrun and took its exhaustion path — which is why a resume appeared while audio was
     /// nominally pending. Parking here leaves the buffer intact and simply does not consume.
     private func parkIfHeld() {
-        while true {
-            bufferLock.lock()
-            let held = drainHoldRequested
-            bufferLock.unlock()
-            if !held { return }
-            runnerLock.lock()
-            if !drainHoldRequested { runnerLock.unlock(); return }
+        // ONE synchronization domain for the flag: `runnerLock` guards `drainHoldRequested` for
+        // every read and write, including the condition wait that releases the park. An earlier
+        // version read the flag under `bufferLock` and then re-read it under `runnerLock`, so the
+        // same variable had two domains; and the wait could be entered while holding the buffer
+        // lock, which a release needs in order to be observed.
+        runnerLock.lock()
+        while drainHoldRequested {
             runnerLock.wait(until: Date().addingTimeInterval(0.01))
-            runnerLock.unlock()
         }
+        runnerLock.unlock()
     }
 
     // MARK: - Audio engine
@@ -567,16 +567,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// frames (a player that buffers forever plays nothing).
     var bufferedFrameCountForTesting: Int { bufferedFrameCount }
 
-    /// TEST-ONLY drain hold. See `parkIfHeld`.
+    /// TEST-ONLY drain hold. Guarded by `runnerLock` — the single domain for every read and write,
+    /// including the condition wait in `parkIfHeld`.
     private var drainHoldRequested = false
 
     /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
     /// the same drain loop continues.
     func setDrainHoldForTesting(_ hold: Bool) {
-        bufferLock.lock()
-        drainHoldRequested = hold
-        bufferLock.unlock()
         runnerLock.lock()
+        drainHoldRequested = hold
+        // Re-arm the runner's own work predicate so a RELEASE is acted on rather than waiting for
+        // an unrelated signal.
         runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
