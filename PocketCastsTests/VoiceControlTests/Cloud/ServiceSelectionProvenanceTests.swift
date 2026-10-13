@@ -426,9 +426,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let conversationId = try XCTUnwrap(body["conversation_id"] as? String)
         let conversationMode = try XCTUnwrap(body["conversation_mode"] as? String)
         XCTAssertEqual(conversationId, prepared?.conversationId)
-        XCTAssertTrue(
-            ["create", "resume"].contains(conversationMode),
-            "conversation_mode is one of the two wire values, got \(conversationMode)"
+        // PREPARED-MODE EQUALITY: not merely "one of the two values" — the mode the sink PREPARED.
+        XCTAssertEqual(
+            conversationMode, prepared?.mode,
+            "the submitted conversation_mode must be the mode the sink PREPARED for this turn"
+        )
+        // FRAME TYPE: the submission is an authenticate frame, not some other message shape.
+        XCTAssertEqual(
+            body["type"] as? String, "authenticate",
+            "the submitted frame must be the authenticate frame"
+        )
+        // EXACT ROUTED TEXT: the request the user's turn carried, not a paraphrase.
+        XCTAssertEqual(
+            body["request"] as? String,
+            "what did the host mean by that remark",
+            "the submitted frame must carry the routed transcript verbatim"
         )
         XCTAssertNil(
             body["capabilities"],
