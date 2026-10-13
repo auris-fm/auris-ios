@@ -71,11 +71,14 @@ final class GracePeriodSignalTests: XCTestCase {
         cancellable?.cancel()
     }
 
-    /// RETIREMENT: an in-flight turn stamped with a generation that is RETIRED by a privacy close
-    /// (app backgrounded) must be REFUSED, so a delayed callback from an ended window cannot reset
-    /// the allowance — or continue a conversation — in the window that replaced it.
+    /// RETIREMENT AT THE SIGNAL: a generation that a privacy close RETIRED must be REFUSED by
+    /// `recognizeCommandIfCurrentWindow`, so a caller holding a stale generation cannot reset the
+    /// allowance while a successor window is live.
     ///
-    /// The retired generation travels the way the intent carries it, as `CloudRouteIntent.generation`.
+    /// SCOPE, stated so it is not mistaken for more: this is a GracePeriodSignal UNIT control. It
+    /// calls `recognizeCommandIfCurrentWindow` directly and constructs NO service, NO engine callback,
+    /// and NO `CloudRouteIntent` — so it shows the SIGNAL refuses a retired generation, not that any
+    /// installed path passes the right generation to it. That carriage is a separate subject.
     @MainActor
     func testAGenerationRetiredByAPrivacyCloseIsRefused() async throws {
         let signal = GracePeriodSignal()
