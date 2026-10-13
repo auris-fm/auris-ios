@@ -368,6 +368,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
         try await waitForRouter(service: service)
 
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
 
@@ -401,9 +402,30 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             frame,
             "EFFECT: the injected client must SUBMIT this turn's frame — no shared recorder is used"
         )
-        // THIS TURN'S identity, from the frame the injected client itself sent.
+        // THIS TURN'S identity, compared against the identity the sink PREPARED — UUID syntax
+        // alone is not an identity comparison.
         let requestId = try XCTUnwrap(body["request_id"] as? String, "the frame carries a request_id")
         XCTAssertNotNil(UUID(uuidString: requestId), "request_id is client-assigned")
+
+        let prepared = await MainActor.run { sink.lastPreparedForTesting }
+        let preparedRequestId = try XCTUnwrap(
+            prepared?.requestId,
+            "the sink must have prepared a conversation for this turn; without it there is nothing "
+                + "to compare the submitted identity against"
+        )
+        XCTAssertEqual(
+            requestId, preparedRequestId,
+            "the SUBMITTED request_id must be the identity the sink PREPARED for this turn"
+        )
+
+        // Conversation fields travel together with the identity on every turn.
+        let conversationId = try XCTUnwrap(body["conversation_id"] as? String)
+        let conversationMode = try XCTUnwrap(body["conversation_mode"] as? String)
+        XCTAssertEqual(conversationId, prepared?.conversationId)
+        XCTAssertTrue(
+            ["create", "resume"].contains(conversationMode),
+            "conversation_mode is one of the two wire values, got \(conversationMode)"
+        )
         XCTAssertNil(
             body["capabilities"],
             "no renderer is advertised here, so capabilities must be omitted"

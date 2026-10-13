@@ -45,6 +45,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Necessary because the two are indistinguishable from inside the sink when grace is active.
     @MainActor private(set) var lastSelectionForTesting: CloudConversationSelection?
 
+    /// The conversation identity the sink PREPARED for the last turn, so a case can compare the
+    /// SUBMITTED frame against the prepared identity rather than only checking UUID syntax.
+    @MainActor private(set) var lastPreparedForTesting: CloudPreparedConversation?
+
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
@@ -247,6 +251,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }
             conversation = prepared
+            lastPreparedForTesting = prepared
         }
 
         let client = clientFactory()
