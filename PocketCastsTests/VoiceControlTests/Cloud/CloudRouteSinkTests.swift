@@ -1879,6 +1879,50 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         )
     }
 
+
+    /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait
+    /// must record `.timedOut` and the case asserting `.released` must fail. This does not depend on
+    /// scheduling luck the way a shortened bound does.
+    @MainActor
+    func testAWithheldReleaseTimesOutSoTheSuccessAssertionIsLoadBearing() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio, "a frame must be pending for the drain to be scheduled")
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        _ = player.finish()
+
+        // Wait for the claim, then deliberately DO NOT release: the runner's bounded wait must end
+        // `.timedOut`.
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime, "the runner must reach the claim")
+
+        // Give the runner's bound time to expire, then read the recorded outcome.
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if player.claimReleaseOutcome != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertEqual(
+            player.claimReleaseOutcome, .timedOut,
+            "WITHHELD release must be recorded as TIMED OUT — this is what makes the success "
+                + "assertion load-bearing rather than a bound that silently swallows a timeout"
+        )
+    }
     private func waitUntilCondition(timeout: TimeInterval, _ condition: () -> Bool) async throws {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {
