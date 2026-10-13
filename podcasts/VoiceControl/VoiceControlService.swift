@@ -544,7 +544,14 @@ class VoiceControlService: ObservableObject {
             // ternary operator.
             var dispatchGeneration: Int?
             if escalation == .escalate {
-                dispatchGeneration = gracePeriodSignal.claimEscalationBudget()
+                // Claimed AGAINST THIS INPUT'S CAPTURED ORIGIN, in one operation with the
+                // comparison (see the signal): checking liveness separately and then claiming
+                // would leave a gap in which a wake or a privacy close could land. A turn whose
+                // captured window has ended must consume NOTHING and dispatch NOTHING, rather than
+                // borrowing the allowance of the window that replaced it.
+                dispatchGeneration = gracePeriodSignal.claimEscalationBudget(
+                    capturedOrigin: capturedOrigin
+                )
             }
             if escalation == .escalate, dispatchGeneration == nil {
                 // Eligible, but this window's allowance is spent. A refused

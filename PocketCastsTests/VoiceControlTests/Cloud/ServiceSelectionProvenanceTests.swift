@@ -629,6 +629,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     ///
     /// A preparation observer would not do: it fires before routing completes, so it cannot say
     /// whether the turn went on to act.
+    ///
+    /// WHICH ROUTING PATH THIS EXERCISES, measured rather than assumed: the router reports
+    /// `finalOutcome=outcomeNoIntent`, `failedStage=stageMapperDialog`,
+    /// `reason=mapper_or_dialog_failed`, so the turn takes the **no-match / fallback ESCALATION**
+    /// path (`RouteFailureEscalationPolicy` -> `claimEscalationBudget`), NOT a model-chosen
+    /// `cloud_route`. Both paths share the same intent and executor by construction, so the
+    /// retirement and allowance rules are the same; this case pins the escalation one.
     @MainActor
     func testAQueuedInputWhoseWindowRetiredSubmitsNothingAndLeavesTheFreshAllowanceClaimable() async throws {
         let capture = FakeAudioCapture()
@@ -723,24 +730,40 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         signal.onWakeWordDetected()
         let windowB = signal.currentGeneration()
         XCTAssertNotEqual(windowA, windowB, "B must be a different window from A, or staleness is untestable")
-        XCTAssertNotNil(signal.claimEscalationBudget(), "B's fresh allowance is spent here")
+
+        // B IS A FRESH WINDOW THAT OWNS A CLAIMABLE ALLOWANCE, proven WITHOUT consuming it: exactly
+        // one allowance is outstanding, and it belongs to B. Consuming it here would refuse A by
+        // B's SPENT BUDGET rather than by A's OWN RETIRED GENERATION — the two are then
+        // indistinguishable and the case would pass for the wrong reason.
+        // B's freshness is established by the SEQUENCE, not by consuming its allowance: B was opened
+        // after A was retired, and `isActive` is true for it. Claiming the allowance here would
+        // refuse A by B's SPENT BUDGET instead of by A's OWN retired generation, making the two
+        // indistinguishable. B's allowance stays UNSPENT until after A has been acknowledged.
+        XCTAssertTrue(signal.isActive, "B's window must be OPEN, so the refusal is not 'no window'")
+        XCTAssertGreaterThan(
+            windowB, windowA,
+            "B's generation must be strictly later than A's, so 'retired' is a statement about order"
+        )
 
         // RELEASE the held turn, then AWAIT A's COMPLETION — not a timer.
         gate.release()
-        let aCompletion = Task {
-            for await _ in aFinished.stream { return }
-        }
         let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
-                await aCompletion.value
-                return true
+                for await _ in aFinished.stream { return true }
+                return false
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
                 return false
             }
             let first = await group.next() ?? false
+            // `cancelAll` reaches BOTH children because both are STRUCTURED children of this group:
+            // the stream reader is cancelled by its own task, and the sleeper by `Task.sleep`
+            // throwing. Awaiting an UNSTRUCTURED `Task` inside a group child — which is what this
+            // used to do — cannot be terminated by `cancelAll`, so a timeout leaked that task and
+            // left the stream alive past teardown.
             group.cancelAll()
+            _ = await group.next()
             return first
         }
         XCTAssertTrue(
@@ -749,7 +772,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "be reading a state the case does not control. Finished inputs seen: \(finishedInputs)"
         )
 
-        // ONLY NOW: A submitted nothing, and B's fresh allowance is still claimable.
+        // ONLY NOW, with A acknowledged: B's allowance is STILL CLAIMABLE, which is the property a
+        // consumed-then-checked assertion could not establish. Then it can be spent, and the case
+        // ends with B genuinely holding its own allowance.
+        XCTAssertNotNil(
+            signal.claimEscalationBudget(),
+            "B's fresh allowance must STILL BE CLAIMABLE after A completed; a nil here means A "
+                + "consumed or restored it, or that B was never fresh to begin with"
+        )
+
+        // ONLY NOW: A submitted nothing.
         XCTAssertEqual(
             turnsBuilt, 1,
             "A, queued when its window retired, must submit nothing; a second client means it acted "
@@ -836,14 +868,17 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertEqual(turnsBuilt, 1, "precondition: A is queued")
 
         gate.release()
-        let aCompletion = Task {
-            for await _ in aFinished.stream { return }
-        }
+        // Structured children only, so `cancelAll` on timeout actually terminates the reader as well
+        // as the sleeper; awaiting an unstructured Task here could not be cancelled.
         let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
-            group.addTask { await aCompletion.value; return true }
+            group.addTask {
+                for await _ in aFinished.stream { return true }
+                return false
+            }
             group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
             let first = await group.next() ?? false
             group.cancelAll()
+            _ = await group.next()
             return first
         }
         XCTAssertTrue(completion, "A must acknowledge completion")
