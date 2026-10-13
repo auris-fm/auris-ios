@@ -101,7 +101,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// carries no turn identity, and a turn's audio can still be draining after a later turn has
     /// taken over the hold, so acting on the flag alone let an older turn's notification restore
     /// playback that the newer turn was deliberately holding.
-    private var restoreHeldForPlayerDrain: CloudTurnToken?
+    /// The deferred restoration, carrying the identity captured WHEN ITS DRAIN WAS SCHEDULED:
+    /// which turn deferred and which drain it waits on. Neither alone suffices — the current owner
+    /// can be the same turn when a foreign notification arrives, and a drain identity alone cannot
+    /// say whether this turn still owns the release.
+    private var restoreHeldForPlayerDrain: (owner: CloudTurnToken, drainEpoch: Int)?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -324,12 +328,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // not that the client has finished playing, so restoring here
                 // would resume the episode under the answer's tail. With nothing
                 // left to play the drain is a no-op and the restore is immediate.
-                if audioPlayer.hasPendingAudio {
-                    restoreHeldForPlayerDrain = turnToken
+                // The turn's own drain is scheduled by `finish()`, and that is when the drain's
+                // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
+                // that `finish()` just assigned. Recording before would capture the PREVIOUS
+                // cycle's identity and reject this turn's own notification.
+                let needsDeferral = audioPlayer.hasPendingAudio
+                audioPlayer.finish()
+                if needsDeferral {
+                    restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: audioPlayer.currentDrainEpoch)
                 } else {
                     restoreTransientAudioState()
                 }
-                audioPlayer.finish()
                 return CloudRouteResult(response: .silent, outcome: .completed)
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
@@ -533,7 +542,7 @@ extension CloudRouteSink {
         // frames arrive.
     }
 
-    func audioPlayerDidStop() {
+    func audioPlayerDidStop(drainEpoch: Int) {
         // The player has drained its buffer and stopped output. This is when a
         // hold taken for the turn may be released, so the answer is not played
         // over the resumed episode, and the turn's held state stays consistent
@@ -544,11 +553,15 @@ extension CloudRouteSink {
         // notification belonging to the earlier turn must not release the newer turn's hold. The
         // inherited transfer itself is unchanged — a turn that owns the hold still restores it,
         // whether it took the hold or inherited it.
-        guard let deferring = restoreHeldForPlayerDrain else { return }
-        guard activeTurn == nil || activeTurn === deferring else {
-            // Ownership has moved on: this notification is stale. Drop the deferred record so it
-            // cannot fire later, but do not restore.
-            restoreHeldForPlayerDrain = nil
+        guard let deferred = restoreHeldForPlayerDrain else { return }
+        // The notification must belong to the drain this turn is waiting on. A foreign drain's
+        // notification is rejected on its own identity, and the record is LEFT INTACT so the turn
+        // that does own it is not robbed of its restoration.
+        guard deferred.drainEpoch == drainEpoch else {
+            return
+        }
+        // ...and the deferring turn must still own the release.
+        guard activeTurn == nil || activeTurn === deferred.owner else {
             return
         }
         restoreHeldForPlayerDrain = nil

@@ -1327,7 +1327,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // restoration is deferred — so drive the drain event the player sends.
         let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
         XCTAssertTrue((enqueued ?? 0) > 0, "the successor's audio must reach the player")
-        await MainActor.run { sink.audioPlayerDidStop() }
+        let currentEpoch = await MainActor.run { sink.audioPlayerForTesting?.currentDrainEpoch ?? 0 }
+        await MainActor.run { sink.audioPlayerDidStop(drainEpoch: currentEpoch) }
 
         // ONLY NOW must restoration have happened: the live owner released its hold exactly once.
         XCTAssertEqual(
@@ -1483,6 +1484,73 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         gate.release()
         _ = await b.value
+    }
+
+    /// @reviewer's conjunct case: B has ITSELF deferred, then A's OLD notification arrives.
+    ///
+    /// At `7e8e7fde8` this passed the owner check, because both `activeTurn` and the deferred record
+    /// contained B — so A's notification restored and CLEARED B's deferred record. Identity of the
+    /// arriving stop is what distinguishes them, so the notification carries the identity captured
+    /// when it was scheduled.
+    func testAnOldNotificationDoesNotClearTheDeferringSuccessorsRecord() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        let maybePlayer = await MainActor.run { sink.audioPlayerForTesting }
+        let player = try XCTUnwrap(maybePlayer, "the sink must own an audio player")
+
+        var capturedNotifications: [() -> Void] = []
+        await MainActor.run {
+            player.setCapturedStopNotificationForTesting { deliver in capturedNotifications.append(deliver) }
+        }
+        defer { Task { @MainActor in player.setCapturedStopNotificationForTesting(nil) } }
+
+        // A DEFERS.
+        playback.setPlaying(true)
+        playback.setPositionMs(60_000)
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let a = await sink.routeToCloud(
+            request: "A", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+        XCTAssertEqual(a.outcome, .completed, "turn A returns")
+        await MainActor.run { player.setDrainHoldForTesting(false) }
+        try await waitUntil("A produced its stop notification") { !capturedNotifications.isEmpty }
+        let aNotification = capturedNotifications[0]
+
+        // B ALSO DEFERS, so `activeTurn` and the deferred record both name B.
+        await MainActor.run { player.setDrainHoldForTesting(true) }
+        playback.setPlaying(true)
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let b = await sink.routeToCloud(
+            request: "B", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp
+        )
+        XCTAssertEqual(b.outcome, .completed, "turn B returns")
+        let resumesBeforeA = playback.calls.filter { $0 == .resume }.count
+
+        // A's OLD notification arrives while B is the deferred owner.
+        await MainActor.run { aNotification() }
+
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, resumesBeforeA,
+            "A's old notification must not restore: B is the deferring owner"
+        )
+
+        // B's OWN drain must still be able to restore — the old notification must leave B's record
+        // intact rather than clearing it.
+        await MainActor.run { player.setDrainHoldForTesting(false) }
+        try await waitUntil("B's own drain produced its notification") { capturedNotifications.count >= 2 }
+        let bNotification = capturedNotifications[1]
+        await MainActor.run { bNotification() }
+
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, resumesBeforeA + 1,
+            "B's own notification must still restore, so A's arrival did not clear B's record"
+        )
     }
 }
 

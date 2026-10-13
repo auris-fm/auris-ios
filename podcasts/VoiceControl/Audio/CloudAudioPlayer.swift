@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import PocketCastsUtils
 import os.log
 
 /// Receives binary audio frames from the cloud and plays them through the
@@ -22,7 +23,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         /// Called when the player has drained and stopped output — the point at
         /// which playback the turn ducked may be restored, so the answer's tail
         /// does not play mixed with the resumed episode.
-        func audioPlayerDidStop()
+        /// `drainEpoch` is the identity of the drain this notification belongs to, pinned when the
+        /// drain was SCHEDULED. Delivery is asynchronous, so an identity taken at delivery time
+        /// would belong to whichever drain is current then.
+        func audioPlayerDidStop(drainEpoch: Int)
     }
 
     /// Codecs this player can actually decode and play.
@@ -76,6 +80,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Call on `done` / `error`.
     func finish() {
         runnerLock.lock()
+        drainEpoch += 1
         drainRemaining = true
         runnerRunning = true
         runnerLock.signal()
@@ -95,6 +100,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         buffer.removeAll()
         bufferLock.unlock()
         runnerLock.lock()
+        drainEpoch += 1
         drainRemaining = false
         stopRequested = true
         runnerRunning = true
@@ -153,6 +159,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request drain-and-stop (done / error).
     private var drainRemaining = false
+
+    /// Identity of the drain most recently SCHEDULED, incremented in `finish()`/`cancel()`.
+    private var drainEpoch = 0
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
@@ -241,7 +250,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 stopEngine()
                 isPlaying = false
                 paused = false
-                notifyDidStop()
+                notifyDidStop(epoch: drainEpoch)
                 runnerLock.lock()
                 runnerExited = false
                 runnerLock.signal()
@@ -603,6 +612,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return !buffer.isEmpty
     }
 
+    /// The identity of the drain most recently SCHEDULED.
+    var currentDrainEpoch: Int {
+        runnerLock.lock(); defer { runnerLock.unlock() }
+        return drainEpoch
+    }
+
     // MARK: - Drain
 
     private func drainAndStop() {
@@ -615,22 +630,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopEngine()
         isPlaying = false
         paused = false
-        notifyDidStop()
+        notifyDidStop(epoch: drainEpoch)
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
     /// ducked. Delivered on the main queue like the other delegate callbacks.
-    private func notifyDidStop() {
+    private func notifyDidStop(epoch: Int) {
         guard let delegate = delegate else { return }
         DispatchQueue.main.async {
             // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
             // the delegate itself, so a delayed notification can be delivered at a chosen moment
             // while another turn owns the hold.
             if let capture = self.capturedStopNotification {
-                capture(delegate.audioPlayerDidStop)
+                capture { delegate.audioPlayerDidStop(drainEpoch: epoch) }
                 return
             }
-            delegate.audioPlayerDidStop()
+            delegate.audioPlayerDidStop(drainEpoch: epoch)
         }
     }
 
