@@ -1241,6 +1241,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var turnsBuilt = 0
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
         let arrivalWait = AsyncStream<Void>.makeStream()
+        var terminals: [VoiceControlService.InputTerminalOutcome] = []
+        let terminalWait = AsyncStream<Void>.makeStream()
         var parsedIntents: [any VoiceIntent] = []
         let aFinished = AsyncStream<Void>.makeStream()
 
@@ -1267,6 +1269,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 if input.routerTranscript.contains("A question") {
                     arrivals.append(outcome)
                     arrivalWait.continuation.yield()
+                }
+            },
+            onInputTerminal: { input, outcome in
+                if input.routerTranscript.contains("A question") {
+                    terminals.append(outcome)
+                    terminalWait.continuation.yield()
                 }
             },
             parsedIntentObserverFactory: { input in
@@ -1312,11 +1320,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
         XCTAssertEqual(turnsBuilt, 0, "A must be held at the barrier and have taken no action")
 
-        // NOTHING is retired. Release and let it complete.
+        // NOTHING is retired. Release and await TERMINAL SETTLEMENT — the every-exit outcome, which is
+        // the acknowledgement that this input's task returned.
         gate.release()
         let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
-                for await _ in aFinished.stream { return true }
+                for await _ in terminalWait.stream { return true }
                 return false
             }
             group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
@@ -1325,7 +1334,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             _ = await group.next()
             return first
         }
-        XCTAssertTrue(completion, "A must acknowledge completion")
+        XCTAssertTrue(
+            completion,
+            "A must report a TERMINAL outcome; without it the assertions below read a state the case "
+                + "does not control. Terminals seen: \(terminals)"
+        )
+        XCTAssertEqual(
+            terminals, [.routed],
+            "the admitted input's terminal outcome is `.routed`: routing was ATTEMPTED, which is a "
+                + "different claim from an action having run. Seen: \(terminals)"
+        )
 
         // POSITIVE: an unretired held input IS admitted and acts.
         XCTAssertEqual(
@@ -1443,7 +1461,23 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // Submit A; it arrives at the barrier and waits.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // AWAIT THE EVENT: a fixed sleep would assert a timing rather than the fact that A is held.
+        let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in arrivalWait.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(
+            arrived,
+            "A must ACKNOWLEDGE ARRIVAL at the barrier; without it 'held' is an assumption. "
+                + "Arrivals seen: \(arrivals)"
+        )
         XCTAssertEqual(arrivals, [.arrived], "A must have ARRIVED at the barrier")
         XCTAssertEqual(turnsBuilt, 0, "A must have taken no action while held")
 
