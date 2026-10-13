@@ -1424,7 +1424,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // CAPTURE A's real notification instead of letting it be delivered.
         var capturedNotification: (() -> Void)?
         await MainActor.run {
-            player.setCapturedStopNotificationForTesting { deliver in capturedNotification = deliver }
+            player.setCapturedStopNotificationForTesting { _, deliver in capturedNotification = deliver }
         }
         defer { Task { @MainActor in player.setCapturedStopNotificationForTesting(nil) } }
 
@@ -1502,7 +1502,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         var capturedNotifications: [() -> Void] = []
         await MainActor.run {
-            player.setCapturedStopNotificationForTesting { deliver in capturedNotifications.append(deliver) }
+            player.setCapturedStopNotificationForTesting { _, deliver in capturedNotifications.append(deliver) }
         }
         defer { Task { @MainActor in player.setCapturedStopNotificationForTesting(nil) } }
 
@@ -1802,4 +1802,82 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
         XCTAssertEqual(resolver.resolvedLocalization, "fr", "the bare-language candidate finds the shipped fr bundle")
 
 }
+}
+
+/// A minimal delegate: `notifyDidStop` returns early when `delegate` is nil, so a directly
+/// constructed player emits nothing without one.
+private final class RecordingAudioPlayerDelegate: CloudAudioPlayer.Delegate {
+    func audioPlayerDidStartPlaying() {}
+    func audioPlayerDidPause() {}
+    func audioPlayerDidStop(drainEpoch: Int) {}
+}
+
+/// The IDENTITY-PLACEMENT control, driven against the REAL `CloudAudioPlayer` directly.
+final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
+
+    /// Prerequisites asserted, then the two snapshot placements separated.
+    ///
+    /// ORDERING CONSTRAINT: the runner releases `runnerLock` BEFORE signalling arrival or waiting on
+    /// release, so no lock spans the barrier. Both waits are BOUNDED and cleanup signals the
+    /// semaphores BEFORE clearing the references, so a setup error fails in seconds rather than
+    /// consuming the runner.
+    @MainActor
+    func testAClaimedDrainKeepsItsAllocatedIdentityWhenASuccessorSchedulesInsideTheWindow() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        var emittedIdentities: [Int] = []
+        player.setCapturedStopNotificationForTesting { identity, _ in
+            emittedIdentities.append(identity)
+        }
+
+        // PREREQUISITE: nonempty audio is enqueued and pending.
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertEqual(player.framesEnqueuedForTesting, 1, "a frame must be enqueued")
+        XCTAssertTrue(player.hasPendingAudio, "the frame must still be pending")
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        // CLEANUP SIGNALS BEFORE CLEARING: nil cannot release a runner already waiting.
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        // PREREQUISITE: finish allocates an identity and schedules the drain.
+        let aAllocated = player.finish()
+        XCTAssertGreaterThan(aAllocated, 0, "finish must allocate an identity")
+
+        // BOUNDED arrival wait: a setup error must fail fast.
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime, "the runner must reach the claim within the bound")
+
+        // INSIDE THE WINDOW: B schedules; its allocated identity must differ.
+        let bAllocated = player.finish()
+        XCTAssertNotEqual(bAllocated, aAllocated, "B's identity must differ from A's")
+
+        release.signal()
+
+        try await waitUntilCondition(timeout: 5) { !emittedIdentities.isEmpty }
+
+        // THE ASSERTION, on the EMITTED identity: A's notification carries A's allocated identity.
+        XCTAssertEqual(
+            emittedIdentities, [aAllocated],
+            "emitted=\(emittedIdentities) aAllocated=\(aAllocated) bAllocated=\(bAllocated)"
+        )
+    }
+
+    private func waitUntilCondition(timeout: TimeInterval, _ condition: () -> Bool) async throws {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
 }

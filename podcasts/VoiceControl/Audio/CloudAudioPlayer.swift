@@ -273,10 +273,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
-                // SNAPSHOT AT THE CLAIM: taken here, alongside clearing the flag and BEFORE the
-                // lock is released, because this is the moment the runner claims this drain.
+                // SNAPSHOT AT THE CLAIM, then RELEASE THE LOCK BEFORE any barrier. Holding
+                // `runnerLock` across `claimRelease.wait()` would block the test's own `finish()`,
+                // which needs the same lock — a lock must never span a barrier.
                 let claimedEpoch = drainEpoch
                 runnerLock.unlock()
+                claimReached?.signal()
+                // BOUNDED: a setup error must fail promptly, not consume the runner forever.
+                _ = claimRelease?.wait(timeout: .now() + 5)
                 drainAndStop(claimedEpoch: claimedEpoch)
                 continue
             }
@@ -594,6 +598,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// including the condition wait in `parkIfHeld`.
     private var drainHoldRequested = false
 
+    /// TEST-ONLY claim signals. See the drainRemaining branch.
+    var claimReached: DispatchSemaphore?
+    var claimRelease: DispatchSemaphore?
+    var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
+
     /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
     /// the same drain loop continues.
     func setDrainHoldForTesting(_ hold: Bool) {
@@ -656,17 +665,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // the delegate itself, so a delayed notification can be delivered at a chosen moment
             // while another turn owns the hold.
             if let capture = self.capturedStopNotification {
-                capture { delegate.audioPlayerDidStop(drainEpoch: epoch) }
+                capture(epoch) { delegate.audioPlayerDidStop(drainEpoch: epoch) }
                 return
             }
             delegate.audioPlayerDidStop(drainEpoch: epoch)
         }
     }
 
-    /// TEST-ONLY: intercept the real stop notification. `nil` (the default) delivers it normally.
-    var capturedStopNotification: ((@escaping () -> Void) -> Void)?
 
-    func setCapturedStopNotificationForTesting(_ capture: ((@escaping () -> Void) -> Void)?) {
+    func setCapturedStopNotificationForTesting(_ capture: ((Int, @escaping () -> Void) -> Void)?) {
         bufferLock.lock()
         capturedStopNotification = capture
         bufferLock.unlock()
