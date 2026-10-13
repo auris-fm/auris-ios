@@ -20,6 +20,23 @@ final class FakeAudioCapture: AudioCaptureSource {
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
 final class ServiceSelectionProvenanceTests: XCTestCase {
+    /// ISOLATED cloud configuration: `isConfigured()` is `{ !CloudConfig.shared.baseUrl.isEmpty }`,
+    /// and it is checked BEFORE the origin gate and before the client is built, so without a base
+    /// URL a routed turn is refused before reaching the transport. An own defaults suite keeps this
+    /// from affecting other cases, and teardown restores it.
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "service_selection_provenance_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
     /// The PRODUCTION FALLBACK repair, covered on its own.
     ///
     /// The PRODUCTION FALLBACK repair, covered on its own: the input's own provenance is honoured
