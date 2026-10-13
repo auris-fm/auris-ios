@@ -1270,6 +1270,79 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     /// A small, valid binary payload: the transport treats any `.data` frame as audio.
     static let audioPayload = Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+
+    /// The HELD-LIVE / STALE-REFUSAL ordering, deterministic by driving the REAL drain event.
+    ///
+    /// The completion is deliberately SPLIT: when audio is still pending at `done`, the sink returns
+    /// `.completed` and defers restoration to `audioPlayerDidStop`, so the answer is not played over
+    /// the resumed episode. Awaiting the route's return therefore stops BEFORE restoration, which is
+    /// why an earlier attempt saw the resume appear on some runs and not others. This case drives
+    /// the drain event the player actually sends, so restoration is awaited rather than raced.
+    func testHeldLiveStaleRefusalOrderingIsDeterministicAndRestoresPlayback() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        // Playback RUNNING before the hold, so the live turn takes one.
+        playback.setPlaying(true)
+        playback.setPositionMs(60_000)
+
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let live = Task {
+            await sink.routeToCloud(
+                request: "live", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord
+            )
+        }
+
+        // BARRIER: the live turn acquired its hold.
+        try await waitUntil("the live turn acquired its hold") {
+            playback.calls.contains(.pause)
+        }
+        XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "one hold")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0, "nothing resumes yet")
+        XCTAssertFalse(playback.isPlaying, "the hold is in effect")
+
+        // A stale request is refused while the successor is held.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        let staleResult = await sink.routeToCloud(
+            request: "stale", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp
+        )
+        XCTAssertEqual(staleResult.outcome, .refused, "the stale turn must be refused")
+
+        // THE REFUSED REQUEST CHANGED NEITHER THE HOLD NOR THE COUNTS.
+        XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "refusal must not pause")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0, "refusal must not resume")
+        XCTAssertFalse(playback.isPlaying, "the refusal must not release the successor's hold")
+
+        // Release the successor: it delivers its audio and returns .completed.
+        gate.release()
+        let liveResult = await live.value
+        XCTAssertEqual(liveResult.outcome, .completed, "the held successor must complete")
+
+        // THE SUCCESSOR'S AUDIO WAS DELIVERED, and because it was still pending at `done` the
+        // restoration is deferred — so drive the drain event the player sends.
+        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
+        XCTAssertTrue((enqueued ?? 0) > 0, "the successor's audio must reach the player")
+        await MainActor.run { sink.audioPlayerDidStop() }
+
+        // ONLY NOW must restoration have happened: the live owner released its hold exactly once.
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .pause }.count, 1,
+            "exactly one pause: the live turn's, with nothing added by the refused request"
+        )
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, 1,
+            "exactly one resume: the live owner's, on drain"
+        )
+        XCTAssertTrue(
+            playback.isPlaying,
+            "playback must return to its pre-hold (running) state"
+        )
+    }
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
