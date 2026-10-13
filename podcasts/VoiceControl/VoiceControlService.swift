@@ -538,6 +538,10 @@ class VoiceControlService: ObservableObject {
 
         switch result {
         case .intent(let rawIntent):
+            // THE RAW CLASSIFIER RESULT, observed BEFORE the stamping below reconstructs the intent.
+            // Firing this after the stamp would assert the reconstructed dispatch intent instead of
+            // what the router actually classified, which is the point of the observation.
+            await MainActor.run { parsedIntentObserver?(rawIntent) }
             // Stamp a model-chosen cloud route with the window it runs under, so
             // its completion can be judged against that window rather than against
             // whatever is current when the network call returns.
@@ -565,10 +569,6 @@ class VoiceControlService: ObservableObject {
                 return
             }
 
-            // BEFORE the executor runs it: the caller observes the intent the ROUTER PARSED, so the
-            // raw `CloudRouteIntent.origin` (the .modelCall/.routingFailure enum) can be asserted for
-            // THIS input rather than inferred from a generation or from a sibling case.
-            await MainActor.run { parsedIntentObserver?(intent) }
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent, preparedObserver: preparedObserver)

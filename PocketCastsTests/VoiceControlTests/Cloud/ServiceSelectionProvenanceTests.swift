@@ -1030,6 +1030,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var turnsBuilt = 0
         var finishedInputs: [String] = []
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        let arrivalWait = AsyncStream<Void>.makeStream()
         var terminals: [VoiceControlService.InputTerminalOutcome] = []
         var parsedIntents: [any VoiceIntent] = []
         let aFinished = AsyncStream<Void>.makeStream()
@@ -1061,7 +1062,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 try await gate.wait()
             },
             onInputBarrierSettled: { input, outcome in
-                if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
+                if input.routerTranscript.contains("A question") {
+                    arrivals.append(outcome)
+                    arrivalWait.continuation.yield()
+                }
             },
             onInputTerminal: { input, outcome in
                 if input.routerTranscript.contains("A question") {
@@ -1092,7 +1096,24 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         signal.onWakeWordDetected()
         let windowA = signal.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // AWAIT THE EVENT, do not sleep and hope: the arrival acknowledgement is what makes "held"
+        // observable, and a fixed sleep asserts a timing rather than a fact.
+        let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in arrivalWait.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(
+            arrived,
+            "A must ACKNOWLEDGE ARRIVAL at the barrier; without it 'held' is an assumption. "
+                + "Arrivals seen: \(arrivals)"
+        )
         XCTAssertEqual(
             arrivals, [.arrived],
             "A must have ACKNOWLEDGED ARRIVAL at the barrier — an event distinct from routing "
@@ -1145,10 +1166,22 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "the parsed intent's ORIGIN ENUM must be .modelCall — the model-chose-it case — rather "
                 + "than .routingFailure; saw \(parsed.origin)"
         )
+        // SEPARATELY, AFTER STAMPING: the observer fires on the RAW classified intent, so its
+        // generation is nil there by construction; the captured window is verified from the SINK's
+        // pre-guard record, which is the stamped dispatch. Asserting it on `parsed` would be asserting
+        // a value that does not exist at that point.
+        XCTAssertNil(
+            parsed.generation,
+            "the observation is of the RAW classified intent, before stamping, so its generation is "
+                + "nil there; saw \(String(describing: parsed.generation))"
+        )
+        let stampedOrigin = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
+        }
         XCTAssertEqual(
-            parsed.generation, windowA,
-            "and the parsed intent must carry the generation THIS turn captured (\(windowA)), "
-                + "not the successor's; saw \(String(describing: parsed.generation))"
+            stampedOrigin, windowA,
+            "AFTER STAMPING the dispatch must carry the generation THIS turn captured (\(windowA)), "
+                + "not the successor's; saw \(String(describing: stampedOrigin))"
         )
 
         // MEASURED, and it corrected an assumption of mine: the retired input settles as `.routed`,
@@ -1206,6 +1239,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         let gate = Gate()
         var turnsBuilt = 0
+        var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        let arrivalWait = AsyncStream<Void>.makeStream()
         var parsedIntents: [any VoiceIntent] = []
         let aFinished = AsyncStream<Void>.makeStream()
 
@@ -1228,6 +1263,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 guard input.routerTranscript.contains("A question") else { return }
                 try await gate.wait()
             },
+            onInputBarrierSettled: { input, outcome in
+                if input.routerTranscript.contains("A question") {
+                    arrivals.append(outcome)
+                    arrivalWait.continuation.yield()
+                }
+            },
             parsedIntentObserverFactory: { input in
                 guard input.routerTranscript.contains("A question") else { return nil }
                 return { parsed in parsedIntents.append(parsed) }
@@ -1248,7 +1289,27 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // below compares against the turn's own window rather than a live read.
         let admittedWindow = service.gracePeriodSignalForTesting.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // AWAIT THE EVENT rather than sleeping: arrival is what makes "held" a fact.
+        let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in arrivalWait.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(
+            arrived,
+            "A must ACKNOWLEDGE ARRIVAL at the barrier; without it 'held' is an assumption. "
+                + "Arrivals seen: \(arrivals)"
+        )
+        XCTAssertEqual(
+            arrivals, [.arrived],
+            "arrival is its own event, distinct from terminal settlement and from any action"
+        )
         XCTAssertEqual(turnsBuilt, 0, "A must be held at the barrier and have taken no action")
 
         // NOTHING is retired. Release and let it complete.
@@ -1283,10 +1344,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "the parsed intent's ORIGIN ENUM must be .modelCall, the model-chose-it case; saw "
                 + "\(parsed.origin)"
         )
+        // SEPARATELY, AFTER STAMPING (see the refusal case): the observation is of the RAW
+        // classified intent, so its generation is nil there; the captured window is verified from the
+        // stamped dispatch.
+        XCTAssertNil(
+            parsed.generation,
+            "the observation is of the RAW classified intent, before stamping; saw "
+                + "\(String(describing: parsed.generation))"
+        )
+        let stampedOrigin = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
+        }
         XCTAssertEqual(
-            parsed.generation, admittedWindow,
-            "the admitted parsed intent must carry the generation it captured (\(admittedWindow)); "
-                + "saw \(String(describing: parsed.generation))"
+            stampedOrigin, admittedWindow,
+            "AFTER STAMPING the admitted dispatch must carry the generation it captured "
+                + "(\(admittedWindow)); saw \(String(describing: stampedOrigin))"
         )
     }
 
@@ -1321,6 +1393,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let gate = Gate()
         var turnsBuilt = 0
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        let arrivalWait = AsyncStream<Void>.makeStream()
         var terminals: [VoiceControlService.InputTerminalOutcome] = []
         var finishedInputs: [String] = []
         let terminalWait = AsyncStream<Void>.makeStream()
@@ -1345,7 +1418,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 try await gate.wait()
             },
             onInputBarrierSettled: { input, outcome in
-                if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
+                if input.routerTranscript.contains("A question") {
+                    arrivals.append(outcome)
+                    arrivalWait.continuation.yield()
+                }
             },
             onInputTerminal: { input, outcome in
                 if input.routerTranscript.contains("A question") {
