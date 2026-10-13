@@ -34,6 +34,9 @@ class VoiceControlService: ObservableObject {
     /// activity signal, so playback state is the reliable in-use signal.
     private let isPlaybackActive: () -> Bool
 
+    /// Live microphone exposure from the route monitor, for diagnostics and tests.
+    var micExposure: MicExposure { routeMonitor.micExposure }
+
     private var latestStageTiming: PipelineStageTiming?
     private var latestRouterMetrics: RouterClassificationMetrics?
 
@@ -63,6 +66,10 @@ class VoiceControlService: ObservableObject {
     /// Route-acquisition attempt. Cancelled when the gate stops requiring it;
     /// a late completion is discarded rather than starting capture.
     private var acquisitionTask: Task<Void, Never>?
+    /// True while an acquisition is executing synchronously (including its
+    /// exposure flip). The flip publishes synchronously through the gate sink,
+    /// so the `.listening` branch must not cancel the task that produced it.
+    private var isAcquiring = false
     /// Bumped on cancellation so a stale acquisition cannot apply its result.
     private var acquisitionGeneration: UInt64 = 0
     /// The route an acquisition was last attempted for, so a failed acquisition
@@ -81,7 +88,7 @@ class VoiceControlService: ObservableObject {
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
         analytics: VoiceAnalytics,
-        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isPlaying }
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -167,7 +174,13 @@ class VoiceControlService: ObservableObject {
                 self.stop()
                 self.considerAcquisition(for: gate.posture)
             case .listening(let mode):
-                self.cancelAcquisition()
+                // The acquisition's own exposure flip publishes synchronously
+                // from inside `acquireExternalInput`. Cancelling here would
+                // abort the very task committing the route, and its later
+                // cancellation check would clear the selection and drop capture.
+                if !self.isAcquiring {
+                    self.cancelAcquisition()
+                }
                 self.start(in: mode)
             }
             self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
@@ -512,21 +525,45 @@ class VoiceControlService: ObservableObject {
             // Playback belongs to the same shared session; the gate context may
             // also already say playback is active. Either is enough to forbid
             // deactivation on failure.
-            let playbackActive = self.isPlaybackActive() || posture.context == .playbackActive || posture.context == .both
-            let result = await self.routeMonitor.acquireExternalInput(playbackActive: playbackActive)
-            guard !Task.isCancelled, self.acquisitionGeneration == generation else { return }
-            self.acquisitionTask = nil
-            guard result != .acquired, let reason = result.failureReason else { return }
-            // Acquisition left the route Exposed/NoMic: report it as a
-            // non-acquisition with the route-acquisition failure reason. A later
-            // gate re-evaluation with the same posture will not duplicate it.
-            self.lifecycleLogger.transition(
-                posture: self.gatePosture,
-                route: self.routeDescription(),
-                wasCapturing: false,
-                isCapturing: false,
-                acquisitionFailureReason: reason
-            )
+            let sessionInUse = self.isPlaybackActive() || posture.context == .playbackActive || posture.context == .both
+            // From here until the function returns, the exposure flip emits
+            // synchronously into the gate sink; mark the task so `.listening`
+            // does not cancel it.
+            self.isAcquiring = true
+            let result = await self.routeMonitor.acquireExternalInput(sessionInUseByPlayback: sessionInUse)
+            self.isAcquiring = false
+            let isCurrent = !Task.isCancelled && self.acquisitionGeneration == generation
+            if isCurrent {
+                self.acquisitionTask = nil
+            }
+            switch result {
+            case .acquired:
+                // Capture starts from the gate sink the moment exposure flips
+                // to isolated. If the gate never reached `.listening` (a
+                // conflict landed first), the acquired route has no owner:
+                // release it so no external input is retained without capture.
+                // Also covers a success that a later cancel superseded before
+                // this task resumed, as long as no newer acquisition owns the
+                // route now.
+                if !self.isListening, self.acquisitionTask == nil {
+                    self.routeMonitor.releaseAcquiredExternalInput()
+                }
+            case .cancelled, .notApplicable:
+                break
+            default:
+                guard isCurrent, let reason = result.failureReason else { break }
+                // Acquisition left the route Exposed/NoMic: report it as a
+                // non-acquisition with the route-acquisition failure reason. A
+                // later gate re-evaluation with the same posture will not
+                // duplicate it.
+                self.lifecycleLogger.transition(
+                    posture: self.gatePosture,
+                    route: self.routeDescription(),
+                    wasCapturing: false,
+                    isCapturing: false,
+                    acquisitionFailureReason: reason
+                )
+            }
         }
     }
 

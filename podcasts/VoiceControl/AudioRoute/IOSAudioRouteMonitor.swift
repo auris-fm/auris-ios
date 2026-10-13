@@ -166,6 +166,20 @@ class IOSAudioRouteMonitor: ObservableObject {
     private let audioSession: AudioSessionControlling
     private var cancellables = Set<AnyCancellable>()
 
+    /// How long `acquireExternalInput` waits for the live route to confirm a
+    /// selected external input. `setPreferredInput` commonly settles on a later
+    /// `routeChangeNotification`, so an immediate read can still report the
+    /// built-in mic; the bounded wait re-reads the route until the deadline.
+    var confirmationTimeout: Duration = .milliseconds(500)
+
+    /// Whether the last successful acquisition activated the shared session.
+    /// The service releases an acquired route that never led to capture; this
+    /// records what that release is allowed to undo (never a session playback
+    /// already owns).
+    private var lastAcquisitionActivatedSession = false
+    /// Whether the last successful acquisition selected a preferred input.
+    private var lastAcquisitionSelectedInput = false
+
     init(
         gracePeriodSignal: GracePeriodSignal = GracePeriodSignal(),
         audioSession: AudioSessionControlling = RealAudioSession()
@@ -213,7 +227,7 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// `.acquired` only when `currentRoute.inputs` confirms an external mic.
     /// Never falls back to the built-in microphone.
     @MainActor
-    func acquireExternalInput(playbackActive: Bool = false) async -> RouteAcquisitionResult {
+    func acquireExternalInput(sessionInUseByPlayback: Bool = false) async -> RouteAcquisitionResult {
         // A task cancelled before it starts must not touch the audio session at
         // all — otherwise a blocked/`Off` posture would still open an input route.
         guard !Task.isCancelled else { return .cancelled }
@@ -230,7 +244,7 @@ class IOSAudioRouteMonitor: ObservableObject {
         // session in use by playback would stop the app's own audio. Playback is
         // signalled by the caller because `AVAudioSession` cannot be queried for
         // its active state and the category is not an activity signal.
-        let sessionAlreadyInUse = audioSession.isActive || playbackActive
+        let sessionAlreadyInUse = audioSession.isActive || sessionInUseByPlayback
         var activatedByAcquisition = false
 
         do {
@@ -294,17 +308,69 @@ class IOSAudioRouteMonitor: ObservableObject {
             return acquiredResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: true)
         }
 
+        // `setPreferredInput` often settles via a later route-change
+        // notification; declaring failure from the immediate read would undo a
+        // selection the platform was about to take. Wait (bounded) for the live
+        // route to confirm before giving up.
+        if await confirmExternalInput() {
+            return acquiredResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: true)
+        }
+
         // Availability is not selection: the candidate was listed and selected
         // but the live route still reports the built-in mic.
         closeSession(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: true)
         refreshRoute()
+        if Task.isCancelled { return .cancelled }
         return .selectionFailed
+    }
+
+    /// Bounded wait for the live route to confirm an external input. Re-reads
+    /// the route on each step; a cancelled enclosing task aborts the wait and
+    /// returns false (the caller releases whatever acquisition opened).
+    @MainActor
+    private func confirmExternalInput() async -> Bool {
+        if micExposure == .isolated { return true }
+        let deadline = ContinuousClock.now + confirmationTimeout
+        while ContinuousClock.now < deadline {
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                return false
+            }
+            refreshRoute()
+            if micExposure == .isolated { return true }
+        }
+        refreshRoute()
+        return micExposure == .isolated
+    }
+
+    /// Release an external input route that a successful acquisition opened when
+    /// the service did not start capture (e.g. a conflict landed between the
+    /// exposure flip and the gate transition). Clears only the preferred input
+    /// acquisition selected and deactivates only a session acquisition itself
+    /// activated — never one playback owns.
+    func releaseAcquiredExternalInput() {
+        if lastAcquisitionSelectedInput {
+            audioSession.clearPreferredInput()
+        }
+        if lastAcquisitionActivatedSession {
+            try? audioSession.setSessionActive(false)
+        }
+        lastAcquisitionActivatedSession = false
+        lastAcquisitionSelectedInput = false
+        refreshRoute()
     }
 
     /// `.acquired`, unless the enclosing task was cancelled after the route was
     /// confirmed — then release what acquisition opened and report `.cancelled`.
     private func acquiredResult(activatedByAcquisition: Bool, hadSelectedInput: Bool) -> RouteAcquisitionResult {
-        cancellationResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: hadSelectedInput) ?? .acquired
+        if let cancelled = cancellationResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: hadSelectedInput) {
+            return cancelled
+        }
+        // Ownership for a later release if capture never starts.
+        lastAcquisitionActivatedSession = activatedByAcquisition
+        lastAcquisitionSelectedInput = hadSelectedInput
+        return .acquired
     }
 
     /// If the enclosing task was cancelled while acquisition ran, close whatever
@@ -324,6 +390,8 @@ class IOSAudioRouteMonitor: ObservableObject {
         if hadSelectedInput {
             audioSession.clearPreferredInput()
         }
+        lastAcquisitionActivatedSession = false
+        lastAcquisitionSelectedInput = false
         guard activatedByAcquisition else { return }
         try? audioSession.setSessionActive(false)
     }

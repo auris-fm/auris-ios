@@ -272,7 +272,7 @@ final class RouteChangeTests: XCTestCase {
         session.isActive = false
         let monitor = makeMonitor(session)
 
-        let result = await monitor.acquireExternalInput(playbackActive: true)
+        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: true)
 
         XCTAssertEqual(result, .noCandidate)
         XCTAssertEqual(session.deactivateCount, 0, "playback owns the shared session; a failed acquisition must not deactivate it")
@@ -302,6 +302,77 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertEqual(result, .cancelled)
         XCTAssertEqual(session.clearCount, 1, "cancellation releases the external input selection")
         XCTAssertNotEqual(monitor.micExposure, .isolated, "a cancelled acquisition must not leave an isolated route")
+    }
+
+    func test_acquisition_settlesViaLaterRouteConfirmation() async {
+        // `setPreferredInput` commonly moves the live route on a later
+        // route-change notification. The immediate read still reports the
+        // built-in mic; acquisition must wait (bounded) instead of undoing the
+        // selection with `.selectionFailed`.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.builtInMic, uid: "built-in")]
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = false
+        let monitor = makeMonitor(session)
+
+        // The platform applies the selection one runloop turn later, as a route
+        // change would.
+        session.onSelect = {
+            DispatchQueue.main.async {
+                session.inputs = session.available.filter { $0.uid == "bt-mic" }
+            }
+        }
+
+        let result = await monitor.acquireExternalInput()
+
+        XCTAssertEqual(result, .acquired, "the later route confirmation must count as a successful acquisition")
+        XCTAssertEqual(monitor.micExposure, .isolated)
+        XCTAssertEqual(session.selectedUIDs, ["bt-mic"])
+    }
+
+    func test_releaseAcquiredExternalInput_clearsSelection() async {
+        // An acquisition that succeeds but never leads to capture must not leave
+        // the external input route selected.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput()
+        XCTAssertEqual(result, .acquired)
+        XCTAssertEqual(monitor.micExposure, .isolated)
+
+        monitor.releaseAcquiredExternalInput()
+
+        XCTAssertEqual(session.clearCount, 1, "the selected external input is released")
+        XCTAssertNotEqual(monitor.micExposure, .isolated, "no external input is retained without capture")
+        XCTAssertEqual(session.deactivateCount, 0, "a session acquisition never activated is not deactivated")
+    }
+
+    func test_releaseAcquiredExternalInput_neverDeactivatesPlaybackSession() async {
+        // The acquired route is released, but a session playback owns must not
+        // be deactivated even if acquisition had to activate it to discover the
+        // input.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: true)
+        XCTAssertEqual(result, .acquired)
+        XCTAssertEqual(session.activateCount, 1)
+
+        monitor.releaseAcquiredExternalInput()
+
+        XCTAssertEqual(session.clearCount, 1)
+        XCTAssertEqual(session.deactivateCount, 0, "playback owns the shared session; release must not deactivate it")
     }
 
     func test_bluetoothDisconnectMidCapture_reEvaluatesToExposed() async {
@@ -399,5 +470,43 @@ final class RouteChangeTests: XCTestCase {
             gracePeriodActive: true
         )
         XCTAssertEqual(exposedGate.state, .off(reason: .exposedMicrophone))
+    }
+
+    // MARK: - Service-level acquisition reentrancy
+
+    /// A successful acquisition flips `micExposure` to `.isolated`, whose
+    /// `@Published` emission runs the service's gate sink synchronously *inside*
+    /// `acquireExternalInput`. That sink must not cancel the very task committing
+    /// the route, and the route must survive once capture starts.
+    @MainActor
+    func test_service_acquisitionOfBluetoothCandidate_keepsCaptureAndDoesNotClearInput() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        let service = VoiceControlAssembly().buildVoiceControlService(audioSession: session)!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { service.isListening }
+
+        XCTAssertEqual(service.micExposure, .isolated,
+                       "acquisition must not undo its own successful exposure flip")
+        XCTAssertTrue(service.isListening, "a successful acquisition must leave capture running")
+        XCTAssertEqual(session.selectedUIDs, ["bt-mic"], "the external candidate is selected")
+        XCTAssertEqual(session.clearCount, 0,
+                       "the reentrant gate must not clear the preferred input acquisition just selected")
+        XCTAssertEqual(session.deactivateCount, 0,
+                       "the reentrant gate must not deactivate the acquired session")
+    }
+
+    @MainActor
+    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 }

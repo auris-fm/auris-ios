@@ -6,10 +6,10 @@ class VoiceControlAssembly {
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
-    func buildVoiceControlService() -> VoiceControlService? {
+    func buildVoiceControlService(audioSession: AudioSessionControlling = RealAudioSession()) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
 
-        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
+        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
         let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
         let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared

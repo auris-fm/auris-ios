@@ -161,6 +161,18 @@ class PlaybackManager: ServerPlaybackDelegate {
         return player?.playing() ?? false
     }
 
+    /// True while the shared audio session is still in use by playback.
+    ///
+    /// `isPlaying` goes false the instant the user pauses, but playback keeps
+    /// the session active until the deferred deactivation runs (~3s later). Any
+    /// caller that must not deactivate a session playback owns (voice-control
+    /// route acquisition) needs a signal that survives that pause window;
+    /// `shouldDeactivateSession` is true from the pause until that deferred
+    /// deactivation completes, so this reads the same window the session stays up.
+    var isAudioSessionInUse: Bool {
+        isPlaying || shouldDeactivateSession.value
+    }
+
     var isBuffering: Bool {
         player?.buffering() ?? false
     }
