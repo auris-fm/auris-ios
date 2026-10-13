@@ -88,6 +88,10 @@ class VoiceControlService: ObservableObject {
 
     /// Acknowledges that a queued input's routing attempt has FINISHED. See the initializer.
     private let onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)?
+    /// Awaited by the serial chain BEFORE an input is classified or executed, so a test can hold a
+    /// specific input while the window state changes around it and then release it. Nil in
+    /// production, where it is never set, so the chain is unmodified.
+    private let testInputBarrier: (@Sendable (IntentRoutingInput) async -> Void)?
 
     /// Live microphone exposure from the route monitor, for diagnostics and tests.
     var micExposure: MicExposure { routeMonitor.micExposure }
@@ -160,7 +164,8 @@ class VoiceControlService: ObservableObject {
         /// and after its `defer` runs. An acknowledgement of COMPLETION, not of preparation: a
         /// preparation observer fires before routing completes and so cannot say whether the turn
         /// acted. Nil in production, where nothing needs to be told.
-        onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil
+        onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
+        testInputBarrier: (@Sendable (IntentRoutingInput) async -> Void)? = nil
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -176,6 +181,7 @@ class VoiceControlService: ObservableObject {
         self.analytics = analytics
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
+        self.testInputBarrier = testInputBarrier
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -304,6 +310,9 @@ class VoiceControlService: ObservableObject {
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
                 guard stillCurrent else { return }
+                // Held here — after the staleness guard, before classification/execution — so a test
+                // can retire this input's window while it waits. Nil in production.
+                if let barrier = self.testInputBarrier { await barrier(input) }
                 await self.handleRoutingInput(
                     input,
                     origin: capturedOrigin,

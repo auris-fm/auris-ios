@@ -996,4 +996,208 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
+
+    /// CAPTURED-ORIGIN ADMISSION, isolated from debounce.
+    ///
+    /// A per-input barrier in the installed serial chain holds A BEFORE classification, so the test
+    /// can retire A's window and open B while A waits, then release it. Debounce never enters the
+    /// picture because A is the FIRST cloud route in this test — the assertion is about
+    /// captured-origin admission, not about the debounce guard.
+    ///
+    /// The unretired twin below is the positive: same arrangement, nothing retired, A must proceed.
+    @MainActor
+    func testAHeldParsedModelInputWhoseWindowRetiredIsRefusedAdmission() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "origin_held_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // A is held at the barrier until the test releases it.
+        let gate = Gate()
+        var turnsBuilt = 0
+        var finishedInputs: [String] = []
+        let aFinished = AsyncStream<Void>.makeStream()
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                turnsBuilt += 1
+                return CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                ).client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            onInputRoutingFinished: { finished in
+                finishedInputs.append(finished.routerTranscript)
+                if finished.routerTranscript.contains("A question") {
+                    aFinished.continuation.yield()
+                }
+            },
+            testInputBarrier: { input in
+                // Hold ONLY A, and only here — before classification, so its window can be retired
+                // while it waits.
+                if input.routerTranscript.contains("A question") { try? await gate.wait() }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+        XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
+
+        let signal = service.gracePeriodSignalForTesting
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        // A is submitted and parks at the barrier, stamped with its own window.
+        signal.onWakeWordDetected()
+        let windowA = signal.currentGeneration()
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(
+            turnsBuilt, 0,
+            "A must be HELD at the barrier and have taken no action; a client now means the barrier "
+                + "did not hold and the assertions below would prove nothing"
+        )
+
+        // RETIRE A's window and OPEN a successor, epoch deliberately UNCHANGED.
+        signal.onAppBackgrounded()
+        signal.onWakeWordDetected()
+        let successor = signal.currentGeneration()
+        XCTAssertNotEqual(windowA, successor, "the successor must be a different window from A")
+        XCTAssertTrue(signal.isActive, "the successor window must be OPEN")
+
+        // RELEASE, then await A's COMPLETION acknowledgement.
+        gate.release()
+        let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in aFinished.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(
+            completion,
+            "A must ACKNOWLEDGE COMPLETION; without it the assertions below read a state the case "
+                + "does not control. Finished inputs seen: \(finishedInputs)"
+        )
+
+        // REFUSED ADMISSION: A completed and took NO action.
+        XCTAssertEqual(
+            turnsBuilt, 0,
+            "a parsed model-chosen input whose window retired while it waited must be refused "
+                + "admission; a client here means it acted under the successor"
+        )
+        // The successor's allowance is its own and untouched.
+        XCTAssertEqual(
+            signal.claimEscalationBudget(),
+            successor,
+            "the successor's allowance must be unclaimed and still its own after A was refused"
+        )
+    }
+
+    /// The POSITIVE twin: identical arrangement with NOTHING retired, so A must be admitted and act.
+    /// Without this, the case above could pass because the barrier or the submission never worked.
+    @MainActor
+    func testAHeldParsedModelInputWhoseWindowIsUnretiredIsAdmitted() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "origin_unretired_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let gate = Gate()
+        var turnsBuilt = 0
+        let aFinished = AsyncStream<Void>.makeStream()
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                turnsBuilt += 1
+                return CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                ).client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            onInputRoutingFinished: { finished in
+                if finished.routerTranscript.contains("A question") { aFinished.continuation.yield() }
+            },
+            testInputBarrier: { input in
+                if input.routerTranscript.contains("A question") { try? await gate.wait() }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(turnsBuilt, 0, "A must be held at the barrier and have taken no action")
+
+        // NOTHING is retired. Release and let it complete.
+        gate.release()
+        let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in aFinished.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(completion, "A must acknowledge completion")
+
+        // POSITIVE: an unretired held input IS admitted and acts.
+        XCTAssertEqual(
+            turnsBuilt, 1,
+            "an UNRETIRED held model-chosen input must be admitted and reach the transport; if it "
+                + "does not, the refusal case above cannot be attributed to retirement"
+        )
+    }
 }
