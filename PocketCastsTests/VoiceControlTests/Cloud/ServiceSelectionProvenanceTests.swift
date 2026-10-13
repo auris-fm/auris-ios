@@ -1050,9 +1050,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 }
             },
             testInputBarrier: { input in
-                // Hold ONLY A, and only here — before classification, so its window can be retired
-                // while it waits.
-                if input.routerTranscript.contains("A question") { try? await gate.wait() }
+                // Hold ONLY A, before classification, so its window can be retired while it waits.
+                // The closure is non-throwing, so cancellation is handled here rather than swallowed:
+                // a cancelled wait ends the wait. Treating `CancellationError` as "released" would let
+                // a cancelled chain sail through the barrier, hiding exactly what the latch's
+                // contract exists to expose.
+                guard input.routerTranscript.contains("A question") else { return }
+                do { try await gate.wait() } catch { return }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1160,7 +1164,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 if finished.routerTranscript.contains("A question") { aFinished.continuation.yield() }
             },
             testInputBarrier: { input in
-                if input.routerTranscript.contains("A question") { try? await gate.wait() }
+                guard input.routerTranscript.contains("A question") else { return }
+                do { try await gate.wait() } catch { return }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
