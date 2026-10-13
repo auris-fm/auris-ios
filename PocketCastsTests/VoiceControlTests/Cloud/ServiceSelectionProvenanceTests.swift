@@ -312,4 +312,101 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "this is exactly what a cancelled assembly subscription prevents"
         )
     }
+
+    /// THE SERVICE SUBMISSION POSITIVE: the routed request must reach the CONTROLLED TRANSPORT.
+    ///
+    /// Admission order matters: `isConfigured()` runs first, so the base URL comes from the isolated
+    /// fixture configuration; then the origin gate; only then is the client built and the request
+    /// sent. The client factory is injected per-assembly, and the recorder observes the SUBMITTED
+    /// text rather than the pre-guard sink entry.
+    @MainActor
+    func testTheServiceSubmitsTheRoutedRequestToTheControlledTransport() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+
+        let fakeBackend = FakeAsrBackend()
+
+        // The fixture's OWN defaults, injected as the PRODUCTION READER's configuration — writing
+        // an unconsumed suite would leave `CloudConfig.shared` blind to it.
+        let suite = "service_submission_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Capture the INJECTED CLIENT'S OWN task and frame, rather than a shared static recorder: a
+        // static (and a substring search over it) cannot attribute a submission to THIS turn.
+        var injectedTask: StubWebSocketTask?
+        var factoryInvocations = 0
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                factoryInvocations += 1
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                injectedTask = built.task
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
+
+        // ASSERT THE EXACT PREDICATE before dispatch, so a refusal here is attributed to it.
+        XCTAssertFalse(
+            fixtureConfig.baseUrl.isEmpty,
+            "the injected configuration must make the sink's own predicate true; baseUrl=\(fixtureConfig.baseUrl)"
+        )
+
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "what did the host mean by that remark",
+                selection: .wakeWord
+            ),
+            origin: liveGeneration
+        )
+
+        // Wait for the injected task to submit its auth frame.
+        let deadline = Date().addingTimeInterval(5)
+        var frame: [String: Any]?
+        while Date() < deadline {
+            if let captured = injectedTask?.sentAuthFrame { frame = captured; break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertGreaterThan(
+            factoryInvocations, 0,
+            "ADMISSION: the injected factory must be invoked, or the turn never reached the client"
+        )
+        let body = try XCTUnwrap(
+            frame,
+            "EFFECT: the injected client must SUBMIT this turn's frame — no shared recorder is used"
+        )
+        // THIS TURN'S identity, from the frame the injected client itself sent.
+        let requestId = try XCTUnwrap(body["request_id"] as? String, "the frame carries a request_id")
+        XCTAssertNotNil(UUID(uuidString: requestId), "request_id is client-assigned")
+        XCTAssertNil(
+            body["capabilities"],
+            "no renderer is advertised here, so capabilities must be omitted"
+        )
+    }
 }
