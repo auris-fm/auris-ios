@@ -1141,9 +1141,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
         XCTAssertTrue(
             (enqueued ?? 0) > 0,
-            "binary audio must reach the player — otherwise an output assertion proves nothing"
+            "binary audio must be DELIVERED to the player — otherwise an output assertion proves nothing"
         )
-        XCTAssertEqual(pending, false, "the turn completed, so its audio must have drained")
+        // SCOPE: this is DELIVERY and buffer state, not proof that speech was RENDERED. The player's
+        // decode/render path is not observed here, so a case reading these two facts must not be
+        // described as showing that audio was heard.
+        XCTAssertEqual(pending, false, "the turn completed, so its audio buffer must be empty")
     }
 
     /// A refused STALE turn must leave the held live successor's AUDIO OUTPUT intact.
@@ -1184,11 +1187,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // so the stale refusal neither suppressed nor discarded the live turn's output.
         let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
         let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
+        // SCOPE: DELIVERY, not rendering — see the note in the positive control above. What these
+        // two facts establish together is that the successor's audio was still handed to the
+        // player after the stale refusal, and that the buffer was not left holding it.
         XCTAssertTrue(
             (enqueued ?? 0) > 0,
-            "the held successor's audio must have reached the player despite the stale refusal"
+            "the held successor's audio must still be DELIVERED to the player despite the stale refusal"
         )
-        XCTAssertEqual(pending, false, "the successor's audio must have drained, not been dropped")
+        XCTAssertEqual(pending, false, "the successor's audio buffer must be empty, not left holding frames")
     }
 
     /// A small, valid binary payload: the transport treats any `.data` frame as audio.
