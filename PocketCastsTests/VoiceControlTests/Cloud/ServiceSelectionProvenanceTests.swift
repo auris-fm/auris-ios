@@ -127,4 +127,44 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         throw XCTSkip("the intent router never became ready")
     }
 
+
+    /// The ASR wake callback the SERVICE installs must actually open the grace window.
+    ///
+    /// `VoiceControlService` wires this link in production:
+    ///     asrEngine.onWakeWordDetected = { self?.gracePeriodSignal.onWakeWordDetected(); … }
+    /// but every existing case calls `gracePeriodSignalForTesting.onWakeWordDetected()` DIRECTLY,
+    /// so the wiring itself was never driven. Breaking that closure — or leaving it nil — would
+    /// leave every case green while the app never opened a window on a wake.
+    ///
+    /// This case fires the callback the engine holds, through the real assembly and start path.
+    @MainActor
+    func testTheASRWakeCallbackInstalledByTheServiceOpensTheGraceWindow() async throws {
+        let capture = FakeAudioCapture()
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        XCTAssertFalse(
+            service.gracePeriodSignalForTesting.isActive,
+            "the window must be shut before the wake, or this case cannot show it opening"
+        )
+
+        // Fire the PRODUCTION callback, not the signal. A nil closure here means the service never
+        // installed the link, which is precisely the defect this case exists to catch.
+        let installed = service.asrEngineForTesting.onWakeWordDetected
+        XCTAssertNotNil(
+            installed,
+            "the service must install an ASR wake callback; a nil one means no wake ever opens a window"
+        )
+        installed?()
+
+        XCTAssertTrue(
+            service.gracePeriodSignalForTesting.isActive,
+            "the installed ASR wake callback must open the grace window"
+        )
+    }
 }
