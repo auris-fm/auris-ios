@@ -9,7 +9,7 @@ SIMULATOR_NAME = $(shell xcrun simctl list devices available \
 	| grep "iPhone" \
 	| tail -1 | sed 's/^[[:space:]]*//' | sed 's/ *(.*) *$$//')
 
-.PHONY: help build clean test lint lint_lenient format install_dependencies build_mac launch_mac
+.PHONY: help build clean test lint lint_lenient format install_dependencies build_mac launch_mac debug debug_all
 
 define run_in_buildtools
 	@pushd BuildTools && \
@@ -90,6 +90,12 @@ launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \
 	xcrun simctl install booted "$$APP" && \
 	xcrun simctl launch booted fm.auris
+
+debug: launch_mac ## Builds, launches, and streams VoicePipeline app logs
+	log stream --predicate 'subsystem == "com.pocketcasts" AND category == "VoicePipeline"' --level debug --style compact
+
+debug_all: launch_mac ## Builds, launches, and streams all process logs
+	log stream --process podcasts --level debug --style compact
 
 format: ## Lint and autocorrect linter errors
 	$(call run_in_buildtools,$(SWIFTLINT_FROM_BUILDTOOLS) --autocorrect)

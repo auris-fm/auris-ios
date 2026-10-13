@@ -12,7 +12,7 @@ Build the app for iOS Simulator, launch it, and stream OSLog output in one comma
 ## Quick Reference
 
 ```bash
-# Build + launch + app subsystem logs (default)
+# Build + launch + VoicePipeline app logs (default)
 make debug
 
 # Build + launch + ALL process logs (includes system/framework)
@@ -21,8 +21,8 @@ make debug_all
 # Build and launch only (no log tail)
 make launch_mac
 
-# Raw log stream — app-only (filter by library/binary, excludes all frameworks)
-log stream --predicate 'sender BEGINSWITH "podcasts."' --level debug --style compact
+# Raw log stream — VoicePipeline category only (voice control pipeline)
+log stream --predicate 'subsystem == "com.pocketcasts" AND category == "VoicePipeline"' --level debug --style compact
 
 # Raw log stream — entire process (includes system/framework logs)
 log stream --process podcasts --level debug --style compact
@@ -32,8 +32,8 @@ log stream --process podcasts --level debug --style compact
 
 | Command | Scope |
 |---------|-------|
-| `sender BEGINSWITH "podcasts."` | App binary/library only (strictest — excludes all frameworks, system, and third-party libraries) |
-| `make debug` | Build + launch + app-only logs |
+| `category == "VoicePipeline"` | Voice control pipeline (VoiceControlService) |
+| `make debug` | Build + launch + VoicePipeline logs |
 | `--process podcasts` / `make debug_all` | All logs from the podcasts process (includes system, frameworks, ASR, audio) |
 
 ## Tips
