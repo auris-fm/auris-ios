@@ -447,4 +447,96 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "no renderer is advertised here, so capabilities must be omitted"
         )
     }
+
+    /// ESCALATION PROVENANCE: the routing-failure escalation must carry the turn's OWN captured
+    /// provenance. A turn stamped at its callback with a selection must reach the sink carrying THAT
+    /// selection, not whatever the live window would derive by the time the fallback runs.
+    ///
+    /// `preparedObserver` is the observable seam: it fires only for a turn the sink ADMITS, so its
+    /// value carries the intent's provenance as the sink received it.
+    @MainActor
+    func testTheEscalationTurnCarriesItsOwnCapturedProvenance() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        // Classify as no_match so routing fails and the escalation path is taken.
+        inference.classifyLabel = "no_match:"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "escalation_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var prepared: CloudPreparedConversation?
+        var factoryInvocations = 0
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                factoryInvocations += 1
+                return CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                ).client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        try await waitForRouter(service: service)
+
+        // A window is open, and the turn's selection is stamped at the callback.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+
+        // The stamp DISAGREES with the live derivation: the window is ACTIVE, so the sink's
+        // provider would say `.followUp`; stamping `.wakeWord` means only genuine provenance
+        // carriage can deliver it.
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "what did the host mean by that remark",
+                selection: .wakeWord
+            ),
+            origin: service.gracePeriodSignalForTesting.currentGeneration(),
+            preparedObserver: { value in prepared = value }
+        )
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if prepared != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertGreaterThan(
+            factoryInvocations, 0,
+            "the escalation must reach the transport (routing failed, so the fallback dispatches)"
+        )
+        let value = try XCTUnwrap(
+            prepared,
+            "the escalated turn must be admitted, so its prepared conversation is observable"
+        )
+        // A fallback carries the generation whose allowance it spent, so the identity exists.
+        XCTAssertFalse(value.requestId.isEmpty, "the escalated turn carries a request identity")
+
+        // PROVENANCE: the sink records the selection the INTENT carried, before its guards, so this
+        // shows what the escalation actually passed on — the turn's own `.followUp`, not a
+        // live-derived value.
+        let carried = await MainActor.run { sink.lastSelectionForTesting }
+        XCTAssertEqual(
+            carried, .wakeWord,
+            "the escalated turn must carry the selection its callback stamped — NOT the live "
+                + "derivation, which for an ACTIVE window would say .followUp"
+        )
+    }
 }
