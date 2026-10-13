@@ -47,6 +47,21 @@ class VoiceControlService: ObservableObject {
     /// call returns and the engine keeps the classification it was built with for the life of
     /// the app. `@Published` delivers the current value at subscribe time, so construction
     /// alone is enough to establish the initial classification.
+    /// Binds the manager's live origin to the grace window, owned by the SERVICE for the same
+    /// reason `wireEchoFilterRoute` is: `AppDelegate` constructs the assembly inline and keeps only
+    /// the service, so a subscription stored in the assembly's `cancellables` is cancelled as soon
+    /// as the build call returns — the manager would then never learn a window opened, and every
+    /// routed turn would be refused at the origin gate.
+    private func wireLiveOriginBinding() {
+        // The sink is main-actor-isolated, so reach its manager on the main actor.
+        MainActor.assumeIsolated {
+            CloudConversationManager.bindLiveOrigin(
+                to: gracePeriodSignal,
+                on: executor.cloudRouteSinkForTesting.conversationManagerForBinding
+            ).store(in: &cancellables)
+        }
+    }
+
     private func wireEchoFilterRoute() {
         routeMonitor.$currentRoute
             .map { VoiceAsrEngine.EchoFilterRoute.forOutput($0.output) }
@@ -173,6 +188,9 @@ class VoiceControlService: ObservableObject {
         // `startIfAllowed()` is still a route change, and the filter must not keep classifying
         // against the route it was built with. See the lifetime note on the helper.
         wireEchoFilterRoute()
+        // Same lifetime reasoning: the manager must learn about windows for as long as the service
+        // lives, not only until the assembly's build call returns.
+        wireLiveOriginBinding()
     }
 
     func startIfAllowed() {

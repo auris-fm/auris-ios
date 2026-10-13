@@ -273,4 +273,48 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "service crashes on the real ONNX model instead"
         )
     }
+
+    /// THE SERVICE-OWNED BINDING: a wake must reach the MANAGER the sink uses, so a routed turn is
+    /// admitted at the origin gate. This is the production admission defect: a binding stored in the
+    /// assembly's `cancellables` is cancelled when the build call returns, so the manager never
+    /// learns a window opened and every turn is refused.
+    @MainActor
+    func testAWakeReachesTheSinkManagersLiveOrigin() async throws {
+        let capture = FakeAudioCapture()
+        let fakeBackend = FakeAsrBackend()
+        VoiceControlAssembly.asrBackendOverrideForTesting = { fakeBackend }
+        defer { VoiceControlAssembly.asrBackendOverrideForTesting = nil }
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let manager = sink.conversationManagerForBinding
+
+        // No window yet: a turn carrying any generation must be refused.
+        XCTAssertNil(
+            manager.prepare(selection: .wakeWord, origin: 1),
+            "with no window open, no captured origin is live"
+        )
+
+        // A wake opens a window; the SERVICE-OWNED binding must move the manager's live origin.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let generation = service.gracePeriodSignalForTesting.currentGeneration()
+
+        let deadline = Date().addingTimeInterval(3)
+        var admitted = false
+        while Date() < deadline {
+            if manager.prepare(selection: .wakeWord, origin: generation) != nil { admitted = true; break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(
+            admitted,
+            "the service-owned binding must teach the sink's manager that this window is live — "
+                + "this is exactly what a cancelled assembly subscription prevents"
+        )
+    }
 }

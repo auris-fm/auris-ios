@@ -52,6 +52,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
     private let conversationManager: CloudConversationManager
+
+    /// The manager whose live origin must follow the grace window. Exposed so the SERVICE can own
+    /// the subscription: a binding stored in the assembly's `cancellables` is cancelled as soon as
+    /// the build call returns, and the manager then never learns a window opened.
+    var conversationManagerForBinding: CloudConversationManager { conversationManager }
     /// What selected the current turn. Defaults to a wake word: a turn with no reported
     /// selection is a new user act, and create-then-resume is the safe direction — resuming
     /// a conversation nobody opened would attach an utterance to someone else's history.

@@ -32,10 +32,9 @@ class VoiceControlAssembly {
         // Keep the manager's live origin in step with the window that actually opens. The
         // sink reads the origin from the INTENT (captured at dispatch), so this only supplies
         // the value that decides whether a captured origin is still live.
-        let originCancellable = CloudConversationManager.bindLiveOrigin(
-            to: gracePeriodSignal, on: conversationManager
-        )
-        cancellables.insert(originCancellable)
+        // The live-origin binding is owned by the SERVICE (see `wireLiveOriginBinding`): a
+        // subscription stored here would be cancelled the moment this build call returns, leaving
+        // the manager unaware of every window that opens.
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
         let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
