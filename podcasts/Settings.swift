@@ -389,6 +389,12 @@ class Settings: NSObject {
         return buildNumber
     }
 
+    /// When the installed binary was built, in the build machine's local time with its UTC offset.
+    /// Written into Info.plist by the "Modify Plist" build phase; nil when that key is absent (e.g. tests).
+    class func buildDate() -> String? {
+        Bundle.main.infoDictionary?["BuildDate"] as? String
+    }
+
     // MARK: - Sleep Time
 
     private static let customSleepTimeKey = "CustomSleepTime"

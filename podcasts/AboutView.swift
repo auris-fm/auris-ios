@@ -69,6 +69,11 @@ struct AboutView: View {
                 .font(.subheadline)
                 .textStyle(SecondaryText())
                 .padding(.top, 5)
+            if let buildDateText = model.buildDateText {
+                Text(buildDateText)
+                    .font(.subheadline)
+                    .textStyle(SecondaryText())
+            }
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .listRowBackground(Color.clear)
