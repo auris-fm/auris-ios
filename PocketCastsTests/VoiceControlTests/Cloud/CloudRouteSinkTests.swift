@@ -1031,9 +1031,33 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp
             )
         }
-        try await waitUntil("B reached the transport") {
-            CloudRouteTestURLProtocol.requestCount >= 2
+        // EXPLICIT BARRIER on B'S OWN TASK, read INSIDE the poll.
+        // NOTE: `CloudRouteTestURLProtocol.requestCount` is NOT usable here — it counts
+        // URLProtocol startLoading, and the route path uses URLSessionWebSocketTask, which never
+        // goes through URLProtocol. An earlier version used it and the condition was never true,
+        // so the "barrier" silently fell through its timeout and the ordering was really a sleep.
+        //
+        // `capturedTask` is replaced when a turn builds its task, and is nil until then, so it must
+        // be sampled inside the poll. B's task is distinguishable from A's by identity.
+        var bTask: StubWebSocketTask?
+        try await waitUntil("B built and submitted its own task") {
+            guard let latest = self.capturedTask, latest !== heldA.task else { return false }
+            guard latest.sentAuthFrame != nil else { return false }
+            bTask = latest
+            return true
         }
+        let bPreparedTask = try XCTUnwrap(bTask, "B must have built and submitted its own task")
+        let bRequestId = try XCTUnwrap(
+            bPreparedTask.sentAuthFrame?["request_id"] as? String,
+            "B's prepared frame must carry a client-assigned request_id"
+        )
+        XCTAssertNotNil(UUID(uuidString: bRequestId), "B's request_id must be a UUID")
+        // A and B are genuinely distinct turns, shown by their own prepared frames.
+        let aRequestId = try XCTUnwrap(
+            heldA.task.sentAuthFrame?["request_id"] as? String,
+            "A's prepared frame must carry a client-assigned request_id"
+        )
+        XCTAssertNotEqual(aRequestId, bRequestId, "A and B must be distinguishable by their frames")
 
         gate.release()
         _ = await a.value
