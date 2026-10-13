@@ -1552,6 +1552,49 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             "B's own notification must still restore, so A's arrival did not clear B's record"
         )
     }
+
+    /// A/B ISOLATION: two dispatches on ONE sink, each carrying its OWN observer, must each capture
+    /// ONLY its own prepared identity. With the observer stored on a shared object, B's dispatch
+    /// would overwrite A's expected value and A's comparison would be made against B's turn.
+    ///
+    /// The sink is the same instance for both, so any shared slot is exercised rather than avoided.
+    @MainActor
+    func testTwoOverlappingDispatchesDoNotShareAPreparedIdentity() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        var preparedA: CloudPreparedConversation?
+        var preparedB: CloudPreparedConversation?
+
+        // Each dispatch needs its own fixture: the handoff is consumed per built turn.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        // A: a wake-word turn under the live generation.
+        let a = await sink.routeToCloud(
+            request: "A", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord,
+            preparedObserver: { prepared in preparedA = prepared }
+        )
+        XCTAssertEqual(a.outcome, .completed, "turn A completes")
+
+        // B: a second dispatch on the SAME sink, with its OWN observer.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let b = await sink.routeToCloud(
+            request: "B", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp,
+            preparedObserver: { prepared in preparedB = prepared }
+        )
+        XCTAssertEqual(b.outcome, .completed, "turn B completes")
+
+        // ISOLATION: each observer saw its own turn's prepared identity, and they differ — a shared
+        // slot would have left A's value equal to B's.
+        let aValue = try XCTUnwrap(preparedA, "A's observer must have captured A's prepared identity")
+        let bValue = try XCTUnwrap(preparedB, "B's observer must have captured B's prepared identity")
+        XCTAssertNotEqual(
+            aValue.requestId, bValue.requestId,
+            "each dispatch must capture its OWN prepared identity; equal values mean a shared slot"
+        )
+    }
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
