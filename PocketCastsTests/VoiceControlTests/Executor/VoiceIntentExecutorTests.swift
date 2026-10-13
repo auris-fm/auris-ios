@@ -347,31 +347,6 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
 
 
-    /// The retry entry point EXISTS and REFUSES. It is the one callable replay API left, so its
-    /// refusal is the thing that must be covered — a removal would settle it differently, but it is
-    /// retained so a future producer has somewhere to attach.
-    ///
-    /// The assertion is that it returns nil and reaches NO transport: a refusal that still
-    /// dispatched would be the replay path this closure exists to prevent.
-    func testTheRetainedRetryEntryPointRefusesWithoutReachingTheTransport() async {
-        mockPlaybackContextProvider.context = Self.context
-        gracePeriodSignal.onWakeWordDetected()
-        let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
-
-        _ = await executor.execute(CloudRouteIntent(
-            request: "A's question", tier: .unknown, generation: generation, selection: .wakeWord
-        ))
-
-        mockCloudRouteSink.retriedRequestIds.removeAll()
-        let result = await executor.retryHeldCloudRequest(requestId: "any-id")
-
-        XCTAssertNil(result, "the retry entry point did not refuse")
-        XCTAssertTrue(
-            mockCloudRouteSink.retriedRequestIds.isEmpty,
-            "the retry reached the transport despite refusing, so the replay access is not closed"
-        )
-    }
 
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)

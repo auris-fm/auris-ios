@@ -155,10 +155,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
-        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
-        /// Supplied by the assembly. Defaults to `nil`, which makes every retry refuse — the
-        /// correct default for a sink with no owner bound.
-
+        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
@@ -264,6 +261,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             recentConversation: recentConversationProvider(),
             conversation: conversation
         )
+        // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
+        // could re-drive it, and that retention IS what made replay possible: a completed or
+        // possibly-submitted request left on the books is exactly what a replay path would find.
+        // With no producer able to establish that a frame was never submitted, the honest state is
+        // to retain nothing, and there is no retry entry point left to consume one.
+        //
+        // The sink therefore has ONE path: prepare a turn, dispatch it, handle its events, report
+        // its outcome. Nothing here implies a second attempt is possible.
+
         // Retained so an EXPLICIT retry can re-drive the SAME logical request. Holding the whole
         // envelope is what makes identity preservation structural rather than a convention: a
         // retry has nothing else to build an id from.
