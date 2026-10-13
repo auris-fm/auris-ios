@@ -6,11 +6,20 @@ class AboutViewModel: ObservableObject {
 
     @Published var navigationPath: [AboutNavigationPathComponent] = []
 
+    private let buildDateProvider: () -> String?
+
     var whatsNewText: String {
         L10n.whatsNewInVersion(Settings.appVersion())
     }
 
-    init() {
+    /// "Built 2026-10-13 09:32 +0800", or nil when the binary carries no build date.
+    var buildDateText: String? {
+        buildDateProvider().map { L10n.aboutBuildDate($0) }
+    }
+
+    init(buildDateProvider: @escaping () -> String? = Settings.buildDate) {
+        self.buildDateProvider = buildDateProvider
+
         whatsNewInfo = WhatsNewHelper.extractWhatsNewInfo()
 
         shouldShowWhatsNew = Settings.appVersion() == whatsNewInfo?.versionNo

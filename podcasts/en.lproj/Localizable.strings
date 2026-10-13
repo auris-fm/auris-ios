@@ -3782,6 +3782,9 @@
 /* Button that takes the user to the Acknowledgements screen */
 "about_acknowledgements" = "Acknowledgements";
 
+/* About page line showing when the installed build was produced. %@ is a date and time with UTC offset */
+"about_build_date" = "Built %@";
+
 /* Text sent when sharing a link to our app with other people */
 "app_share_text" = "Hey! Here is a link to download the Pocket Casts app. I'm really enjoying it and thought you might too.";
 
