@@ -1481,6 +1481,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertEqual(arrivals, [.arrived], "A must have ARRIVED at the barrier")
         XCTAssertEqual(turnsBuilt, 0, "A must have taken no action while held")
 
+        // CLASSIFIER COUNT BEFORE TERMINAL SETTLEMENT: A is HELD at the barrier, which sits BEFORE
+        // classification, so it must not have been classified yet. Recorded here and compared after
+        // settlement, so "the cancellation changed no classifier state" is observed rather than
+        // assumed from the absence of clients.
+        let classifyCountAtBarrier = inference.classifyCount
+
         // CANCEL the serial chain, then open the gate so the wait can observe the cancellation.
         service.stop()
         gate.release()
@@ -1519,6 +1525,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             turnsBuilt, 0,
             "a CANCELLED held input must submit nothing; a client here means the chain resumed "
                 + "routing after the barrier was cancelled"
+        )
+        // CLASSIFIER COUNT AFTER TERMINAL SETTLEMENT: unchanged, because a turn cancelled at the
+        // barrier never reaches classification. A rise here would mean the chain resumed past the
+        // barrier — the very thing the throwing barrier exists to prevent.
+        //
+        // REACHABILITY, measured rather than assumed: this assertion cannot fail IN ISOLATION. Making
+        // the chain continue past a cancelled barrier also moves the terminal outcome to `.routed`,
+        // and that assertion precedes this one — verified by two mutants, one of which deliberately
+        // preserved `.barrierCancelled` and still tripped the terminal check first. So this is a
+        // REDUNDANT guard on the same violation, not an independent one; it is kept because it names
+        // the classifier state explicitly, and it is NOT cited as separate coverage.
+        XCTAssertEqual(
+            inference.classifyCount, classifyCountAtBarrier,
+            "a turn cancelled at the barrier must not have been classified; the count moved from "
+                + "\(classifyCountAtBarrier) to \(inference.classifyCount)"
         )
         // NO ROUTING COMPLETION for that input: cancellation is not completion.
         XCTAssertFalse(
