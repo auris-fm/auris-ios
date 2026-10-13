@@ -44,6 +44,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// service derived it from the turn's own provenance rather than from live window state.
     /// Necessary because the two are indistinguishable from inside the sink when grace is active.
     @MainActor private(set) var lastSelectionForTesting: CloudConversationSelection?
+    /// The ORIGIN the last turn arrived with, recorded at the same PRE-GUARD point as the selection.
+    /// A caller-level case can therefore assert that the turn carried the generation captured at its
+    /// callback — the raw `CloudRouteIntent.origin` — rather than whatever window is live later.
+    @MainActor private(set) var lastOriginForTesting: Int?
 
     /// REQUEST-SCOPED preparation observer: the dispatch supplies it, so the prepared identity is
     /// captured FOR THAT DISPATCH rather than read from a sink-wide "last" slot. A shared slot is a
@@ -224,6 +228,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // the seam blind to exactly the refused turns a caller-level case most needs to observe.
         MainActor.assumeIsolated {
             lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
+            lastOriginForTesting = origin
         }
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken

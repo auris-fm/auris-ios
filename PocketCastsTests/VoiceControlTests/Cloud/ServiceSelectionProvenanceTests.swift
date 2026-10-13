@@ -1125,6 +1125,22 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "A must report a TERMINAL outcome; without it the assertions below read a state the case "
                 + "does not control. Terminals seen: \(terminals)"
         )
+        // EXPLICIT, REQUEST-SCOPED RAW ASSERTION: the dispatch reached the sink carrying THIS turn's
+        // captured window as `CloudRouteIntent.origin` — pinned from the pre-guard record, so it holds
+        // whether or not the turn was admitted. This is the raw modelCall origin, not a proxy for it.
+        let dispatchedOrigin = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
+        }
+        XCTAssertEqual(
+            dispatchedOrigin, windowA,
+            "the refused turn must have carried the generation it CAPTURED (\(windowA)) as the raw "
+                + "intent's origin, not the successor's; saw \(String(describing: dispatchedOrigin))"
+        )
+        XCTAssertNotEqual(
+            dispatchedOrigin, successor,
+            "the raw origin must not be the window that replaced it"
+        )
+
         // MEASURED, and it corrected an assumption of mine: the retired input settles as `.routed`,
         // NOT as `.barrierRefused`. The barrier RELEASES normally here — the refusal happens later,
         // when `prepare` refuses the turn's live-origin check. `.routed` therefore means "routing was
@@ -1213,6 +1229,9 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
 
         service.gracePeriodSignalForTesting.onWakeWordDetected()
+        // The window THIS turn is stamped with, captured at submission so the raw-origin assertion
+        // below compares against the turn's own window rather than a live read.
+        let admittedWindow = service.gracePeriodSignalForTesting.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(turnsBuilt, 0, "A must be held at the barrier and have taken no action")
@@ -1237,6 +1256,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             turnsBuilt, 1,
             "an UNRETIRED held model-chosen input must be admitted and reach the transport; if it "
                 + "does not, the refusal case above cannot be attributed to retirement"
+        )
+        // EXPLICIT, REQUEST-SCOPED RAW ASSERTION, and the positive half of the pair: this turn's raw
+        // intent carried ITS OWN captured window as the origin, and it was admitted.
+        let dispatchedOrigin = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
+        }
+        XCTAssertEqual(
+            dispatchedOrigin, admittedWindow,
+            "the admitted turn must carry the generation it CAPTURED (\(admittedWindow)) as the raw "
+                + "intent's origin; saw \(String(describing: dispatchedOrigin))"
         )
     }
 
