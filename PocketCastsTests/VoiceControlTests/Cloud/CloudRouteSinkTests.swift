@@ -1553,13 +1553,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
     }
 
-    /// A/B ISOLATION: two dispatches on ONE sink, each carrying its OWN observer, must each capture
-    /// ONLY its own prepared identity. With the observer stored on a shared object, B's dispatch
-    /// would overwrite A's expected value and A's comparison would be made against B's turn.
+    /// SEQUENTIAL OWNERSHIP (NOT overlap): two dispatches in turn on ONE sink, each carrying its OWN
+    /// observer, must each capture their own prepared identity.
     ///
-    /// The sink is the same instance for both, so any shared slot is exercised rather than avoided.
+    /// SCOPE, measured rather than assumed: this case does NOT demonstrate that OVERLAPPING
+    /// dispatches are isolated. It was falsified against a shared-slot mutation and SURVIVED, because
+    /// the two turns run sequentially — a shared slot agrees with the correct value when nothing
+    /// overlaps. Demonstrating overlap would need a second dispatch to publish between A's
+    /// preparation and A's observation; the socket gate parks downstream of preparation, so this
+    /// arrangement cannot create that window. Do not cite this case as overlap isolation.
     @MainActor
-    func testTwoOverlappingDispatchesDoNotShareAPreparedIdentity() async throws {
+    func testSequentialDispatchesEachCaptureTheirOwnPreparedIdentity() async throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(cloudTestOrigin)
         let sink = makeSink(conversationManager: manager)
@@ -1586,8 +1590,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
         XCTAssertEqual(b.outcome, .completed, "turn B completes")
 
-        // ISOLATION: each observer saw its own turn's prepared identity, and they differ — a shared
-        // slot would have left A's value equal to B's.
+        // Each observer saw its own turn's prepared identity and they differ — which rules out a
+        // single cell read only at the END. It does NOT rule out a shared slot read per dispatch.
         let aValue = try XCTUnwrap(preparedA, "A's observer must have captured A's prepared identity")
         let bValue = try XCTUnwrap(preparedB, "B's observer must have captured B's prepared identity")
         XCTAssertNotEqual(
