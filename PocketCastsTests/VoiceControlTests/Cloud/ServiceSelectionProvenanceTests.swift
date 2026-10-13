@@ -167,4 +167,65 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "the installed ASR wake callback must open the grace window"
         )
     }
+
+    /// The REGISTERED ASR INPUT path carries its provenance to the sink — driven
+    /// deterministically, without waiting on a real transcript from synthetic audio.
+    ///
+    /// `VoiceControlService` installs `asrEngine.onRoutingInput`, and that closure is where the
+    /// turn's provenance is captured — BEFORE the serial Task queues. The existing registered-input
+    /// case drove synthetic audio through the capture and then skipped, because no transcript ever
+    /// emerged, so the path was never exercised. This case fires the callback the engine actually
+    /// holds, which is the same seam the production ASR uses and removes the dependence on a
+    /// recognizer result.
+    ///
+    /// It also covers the OLDER repair: provenance is read from the INPUT at the callback, so a
+    /// selection stamped on the input must survive to the sink.
+    @MainActor
+    func testTheRegisteredASRInputCarriesItsProvenanceToTheSink() async throws {
+        let capture = FakeAudioCapture()
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        // A window is already open, so a live read and the input's provenance would disagree —
+        // without this the case cannot show the provenance being carried.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "the window did not open")
+
+        // The callback the service installed. A nil one means the registered path does not exist.
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(
+            installed,
+            "the service must install an onRoutingInput callback; a nil one means no ASR input is routed"
+        )
+
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        // The stamp must DISAGREE with what a live read would produce. The window above was
+        // opened by a WAKE (`.wakeWord`), so stamping `.followUp` means only genuine provenance
+        // carriage can deliver `.followUp`: if the input's provenance were dropped and the code
+        // fell back to the live window, this assertion would see `.wakeWord` instead. Stamping the
+        // same value the window implies would make the case pass either way.
+        installed?(IntentRoutingInput.english(
+            transcript: "what did the host mean by that remark",
+            selection: .followUp
+        ))
+
+        var delivered: CloudConversationSelection?
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            delivered = sink.lastSelectionForTesting
+            if delivered != nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        XCTAssertEqual(
+            delivered, .followUp,
+            "the registered ASR input's provenance must reach the sink — NOT the live window's "
+                + "implied .wakeWord, which is what a dropped provenance would fall back to"
+        )
+    }
 }
