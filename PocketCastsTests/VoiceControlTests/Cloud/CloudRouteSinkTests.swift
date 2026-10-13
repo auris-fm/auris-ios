@@ -1099,14 +1099,18 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     }
 
     /// Polls `condition` until it holds: an EXPLICIT BARRIER, not an elapsed sleep.
-    @discardableResult
-    private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws -> Bool {
+    private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {
-            if condition() { return true }
+            if condition() { return }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
-        return condition()
+        if condition() { return }
+        struct BarrierNotReached: Error, CustomStringConvertible {
+            let label: String
+            var description: String { "barrier never satisfied: \(label)" }
+        }
+        throw BarrierNotReached(label: description)
     }
 }
 
