@@ -329,11 +329,17 @@ class VoiceControlService: ObservableObject {
                 // "an action ran". A test can therefore await settlement instead of polling for an
                 // absence. `onInputRoutingFinished` remains the separate, narrower signal that routing
                 // was actually ATTEMPTED.
+                // CAPTURED INTO THIS TASK'S OWN STATE BEFORE THE FIRST `await`: reading `self?.hook`
+                // from the `defer` would let weak service lifetime silently lose the acknowledgement
+                // on an exit that precedes the strong `self` binding — the exits taken when the chain
+                // is cancelled or `self` is already gone. The hooks belong to the INVOCATION, so they
+                // are bound to it here rather than re-read later.
+                let notifyTerminal = self?.onInputTerminal
+                let notifyFinished = self?.onInputRoutingFinished
                 var terminal: InputTerminalOutcome = .dropped
                 defer {
-                    let notifyTerminal = self?.onInputTerminal
                     if let notifyTerminal { Task { @MainActor in notifyTerminal(input, terminal) } }
-                    if terminal == .routed, let notifyFinished = self?.onInputRoutingFinished {
+                    if terminal == .routed, let notifyFinished {
                         Task { @MainActor in notifyFinished(input) }
                     }
                 }
