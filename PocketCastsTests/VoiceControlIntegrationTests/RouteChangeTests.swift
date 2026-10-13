@@ -26,44 +26,45 @@ final class RouteChangeTests: XCTestCase {
     }
 
     func test_gate_modeResolution_matrix() {
+        // Only an Isolated route permits capture; mode-policy cases use `.isolated`.
         // Grace period active → continuous
         let graceGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .appInForeground,
-            micExposure: .exposed,
+            micExposure: .isolated,
             gracePeriodActive: true
         )
         XCTAssertEqual(graceGate.state, .listening(mode: .continuous))
 
-        // No grace period → wake word (appInForeground, exposed)
-        let foregroundExposedGate = VoiceControlGate(
+        // No grace period → wake word (appInForeground, isolated)
+        let foregroundGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .appInForeground,
-            micExposure: .exposed,
+            micExposure: .isolated,
             gracePeriodActive: false
         )
-        XCTAssertEqual(foregroundExposedGate.state, .listening(mode: .wakeWord))
-
-        // No grace period → wake word (playbackActive, exposed)
-        let backgroundExposedGate = VoiceControlGate(
-            setup: .allAllowed,
-            conflicts: .noneBlocked,
-            context: .playbackActive,
-            micExposure: .exposed,
-            gracePeriodActive: false
-        )
-        XCTAssertEqual(backgroundExposedGate.state, .listening(mode: .wakeWord))
+        XCTAssertEqual(foregroundGate.state, .listening(mode: .wakeWord))
 
         // No grace period → wake word (playbackActive, isolated)
-        let backgroundIsolatedGate = VoiceControlGate(
+        let backgroundGate = VoiceControlGate(
             setup: .allAllowed,
             conflicts: .noneBlocked,
             context: .playbackActive,
             micExposure: .isolated,
             gracePeriodActive: false
         )
-        XCTAssertEqual(backgroundIsolatedGate.state, .listening(mode: .wakeWord))
+        XCTAssertEqual(backgroundGate.state, .listening(mode: .wakeWord))
+
+        // Built-in microphone route blocks capture even with grace active.
+        let exposedGate = VoiceControlGate(
+            setup: .allAllowed,
+            conflicts: .noneBlocked,
+            context: .appInForeground,
+            micExposure: .exposed,
+            gracePeriodActive: true
+        )
+        XCTAssertEqual(exposedGate.state, .off(reason: .exposedMicrophone))
     }
 }

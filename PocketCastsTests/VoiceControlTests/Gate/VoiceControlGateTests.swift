@@ -70,17 +70,22 @@ final class VoiceControlGateTests: XCTestCase {
         XCTAssertEqual(gate.state, .off(reason: .noMicrophone))
     }
 
+    func test_exposedMic_blocksListening() {
+        let gate = makeGate(micExposure: .exposed)
+        XCTAssertEqual(gate.state, .off(reason: .exposedMicrophone))
+    }
+
     // MARK: - Rule 1: Grace period → continuous
 
     func test_gracePeriodActive_continuous() {
-        let gate = makeGate(context: .appInForeground, micExposure: .exposed, gracePeriod: true)
+        let gate = makeGate(context: .appInForeground, micExposure: .isolated, gracePeriod: true)
         XCTAssertEqual(gate.state, .listening(mode: .continuous))
     }
 
     // MARK: - Rule 2: Everything else → wake word
 
     func test_noGracePeriod_appInForeground_wakeWord() {
-        let gate = makeGate(context: .appInForeground, micExposure: .exposed, gracePeriod: false)
+        let gate = makeGate(context: .appInForeground, micExposure: .isolated, gracePeriod: false)
         XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
 
@@ -90,14 +95,14 @@ final class VoiceControlGateTests: XCTestCase {
     }
 
     func test_noGracePeriod_bothContext_wakeWord() {
-        let gate = makeGate(context: .both, micExposure: .exposed, gracePeriod: false)
+        let gate = makeGate(context: .both, micExposure: .isolated, gracePeriod: false)
         XCTAssertEqual(gate.state, .listening(mode: .wakeWord))
     }
 
     // MARK: - Both context
 
     func test_both_context_gracePeriod_continuous() {
-        let gate = makeGate(context: .both, micExposure: .exposed, gracePeriod: true)
+        let gate = makeGate(context: .both, micExposure: .isolated, gracePeriod: true)
         XCTAssertEqual(gate.state, .listening(mode: .continuous))
     }
 
@@ -117,13 +122,21 @@ final class VoiceControlGateTests: XCTestCase {
         XCTAssertFalse(posture.conflicts.notOnCall.isAllowed)
     }
 
+    func test_posture_exposedMic_showsExposedMicrophone() {
+        let gate = makeGate(micExposure: .exposed)
+        let posture = gate.posture
+        XCTAssertFalse(posture.allowed)
+        XCTAssertEqual(posture.offReason, .exposedMicrophone)
+        XCTAssertEqual(posture.micExposure, .exposed)
+    }
+
     func test_posture_gracePeriodActive_showsContinuous() {
-        let gate = makeGate(context: .appInForeground, micExposure: .exposed, gracePeriod: true)
+        let gate = makeGate(context: .appInForeground, micExposure: .isolated, gracePeriod: true)
         let posture = gate.posture
         XCTAssertTrue(posture.allowed)
         XCTAssertEqual(posture.listeningMode, .continuous)
         XCTAssertTrue(posture.gracePeriodActive)
         XCTAssertEqual(posture.context, .appInForeground)
-        XCTAssertEqual(posture.micExposure, .exposed)
+        XCTAssertEqual(posture.micExposure, .isolated)
     }
 }

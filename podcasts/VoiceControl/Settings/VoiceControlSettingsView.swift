@@ -135,6 +135,9 @@ struct VoiceControlSettingsView: View {
         if posture.offReason == .noMicrophone {
             return "No microphone on this route"
         }
+        if posture.offReason == .exposedMicrophone {
+            return "Built-in microphone; a headset or earbud microphone is required"
+        }
         if posture.listeningMode == .continuous {
             return "Active (grace period)"
         }
@@ -151,6 +154,7 @@ struct VoiceControlSettingsView: View {
         case .conflictBlocking: return "conflictBlocking"
         case .noContext: return "noContext"
         case .noMicrophone: return "noMicrophone"
+        case .exposedMicrophone: return "exposedMicrophone"
         case .onCall: return "onCall"
         case .modelsNotReady: return "modelsNotReady"
         }

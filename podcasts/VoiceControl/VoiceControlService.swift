@@ -475,6 +475,7 @@ class VoiceControlService: ObservableObject {
         if !posture.conflicts.otherAppPlaying.isAllowed { reasons.append("OtherAppPlaying") }
         if posture.context == .none { reasons.append("ListeningContext") }
         if posture.micExposure == .noMic { reasons.append("NoMic") }
+        if posture.micExposure == .exposed { reasons.append("ExposedMic") }
         return reasons
     }
 

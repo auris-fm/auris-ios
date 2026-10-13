@@ -22,6 +22,7 @@ enum GateState: Equatable {
         case conflictBlocking
         case noContext
         case noMicrophone
+        case exposedMicrophone
         case onCall
         case modelsNotReady
     }
