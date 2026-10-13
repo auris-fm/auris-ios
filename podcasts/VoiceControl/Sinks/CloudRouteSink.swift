@@ -219,19 +219,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
         // leave the sink pointing at a token nobody will ever complete.
         let effectiveSelection = selection ?? conversationSelectionProvider()
-        // A RETRY must not re-prepare: `prepare` can select or mint a conversation, and cancelling
-        // `activeTurn` after that would disturb a successor for a turn that already has its own
-        // identity. The retained envelope already carries the conversation it was admitted under,
-        // so a re-drive uses that and touches none of the preparation path.
-        // A RETRY does not re-prepare: `prepare` can select or mint a conversation, and cancelling
-        // `activeTurn` after that would disturb a successor for a turn that already has its own
-        // identity. The retained envelope names its conversation, so a re-drive takes it from
-        // there — and then flows into the SAME event loop below, because a retry that handled a
-        // subset of events would report success while delivering none of the answer.
-        //
-        // There is deliberately NO second event loop: `route` handles connected/codec, audioFrame,
-        // token, action, result, done and error in one place, and a parallel path would diverge
-        // from it the moment either changed.
         let conversation: CloudPreparedConversation
         do {
             guard let prepared = conversationManager.prepare(
