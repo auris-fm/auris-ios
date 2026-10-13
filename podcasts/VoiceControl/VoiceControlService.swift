@@ -88,10 +88,19 @@ class VoiceControlService: ObservableObject {
 
     /// Acknowledges that a queued input's routing attempt has FINISHED. See the initializer.
     private let onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)?
+
+    /// What a test input barrier decided, reported before classification. `.arrived` is emitted when
+    /// the barrier is REACHED; `.cancelled`/`.refused` when it stops the chain.
+    enum InputBarrierOutcome: Sendable { case arrived, cancelled, refused }
     /// Awaited by the serial chain BEFORE an input is classified or executed, so a test can hold a
     /// specific input while the window state changes around it and then release it. Nil in
     /// production, where it is never set, so the chain is unmodified.
-    private let testInputBarrier: (@Sendable (IntentRoutingInput) async -> Void)?
+    private let testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)?
+    /// Reports what the BARRIER decided for an input, before any classification: `.arrived`,
+    /// `.cancelled`, or `.refused`. A test needs these as events distinct from routing completion —
+    /// otherwise a cancelled or refused input is indistinguishable from one that simply routed and
+    /// did nothing. Nil in production.
+    private let onInputBarrierSettled: (@Sendable (IntentRoutingInput, InputBarrierOutcome) -> Void)?
 
     /// Live microphone exposure from the route monitor, for diagnostics and tests.
     var micExposure: MicExposure { routeMonitor.micExposure }
@@ -165,7 +174,8 @@ class VoiceControlService: ObservableObject {
         /// preparation observer fires before routing completes and so cannot say whether the turn
         /// acted. Nil in production, where nothing needs to be told.
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
-        testInputBarrier: (@Sendable (IntentRoutingInput) async -> Void)? = nil
+        testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
+        onInputBarrierSettled: (@Sendable (IntentRoutingInput, InputBarrierOutcome) -> Void)? = nil
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -181,6 +191,7 @@ class VoiceControlService: ObservableObject {
         self.analytics = analytics
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
+        self.onInputBarrierSettled = onInputBarrierSettled
         self.testInputBarrier = testInputBarrier
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
@@ -297,11 +308,15 @@ class VoiceControlService: ObservableObject {
             // active — so the answer has to come from the gate decision that produced this input.
             let capturedSelection = input.selection
             let task = Task { [weak self] in
-                // The acknowledgement is captured into THIS task, so it names this input and not
-                // whichever input happens to be current when the queue drains.
+                // ROUTING COMPLETION IS REPORTED ONLY IF ROUTING WAS ATTEMPTED. This used to be an
+                // unconditional `defer`, which fired on EVERY exit — so an input that was cancelled
+                // at the barrier, or dropped by the staleness guard, still reported completion. That
+                // conflates "finished routing" with "never routed", which are separate events.
+                var routed = false
                 defer {
-                    let notify = self?.onInputRoutingFinished
-                    if let notify { Task { @MainActor in notify(input) } }
+                    if routed, let notify = self?.onInputRoutingFinished {
+                        Task { @MainActor in notify(input) }
+                    }
                 }
                 await previous?.value
                 guard !Task.isCancelled else { return }
@@ -312,7 +327,23 @@ class VoiceControlService: ObservableObject {
                 guard stillCurrent else { return }
                 // Held here — after the staleness guard, before classification/execution — so a test
                 // can retire this input's window while it waits. Nil in production.
-                if let barrier = self.testInputBarrier { await barrier(input) }
+                //
+                // THROWING: a barrier that refuses must STOP this chain. A non-throwing barrier could
+                // only return from the closure, and routing would resume immediately below, so a
+                // cancelled input would still be routed.
+                if let barrier = self.testInputBarrier {
+                    self.onInputBarrierSettled?(input, .arrived)
+                    do {
+                        try await barrier(input)
+                    } catch is CancellationError {
+                        self.onInputBarrierSettled?(input, .cancelled)
+                        return
+                    } catch {
+                        self.onInputBarrierSettled?(input, .refused)
+                        return
+                    }
+                }
+                routed = true
                 await self.handleRoutingInput(
                     input,
                     origin: capturedOrigin,

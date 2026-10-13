@@ -1029,6 +1029,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let gate = Gate()
         var turnsBuilt = 0
         var finishedInputs: [String] = []
+        var arrivals: [VoiceControlService.InputBarrierOutcome] = []
         let aFinished = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
@@ -1051,12 +1052,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             },
             testInputBarrier: { input in
                 // Hold ONLY A, before classification, so its window can be retired while it waits.
-                // The closure is non-throwing, so cancellation is handled here rather than swallowed:
-                // a cancelled wait ends the wait. Treating `CancellationError` as "released" would let
-                // a cancelled chain sail through the barrier, hiding exactly what the latch's
-                // contract exists to expose.
+                // The wait PROPAGATES its outcome: the barrier is THROWING, so a cancellation or a
+                // refusal STOPS the serial chain instead of letting routing resume below it.
                 guard input.routerTranscript.contains("A question") else { return }
-                do { try await gate.wait() } catch { return }
+                try await gate.wait()
+            },
+            onInputBarrierSettled: { input, outcome in
+                if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1076,6 +1078,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let windowA = signal.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
         try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(
+            arrivals, [.arrived],
+            "A must have ACKNOWLEDGED ARRIVAL at the barrier — an event distinct from routing "
+                + "completion — or the hold below would be indistinguishable from an input that was "
+                + "never submitted. Arrivals seen: \(arrivals)"
+        )
         XCTAssertEqual(
             turnsBuilt, 0,
             "A must be HELD at the barrier and have taken no action; a client now means the barrier "
@@ -1165,7 +1173,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             },
             testInputBarrier: { input in
                 guard input.routerTranscript.contains("A question") else { return }
-                do { try await gate.wait() } catch { return }
+                try await gate.wait()
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1203,6 +1211,104 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             turnsBuilt, 1,
             "an UNRETIRED held model-chosen input must be admitted and reach the transport; if it "
                 + "does not, the refusal case above cannot be attributed to retirement"
+        )
+    }
+
+    /// CANCELLATION YIELDS NO SUBMISSION OR ACTION, and is reported as an event DISTINCT from
+    /// arrival and from routing completion.
+    ///
+    /// The input is held at the barrier, then the serial chain is cancelled (as `stop()` does). The
+    /// throwing barrier must then STOP the chain: a non-throwing barrier could only return from its
+    /// own closure, and routing would resume immediately below it, so a cancelled input would still
+    /// be routed. Three events are asserted separately: ARRIVAL at the barrier, CANCELLATION, and
+    /// absence of any routing completion for that input.
+    @MainActor
+    func testACancelledHeldInputIsReportedCancelledAndTakesNoAction() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "cancel_held_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let gate = Gate()
+        var turnsBuilt = 0
+        var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        var finishedInputs: [String] = []
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                turnsBuilt += 1
+                return CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                ).client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            onInputRoutingFinished: { finished in
+                finishedInputs.append(finished.routerTranscript)
+            },
+            testInputBarrier: { input in
+                guard input.routerTranscript.contains("A question") else { return }
+                try await gate.wait()
+            },
+            onInputBarrierSettled: { input, outcome in
+                if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        // Submit A; it arrives at the barrier and waits.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(arrivals, [.arrived], "A must have ARRIVED at the barrier")
+        XCTAssertEqual(turnsBuilt, 0, "A must have taken no action while held")
+
+        // CANCEL the serial chain, then open the gate so the wait can observe the cancellation.
+        service.stop()
+        gate.release()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // CANCELLATION IS ITS OWN EVENT, and distinct from arrival and from routing completion.
+        XCTAssertEqual(
+            arrivals, [.arrived, .cancelled],
+            "the cancelled input must be reported CANCELLED at the barrier, not silently skipped; "
+                + "arrival and cancellation are separate events. Seen: \(arrivals)"
+        )
+        // NO SUBMISSION OR ACTION.
+        XCTAssertEqual(
+            turnsBuilt, 0,
+            "a CANCELLED held input must submit nothing; a client here means the chain resumed "
+                + "routing after the barrier was cancelled"
+        )
+        // NO ROUTING COMPLETION for that input: cancellation is not completion.
+        XCTAssertFalse(
+            finishedInputs.contains("A question"),
+            "a cancelled input must NOT report routing completion; that would conflate cancellation "
+                + "with a route that finished. Finished: \(finishedInputs)"
         )
     }
 }
