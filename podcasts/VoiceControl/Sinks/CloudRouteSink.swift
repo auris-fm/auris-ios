@@ -333,9 +333,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // that `finish()` just assigned. Recording before would capture the PREVIOUS
                 // cycle's identity and reject this turn's own notification.
                 let needsDeferral = audioPlayer.hasPendingAudio
-                audioPlayer.finish()
+                // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
+                // current value could pick up a later schedule, leaving this turn waiting on an
+                // identity that is not its own.
+                let scheduledEpoch = audioPlayer.finish()
                 if needsDeferral {
-                    restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: audioPlayer.currentDrainEpoch)
+                    restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
                 } else {
                     restoreTransientAudioState()
                 }

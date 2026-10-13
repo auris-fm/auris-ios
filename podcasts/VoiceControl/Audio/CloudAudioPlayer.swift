@@ -78,13 +78,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Drain remaining buffered frames and stop playback.
     /// Call on `done` / `error`.
-    func finish() {
+    /// Schedule the drain and RETURN the identity it allocated. The caller must record that
+    /// returned value rather than re-reading `currentDrainEpoch`: a re-read can observe a LATER
+    /// schedule, so the deferral would wait on an identity that is not its own.
+    @discardableResult
+    func finish() -> Int {
         runnerLock.lock()
         drainEpoch += 1
+        let allocated = drainEpoch
         drainRemaining = true
         runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
+        return allocated
     }
 
     /// Reset state immediately (e.g. on cancellation).
