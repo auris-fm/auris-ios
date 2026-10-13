@@ -188,7 +188,8 @@ class VoiceControlService: ObservableObject {
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
         testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
         onInputBarrierSettled: (@Sendable (IntentRoutingInput, InputBarrierOutcome) -> Void)? = nil,
-        onInputTerminal: (@Sendable (IntentRoutingInput, InputTerminalOutcome) -> Void)? = nil
+        onInputTerminal: (@Sendable (IntentRoutingInput, InputTerminalOutcome) -> Void)? = nil,
+        parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> ParsedIntentObserver?)? = nil
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -206,6 +207,7 @@ class VoiceControlService: ObservableObject {
         self.onInputRoutingFinished = onInputRoutingFinished
         self.onInputBarrierSettled = onInputBarrierSettled
         self.onInputTerminal = onInputTerminal
+        self.parsedIntentObserverFactory = parsedIntentObserverFactory
         self.testInputBarrier = testInputBarrier
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
@@ -363,10 +365,13 @@ class VoiceControlService: ObservableObject {
                     }
                 }
                 terminal = .routed
+                // The observer for THIS input, resolved here so no shared slot is involved.
+                let parsedObserver = self.parsedIntentObserverFactory?(input)
                 await self.handleRoutingInput(
                     input,
                     origin: capturedOrigin,
-                    selection: capturedSelection
+                    selection: capturedSelection,
+                    parsedIntentObserver: parsedObserver
                 )
             }
             self.transcriptSerialTask = task
@@ -472,11 +477,24 @@ class VoiceControlService: ObservableObject {
     ///     have moved on.
     ///   - selection: what selected the turn, captured at the same moment and for the same
     ///     reason.
+    /// Produces a PARSED-INTENT observer FOR A SPECIFIC INPUT, so the observation is invocation-local:
+    /// the callback returns a fresh observer per input rather than every dispatch writing into one
+    /// shared slot, which would let an overlapping turn overwrite another's observed intent.
+    /// Nil in production.
+    private let parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> ParsedIntentObserver?)?
+
+    /// Reports the intent the ROUTER PARSED for a dispatch, BEFORE the executor runs it. Invocation
+    /// local and carried on the call, like `preparedObserver`: a sink- or service-wide slot would let
+    /// an overlapping dispatch overwrite another's observed intent, so the assertion could be made
+    /// against the wrong turn.
+    typealias ParsedIntentObserver = @MainActor (any VoiceIntent) -> Void
+
     func handleRoutingInput(
         _ input: IntentRoutingInput,
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil,
-        preparedObserver: CloudRouteSink.PreparedObserver? = nil
+        preparedObserver: CloudRouteSink.PreparedObserver? = nil,
+        parsedIntentObserver: ParsedIntentObserver? = nil
     ) async {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
@@ -547,6 +565,10 @@ class VoiceControlService: ObservableObject {
                 return
             }
 
+            // BEFORE the executor runs it: the caller observes the intent the ROUTER PARSED, so the
+            // raw `CloudRouteIntent.origin` (the .modelCall/.routingFailure enum) can be asserted for
+            // THIS input rather than inferred from a generation or from a sibling case.
+            await MainActor.run { parsedIntentObserver?(intent) }
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
             let response = await executor.execute(intent, preparedObserver: preparedObserver)

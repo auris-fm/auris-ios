@@ -1031,6 +1031,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var finishedInputs: [String] = []
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
         var terminals: [VoiceControlService.InputTerminalOutcome] = []
+        var parsedIntents: [any VoiceIntent] = []
         let aFinished = AsyncStream<Void>.makeStream()
         let terminalWait = AsyncStream<Void>.makeStream()
 
@@ -1067,6 +1068,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                     terminals.append(outcome)
                     terminalWait.continuation.yield()
                 }
+            },
+            // INVOCATION-LOCAL: the factory returns a FRESH observer for THIS input, so nothing is
+            // read from a shared slot and an overlapping turn cannot overwrite what it observed.
+            parsedIntentObserverFactory: { input in
+                guard input.routerTranscript.contains("A question") else { return nil }
+                return { parsed in parsedIntents.append(parsed) }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1125,20 +1132,23 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "A must report a TERMINAL outcome; without it the assertions below read a state the case "
                 + "does not control. Terminals seen: \(terminals)"
         )
-        // EXPLICIT, REQUEST-SCOPED RAW ASSERTION: the dispatch reached the sink carrying THIS turn's
-        // captured window as `CloudRouteIntent.origin` — pinned from the pre-guard record, so it holds
-        // whether or not the turn was admitted. This is the raw modelCall origin, not a proxy for it.
-        let dispatchedOrigin = await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
-        }
-        XCTAssertEqual(
-            dispatchedOrigin, windowA,
-            "the refused turn must have carried the generation it CAPTURED (\(windowA)) as the raw "
-                + "intent's origin, not the successor's; saw \(String(describing: dispatchedOrigin))"
+        // EXPLICIT ENUM ASSERTION, per input and BEFORE executor dispatch: the router PARSED this
+        // input into a `CloudRouteIntent` whose `origin` is the `.modelCall` CASE — not the
+        // `origin:` Int? generation that reaches `routeToCloud`, which is a different value.
+        let parsed = try XCTUnwrap(
+            parsedIntents.first as? CloudRouteIntent,
+            "this input must have been parsed into a CloudRouteIntent; saw: "
+                + "\(parsedIntents.map { String(describing: type(of: $0)) })"
         )
-        XCTAssertNotEqual(
-            dispatchedOrigin, successor,
-            "the raw origin must not be the window that replaced it"
+        XCTAssertEqual(
+            parsed.origin, .modelCall,
+            "the parsed intent's ORIGIN ENUM must be .modelCall — the model-chose-it case — rather "
+                + "than .routingFailure; saw \(parsed.origin)"
+        )
+        XCTAssertEqual(
+            parsed.generation, windowA,
+            "and the parsed intent must carry the generation THIS turn captured (\(windowA)), "
+                + "not the successor's; saw \(String(describing: parsed.generation))"
         )
 
         // MEASURED, and it corrected an assumption of mine: the retired input settles as `.routed`,
@@ -1196,6 +1206,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         let gate = Gate()
         var turnsBuilt = 0
+        var parsedIntents: [any VoiceIntent] = []
         let aFinished = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
@@ -1216,6 +1227,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             testInputBarrier: { input in
                 guard input.routerTranscript.contains("A question") else { return }
                 try await gate.wait()
+            },
+            parsedIntentObserverFactory: { input in
+                guard input.routerTranscript.contains("A question") else { return nil }
+                return { parsed in parsedIntents.append(parsed) }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1257,15 +1272,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "an UNRETIRED held model-chosen input must be admitted and reach the transport; if it "
                 + "does not, the refusal case above cannot be attributed to retirement"
         )
-        // EXPLICIT, REQUEST-SCOPED RAW ASSERTION, and the positive half of the pair: this turn's raw
-        // intent carried ITS OWN captured window as the origin, and it was admitted.
-        let dispatchedOrigin = await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting.lastOriginForTesting
-        }
+        // EXPLICIT ENUM ASSERTION, the positive half of the pair, per input and BEFORE dispatch.
+        let parsed = try XCTUnwrap(
+            parsedIntents.first as? CloudRouteIntent,
+            "the admitted input must have been parsed into a CloudRouteIntent; saw: "
+                + "\(parsedIntents.map { String(describing: type(of: $0)) })"
+        )
         XCTAssertEqual(
-            dispatchedOrigin, admittedWindow,
-            "the admitted turn must carry the generation it CAPTURED (\(admittedWindow)) as the raw "
-                + "intent's origin; saw \(String(describing: dispatchedOrigin))"
+            parsed.origin, .modelCall,
+            "the parsed intent's ORIGIN ENUM must be .modelCall, the model-chose-it case; saw "
+                + "\(parsed.origin)"
+        )
+        XCTAssertEqual(
+            parsed.generation, admittedWindow,
+            "the admitted parsed intent must carry the generation it captured (\(admittedWindow)); "
+                + "saw \(String(describing: parsed.generation))"
         )
     }
 
