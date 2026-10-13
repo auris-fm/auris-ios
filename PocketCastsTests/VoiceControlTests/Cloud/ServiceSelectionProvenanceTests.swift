@@ -253,10 +253,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     func testTheSubstitutedBackendIsPreloadedByTheServiceStart() async throws {
         let capture = FakeAudioCapture()
         let fakeBackend = FakeAsrBackend()
-        VoiceControlAssembly.asrBackendOverrideForTesting = { fakeBackend }
-        defer { VoiceControlAssembly.asrBackendOverrideForTesting = nil }
 
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture, asrBackend: { fakeBackend }) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
@@ -282,10 +280,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     func testAWakeReachesTheSinkManagersLiveOrigin() async throws {
         let capture = FakeAudioCapture()
         let fakeBackend = FakeAsrBackend()
-        VoiceControlAssembly.asrBackendOverrideForTesting = { fakeBackend }
-        defer { VoiceControlAssembly.asrBackendOverrideForTesting = nil }
 
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture, asrBackend: { fakeBackend }) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }

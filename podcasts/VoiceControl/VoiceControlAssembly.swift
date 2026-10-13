@@ -20,7 +20,10 @@ class VoiceControlAssembly {
         capture injectedCapture: (any AudioCaptureSource)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
         inference injectedInference: (any LfmInference)? = nil,
-        modelManager injectedModelManager: ModelManager? = nil
+        modelManager injectedModelManager: ModelManager? = nil,
+        clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
+        cloudConfig injectedCloudConfig: CloudConfig? = nil,
+        asrBackend injectedBackend: (() -> AsrBackend?)? = nil
     ) -> VoiceControlService? {
 ||||||| parent of 3a7a55f (test(voice): substitute the ASR backend the engine preloads)
     /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
@@ -42,7 +45,7 @@ class VoiceControlAssembly {
         let playbackManager = PlaybackManager.shared
 
         let locale = Locale.current
-        guard let asrBackend = resolveAsrBackend(locale: locale) else {
+        guard let asrBackend = resolveAsrBackend(locale: locale, override: injectedBackend) else {
             let lang = locale.language.languageCode?.identifier ?? "?"
             FileLog.shared.addMessage(
                 "[VoicePipeline] unsupported locale \(lang) — voice control disabled (no Whisper product route)"
@@ -131,6 +134,8 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
+                clientFactory: injectedClientFactory ?? CloudRouteSink.productionClientFactory(),
+                isConfigured: { !(injectedCloudConfig ?? CloudConfig.shared).baseUrl.isEmpty },
                 audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
                 playbackSink: playbackSink,
@@ -186,15 +191,12 @@ class VoiceControlAssembly {
         )
     }
 
-    /// TEST-ONLY override for the backend the ENGINE preloads. `nil` keeps the product selector, so
-    /// production is unchanged. The engine's `preloadBackend()` calls `backend.ensureReady()`, so
-    /// the substitution has to reach the engine's `backend`, which this does by replacing the value
-    /// the assembly passes in at construction.
-    static var asrBackendOverrideForTesting: (() -> AsrBackend?)?
-
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
-    func resolveAsrBackend(locale: Locale) -> AsrBackend? {
-        if let override = Self.asrBackendOverrideForTesting { return override() }
+    /// - Parameter override: PER-ASSEMBLY substitution; `nil` keeps the product selector, so
+    ///   production is unchanged. A per-instance parameter rather than a global static, so one
+    ///   fixture's substitution cannot leak into a concurrently running case.
+    func resolveAsrBackend(locale: Locale, override: (() -> AsrBackend?)? = nil) -> AsrBackend? {
+        if let override { return override() }
         return AsrBackendSelector().select(locale: locale)
     }
 

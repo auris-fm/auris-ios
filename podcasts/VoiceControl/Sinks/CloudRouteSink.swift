@@ -48,6 +48,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
+    /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
+    /// substitutes it. Production is unchanged: the default is this same factory.
+    nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
+        {
+            CloudRouteClient(
+                baseURL: CloudConfig.shared.baseUrl,
+                userId: CloudIdentity.shared.userId,
+                tokenProvider: CloudTokenProviderRouter.provider()
+            )
+        }
+    }
+
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
@@ -145,15 +157,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     // (no main-actor state is touched), so the initializer is safe to call from
     // any context.
     nonisolated init(
-        clientFactory: @escaping () -> CloudRouteClient = {
-            CloudRouteClient(
-                baseURL: CloudConfig.shared.baseUrl,
-                userId: CloudIdentity.shared.userId,
-                // Per-call: a configured Auris origin switches the credential
-                // source to Auris-issued tokens; otherwise the static provider.
-                tokenProvider: CloudTokenProviderRouter.provider()
-            )
-        },
+        clientFactory: @escaping () -> CloudRouteClient = CloudRouteSink.productionClientFactory(),
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
         audioPlayer: CloudAudioPlayer? = nil,
         playbackManager: PlaybackManager? = nil,
