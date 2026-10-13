@@ -610,7 +610,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// TEST-ONLY: how the runner's bounded wait on `claimRelease` ended, so a case can ASSERT the
     /// release succeeded rather than a bound merely preventing an infinite block.
     enum ClaimReleaseOutcome { case released, timedOut }
-    var claimReleaseOutcome: ClaimReleaseOutcome?
+
+    /// Guarded by `runnerLock`: the runner publishes and a test reads, so the value needs one
+    /// synchronization domain rather than a plain stored property.
+    private var storedClaimReleaseOutcome: ClaimReleaseOutcome?
+    var claimReleaseOutcome: ClaimReleaseOutcome? {
+        get { runnerLock.lock(); defer { runnerLock.unlock() }; return storedClaimReleaseOutcome }
+        set { runnerLock.lock(); storedClaimReleaseOutcome = newValue; runnerLock.unlock() }
+    }
     var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
 
     /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
