@@ -53,12 +53,15 @@ enum RouteAcquisitionResult: Equatable {
     case selectionFailed
     /// Configuring/activating/selecting threw.
     case sessionUnavailable
+    /// The enclosing task was cancelled; acquisition opened nothing or closed
+    /// whatever it opened.
+    case cancelled
 
     /// Runtime reason appended to a non-acquisition log. `nil` when there is
-    /// nothing to log (`.acquired` and `.notApplicable`).
+    /// nothing to log (`.acquired`, `.notApplicable` and `.cancelled`).
     var failureReason: String? {
         switch self {
-        case .acquired, .notApplicable:
+        case .acquired, .notApplicable, .cancelled:
             return nil
         case .noCandidate:
             return "route_acquisition_no_candidate"
@@ -76,6 +79,9 @@ enum RouteAcquisitionResult: Equatable {
 /// Discovery (`availableInputs`) and confirmation (`currentInputs`) are exposed
 /// separately on purpose: availability is never selection.
 protocol AudioSessionControlling: AnyObject {
+    /// Whether the shared app session is currently active. Acquisition only
+    /// deactivates a session it activated itself, so this preserves playback.
+    var isActive: Bool { get }
     /// Ports the session is currently using (`currentRoute.outputs`).
     var currentOutputs: [AudioPort] { get }
     /// Ports the session is currently using (`currentRoute.inputs`).
@@ -94,6 +100,13 @@ protocol AudioSessionControlling: AnyObject {
 /// settles on an active session, then select with `setPreferredInput(_:)`.
 final class RealAudioSession: AudioSessionControlling {
     private var session: AVAudioSession { AVAudioSession.sharedInstance() }
+
+    /// `AVAudioSession` exposes no public `isActive`, so track the last state we
+    /// set. An already-`.playAndRecord` category also counts as active: it means
+    /// the shared session is already configured for capture by voice control or
+    /// playback, and acquisition must not deactivate it.
+    private var sessionIsActive = false
+    var isActive: Bool { sessionIsActive || session.category == .playAndRecord }
 
     var currentOutputs: [AudioPort] {
         session.currentRoute.outputs.map { AudioPort(portType: $0.portType, uid: $0.uid) }
@@ -121,6 +134,7 @@ final class RealAudioSession: AudioSessionControlling {
         } else {
             try session.setActive(false, options: .notifyOthersOnDeactivation)
         }
+        sessionIsActive = active
     }
 
     func selectPreferredInput(uid: String) throws {
@@ -191,31 +205,49 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// Never falls back to the built-in microphone.
     @MainActor
     func acquireExternalInput() async -> RouteAcquisitionResult {
+        // A task cancelled before it starts must not touch the audio session at
+        // all — otherwise a blocked/`Off` posture would still open an input route.
+        guard !Task.isCancelled else { return .cancelled }
+
         // Only an external output can carry an external microphone. A built-in
         // speaker/earpiece route has nothing to acquire, so do not touch the session.
         guard hasExternalOutputHint(currentRoute.output) else { return .notApplicable }
         if micExposure == .isolated { return .acquired }
 
+        // Record explicitly whether acquisition itself activated the session.
+        // The app shares one `AVAudioSession` with playback, so deactivating a
+        // session that was already active would stop the app's own audio.
+        let wasActiveBefore = audioSession.isActive
+        var activatedByAcquisition = false
+
         do {
             try audioSession.configureInputCapableSession()
         } catch {
             FileLog.shared.addMessage("[VoicePipeline] acquisition: configure failed — \(error)")
-            closeSession()
+            closeSession(activatedByAcquisition: activatedByAcquisition)
             refreshRoute()
             return .sessionUnavailable
         }
 
         // Some routes only populate inputs/availableInputs once the session is
         // active. Configure first; activate only if discovery still sees nothing.
-        if audioSession.currentInputs.isEmpty && audioSession.availableInputs.isEmpty {
+        // Whether this actually transitioned the session is what
+        // `activatedByAcquisition` records, so a session playback already holds
+        // open is never deactivated by a later failed acquisition.
+        if audioSession.currentInputs.isEmpty, audioSession.availableInputs.isEmpty {
             do {
                 try audioSession.setSessionActive(true)
+                activatedByAcquisition = !wasActiveBefore
             } catch {
                 FileLog.shared.addMessage("[VoicePipeline] acquisition: activate failed — \(error)")
-                closeSession()
+                closeSession(activatedByAcquisition: activatedByAcquisition)
                 refreshRoute()
                 return .sessionUnavailable
             }
+        }
+
+        if let cancelled = cancellationResult(activatedByAcquisition: activatedByAcquisition) {
+            return cancelled
         }
 
         refreshRoute()
@@ -223,7 +255,7 @@ class IOSAudioRouteMonitor: ObservableObject {
 
         let candidates = audioSession.availableInputs.filter { isExternalInput($0.portType) }
         guard let candidate = candidates.first else {
-            closeSession()
+            closeSession(activatedByAcquisition: activatedByAcquisition)
             refreshRoute()
             let builtInAvailable = audioSession.availableInputs.contains { $0.portType == .builtInMic }
                 || audioSession.currentInputs.contains { $0.portType == .builtInMic }
@@ -234,7 +266,7 @@ class IOSAudioRouteMonitor: ObservableObject {
             try audioSession.selectPreferredInput(uid: candidate.uid)
         } catch {
             FileLog.shared.addMessage("[VoicePipeline] acquisition: select failed — \(error)")
-            closeSession()
+            closeSession(activatedByAcquisition: activatedByAcquisition)
             refreshRoute()
             return .selectionFailed
         }
@@ -244,14 +276,24 @@ class IOSAudioRouteMonitor: ObservableObject {
 
         // Availability is not selection: the candidate was listed and selected
         // but the live route still reports the built-in mic.
-        closeSession()
+        closeSession(activatedByAcquisition: activatedByAcquisition)
         refreshRoute()
         return .selectionFailed
     }
 
-    /// Deactivate anything acquisition opened so a blocked/off posture retains no
-    /// input route. Best-effort — the session may already be inactive.
-    private func closeSession() {
+    /// If the enclosing task was cancelled while acquisition ran, close whatever
+    /// acquisition opened so a blocked/`Off` posture retains no input route.
+    private func cancellationResult(activatedByAcquisition: Bool) -> RouteAcquisitionResult? {
+        guard Task.isCancelled else { return nil }
+        closeSession(activatedByAcquisition: activatedByAcquisition)
+        refreshRoute()
+        return .cancelled
+    }
+
+    /// Deactivate only a session acquisition itself activated, so the app's own
+    /// playback is never stopped. Best-effort — the session may already be inactive.
+    private func closeSession(activatedByAcquisition: Bool) {
+        guard activatedByAcquisition else { return }
         try? audioSession.setSessionActive(false)
     }
 

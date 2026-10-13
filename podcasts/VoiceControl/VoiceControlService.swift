@@ -499,6 +499,9 @@ class VoiceControlService: ObservableObject {
 
         acquisitionTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            // Cancelled before it starts: never touch the audio session, so a
+            // blocked/`Off` posture cannot retain an input route.
+            guard !Task.isCancelled else { return }
             let result = await self.routeMonitor.acquireExternalInput()
             guard !Task.isCancelled, self.acquisitionGeneration == generation else { return }
             self.acquisitionTask = nil

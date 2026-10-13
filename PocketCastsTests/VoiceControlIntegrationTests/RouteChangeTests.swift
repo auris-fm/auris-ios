@@ -23,7 +23,10 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     private(set) var activateCount = 0
     private(set) var deactivateCount = 0
     private(set) var selectedUIDs: [String] = []
-    private(set) var isActive = false
+    var isActive = false
+    /// Invoked when the session is activated — lets a test cancel the
+    /// enclosing acquisition task mid-run.
+    var onActivate: (() -> Void)?
 
     var currentOutputs: [AudioPort] { outputs }
     var currentInputs: [AudioPort] { inputs }
@@ -44,6 +47,7 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
         if active, !availableAfterActivate.isEmpty {
             available = availableAfterActivate
         }
+        if active { onActivate?() }
     }
 
     func selectPreferredInput(uid: String) throws {
@@ -123,7 +127,7 @@ final class RouteChangeTests: XCTestCase {
 
         XCTAssertEqual(result, .selectionFailed)
         XCTAssertEqual(monitor.micExposure, .exposed, "no external mic confirmed → capture must not be allowed")
-        XCTAssertEqual(session.deactivateCount, 1, "a failed acquisition closes what it opened")
+        XCTAssertEqual(session.deactivateCount, 0, "a session acquisition never activated is not deactivated")
     }
 
     func test_acquisition_onlyBuiltInAvailable_isExposed() async {
@@ -138,7 +142,7 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertEqual(result, .builtInOnly)
         XCTAssertEqual(monitor.micExposure, .exposed)
         XCTAssertTrue(session.selectedUIDs.isEmpty, "never select the built-in mic")
-        XCTAssertEqual(session.deactivateCount, 1)
+        XCTAssertEqual(session.deactivateCount, 0, "a session acquisition never activated is not deactivated")
     }
 
     func test_acquisition_noExternalInput_logsFailureReason() async {
@@ -154,6 +158,92 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertNotNil(result.failureReason)
         XCTAssertNotEqual(monitor.micExposure, .isolated)
         XCTAssertEqual(session.deactivateCount, 1)
+    }
+
+    func test_acquisition_inputsAppearOnlyAfterActivate_activatesAndAcquires() async {
+        // The route only settles on an active session: nothing is discoverable
+        // until `setSessionActive(true)`, then the external mic appears and can
+        // be selected. This is the activation branch of acquisition.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput()
+
+        XCTAssertEqual(result, .acquired)
+        XCTAssertEqual(session.configureCount, 1)
+        XCTAssertEqual(session.activateCount, 1, "the input-capable session is activated when nothing is discoverable before activation")
+        XCTAssertEqual(session.selectedUIDs, ["bt-mic"])
+        XCTAssertEqual(monitor.micExposure, .isolated)
+        XCTAssertEqual(session.deactivateCount, 0)
+    }
+
+    @MainActor
+    func test_acquisition_cancelledBeforeRun_returnsCancelledWithoutTouchingSession() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        let monitor = makeMonitor(session)
+
+        // Create the task, then cancel before the main actor ever runs it, so
+        // acquisition sees a cancelled task on entry.
+        let task = Task { @MainActor in
+            await monitor.acquireExternalInput()
+        }
+        task.cancel()
+        let result = await task.value
+
+        XCTAssertEqual(result, .cancelled)
+        XCTAssertNil(result.failureReason, "a cancelled acquisition is not a failure to log")
+        XCTAssertEqual(session.configureCount, 0, "a cancelled acquisition must not touch the session")
+        XCTAssertEqual(session.activateCount, 0)
+        XCTAssertEqual(session.deactivateCount, 0)
+        XCTAssertEqual(monitor.micExposure, .noMic)
+    }
+
+    @MainActor
+    func test_acquisition_cancelledMidRun_closesActivatedSession() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        var acquisition: Task<RouteAcquisitionResult, Never>?
+        session.onActivate = { acquisition?.cancel() }
+        let task = Task { @MainActor in
+            await monitor.acquireExternalInput()
+        }
+        acquisition = task
+        let result = await task.value
+
+        XCTAssertEqual(result, .cancelled)
+        XCTAssertEqual(session.activateCount, 1)
+        XCTAssertEqual(session.deactivateCount, 1, "cancellation closes the session acquisition activated")
+        XCTAssertEqual(monitor.micExposure, .noMic)
+    }
+
+    func test_failedAcquisition_onSessionAppAlreadyHeldActive_doesNotDeactivate() async {
+        // The app shares one AVAudioSession for playback. Acquisition must not
+        // deactivate a session it did not activate, or it would stop playback.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.isActive = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput()
+
+        XCTAssertEqual(result, .noCandidate)
+        XCTAssertEqual(session.deactivateCount, 0, "a session the app already had active is left untouched")
     }
 
     func test_bluetoothDisconnectMidCapture_reEvaluatesToExposed() async {
