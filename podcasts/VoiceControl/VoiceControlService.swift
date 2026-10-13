@@ -28,9 +28,16 @@ class VoiceControlService: ObservableObject {
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
 
+    /// The manager whose live origin follows the grace window. An EXPLICIT dependency rather than a
+    /// reach-through to a test accessor: production must not depend on `…ForTesting` or a force-cast.
+    private let liveOriginManager: CloudConversationManager
+
     /// The grace signal this service drives, so a test can observe a route change's effect
     /// through the service rather than through the assembly that built it.
     var gracePeriodSignalForTesting: GracePeriodSignal { gracePeriodSignal }
+
+    /// The manager the service binds, for cases that assert the wake reaches its live origin.
+    var liveOriginManagerForTesting: CloudConversationManager { liveOriginManager }
 
     /// The engine whose echo-filter route the assembly is responsible for keeping current.
     var asrEngineForTesting: VoiceAsrEngine { asrEngine }
@@ -54,12 +61,8 @@ class VoiceControlService: ObservableObject {
     /// routed turn would be refused at the origin gate.
     private func wireLiveOriginBinding() {
         // The sink is main-actor-isolated, so reach its manager on the main actor.
-        MainActor.assumeIsolated {
-            CloudConversationManager.bindLiveOrigin(
-                to: gracePeriodSignal,
-                on: executor.cloudRouteSinkForTesting.conversationManagerForBinding
-            ).store(in: &cancellables)
-        }
+        CloudConversationManager.bindLiveOrigin(to: gracePeriodSignal, on: liveOriginManager)
+            .store(in: &cancellables)
     }
 
     private func wireEchoFilterRoute() {
@@ -147,6 +150,7 @@ class VoiceControlService: ObservableObject {
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
+        liveOriginManager: CloudConversationManager,
         analytics: VoiceAnalytics,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) {
@@ -160,6 +164,7 @@ class VoiceControlService: ObservableObject {
         self.dialogManager = dialogManager
         self.audioRenderer = audioRenderer
         self.gracePeriodSignal = gracePeriodSignal
+        self.liveOriginManager = liveOriginManager
         self.analytics = analytics
         self.isPlaybackActive = isPlaybackActive
 

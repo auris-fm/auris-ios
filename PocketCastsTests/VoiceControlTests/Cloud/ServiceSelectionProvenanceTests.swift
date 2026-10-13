@@ -288,8 +288,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         service.startIfAllowed()
         try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
 
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-        let manager = sink.conversationManagerForBinding
+        let manager = service.liveOriginManagerForTesting
 
         // No window yet: a turn carrying any generation must be refused.
         XCTAssertNil(

@@ -186,6 +186,7 @@ class VoiceControlAssembly {
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
             gracePeriodSignal: gracePeriodSignal,
+            liveOriginManager: conversationManager,
             analytics: voiceAnalytics,
             isPlaybackActive: isPlaybackActive
         )
