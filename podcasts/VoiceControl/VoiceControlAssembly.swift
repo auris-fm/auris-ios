@@ -23,7 +23,8 @@ class VoiceControlAssembly {
         modelManager injectedModelManager: ModelManager? = nil,
         clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
         cloudConfig injectedCloudConfig: CloudConfig? = nil,
-        asrBackend injectedBackend: (() -> AsrBackend?)? = nil
+        asrBackend injectedBackend: (() -> AsrBackend?)? = nil,
+        onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil
     ) -> VoiceControlService? {
 ||||||| parent of 3a7a55f (test(voice): substitute the ASR backend the engine preloads)
     /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
@@ -188,6 +189,7 @@ class VoiceControlAssembly {
             gracePeriodSignal: gracePeriodSignal,
             liveOriginManager: conversationManager,
             analytics: voiceAnalytics,
+            onInputRoutingFinished: onInputRoutingFinished,
             isPlaybackActive: isPlaybackActive
         )
     }

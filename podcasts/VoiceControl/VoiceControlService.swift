@@ -86,6 +86,9 @@ class VoiceControlService: ObservableObject {
     /// activity signal, so playback state is the reliable in-use signal.
     private let isPlaybackActive: () -> Bool
 
+    /// Acknowledges that a queued input's routing attempt has FINISHED. See the initializer.
+    private let onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)?
+
     /// Live microphone exposure from the route monitor, for diagnostics and tests.
     var micExposure: MicExposure { routeMonitor.micExposure }
 
@@ -152,7 +155,12 @@ class VoiceControlService: ObservableObject {
         gracePeriodSignal: GracePeriodSignal,
         liveOriginManager: CloudConversationManager,
         analytics: VoiceAnalytics,
-        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse },
+        /// Invoked when a queued input's routing attempt FINISHES — after it returns or is refused,
+        /// and after its `defer` runs. An acknowledgement of COMPLETION, not of preparation: a
+        /// preparation observer fires before routing completes and so cannot say whether the turn
+        /// acted. Nil in production, where nothing needs to be told.
+        onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -167,6 +175,7 @@ class VoiceControlService: ObservableObject {
         self.liveOriginManager = liveOriginManager
         self.analytics = analytics
         self.isPlaybackActive = isPlaybackActive
+        self.onInputRoutingFinished = onInputRoutingFinished
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -282,6 +291,12 @@ class VoiceControlService: ObservableObject {
             // active — so the answer has to come from the gate decision that produced this input.
             let capturedSelection = input.selection
             let task = Task { [weak self] in
+                // The acknowledgement is captured into THIS task, so it names this input and not
+                // whichever input happens to be current when the queue drains.
+                defer {
+                    let notify = self?.onInputRoutingFinished
+                    if let notify { Task { @MainActor in notify(input) } }
+                }
                 await previous?.value
                 guard !Task.isCancelled else { return }
                 guard let self else { return }

@@ -619,4 +619,240 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// MEASURED TRACE (the precondition this case depends on actually holds):
     ///     queuechk task created for origin=1  ->  resumed; cancelled=false   (the held turn runs)
     ///     queuechk task created for origin=2  ->  resumed; cancelled=true    (the queued turn DROPS)
+
+    /// QUEUED INSTALLED INPUT — the acknowledgement is COMPLETION, not preparation.
+    ///
+    /// Arrangement, per the assigned contract: a preceding turn is HELD on its socket, so input A
+    /// QUEUES behind it; A's window is then RETIRED and a fresh window B opened, with
+    /// `transcriptEpoch` UNCHANGED; the hold is released and A's COMPLETION is AWAITED through the
+    /// per-input callback; only then are A's effects and B's allowance asserted.
+    ///
+    /// A preparation observer would not do: it fires before routing completes, so it cannot say
+    /// whether the turn went on to act.
+    @MainActor
+    func testAQueuedInputWhoseWindowRetiredSubmitsNothingAndLeavesTheFreshAllowanceClaimable() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "queued_input_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // The FIRST turn built is held open on its socket — an ASYNC hold, so the main actor stays
+        // free — which is what keeps the input submitted after it waiting in the queue.
+        let gate = Gate()
+        var heldOnce = false
+        var turnsBuilt = 0
+
+        // A's COMPLETION acknowledgement, captured per input rather than read from a shared slot.
+        var finishedInputs: [String] = []
+        let aFinished = AsyncStream<Void>.makeStream()
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                turnsBuilt += 1
+                if !heldOnce {
+                    heldOnce = true
+                    built.task.holdUntilReleased(gate)
+                }
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            onInputRoutingFinished: { finished in
+                finishedInputs.append(finished.routerTranscript)
+                if finished.routerTranscript.contains("A question") {
+                    aFinished.continuation.yield()
+                }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+        XCTAssertFalse(
+            fixtureConfig.baseUrl.isEmpty,
+            "the injected configuration must make the sink's own predicate true"
+        )
+
+        let signal = service.gracePeriodSignalForTesting
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        // A preceding turn is dispatched and HELD, so it occupies the serial slot.
+        signal.onWakeWordDetected()
+        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord))
+        let builtDeadline = Date().addingTimeInterval(8)
+        while Date() < builtDeadline && turnsBuilt == 0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(turnsBuilt, 1, "the preceding turn must have been built and held")
+
+        // A is submitted next: it QUEUES behind the held turn and cannot run while it waits.
+        signal.onWakeWordDetected()
+        let windowA = signal.currentGeneration()
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(
+            turnsBuilt, 1,
+            "precondition: A must still be QUEUED — only the held turn has reached a client"
+        )
+
+        // RETIRE A's window and OPEN a fresh one. The epoch is deliberately UNCHANGED: the subject is
+        // A's CAPTURED GENERATION, and advancing the epoch would refuse A for a different reason.
+        signal.onAppBackgrounded()
+        signal.onWakeWordDetected()
+        let windowB = signal.currentGeneration()
+        XCTAssertNotEqual(windowA, windowB, "B must be a different window from A, or staleness is untestable")
+        XCTAssertNotNil(signal.claimEscalationBudget(), "B's fresh allowance is spent here")
+
+        // RELEASE the held turn, then AWAIT A's COMPLETION — not a timer.
+        gate.release()
+        let aCompletion = Task {
+            for await _ in aFinished.stream { return }
+        }
+        let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                await aCompletion.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(
+            completion,
+            "A must ACKNOWLEDGE COMPLETION; without the acknowledgement the assertions below would "
+                + "be reading a state the case does not control. Finished inputs seen: \(finishedInputs)"
+        )
+
+        // ONLY NOW: A submitted nothing, and B's fresh allowance is still claimable.
+        XCTAssertEqual(
+            turnsBuilt, 1,
+            "A, queued when its window retired, must submit nothing; a second client means it acted "
+                + "under B"
+        )
+        XCTAssertNil(
+            signal.claimEscalationBudget(),
+            "B's fresh allowance must remain spent after A completed; a value here means A restored it"
+        )
+    }
+
+    /// The paired POSITIVE: the same arrangement WITHOUT the retirement must let the queued input act,
+    /// so the case above is measuring retirement rather than a queue that never runs.
+    @MainActor
+    func testAQueuedInputWhoseWindowIsUnretiredProceedsAndUsesTheTransports() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "unretired_input_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let gate = Gate()
+        var heldOnce = false
+        var turnsBuilt = 0
+        let aFinished = AsyncStream<Void>.makeStream()
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                turnsBuilt += 1
+                if !heldOnce {
+                    heldOnce = true
+                    built.task.holdUntilReleased(gate)
+                }
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            onInputRoutingFinished: { finished in
+                if finished.routerTranscript.contains("A question") {
+                    aFinished.continuation.yield()
+                }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord))
+        let builtDeadline = Date().addingTimeInterval(8)
+        while Date() < builtDeadline && turnsBuilt == 0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(turnsBuilt, 1, "the preceding turn must have been built and held")
+
+        // A queues behind the held turn. NOTHING is retired here.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord))
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(turnsBuilt, 1, "precondition: A is queued")
+
+        gate.release()
+        let aCompletion = Task {
+            for await _ in aFinished.stream { return }
+        }
+        let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await aCompletion.value; return true }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(completion, "A must acknowledge completion")
+
+        // POSITIVE: with nothing retired, the queued input DOES reach the transport.
+        XCTAssertEqual(
+            turnsBuilt, 2,
+            "an UNRETIRED queued input must still submit; if it does not, the retirement case above "
+                + "is passing because the queue never runs"
+        )
+    }
 }
