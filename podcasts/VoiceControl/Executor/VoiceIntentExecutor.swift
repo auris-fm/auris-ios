@@ -130,7 +130,6 @@ class VoiceIntentExecutor {
 
     /// TEST-ONLY: forwarded to the sink for the NEXT dispatch, so a case observes the identity
     /// prepared for ITS turn rather than a sink-wide "last prepared" value.
-    var preparedObserverForTesting: CloudRouteSink.PreparedObserver?
     private let playbackContextProvider: PlaybackContextProvider
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics?
@@ -165,7 +164,13 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
-    func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
+    func execute(
+        _ intent: any VoiceIntent,
+        /// REQUEST-SCOPED, carried on THIS dispatch alongside its request. Storing it on the shared
+        /// executor would let an overlapping dispatch replace another's expected value, so the
+        /// prepared identity could be compared against the wrong turn's.
+        preparedObserver: CloudRouteSink.PreparedObserver? = nil
+    ) async -> VoiceResponse {
         let response: VoiceResponse
         // Set only by the cloud branch. Every other intent leaves it nil, so the generic
         // response-shape rule below is untouched for them.
@@ -195,7 +200,7 @@ class VoiceIntentExecutor {
                 // window and the selection it was issued under.
                 origin: cr.generation,
                 selection: cr.selection,
-                preparedObserver: preparedObserverForTesting
+                preparedObserver: preparedObserver,
             )
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the

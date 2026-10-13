@@ -401,7 +401,8 @@ class VoiceControlService: ObservableObject {
     func handleRoutingInput(
         _ input: IntentRoutingInput,
         origin: Int? = nil,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        preparedObserver: CloudRouteSink.PreparedObserver? = nil
     ) async {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
@@ -474,7 +475,7 @@ class VoiceControlService: ObservableObject {
 
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
             guard isListening else { return }
-            let response = await executor.execute(intent)
+            let response = await executor.execute(intent, preparedObserver: preparedObserver)
             // Do not reset the window unconditionally here. A cloud route's
             // completion is the executor's to attribute — it already does so
             // against the generation the route was issued under
@@ -496,7 +497,7 @@ class VoiceControlService: ObservableObject {
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
-                let response = await executor.execute(intent)
+                let response = await executor.execute(intent, preparedObserver: preparedObserver)
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
@@ -568,7 +569,8 @@ class VoiceControlService: ObservableObject {
                         // escalated turn was classified by live window state rather than by what
                         // selected it — the exact defect the caller-level control exists to catch.
                         selection: capturedSelection
-                    )
+                    ),
+                    preparedObserver: preparedObserver
                 )
                 audioRenderer.render(response)
                 return

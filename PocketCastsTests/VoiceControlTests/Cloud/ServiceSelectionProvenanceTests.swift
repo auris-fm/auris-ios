@@ -371,9 +371,6 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // REQUEST-SCOPED: the observer captures the identity prepared for THIS dispatch, rather
         // than reading a sink-wide "last prepared" slot afterwards.
         var preparedForThisTurn: CloudPreparedConversation?
-        service.executorForTesting.preparedObserverForTesting = { prepared in
-            preparedForThisTurn = prepared
-        }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
 
@@ -388,8 +385,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord
             ),
-            origin: liveGeneration
+            origin: liveGeneration,
+            preparedObserver: { prepared in preparedForThisTurn = prepared }
         )
+
 
         // Wait for the injected task to submit its auth frame.
         let deadline = Date().addingTimeInterval(5)

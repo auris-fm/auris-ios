@@ -43,6 +43,8 @@ final class CloudConversationManager {
     /// The origin currently in force.
     private var liveOrigin: Int?
 
+    var liveOriginForTesting: Int? { liveOrigin }
+
     /// The conversation opened in the live origin.
     private var current: OpenConversation?
 
