@@ -280,7 +280,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 runnerLock.unlock()
                 claimReached?.signal()
                 // BOUNDED: a setup error must fail promptly, not consume the runner forever.
-                _ = claimRelease?.wait(timeout: .now() + 5)
+                // The release outcome is RECORDED, not discarded: a bound alone does not make a
+                // timeout a failure, so the case asserts this value.
+                if let release = claimRelease {
+                    // FALSIFICATION: a much shorter bound, and the test's signal is too late.
+                    claimReleaseOutcome = (release.wait(timeout: .now() + 5) == .success) ? .released : .timedOut
+                }
                 drainAndStop(claimedEpoch: claimedEpoch)
                 continue
             }
@@ -601,6 +606,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// TEST-ONLY claim signals. See the drainRemaining branch.
     var claimReached: DispatchSemaphore?
     var claimRelease: DispatchSemaphore?
+
+    /// TEST-ONLY: how the runner's bounded wait on `claimRelease` ended, so a case can ASSERT the
+    /// release succeeded rather than a bound merely preventing an infinite block.
+    enum ClaimReleaseOutcome { case released, timedOut }
+    var claimReleaseOutcome: ClaimReleaseOutcome?
     var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
 
     /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so

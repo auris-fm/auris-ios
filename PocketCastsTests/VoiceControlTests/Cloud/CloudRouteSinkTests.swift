@@ -1866,6 +1866,12 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
 
         try await waitUntilCondition(timeout: 5) { !emittedIdentities.isEmpty }
 
+        // THE RELEASE IS ASSERTED, not merely bounded: a bound only prevents an infinite block.
+        XCTAssertEqual(
+            player.claimReleaseOutcome, .released,
+            "the runner's bounded wait must end RELEASED, not timed out"
+        )
+
         // THE ASSERTION, on the EMITTED identity: A's notification carries A's allocated identity.
         XCTAssertEqual(
             emittedIdentities, [aAllocated],
