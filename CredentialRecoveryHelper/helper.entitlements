@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The APP's owning group, not a helper-only placeholder. A reader that declares its own
+	     group reports on itself; this helper exists to report on the app's store. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)fm.auris.debug</string>
+	</array>
+</dict>
+</plist>

@@ -2763,6 +2763,8 @@
 		FFEE59C22EB37F4300D4B145 /* playback2025_listening_time.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = playback2025_listening_time.json; sourceTree = "<group>"; };
 		FFF23E892CC91E2A0046D3AD /* ServerPodcastManager+Subscription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServerPodcastManager+Subscription.swift"; sourceTree = "<group>"; };
 		FFFCD23E2C7768F900A345ED /* Referrals.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Referrals.xcassets; sourceTree = "<group>"; };
+		A1BE520AFF184EB6B32D093E /* CredentialRecoveryHelper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CredentialRecoveryHelper.app; sourceTree = BUILT_PRODUCTS_DIR; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -3674,6 +3676,16 @@
 		3FDAD5122F46D79100CC3259 /* Pocket Casts App Clip */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (3FDAD51A2F46D79100CC3259 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Pocket Casts App Clip"; sourceTree = "<group>"; };
 		3FDAD5A22F46D82100CC3259 /* Test Plans */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (3FDAD5A42F46D82200CC3259 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Test Plans"; sourceTree = "<group>"; };
 		FF4B83AF2F981D8E001B8C56 /* Pocket Casts TV App */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (FF6033FB2FAB4B8600EB3AD5 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Pocket Casts TV App"; sourceTree = "<group>"; };
+		5438DF7F41A947BABC079DDE /* CredentialRecoveryHelper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = CredentialRecoveryHelper;
+			sourceTree = "<group>";
+		};
+
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -3783,6 +3795,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1C76A5AA5DE94C1E907663C9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -5313,6 +5333,7 @@
 		BDBD53E317019B290048C8C5 = {
 			isa = PBXGroup;
 			children = (
+				5438DF7F41A947BABC079DDE /* CredentialRecoveryHelper */,
 				FF57373B2B4EB5B100F511C7 /* CHANGELOG.md */,
 				FF57373C2B4EB5B100F511C7 /* README.md */,
 				3F7463D02F55488A004C7FF6 /* config */,
@@ -5344,6 +5365,7 @@
 		BDBD53ED17019B2A0048C8C5 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				A1BE520AFF184EB6B32D093E /* CredentialRecoveryHelper.app */,
 				BDBD53EC17019B2A0048C8C5 /* podcasts.app */,
 				BD3A210D1E6CFC2400F42241 /* NotificationExtension.appex */,
 				BDEFBA141E6D3C2300B9024B /* NotificationContent.appex */,
@@ -6646,6 +6668,27 @@
 			productReference = FF4B83AE2F981D8E001B8C56 /* Pocket Casts TV App.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B242F32131CA4FCF8E1F979D /* CredentialRecoveryHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 90FDFF5A3E364D1587994712 /* Build configuration list for PBXNativeTarget "CredentialRecoveryHelper" */;
+			buildPhases = (
+				878ECD97121F4A7D99852097 /* Sources */,
+				1C76A5AA5DE94C1E907663C9 /* Frameworks */,
+				09EF0C0BB55E4505B7D55F0C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5438DF7F41A947BABC079DDE /* CredentialRecoveryHelper */,
+			);
+			name = CredentialRecoveryHelper;
+			productName = CredentialRecoveryHelper;
+			productReference = A1BE520AFF184EB6B32D093E /* CredentialRecoveryHelper.app */;
+			productType = "com.apple.product-type.application";
+		};
+
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -6763,6 +6806,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				B242F32131CA4FCF8E1F979D /* CredentialRecoveryHelper */,
 				BDBD53EB17019B2A0048C8C5 /* podcasts */,
 				BD3A210C1E6CFC2400F42241 /* NotificationExtension */,
 				BDEFBA131E6D3C2300B9024B /* NotificationContent */,
@@ -7371,6 +7415,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		09EF0C0BB55E4505B7D55F0C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
@@ -8464,6 +8516,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		878ECD97121F4A7D99852097 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -10796,6 +10856,94 @@
 			};
 			name = Release;
 		};
+		8BA790F6877E4847973C9197 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				CODE_SIGN_ENTITLEMENTS = CredentialRecoveryHelper/helper.entitlements;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		82B08137E09647738107E871 /* StagingDebug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				CODE_SIGN_ENTITLEMENTS = CredentialRecoveryHelper/helper.entitlements;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = StagingDebug;
+		};
+		7BAF0E5E56BE4956A00D7035 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				CODE_SIGN_ENTITLEMENTS = CredentialRecoveryHelper/helper.entitlements;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		51E01C35226344EC985B0CF2 /* Prototype */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				CODE_SIGN_ENTITLEMENTS = CredentialRecoveryHelper/helper.entitlements;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Prototype;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -10963,7 +11111,18 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};		90FDFF5A3E364D1587994712 /* Build configuration list for PBXNativeTarget "CredentialRecoveryHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BA790F6877E4847973C9197 /* Debug */,
+				82B08137E09647738107E871 /* StagingDebug */,
+				51E01C35226344EC985B0CF2 /* Prototype */,
+				7BAF0E5E56BE4956A00D7035 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
+
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
