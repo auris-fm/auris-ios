@@ -279,6 +279,11 @@ class VoiceControlService: ObservableObject {
         transcriptSerialTask?.cancel()
         transcriptSerialTask = nil
         transcriptLock.unlock()
+        // An active capture stop ends the acquired external-input route. Release
+        // the preferred input acquisition selected and deactivate only a session
+        // acquisition itself activated, re-checking live playback ownership so a
+        // session playback holds is never stopped.
+        routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
     }
 
     /// Compatibility wrapper for tests that still pass a bare English transcript.
@@ -524,13 +529,18 @@ class VoiceControlService: ObservableObject {
             guard !Task.isCancelled else { return }
             // Playback belongs to the same shared session; the gate context may
             // also already say playback is active. Either is enough to forbid
-            // deactivation on failure.
-            let sessionInUse = self.isPlaybackActive() || posture.context == .playbackActive || posture.context == .both
+            // deactivation on failure. Passed as a live provider, not a sampled
+            // value: playback can start during the async confirmation wait, and
+            // every cleanup path must re-check who owns the session then.
+            let contextPlaybackActive = posture.context == .playbackActive || posture.context == .both
+            let isPlaybackActive: () -> Bool = { [weak self] in
+                contextPlaybackActive || (self?.isPlaybackActive() ?? true)
+            }
             // From here until the function returns, the exposure flip emits
             // synchronously into the gate sink; mark the task so `.listening`
             // does not cancel it.
             self.isAcquiring = true
-            let result = await self.routeMonitor.acquireExternalInput(sessionInUseByPlayback: sessionInUse)
+            let result = await self.routeMonitor.acquireExternalInput(isPlaybackActive: isPlaybackActive)
             self.isAcquiring = false
             let isCurrent = !Task.isCancelled && self.acquisitionGeneration == generation
             if isCurrent {

@@ -8,7 +8,8 @@ class VoiceControlAssembly {
     /// deployment threshold and verified assets.
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
-        conditionMonitor: LiveConditionMonitor? = nil
+        conditionMonitor: LiveConditionMonitor? = nil,
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
 
@@ -119,7 +120,8 @@ class VoiceControlAssembly {
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
             gracePeriodSignal: gracePeriodSignal,
-            analytics: voiceAnalytics
+            analytics: voiceAnalytics,
+            isPlaybackActive: isPlaybackActive
         )
     }
 

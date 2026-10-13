@@ -272,7 +272,7 @@ final class RouteChangeTests: XCTestCase {
         session.isActive = false
         let monitor = makeMonitor(session)
 
-        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: true)
+        let result = await monitor.acquireExternalInput(isPlaybackActive: { true })
 
         XCTAssertEqual(result, .noCandidate)
         XCTAssertEqual(session.deactivateCount, 0, "playback owns the shared session; a failed acquisition must not deactivate it")
@@ -365,7 +365,7 @@ final class RouteChangeTests: XCTestCase {
         session.selectionTakesEffect = true
         let monitor = makeMonitor(session)
 
-        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: true)
+        let result = await monitor.acquireExternalInput(isPlaybackActive: { true })
         XCTAssertEqual(result, .acquired)
         XCTAssertEqual(session.activateCount, 1)
 
@@ -388,7 +388,7 @@ final class RouteChangeTests: XCTestCase {
         session.selectionTakesEffect = true
         let monitor = makeMonitor(session)
 
-        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: false)
+        let result = await monitor.acquireExternalInput(isPlaybackActive: { false })
         XCTAssertEqual(result, .acquired)
         XCTAssertEqual(session.activateCount, 1, "acquisition activated the shared session")
 
@@ -409,7 +409,7 @@ final class RouteChangeTests: XCTestCase {
         session.selectionTakesEffect = true
         let monitor = makeMonitor(session)
 
-        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: false)
+        let result = await monitor.acquireExternalInput(isPlaybackActive: { false })
         XCTAssertEqual(result, .acquired)
 
         monitor.releaseAcquiredExternalInput(sessionInUseByPlayback: false)
@@ -579,6 +579,129 @@ final class RouteChangeTests: XCTestCase {
 
         await waitUntil(timeout: 5) { session.configureCount >= 2 }
         XCTAssertEqual(session.configureCount, 2, "the same route is retried once the blocker clears")
+    }
+
+    // MARK: - Cleanup re-checks live playback ownership
+
+    /// Critical: acquisition samples playback ownership when it starts, but the
+    /// async confirmation wait is a window in which playback can begin. A
+    /// failure cleanup must re-check live ownership, not trust the sample, or it
+    /// deactivates the session playback just started using.
+    @MainActor
+    func test_failedAcquisition_whenPlaybackStartsDuringConfirmation_doesNotDeactivateSession() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        // Availability is not selection: the confirmation wait never settles, so
+        // acquisition fails after the wait.
+        session.selectionTakesEffect = false
+        let monitor = makeMonitor(session)
+
+        var playbackActive = false
+        // Playback starts while acquisition is parked in its confirmation wait,
+        // after acquisition itself activated the shared session.
+        session.onSelect = {
+            DispatchQueue.main.async { playbackActive = true }
+        }
+
+        let result = await monitor.acquireExternalInput(isPlaybackActive: { playbackActive })
+
+        XCTAssertEqual(result, .selectionFailed)
+        XCTAssertEqual(session.activateCount, 1, "acquisition activated the shared session before playback started")
+        XCTAssertEqual(session.deactivateCount, 0,
+                       "playback started during the confirmation wait; failure cleanup must not deactivate its session")
+    }
+
+    /// Same window, but the task is cancelled instead of failing.
+    @MainActor
+    func test_cancelledAcquisition_whenPlaybackStartsDuringConfirmation_doesNotDeactivateSession() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = false
+        let monitor = makeMonitor(session)
+
+        var playbackActive = false
+        var acquisition: Task<RouteAcquisitionResult, Never>?
+        session.onSelect = {
+            DispatchQueue.main.async {
+                playbackActive = true
+                acquisition?.cancel()
+            }
+        }
+        let task = Task { @MainActor in
+            await monitor.acquireExternalInput(isPlaybackActive: { playbackActive })
+        }
+        acquisition = task
+        let result = await task.value
+
+        XCTAssertEqual(result, .cancelled)
+        XCTAssertEqual(session.activateCount, 1)
+        XCTAssertEqual(session.deactivateCount, 0,
+                       "playback started during the confirmation wait; cancellation cleanup must not deactivate its session")
+    }
+
+    /// Important: a stop of *active* capture must release the acquired preferred
+    /// input, not only a successful acquisition that never reached capture. The
+    /// release must still re-check live playback ownership.
+    @MainActor
+    func test_service_activeStopReleasesAcquiredInputWithoutDeactivatingPlayback() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        // Activation-only discovery forces acquisition to activate the shared
+        // session itself, so the release path has a session it may deactivate.
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        var playbackActive = false
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, isPlaybackActive: { playbackActive })!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertEqual(service.micExposure, .isolated)
+        XCTAssertEqual(session.activateCount, 1, "acquisition activated the shared session")
+        XCTAssertEqual(session.clearCount, 0, "capture keeps the acquired input while listening")
+
+        // Playback resumes, then capture stops (user disabled, conflict, privacy).
+        playbackActive = true
+        service.stop()
+
+        XCTAssertEqual(session.clearCount, 1, "an active stop releases the acquired preferred input")
+        XCTAssertEqual(session.deactivateCount, 0,
+                       "playback owns the shared session; the active-stop release must not deactivate it")
+    }
+
+    /// Control for the test above: with playback still inactive, the active-stop
+    /// release does deactivate the session acquisition activated.
+    @MainActor
+    func test_service_activeStopWithPlaybackInactive_deactivatesAcquiredSession() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, isPlaybackActive: { false })!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertEqual(session.activateCount, 1)
+        XCTAssertEqual(session.clearCount, 0)
+
+        service.stop()
+
+        XCTAssertEqual(session.clearCount, 1, "an active stop releases the acquired preferred input")
+        XCTAssertEqual(session.deactivateCount, 1,
+                       "with playback inactive, the session acquisition activated is released")
     }
 
     @MainActor
