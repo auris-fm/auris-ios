@@ -360,10 +360,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// nominally pending. Parking here leaves the buffer intact and simply does not consume.
     private func parkIfHeld() {
         // ONE synchronization domain for the flag: `runnerLock` guards `drainHoldRequested` for
-        // every read and write, including the condition wait that releases the park. An earlier
-        // version read the flag under `bufferLock` and then re-read it under `runnerLock`, so the
-        // same variable had two domains; and the wait could be entered while holding the buffer
-        // lock, which a release needs in order to be observed.
+        // every read and write, including the condition wait that releases the park.
+        //
+        // An earlier version read the flag under `bufferLock` for its first check and then RE-READ
+        // it under `runnerLock`, so the same variable had two domains and the two reads could
+        // disagree. (It did release `bufferLock` before waiting; the second flag read under the
+        // wrong lock was the defect.)
         runnerLock.lock()
         while drainHoldRequested {
             runnerLock.wait(until: Date().addingTimeInterval(0.01))
