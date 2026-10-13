@@ -246,11 +246,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // Cancelled: drop everything and stop the engine, without draining.
             if stopRequested {
                 stopRequested = false
+                // Snapshot the identity WHILE HOLDING runnerLock: reading it after the unlock
+                // raced the writers in finish()/cancel().
+                let scheduledEpoch = drainEpoch
                 runnerLock.unlock()
                 stopEngine()
                 isPlaying = false
                 paused = false
-                notifyDidStop(epoch: drainEpoch)
+                notifyDidStop(epoch: scheduledEpoch)
                 runnerLock.lock()
                 runnerExited = false
                 runnerLock.signal()
@@ -621,6 +624,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Drain
 
     private func drainAndStop() {
+        // Snapshot the identity under runnerLock: this drain belongs to the schedule that pinned it.
+        runnerLock.lock()
+        let scheduledEpoch = drainEpoch
+        runnerLock.unlock()
         parkIfHeld()
         // Play any remaining frames.
         while true {
@@ -630,7 +637,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopEngine()
         isPlaying = false
         paused = false
-        notifyDidStop(epoch: drainEpoch)
+        notifyDidStop(epoch: scheduledEpoch)
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
