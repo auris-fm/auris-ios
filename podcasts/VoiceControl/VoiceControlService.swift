@@ -546,7 +546,7 @@ class VoiceControlService: ObservableObject {
                 // this task resumed, as long as no newer acquisition owns the
                 // route now.
                 if !self.isListening, self.acquisitionTask == nil {
-                    self.routeMonitor.releaseAcquiredExternalInput()
+                    self.routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: self.isPlaybackActive())
                 }
             case .cancelled, .notApplicable:
                 break
@@ -571,6 +571,11 @@ class VoiceControlService: ObservableObject {
         acquisitionGeneration &+= 1
         acquisitionTask?.cancel()
         acquisitionTask = nil
+        // Clear the one-shot dedup: a transient blocker (call, casting, other
+        // app, context loss) cancels a scheduled attempt, and the same route
+        // must be retried once the blocker clears. Failure completions do not
+        // call this, so a genuinely failed route is still not retried in a loop.
+        acquisitionAttemptedRoute = nil
     }
 }
 

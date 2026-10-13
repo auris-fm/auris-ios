@@ -349,11 +349,15 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// exposure flip and the gate transition). Clears only the preferred input
     /// acquisition selected and deactivates only a session acquisition itself
     /// activated — never one playback owns.
-    func releaseAcquiredExternalInput() {
+    func releaseAcquiredExternalInput(sessionInUseByPlayback: Bool = false) {
         if lastAcquisitionSelectedInput {
             audioSession.clearPreferredInput()
         }
-        if lastAcquisitionActivatedSession {
+        // Re-check live playback ownership at release time: playback can start
+        // after acquisition sampled its flag, and deactivating then would stop
+        // the podcast. Retaining the active session is the safe direction — the
+        // next acquisition re-uses it.
+        if lastAcquisitionActivatedSession, !sessionInUseByPlayback {
             try? audioSession.setSessionActive(false)
         }
         lastAcquisitionActivatedSession = false

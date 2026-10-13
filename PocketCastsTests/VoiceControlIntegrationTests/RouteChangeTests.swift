@@ -375,6 +375,49 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertEqual(session.deactivateCount, 0, "playback owns the shared session; release must not deactivate it")
     }
 
+    func test_releaseAcquiredExternalInput_whenPlaybackStartsAfterAcquisition_doesNotDeactivate() async {
+        // Playback is not active when acquisition samples it, so acquisition
+        // activates the shared session itself. Playback then starts during the
+        // acquisition/confirmation window; release must re-check the live
+        // playback state rather than trust the value sampled at task start.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: false)
+        XCTAssertEqual(result, .acquired)
+        XCTAssertEqual(session.activateCount, 1, "acquisition activated the shared session")
+
+        monitor.releaseAcquiredExternalInput(sessionInUseByPlayback: true)
+
+        XCTAssertEqual(session.clearCount, 1, "the selected external input is still released")
+        XCTAssertEqual(session.deactivateCount, 0, "playback now owns the shared session; release must not deactivate it")
+    }
+
+    func test_releaseAcquiredExternalInput_whenPlaybackStillInactive_deactivatesSession() async {
+        // Control for the re-check above: the same acquisition with playback
+        // still inactive at release time does deactivate the session it opened.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterActivate = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput(sessionInUseByPlayback: false)
+        XCTAssertEqual(result, .acquired)
+
+        monitor.releaseAcquiredExternalInput(sessionInUseByPlayback: false)
+
+        XCTAssertEqual(session.clearCount, 1)
+        XCTAssertEqual(session.deactivateCount, 1, "with playback still inactive, the session acquisition activated is released")
+    }
+
     func test_bluetoothDisconnectMidCapture_reEvaluatesToExposed() async {
         let session = FakeAudioSessionControlling()
         session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
@@ -500,6 +543,42 @@ final class RouteChangeTests: XCTestCase {
                        "the reentrant gate must not clear the preferred input acquisition just selected")
         XCTAssertEqual(session.deactivateCount, 0,
                        "the reentrant gate must not deactivate the acquired session")
+    }
+
+    @MainActor
+    func test_service_cancelledAcquisition_retriesSameRouteAfterBlockerClears() async {
+        // A transient blocker (here: a conflict) cancels a pending acquisition.
+        // Once the blocker clears, the same route must be attempted again;
+        // otherwise capture silently never starts.
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.builtInMic, uid: "built-in")]
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = false  // keep the attempt pending in its confirmation wait
+
+        let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor)!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { session.configureCount >= 1 }
+        XCTAssertEqual(session.configureCount, 1, "the eligible route starts an acquisition attempt")
+
+        conditionMonitor.conflicts = GateConflicts(
+            notOnCall: .blocked(reason: "call_in_progress"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        conditionMonitor.conflicts = GateConflicts(
+            notOnCall: .allowed,
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+
+        await waitUntil(timeout: 5) { session.configureCount >= 2 }
+        XCTAssertEqual(session.configureCount, 2, "the same route is retried once the blocker clears")
     }
 
     @MainActor
