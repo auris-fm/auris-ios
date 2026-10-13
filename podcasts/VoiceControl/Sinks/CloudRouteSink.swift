@@ -193,6 +193,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var liveOriginForRetry: () -> Int? { liveOriginProviderForRetry }
 
     func retryLastPreparedRequest(requestId: String) async -> CloudRouteResult? {
+        // CLOSED. @spec: a disabled executor alone must not leave another callable replay API.
+        //
+        // This entry refused only on missing/retired handles and an unestablished origin — but a
+        // handle that a completion left RETAINED, under a still-live origin, passed both guards and
+        // would have been RE-DRIVEN. Since no producer can establish that a frame was never
+        // submitted, nothing is eligible, and the honest state is that this cannot dispatch at all.
+        //
+        // The seam stays so a future producer has somewhere to attach; this is the line to replace
+        // when it does.
+        return nil
+    }
+
+    /// Kept for the seam but unreachable: the body above refuses before looking anything up.
+    private func retryPreparedRequestUnreachable(requestId: String) async -> CloudRouteResult? {
         // NOT AN ACCESSIBLE REPLAY PATH AFTER POSSIBLE SUBMISSION (@spec's constraint).
         //
         // Two conditions stand between a caller and a re-drive, and both must hold: the request must
@@ -423,14 +437,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // There is deliberately NO blanket retry loop here. The identity requirement does not
         // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
         // before admission is safe to re-drive, and that decision belongs to an explicit caller.
-        preparedRequests[turn.requestId] = PreparedRequest(
-            turn: turn,
-            request: request,
-            tier: tier,
-            playbackContext: context,
-            origin: origin,
-            selection: effectiveSelection
-        )
+        // NOTHING IS RETAINED FOR REPLAY (@spec). An earlier version kept the prepared request so a
+        // retry could re-drive it, and that retention IS what makes replay possible: a completed or
+        // possibly-submitted request left on the books is exactly the thing a replay path would
+        // find. With no eligible producer, the honest state is to retain nothing.
+        //
+        // The `RetainedPreparation` handle still rides on the result, because the ownership-token
+        // mechanism is what the caller uses to identify a turn; it simply has no server-side entry
+        // to reach any more.
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's
