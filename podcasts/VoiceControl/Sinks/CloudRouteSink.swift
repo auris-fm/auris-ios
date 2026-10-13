@@ -96,7 +96,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Set when the turn has completed and the player is draining: the hold is
     /// released from `audioPlayerDidStop` rather than at `done`.
-    private var restoreHeldForPlayerDrain = false
+    ///
+    /// It records WHICH turn deferred, not merely THAT one did. The player's stop notification
+    /// carries no turn identity, and a turn's audio can still be draining after a later turn has
+    /// taken over the hold, so acting on the flag alone let an older turn's notification restore
+    /// playback that the newer turn was deliberately holding.
+    private var restoreHeldForPlayerDrain: CloudTurnToken?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -320,7 +325,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // would resume the episode under the answer's tail. With nothing
                 // left to play the drain is a no-op and the restore is immediate.
                 if audioPlayer.hasPendingAudio {
-                    restoreHeldForPlayerDrain = true
+                    restoreHeldForPlayerDrain = turnToken
                 } else {
                     restoreTransientAudioState()
                 }
@@ -533,8 +538,20 @@ extension CloudRouteSink {
         // hold taken for the turn may be released, so the answer is not played
         // over the resumed episode, and the turn's held state stays consistent
         // even though the sink has already returned to its caller.
-        guard restoreHeldForPlayerDrain else { return }
-        restoreHeldForPlayerDrain = false
+        //
+        // OWNERSHIP: act only for the turn that DEFERRED. A successor that inherited the hold has
+        // already taken it over (it keeps `didAutoPause`), so once ownership moves on, a
+        // notification belonging to the earlier turn must not release the newer turn's hold. The
+        // inherited transfer itself is unchanged — a turn that owns the hold still restores it,
+        // whether it took the hold or inherited it.
+        guard let deferring = restoreHeldForPlayerDrain else { return }
+        guard activeTurn == nil || activeTurn === deferring else {
+            // Ownership has moved on: this notification is stale. Drop the deferred record so it
+            // cannot fire later, but do not restore.
+            restoreHeldForPlayerDrain = nil
+            return
+        }
+        restoreHeldForPlayerDrain = nil
         restoreTransientAudioState()
     }
 }

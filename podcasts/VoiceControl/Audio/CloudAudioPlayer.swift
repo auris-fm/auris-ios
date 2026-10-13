@@ -623,7 +623,23 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private func notifyDidStop() {
         guard let delegate = delegate else { return }
         DispatchQueue.main.async {
+            // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
+            // the delegate itself, so a delayed notification can be delivered at a chosen moment
+            // while another turn owns the hold.
+            if let capture = self.capturedStopNotification {
+                capture(delegate.audioPlayerDidStop)
+                return
+            }
             delegate.audioPlayerDidStop()
         }
+    }
+
+    /// TEST-ONLY: intercept the real stop notification. `nil` (the default) delivers it normally.
+    var capturedStopNotification: ((@escaping () -> Void) -> Void)?
+
+    func setCapturedStopNotificationForTesting(_ capture: ((@escaping () -> Void) -> Void)?) {
+        bufferLock.lock()
+        capturedStopNotification = capture
+        bufferLock.unlock()
     }
 }

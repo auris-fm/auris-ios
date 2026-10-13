@@ -1400,6 +1400,90 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(playback.isPlaying, "playback returns to its pre-hold running state")
     }
+
+    /// A's CAPTURED, REAL stop notification must not restore once B owns the hold.
+    ///
+    /// Per @reviewer's interleaving, with no second pause required:
+    ///   1. A completes with audio pending, so its restoration is deferred;
+    ///   2. A's real drain produces its notification, which is CAPTURED rather than delivered;
+    ///   3. B starts and INHERITS the outstanding hold (by design), held before its `done`;
+    ///   4. the captured notification is released while B is in flight;
+    ///   5. zero resumes while B still owns the hold.
+    ///
+    /// Clearing the shared flag prevents a DUPLICATE restoration; this asks whether the FIRST
+    /// notification restores too early, which is the obligation the case names.
+    func testACapturedOlderTurnNotificationDoesNotRestoreWhileTheInheritorIsInFlight() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        let maybePlayer = await MainActor.run { sink.audioPlayerForTesting }
+        let player = try XCTUnwrap(maybePlayer, "the sink must own an audio player")
+
+        // CAPTURE A's real notification instead of letting it be delivered.
+        var capturedNotification: (() -> Void)?
+        await MainActor.run {
+            player.setCapturedStopNotificationForTesting { deliver in capturedNotification = deliver }
+        }
+        defer { Task { @MainActor in player.setCapturedStopNotificationForTesting(nil) } }
+
+        // (1) TURN A: completes with audio pending -> deferred.
+        playback.setPlaying(true)
+        playback.setPositionMs(60_000)
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let a = await sink.routeToCloud(
+            request: "A", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+        XCTAssertEqual(a.outcome, .completed, "turn A returns")
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, 0,
+            "turn A defers: its drain has not produced a notification yet"
+        )
+
+        // (2) A's REAL drain produces its notification, captured.
+        await MainActor.run { player.setDrainHoldForTesting(false) }
+        try await waitUntil("turn A's real drain produced its stop notification") {
+            capturedNotification != nil
+        }
+        let deliverAsNotification = try XCTUnwrap(capturedNotification, "A's notification must exist")
+
+        // (3) TURN B: starts and INHERITS the hold, held before its `done`.
+        let gate = holdNextTurn()
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let b = Task {
+            await sink.routeToCloud(
+                request: "B", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp
+            )
+        }
+        let maybeHeldB = await waitForHeldTurn()
+        let heldB = try XCTUnwrap(maybeHeldB, "turn B must be in flight and holding")
+        // B's distinct identity, from ITS OWN prepared frame.
+        let bFrame = try XCTUnwrap(heldB.task.sentAuthFrame, "B's prepared frame must be readable")
+        let bRequestId = try XCTUnwrap(bFrame["request_id"] as? String, "B carries a request_id")
+        XCTAssertNotNil(UUID(uuidString: bRequestId), "B's request_id is client-assigned")
+
+        let resumesBeforeNotification = playback.calls.filter { $0 == .resume }.count
+        XCTAssertFalse(playback.isPlaying, "the inherited hold is in effect while B is in flight")
+
+        // (4) Release A's captured notification WHILE B is in flight and owning.
+        await MainActor.run { deliverAsNotification() }
+
+        // (5) Zero resumes for a notification that is not B's.
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, resumesBeforeNotification,
+            "A's captured notification must not restore while its INHERITOR is still in flight"
+        )
+        XCTAssertFalse(
+            playback.isPlaying,
+            "the inheriting turn's hold must survive an older turn's notification"
+        )
+
+        gate.release()
+        _ = await b.value
+    }
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
