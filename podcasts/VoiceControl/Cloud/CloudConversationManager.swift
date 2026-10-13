@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// What selected a turn. The conversation mode follows this, not the wire history.
@@ -103,6 +104,19 @@ final class CloudConversationManager {
             conversationId: conversationId,
             mode: Self.create
         )
+    }
+
+    /// Binds a grace-window signal to this manager's live origin, and returns the cancellable
+    /// that owns the subscription.
+    ///
+    /// This is the PRODUCTION registration path: the assembly uses it, and the test drives the
+    /// same function rather than re-implementing the closure. A test that copies the closure
+    /// instead tests its own copy, so breaking this wiring would leave the test green.
+    @discardableResult
+    static func bindLiveOrigin(to signal: GracePeriodSignal, on manager: CloudConversationManager) -> AnyCancellable {
+        signal.$isActive.sink { active in
+            if active { manager.registerLiveOrigin(signal.currentGeneration()) }
+        }
     }
 
     /// Records the origin currently in force. A turn may only create or continue a

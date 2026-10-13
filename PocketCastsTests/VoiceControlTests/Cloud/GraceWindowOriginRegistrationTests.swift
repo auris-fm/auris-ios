@@ -20,9 +20,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
     func testActiveWindowAdmitsATurnCarryingItsGeneration() {
         let signal = GracePeriodSignal()
         let manager = CloudConversationManager()
-        let link = signal.$isActive.sink { active in
-            if active { manager.registerLiveOrigin(signal.currentGeneration()) }
-        }
+        let link = CloudConversationManager.bindLiveOrigin(to: signal, on: manager)
         defer { link.cancel() }
 
         signal.onWakeWordDetected()
@@ -40,9 +38,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
     func testASupersededGenerationIsRefused() {
         let signal = GracePeriodSignal()
         let manager = CloudConversationManager()
-        let link = signal.$isActive.sink { active in
-            if active { manager.registerLiveOrigin(signal.currentGeneration()) }
-        }
+        let link = CloudConversationManager.bindLiveOrigin(to: signal, on: manager)
         defer { link.cancel() }
 
         signal.onWakeWordDetected()
@@ -68,9 +64,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
     func testAnUnstampedDispatchIsRefused() {
         let signal = GracePeriodSignal()
         let manager = CloudConversationManager()
-        let link = signal.$isActive.sink { active in
-            if active { manager.registerLiveOrigin(signal.currentGeneration()) }
-        }
+        let link = CloudConversationManager.bindLiveOrigin(to: signal, on: manager)
         defer { link.cancel() }
 
         signal.onWakeWordDetected()

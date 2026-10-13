@@ -25,10 +25,9 @@ class VoiceControlAssembly {
         // Keep the manager's live origin in step with the window that actually opens. The
         // sink reads the origin from the INTENT (captured at dispatch), so this only supplies
         // the value that decides whether a captured origin is still live.
-        let originCancellable = gracePeriodSignal.$isActive
-            .sink { active in
-                if active { conversationManager.registerLiveOrigin(gracePeriodSignal.currentGeneration()) }
-            }
+        let originCancellable = CloudConversationManager.bindLiveOrigin(
+            to: gracePeriodSignal, on: conversationManager
+        )
         cancellables.insert(originCancellable)
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
