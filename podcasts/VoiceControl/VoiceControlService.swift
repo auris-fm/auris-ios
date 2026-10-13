@@ -92,6 +92,18 @@ class VoiceControlService: ObservableObject {
     /// What a test input barrier decided, reported before classification. `.arrived` is emitted when
     /// the barrier is REACHED; `.cancelled`/`.refused` when it stops the chain.
     enum InputBarrierOutcome: Sendable { case arrived, cancelled, refused }
+
+    /// How a queued input's task TERMINATED. Reported on EVERY exit from the serial task, so a test
+    /// can await settlement instead of polling for an absence: `.routed` when routing was attempted,
+    /// `.cancelled`/`.refused` when the barrier stopped the chain, `.dropped` when the staleness guard
+    /// (or a cancelled task) discarded it before reaching the barrier.
+    enum InputTerminalOutcome: Sendable { case routed, barrierCancelled, barrierRefused, dropped }
+    /// Reports how a queued input's task TERMINATED — on EVERY exit, including a refusal or a
+    /// cancellation. This is the TERMINAL ACKNOWLEDGEMENT: the input returned, which is not the same
+    /// as an action having run. Distinct from `onInputRoutingFinished`, which reports that routing was
+    /// ATTEMPTED. Nil in production.
+    private let onInputTerminal: (@Sendable (IntentRoutingInput, InputTerminalOutcome) -> Void)?
+
     /// Awaited by the serial chain BEFORE an input is classified or executed, so a test can hold a
     /// specific input while the window state changes around it and then release it. Nil in
     /// production, where it is never set, so the chain is unmodified.
@@ -175,7 +187,8 @@ class VoiceControlService: ObservableObject {
         /// acted. Nil in production, where nothing needs to be told.
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
         testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
-        onInputBarrierSettled: (@Sendable (IntentRoutingInput, InputBarrierOutcome) -> Void)? = nil
+        onInputBarrierSettled: (@Sendable (IntentRoutingInput, InputBarrierOutcome) -> Void)? = nil,
+        onInputTerminal: (@Sendable (IntentRoutingInput, InputTerminalOutcome) -> Void)? = nil
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -192,6 +205,7 @@ class VoiceControlService: ObservableObject {
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
         self.onInputBarrierSettled = onInputBarrierSettled
+        self.onInputTerminal = onInputTerminal
         self.testInputBarrier = testInputBarrier
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
@@ -308,14 +322,17 @@ class VoiceControlService: ObservableObject {
             // active — so the answer has to come from the gate decision that produced this input.
             let capturedSelection = input.selection
             let task = Task { [weak self] in
-                // ROUTING COMPLETION IS REPORTED ONLY IF ROUTING WAS ATTEMPTED. This used to be an
-                // unconditional `defer`, which fired on EVERY exit — so an input that was cancelled
-                // at the barrier, or dropped by the staleness guard, still reported completion. That
-                // conflates "finished routing" with "never routed", which are separate events.
-                var routed = false
+                // THE TERMINAL ACKNOWLEDGEMENT IS UNCONDITIONAL: on EVERY exit the input's task
+                // reports HOW it ended, because "the queued input returned" is not the same claim as
+                // "an action ran". A test can therefore await settlement instead of polling for an
+                // absence. `onInputRoutingFinished` remains the separate, narrower signal that routing
+                // was actually ATTEMPTED.
+                var terminal: InputTerminalOutcome = .dropped
                 defer {
-                    if routed, let notify = self?.onInputRoutingFinished {
-                        Task { @MainActor in notify(input) }
+                    let notifyTerminal = self?.onInputTerminal
+                    if let notifyTerminal { Task { @MainActor in notifyTerminal(input, terminal) } }
+                    if terminal == .routed, let notifyFinished = self?.onInputRoutingFinished {
+                        Task { @MainActor in notifyFinished(input) }
                     }
                 }
                 await previous?.value
@@ -337,13 +354,15 @@ class VoiceControlService: ObservableObject {
                         try await barrier(input)
                     } catch is CancellationError {
                         self.onInputBarrierSettled?(input, .cancelled)
+                        terminal = .barrierCancelled
                         return
                     } catch {
                         self.onInputBarrierSettled?(input, .refused)
+                        terminal = .barrierRefused
                         return
                     }
                 }
-                routed = true
+                terminal = .routed
                 await self.handleRoutingInput(
                     input,
                     origin: capturedOrigin,

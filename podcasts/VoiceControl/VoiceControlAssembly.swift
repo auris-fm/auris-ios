@@ -26,7 +26,8 @@ class VoiceControlAssembly {
         asrBackend injectedBackend: (() -> AsrBackend?)? = nil,
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
         testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
-        onInputBarrierSettled: (@Sendable (IntentRoutingInput, VoiceControlService.InputBarrierOutcome) -> Void)? = nil
+        onInputBarrierSettled: (@Sendable (IntentRoutingInput, VoiceControlService.InputBarrierOutcome) -> Void)? = nil,
+        onInputTerminal: (@Sendable (IntentRoutingInput, VoiceControlService.InputTerminalOutcome) -> Void)? = nil
     ) -> VoiceControlService? {
 ||||||| parent of 3a7a55f (test(voice): substitute the ASR backend the engine preloads)
     /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
@@ -194,6 +195,7 @@ class VoiceControlAssembly {
             onInputRoutingFinished: onInputRoutingFinished,
             testInputBarrier: testInputBarrier,
             onInputBarrierSettled: onInputBarrierSettled,
+            onInputTerminal: onInputTerminal,
             isPlaybackActive: isPlaybackActive
         )
     }

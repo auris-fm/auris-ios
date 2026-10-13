@@ -1030,7 +1030,9 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var turnsBuilt = 0
         var finishedInputs: [String] = []
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        var terminals: [VoiceControlService.InputTerminalOutcome] = []
         let aFinished = AsyncStream<Void>.makeStream()
+        let terminalWait = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
             capture: capture,
@@ -1059,6 +1061,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             },
             onInputBarrierSettled: { input, outcome in
                 if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
+            },
+            onInputTerminal: { input, outcome in
+                if input.routerTranscript.contains("A question") {
+                    terminals.append(outcome)
+                    terminalWait.continuation.yield()
+                }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1097,11 +1105,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertNotEqual(windowA, successor, "the successor must be a different window from A")
         XCTAssertTrue(signal.isActive, "the successor window must be OPEN")
 
-        // RELEASE, then await A's COMPLETION acknowledgement.
+        // RELEASE, then await A's TERMINAL acknowledgement. NOT the routing-attempted hook: a turn
+        // refused before routing never fires that one, so awaiting it here would hang until the
+        // timeout — which is exactly why the terminal outcome exists.
         gate.release()
         let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
-                for await _ in aFinished.stream { return true }
+                for await _ in terminalWait.stream { return true }
                 return false
             }
             group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
@@ -1112,8 +1122,24 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         }
         XCTAssertTrue(
             completion,
-            "A must ACKNOWLEDGE COMPLETION; without it the assertions below read a state the case "
-                + "does not control. Finished inputs seen: \(finishedInputs)"
+            "A must report a TERMINAL outcome; without it the assertions below read a state the case "
+                + "does not control. Terminals seen: \(terminals)"
+        )
+        // MEASURED, and it corrected an assumption of mine: the retired input settles as `.routed`,
+        // NOT as `.barrierRefused`. The barrier RELEASES normally here — the refusal happens later,
+        // when `prepare` refuses the turn's live-origin check. `.routed` therefore means "routing was
+        // ATTEMPTED", which is true and is not the same claim as "an action ran"; the no-action part
+        // is asserted separately by `turnsBuilt == 0`.
+        XCTAssertEqual(
+            terminals, [.routed],
+            "the retired input must report a TERMINAL outcome; `.routed` records that routing was "
+                + "attempted, while the refusal itself is the live-origin check in prepare. Seen: "
+                + "\(terminals)"
+        )
+        XCTAssertTrue(
+            finishedInputs.contains("A question"),
+            "routing WAS attempted for this turn, so the routing-attempted signal must fire; the "
+                + "narrower signal stays narrower than the terminal one. Finished: \(finishedInputs)"
         )
 
         // REFUSED ADMISSION: A completed and took NO action.
@@ -1245,7 +1271,9 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let gate = Gate()
         var turnsBuilt = 0
         var arrivals: [VoiceControlService.InputBarrierOutcome] = []
+        var terminals: [VoiceControlService.InputTerminalOutcome] = []
         var finishedInputs: [String] = []
+        let terminalWait = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
             capture: capture,
@@ -1268,6 +1296,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             },
             onInputBarrierSettled: { input, outcome in
                 if input.routerTranscript.contains("A question") { arrivals.append(outcome) }
+            },
+            onInputTerminal: { input, outcome in
+                if input.routerTranscript.contains("A question") {
+                    terminals.append(outcome)
+                    terminalWait.continuation.yield()
+                }
             }
         ) else {
             XCTFail("the assembly built no service, so the case proves nothing")
@@ -1290,7 +1324,29 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // CANCEL the serial chain, then open the gate so the wait can observe the cancellation.
         service.stop()
         gate.release()
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        // AWAIT THE TERMINAL ACKNOWLEDGEMENT rather than sleeping and inferring from absence: every
+        // exit reports how the task ended, so settlement is observed, not assumed.
+        let settled = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                for await _ in terminalWait.stream { return true }
+                return false
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        XCTAssertTrue(
+            settled,
+            "the cancelled input must report a TERMINAL outcome; without it the assertions below "
+                + "would rely on an absence timer. Terminals seen: \(terminals)"
+        )
+        XCTAssertEqual(
+            terminals, [.barrierCancelled],
+            "the terminal outcome must be barrierCancelled — how the task ENDED — which is distinct "
+                + "from arrival and from an action having run. Seen: \(terminals)"
+        )
 
         // CANCELLATION IS ITS OWN EVENT, and distinct from arrival and from routing completion.
         XCTAssertEqual(
