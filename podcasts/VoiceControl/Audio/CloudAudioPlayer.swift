@@ -301,6 +301,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // `playFrame` is best-effort (no engine, no output), but the frames are
         // still taken: a player that leaves them queued on an engine failure
         // would report "playing" with nothing coming out.
+        parkIfHeld()
         let framesToProcess = bufferedFrameCount
         for _ in 0..<framesToProcess {
             guard let frame = dequeueFrame() else { break }
@@ -349,6 +350,25 @@ final class CloudAudioPlayer: @unchecked Sendable {
         defer { bufferLock.unlock() }
         guard !buffer.isEmpty else { return nil }
         return buffer.removeFirst()
+    }
+
+    /// TEST-ONLY: park the drain runner until released, WITHOUT returning an exhaustion sentinel.
+    ///
+    /// An earlier version returned `nil` from `dequeueFrame` while held. That is indistinguishable
+    /// from "the buffer is empty", so the drain loop treated a deliberately-held player as an
+    /// underrun and took its exhaustion path — which is why a resume appeared while audio was
+    /// nominally pending. Parking here leaves the buffer intact and simply does not consume.
+    private func parkIfHeld() {
+        while true {
+            bufferLock.lock()
+            let held = drainHoldRequested
+            bufferLock.unlock()
+            if !held { return }
+            runnerLock.lock()
+            if !drainHoldRequested { runnerLock.unlock(); return }
+            runnerLock.wait(until: Date().addingTimeInterval(0.01))
+            runnerLock.unlock()
+        }
     }
 
     // MARK: - Audio engine
@@ -547,6 +567,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// frames (a player that buffers forever plays nothing).
     var bufferedFrameCountForTesting: Int { bufferedFrameCount }
 
+    /// TEST-ONLY drain hold. See `parkIfHeld`.
+    private var drainHoldRequested = false
+
+    /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
+    /// the same drain loop continues.
+    func setDrainHoldForTesting(_ hold: Bool) {
+        bufferLock.lock()
+        drainHoldRequested = hold
+        bufferLock.unlock()
+        runnerLock.lock()
+        runnerRunning = true
+        runnerLock.signal()
+        runnerLock.unlock()
+    }
+
     /// Cumulative count of frames handed to this player, for asserting that audio actually
     /// ARRIVED rather than merely that nothing is pending at the end.
     var framesEnqueuedForTesting: Int {
@@ -568,6 +603,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Drain
 
     private func drainAndStop() {
+        parkIfHeld()
         // Play any remaining frames.
         while true {
             guard let frame = dequeueFrame() else { break }

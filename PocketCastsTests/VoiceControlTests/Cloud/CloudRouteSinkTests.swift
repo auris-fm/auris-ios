@@ -1343,6 +1343,63 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             "playback must return to its pre-hold (running) state"
         )
     }
+
+    /// The SINGLE-OWNER deferred-restoration positive.
+    ///
+    /// One turn, owned end to end: its own task, its own prepared frame's request_id, its binary
+    /// audio, its `done`, and its own drain. With audio still pending at `done` the sink defers
+    /// restoration, and the release of the drain lets the player's REAL stop notification run —
+    /// asserted on the same turn, so a mismatch between the turn that carried the audio and the
+    /// turn the assertions read would fail.
+    func testSingleOwnerPendingAudioDefersRestorationUntilItsOwnDrain() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(conversationManager: manager)
+
+        playback.setPlaying(true)
+        playback.setPositionMs(60_000)
+
+        let maybePlayer = await MainActor.run { sink.audioPlayerForTesting }
+        let owningPlayer = try XCTUnwrap(maybePlayer, "the sink must own an audio player")
+        await MainActor.run { owningPlayer.setDrainHoldForTesting(true) }
+        defer { Task { @MainActor in owningPlayer.setDrainHoldForTesting(false) } }
+
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = [Self.audioPayload]
+        let result = await sink.routeToCloud(
+            request: "audio", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord
+        )
+
+        // IDENTITY: the turn that ran is the turn this case built, named by its own prepared frame.
+        let task = try XCTUnwrap(capturedTask, "the turn must have built its own transport task")
+        let frame = try XCTUnwrap(task.sentAuthFrame, "the turn's own prepared frame must be readable")
+        let requestId = try XCTUnwrap(frame["request_id"] as? String, "the frame carries a request_id")
+        XCTAssertNotNil(UUID(uuidString: requestId), "the request_id is client-assigned")
+        XCTAssertEqual(result.outcome, .completed, "this turn completes at `done`")
+
+        let pending = await MainActor.run { owningPlayer.hasPendingAudio }
+        XCTAssertTrue(pending, "this turn's audio is still PENDING at its `done`")
+
+        // DEFERRAL: this turn completed, and nothing has resumed for it yet.
+        XCTAssertTrue(playback.calls.contains(.pause), "this turn took its hold")
+        XCTAssertEqual(
+            playback.calls.filter { $0 == .resume }.count, 0,
+            "restoration is DEFERRED while this turn's audio is pending"
+        )
+        XCTAssertFalse(playback.isPlaying, "the hold is still in effect before the drain")
+
+        // RELEASE the drain. The player then drains for real and emits its OWN stop notification —
+        // no manual stop-callback invocation, so the deferred callback is reached through the
+        // production path rather than being called by the test.
+        await MainActor.run { owningPlayer.setDrainHoldForTesting(false) }
+
+        // The restoration is signalled by the resume landing, awaited rather than read once.
+        try await waitUntil("the deferred restoration ran after the real drain") {
+            playback.calls.filter { $0 == .resume }.count == 1
+        }
+        XCTAssertTrue(playback.isPlaying, "playback returns to its pre-hold running state")
+    }
 }
 
 /// The client-generated-diagnostic convention (PR #19 review): a code with an
