@@ -270,21 +270,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The sink therefore has ONE path: prepare a turn, dispatch it, handle its events, report
         // its outcome. Nothing here implies a second attempt is possible.
 
-        // Retained so an EXPLICIT retry can re-drive the SAME logical request. Holding the whole
-        // envelope is what makes identity preservation structural rather than a convention: a
-        // retry has nothing else to build an id from.
-        //
-        // There is deliberately NO blanket retry loop here. The identity requirement does not
-        // authorize replaying a turn after an UNKNOWN outcome — only a transport that dropped
-        // before admission is safe to re-drive, and that decision belongs to an explicit caller.
-        // NOTHING IS RETAINED FOR REPLAY (@spec). An earlier version kept the prepared request so a
-        // retry could re-drive it, and that retention IS what makes replay possible: a completed or
-        // possibly-submitted request left on the books is exactly the thing a replay path would
-        // find. With no eligible producer, the honest state is to retain nothing.
-        //
-        // mechanism is what the caller uses to identify a turn; it simply has no server-side entry
-        // to reach any more.
-
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's
         // captured position (task #12 PR review).

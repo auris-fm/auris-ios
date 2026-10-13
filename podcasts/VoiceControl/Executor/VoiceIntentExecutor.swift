@@ -124,12 +124,6 @@ class VoiceIntentExecutor {
     private let statsQuerySink: VoiceStatsQuerySink
     private let cloudRouteSink: VoiceCloudRouteSink
 
-    /// The handle to the cloud request most recently PREPARED, held on the executor rather than as
-    /// a local in `execute`.
-    ///
-    /// A local dies when the call returns, so a later retry/recovery action would have nothing to
-    /// name — the holder has to survive into the action that uses it. It is per-EXECUTOR rather
-    /// than per-sink so a successor's turn cannot overwrite a handle belonging to an older one.
     /// The sink this executor routes cloud playback through, so a test can reach the real
     /// producer the app built rather than constructing its own.
     var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
@@ -167,26 +161,11 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
-    /// Re-drives the cloud request this executor last PREPARED, naming it by its held handle.
-    ///
-    /// This is the request-scoped retry action @spec asked for: it acts on the request the holder
-    /// belongs to rather than on whatever the sink prepared most recently, so an older action
-    /// cannot reach a successor's turn.
-    ///
-    /// **Eligibility is the caller's to establish.** The identity requirement does not authorize
-    /// replaying a turn after an unknown outcome, and a transport error code is not evidence about
-    /// the admission boundary — so this only re-drives what the holder names, and the sink itself
-    /// refuses when the request's origin is no longer live.
-    ///
-    /// Returns nil when nothing is held, so an absent holder cannot be mistaken for a retry.
-
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
         let response: VoiceResponse
         // Set only by the cloud branch. Every other intent leaves it nil, so the generic
         // response-shape rule below is untouched for them.
         var cloudOutcome: CloudRouteOutcome?
-        /// The handle to the request THIS execute call prepared, if any. Held per call so a retry
-        /// names the request the caller actually made.
 
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
