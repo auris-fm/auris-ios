@@ -1530,12 +1530,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // barrier never reaches classification. A rise here would mean the chain resumed past the
         // barrier — the very thing the throwing barrier exists to prevent.
         //
-        // REACHABILITY, measured rather than assumed: this assertion cannot fail IN ISOLATION. Making
-        // the chain continue past a cancelled barrier also moves the terminal outcome to `.routed`,
-        // and that assertion precedes this one — verified by two mutants, one of which deliberately
-        // preserved `.barrierCancelled` and still tripped the terminal check first. So this is a
-        // REDUNDANT guard on the same violation, not an independent one; it is kept because it names
-        // the classifier state explicitly, and it is NOT cited as separate coverage.
+        // MEASURED: BOTH fall-through mutants I tried also violated the TERMINAL outcome contract —
+        // the second even though it deliberately preserved `.barrierCancelled`, because falling
+        // through overwrites it. So any violation this assertion can detect is already reported by
+        // the terminal assertion. (XCTest reports every failed assertion in a case, so this is a
+        // statement about the violations being the SAME one, not about execution stopping early.)
+        // Kept because it names the classifier state explicitly; NOT cited as separate coverage.
         XCTAssertEqual(
             inference.classifyCount, classifyCountAtBarrier,
             "a turn cancelled at the barrier must not have been classified; the count moved from "
