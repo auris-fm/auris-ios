@@ -19,7 +19,14 @@ class VoiceControlAssembly {
         conditionMonitor: LiveConditionMonitor? = nil,
         capture injectedCapture: (any AudioCaptureSource)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
+        inference injectedInference: (any LfmInference)? = nil,
+        modelManager injectedModelManager: ModelManager? = nil
     ) -> VoiceControlService? {
+||||||| parent of 3a7a55f (test(voice): substitute the ASR backend the engine preloads)
+    /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
+    ///   so the service can be driven through its REAL assembly and start path without opening the
+    ///   microphone. This is the only injection point — everything else is built as the app does.
+    func buildVoiceControlService(capture injectedCapture: (any AudioCaptureSource)? = nil) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
         let conversationManager = CloudConversationManager()
         // Keep the manager's live origin in step with the window that actually opens. The
@@ -99,7 +106,10 @@ class VoiceControlAssembly {
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).
 
-        let intentRouter = LfmIntentRouter()
+        let intentRouter = injectedInference == nil && injectedModelManager == nil
+            ? LfmIntentRouter()
+            : LfmIntentRouter(modelManager: injectedModelManager ?? ModelManager(),
+                              inference: injectedInference ?? LfmNativeInference())
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)
@@ -177,9 +187,16 @@ class VoiceControlAssembly {
         )
     }
 
+    /// TEST-ONLY override for the backend the ENGINE preloads. `nil` keeps the product selector, so
+    /// production is unchanged. The engine's `preloadBackend()` calls `backend.ensureReady()`, so
+    /// the substitution has to reach the engine's `backend`, which this does by replacing the value
+    /// the assembly passes in at construction.
+    static var asrBackendOverrideForTesting: (() -> AsrBackend?)?
+
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
     func resolveAsrBackend(locale: Locale) -> AsrBackend? {
-        AsrBackendSelector().select(locale: locale)
+        if let override = Self.asrBackendOverrideForTesting { return override() }
+        return AsrBackendSelector().select(locale: locale)
     }
 
     private func bundleURL(_ filename: String) -> URL {

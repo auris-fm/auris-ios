@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import podcasts
 
@@ -61,4 +62,49 @@ final class FakeLfmInference: LfmInference {
     }
 
     func release() {}
+}
+
+
+/// A DETERMINISTIC ASR backend: ready immediately, no model download, no ONNX load. Substituted at
+/// the ENGINE's backend so `preloadBackend()`/`ensureReady()` never touches real model assets.
+final class FakeAsrBackend: AsrBackend {
+    var ensureReadyCount = 0
+    private(set) var released = false
+    var requiredModel: ModelSpec { ModelSpec(id: "fake", files: [], targetDir: "fake") }
+    var capabilities: AsrCapabilities {
+        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+    }
+    func ensureReady() async -> Result<Void, Error> {
+        ensureReadyCount += 1
+        return .success(())
+    }
+    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        AsrResult(text: "", detectedLanguage: nil, tokens: nil)
+    }
+    func release() { released = true }
+}
+
+
+/// Seeds a `ModelManager`'s LFM assets so `LfmIntentRouter.ensureReady()` succeeds without the real
+/// model. Readiness goes through the manager, so injecting an inference alone is not enough.
+func seedLfmAssetsForTestingForPositive(manager: ModelManager, labelMap: String = #"{"labels":["cloud_route:"]}"#) {
+    func sha256(_ v: String) -> String {
+        SHA256.hash(data: Data(v.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+    }
+    let dir = manager.lfmDir
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try? "gguf".write(to: manager.lfmModelFile, atomically: true, encoding: .utf8)
+    try? "LFMC".write(to: manager.lfmClassifierFile, atomically: true, encoding: .utf8)
+    try? labelMap.write(to: manager.lfmLabelMapFile, atomically: true, encoding: .utf8)
+    let manifest = """
+    {
+      "version": "2026-06-21-143005",
+      "assets": {
+        "model.gguf": { "bytes": 4, "sha256": "\(sha256("gguf"))", "url": "https://example.test/model.gguf" },
+        "classifier.bin": { "bytes": 4, "sha256": "\(sha256("LFMC"))", "url": "https://example.test/classifier.bin" },
+        "label_map.json": { "bytes": \(labelMap.utf8.count), "sha256": "\(sha256(labelMap))", "url": "https://example.test/label_map.json" }
+      }
+    }
+    """
+    try? manifest.write(to: dir.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
 }

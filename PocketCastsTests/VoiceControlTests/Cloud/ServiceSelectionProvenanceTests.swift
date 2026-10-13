@@ -228,4 +228,32 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "implied .wakeWord, which is what a dropped provenance would fall back to"
         )
     }
+
+    /// The ASR substitution is ON THE LOADING PATH: the engine's `preloadBackend()` calls
+    /// `backend.ensureReady()`, so a substituted backend is invoked during a real service start and
+    /// no real model is loaded. This case is what keeps the seam alive and falsifiable.
+    @MainActor
+    func testTheSubstitutedBackendIsPreloadedByTheServiceStart() async throws {
+        let capture = FakeAudioCapture()
+        let fakeBackend = FakeAsrBackend()
+        VoiceControlAssembly.asrBackendOverrideForTesting = { fakeBackend }
+        defer { VoiceControlAssembly.asrBackendOverrideForTesting = nil }
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if fakeBackend.ensureReadyCount > 0 { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertGreaterThan(
+            fakeBackend.ensureReadyCount, 0,
+            "the engine's preload must invoke the substituted backend; without the override the "
+                + "service crashes on the real ONNX model instead"
+        )
+    }
 }
