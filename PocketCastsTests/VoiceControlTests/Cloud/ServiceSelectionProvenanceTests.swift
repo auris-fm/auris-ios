@@ -448,9 +448,15 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// ESCALATION PROVENANCE: the routing-failure escalation must carry the turn's OWN captured
-    /// provenance. A turn stamped at its callback with a selection must reach the sink carrying THAT
-    /// selection, not whatever the live window would derive by the time the fallback runs.
+    /// ESCALATION PROVENANCE: a turn carrying a caller-supplied selection must reach the
+    /// routing-failure escalation with THAT selection, not whatever the live window would derive by
+    /// the time the fallback dispatches.
+    ///
+    /// WHAT THIS DRIVES, stated so it is not mistaken for more: this calls `handleRoutingInput`
+    /// DIRECTLY with an explicit `selection:`. It does NOT exercise an installed callback, nor the
+    /// closure in `VoiceControlService` that stamps `capturedSelection` — so it shows the escalation
+    /// CARRIES a supplied selection through to the sink, not that the installed callback SUPPLIES the
+    /// right one. (The installed closure's stamping is the `c6654fa49` caller-level control's subject.)
     ///
     /// `preparedObserver` is the observable seam: it fires only for a turn the sink ADMITS, so its
     /// value carries the intent's provenance as the sink received it.
@@ -537,6 +543,75 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             carried, .wakeWord,
             "the escalated turn must carry the selection its callback stamped — NOT the live "
                 + "derivation, which for an ACTIVE window would say .followUp"
+        )
+    }
+
+    /// ESCALATION PROVENANCE, through the INSTALLED callback: a turn the service's own
+    /// `asrEngine.onRoutingInput` closure stamps must reach the routing-failure escalation carrying
+    /// THAT selection, not whatever the live window would derive by the time the fallback dispatches.
+    ///
+    /// Driven through `installed?(...)` rather than by calling `handleRoutingInput` directly, so the
+    /// service's capture-before-the-serial-Task is inside the case rather than assumed.
+    @MainActor
+    func testTheInstalledCallbackEscalationCarriesItsOwnProvenance() async throws {
+        let capture = FakeAudioCapture()
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "no_match:"     // routing fails, so the escalation path is taken
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        let modelManager = ModelManager(storageDir: tempDir)
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let fakeBackend = FakeAsrBackend()
+
+        let suite = "escalation_installed_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                ).client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForRouter(service: service)
+
+        // A window is OPEN, so the sink's provider would derive `.followUp`. Stamping `.wakeWord`
+        // makes the two DISAGREE: only genuine carriage can deliver the stamped value.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let installed = service.asrEngineForTesting.onRoutingInput
+        XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
+
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        installed?(IntentRoutingInput.english(
+            transcript: "what did the host mean by that remark",
+            selection: .wakeWord
+        ))
+
+        var delivered: CloudConversationSelection?
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            delivered = sink.lastSelectionForTesting
+            if delivered != nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        XCTAssertEqual(
+            delivered, .wakeWord,
+            "the escalated turn must carry the selection the INSTALLED callback stamped — not the "
+                + "live derivation, which for an active window would say .followUp"
         )
     }
 }
