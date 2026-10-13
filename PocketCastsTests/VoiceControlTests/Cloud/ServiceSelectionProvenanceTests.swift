@@ -368,7 +368,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
         try await waitForRouter(service: service)
 
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        // REQUEST-SCOPED: the observer captures the identity prepared for THIS dispatch, rather
+        // than reading a sink-wide "last prepared" slot afterwards.
+        var preparedForThisTurn: CloudPreparedConversation?
+        service.executorForTesting.preparedObserverForTesting = { prepared in
+            preparedForThisTurn = prepared
+        }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
 
@@ -407,7 +412,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let requestId = try XCTUnwrap(body["request_id"] as? String, "the frame carries a request_id")
         XCTAssertNotNil(UUID(uuidString: requestId), "request_id is client-assigned")
 
-        let prepared = await MainActor.run { sink.lastPreparedForTesting }
+        let prepared = preparedForThisTurn
         let preparedRequestId = try XCTUnwrap(
             prepared?.requestId,
             "the sink must have prepared a conversation for this turn; without it there is nothing "

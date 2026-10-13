@@ -12,7 +12,8 @@ protocol VoiceCloudRouteSink {
         tier: CloudTier,
         context: PlaybackContext,
         origin: Int?,
-        selection: CloudConversationSelection?
+        selection: CloudConversationSelection?,
+        preparedObserver: CloudRouteSink.PreparedObserver?
     ) async -> CloudRouteResult
 
 

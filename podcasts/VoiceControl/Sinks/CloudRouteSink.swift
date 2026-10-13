@@ -45,9 +45,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Necessary because the two are indistinguishable from inside the sink when grace is active.
     @MainActor private(set) var lastSelectionForTesting: CloudConversationSelection?
 
-    /// The conversation identity the sink PREPARED for the last turn, so a case can compare the
-    /// SUBMITTED frame against the prepared identity rather than only checking UUID syntax.
-    @MainActor private(set) var lastPreparedForTesting: CloudPreparedConversation?
+    /// REQUEST-SCOPED preparation observer: the dispatch supplies it, so the prepared identity is
+    /// captured FOR THAT DISPATCH rather than read from a sink-wide "last" slot. A shared slot is a
+    /// last-value property: with more than one turn on a sink it reports whichever ran most
+    /// recently, which is the wrong subject for an identity comparison.
+    typealias PreparedObserver = @MainActor (CloudPreparedConversation) -> Void
 
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
@@ -214,7 +216,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         tier: CloudTier,
         context: PlaybackContext,
         origin: Int?,
-        selection: CloudConversationSelection?
+        selection: CloudConversationSelection?,
+        preparedObserver: PreparedObserver? = nil
     ) async -> CloudRouteResult {
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -251,7 +254,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }
             conversation = prepared
-            lastPreparedForTesting = prepared
+            preparedObserver?(prepared)
         }
 
         let client = clientFactory()

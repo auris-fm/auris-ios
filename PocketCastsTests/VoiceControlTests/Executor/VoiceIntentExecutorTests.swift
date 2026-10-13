@@ -560,7 +560,8 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
 
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
-        selection: CloudConversationSelection?
+        selection: CloudConversationSelection?,
+        preparedObserver: CloudRouteSink.PreparedObserver?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
         lastRequest = request

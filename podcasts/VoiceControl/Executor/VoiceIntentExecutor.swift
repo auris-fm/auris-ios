@@ -127,6 +127,10 @@ class VoiceIntentExecutor {
     /// The sink this executor routes cloud playback through, so a test can reach the real
     /// producer the app built rather than constructing its own.
     var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
+
+    /// TEST-ONLY: forwarded to the sink for the NEXT dispatch, so a case observes the identity
+    /// prepared for ITS turn rather than a sink-wide "last prepared" value.
+    var preparedObserverForTesting: CloudRouteSink.PreparedObserver?
     private let playbackContextProvider: PlaybackContextProvider
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics?
@@ -190,7 +194,8 @@ class VoiceIntentExecutor {
                 // The captured origin and selection, not live ones: the turn belongs to the
                 // window and the selection it was issued under.
                 origin: cr.generation,
-                selection: cr.selection
+                selection: cr.selection,
+                preparedObserver: preparedObserverForTesting
             )
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the
