@@ -205,50 +205,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return nil
     }
 
-    /// Kept for the seam but unreachable: the body above refuses before looking anything up.
-    private func retryPreparedRequestUnreachable(requestId: String) async -> CloudRouteResult? {
-        // NOT AN ACCESSIBLE REPLAY PATH AFTER POSSIBLE SUBMISSION (@spec's constraint).
-        //
-        // Two conditions stand between a caller and a re-drive, and both must hold: the request must
-        // still be RETAINED (retired on use, dropped at session end), and its captured origin must
-        // equal the LIVE origin. A request prepared under a still-current window is therefore the
-        // only thing this can reach — and the caller is responsible for establishing eligibility,
-        // which today NO producer can, because this transport cannot report a frame as provably
-        // never submitted.
-        //
-        // So the API is deliberate but currently unreachable-in-practice: retaining it preserves the
-        // seam for the producer that does not yet exist, and it cannot be used to replay a turn
-        // whose window has moved on.
-        // Refuse BEFORE `route()`, which is where `activeTurn.cancel()` and the output
-        // registration happen: an absent or retired retry must not disturb a successor. Retiring
-        // the entry on use also stops a second retry of the same turn re-driving it again.
-        guard let prepared = preparedRequests.removeValue(forKey: requestId) else { return nil }
-        // A retired origin cannot re-drive: the request belonged to a window that is gone, and
-        // re-driving it would attribute the turn to whatever window is current now.
-        // FAIL CLOSED on an unestablished origin. An earlier version skipped this guard when the
-        // captured origin was nil, which means "we do not know what window this belonged to" was
-        // treated as permission to re-drive it — the opposite reading. Liveness must be
-        // ESTABLISHED, and an unknown live origin cannot establish anything.
-        guard let requestOrigin = prepared.origin,
-              let liveOrigin = liveOriginForRetry(),
-              requestOrigin == liveOrigin
-        else { return nil }
-        // Re-enters the single-attempt path with the RETAINED envelope, so the ids on the wire are
-        // the originals by construction. Passing the retained turn through means the retry cannot
-        // mint a fresh id even by mistake.
-        // The CAPTURED origin, not nil: a retry belongs to the window its request was prepared
-        // under, and passing nil would drop it to the sink's live-state fallback — reintroducing
-        // the very attribution error the captured origin exists to prevent.
-        return await route(
-            request: prepared.request,
-            tier: prepared.tier,                        // retained, not substituted
-            context: prepared.playbackContext,          // retained, not `absent`
-            origin: prepared.origin,
-            selection: prepared.selection,
-            retainedTurn: prepared.turn   // retained: same request_id, same conversation id
-        )
-    }
-
     /// Cancellation handle for one logical turn.
     final class CloudTurnToken {
         private let lock = NSLock()

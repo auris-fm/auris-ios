@@ -211,24 +211,12 @@ class VoiceIntentExecutor {
         return nil
     }
 
-    /// Kept for the seam but unreachable: the body above refuses before looking anything up.
-    private func retryHeldCloudRequestUnreachable(requestId: String) async -> CloudRouteResult? {
-        guard let held = cloudPreparations[requestId] else { return nil }
-        let result = await cloudRouteSink.retryLastPreparedRequest(requestId: held.requestId)
-        // COMPARE-AND-CLEAR. The await above is a suspension point, so a successor can prepare
-        // again under the same key while this call is in flight; clearing unconditionally would
-        // then drop THEIR handle and leave a later retry naming something that no longer exists.
-        // Clearing only when the entry is still the one this call took is what makes the removal
-        // belong to the action that consumed it.
-        if cloudPreparations[requestId] == held {
-            cloudPreparations[requestId] = nil
-            cloudPreparationRequests[requestId] = nil
-        }
-        return result
-    }
-
-    /// Drops the held handle AND the sink's retained request for it, called when the owning
-    /// session ends.
+    /// Drops every held preparation, called when the owning session ends.
+    ///
+    /// Still live and still meaningful even though nothing can retry: the HELD HANDLES are state a
+    /// caller reads (`heldCloudPreparation(forRequestId:)`), so an ended session must not leave
+    /// stale handles readable. This is lifecycle cleanup, not a replay path — it removes state and
+    /// reaches no transport.
     func invalidateHeldCloudRequest() {
         for (_, held) in cloudPreparations {
             cloudRouteSink.invalidateRetained(held)
