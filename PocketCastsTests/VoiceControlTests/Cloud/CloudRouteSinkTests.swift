@@ -1590,8 +1590,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
         XCTAssertEqual(b.outcome, .completed, "turn B completes")
 
-        // Each observer saw its own turn's prepared identity and they differ — which rules out a
-        // single cell read only at the END. It does NOT rule out a shared slot read per dispatch.
+        // The two observations DIFFER, which proves they are distinct observations. It does NOT
+        // prove attribution — that each observer received ITS OWN turn's value — and it does not
+        // rule out a shared slot read per dispatch. This sequential arrangement does not test overlap.
         let aValue = try XCTUnwrap(preparedA, "A's observer must have captured A's prepared identity")
         let bValue = try XCTUnwrap(preparedB, "B's observer must have captured B's prepared identity")
         XCTAssertNotEqual(
