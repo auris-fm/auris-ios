@@ -56,7 +56,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
-        playback.positionMs = 500_000
+        playback.setPositionMs(500_000)
 
         let response = await makeSink().routeToCloud(
             request: "What did she mean?",
@@ -154,7 +154,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [500.0: 510.0]
-        playback.positionMs = 900_000
+        playback.setPositionMs(900_000)
 
         let response = await makeSink().routeToCloud(
             request: "play that",
@@ -181,7 +181,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        playback.positionMs = 120_000
+        playback.setPositionMs(120_000)
 
         let response = await makeSink().routeToCloud(
             request: "forward 15 seconds",
@@ -204,7 +204,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        playback.positionMs = 120_000
+        playback.setPositionMs(120_000)
 
         _ = await makeSink().routeToCloud(
             request: "go back",
@@ -225,7 +225,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        playback.positionMs = 120_000
+        playback.setPositionMs(120_000)
 
         _ = await makeSink().routeToCloud(
             request: "skip forward",
@@ -268,7 +268,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
-        playback.positionMs = 50_000
+        playback.setPositionMs(50_000)
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
 
@@ -451,7 +451,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testStopQuoteWithoutPlayQuoteInLaterTurnDoesNotUseStalePosition() async {
         // RecordingFingerprintMapper is a struct — configure it before the sink copies it.
         mapper.playbackSecondsForReference = [500.0: 510.0]
-        playback.positionMs = 900_000
+        playback.setPositionMs(900_000)
         let sink = makeSink()
 
         // Turn 1 captures a pre-quote position via play_quote.
@@ -468,7 +468,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
 
         // Turn 2 (same sink): stop_quote without play_quote must be a no-op seek-wise.
-        playback.calls.removeAll()
+        playback.clearCalls()
         self.pendingFixture = 
             """
             event: action
@@ -639,41 +639,101 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 }
 
 
-private final class RecordingPlaybackSink: VoicePlaybackSink {
+/// A playback double whose reads and writes are SYNCHRONIZED.
+///
+/// The sink calls it from its own serial task while a test reads it from the test task, so the
+/// unlocked `var calls` / `var isPlaying` this replaces were a data race: a resume could land
+/// after a read and the same assertion then saw 1 or 0 across identical runs. Everything below is
+/// behind one lock, and `awaitResume()` waits on the lock rather than polling a copied array, so a
+/// test observes the state the double actually holds.
+private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
     /// Host playing at the moment the turn reads it. `pause()` and `resume()`
     /// keep it true to playback: a constant `true` hides a lost hold, because a
     /// turn that inherits an outstanding pause would still read "playing".
-    private(set) var isPlaying = true
+    private let lock = NSLock()
+    private var storedIsPlaying = true
+    private var storedCalls: [Call] = []
+    private var storedPositionMs: Int64 = 0
+    /// Signalled each time `resume()` records a call, so a test can AWAIT restoration rather than
+    /// poll a snapshot that may predate it.
+    private let resumeLatch = NSCondition()
+
+    var isPlaying: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return storedIsPlaying
+    }
+
     enum Call: Equatable {
         case pause, resume, seekRelative(Int?, SeekDirection), seekTo(Int), nextEpisode
     }
 
     /// Models the state before a turn: a user who paused before speaking, or a
     /// player that is running. `pause()`/`resume()` maintain it thereafter.
-    func setPlaying(_ playing: Bool) { isPlaying = playing }
+    func setPlaying(_ playing: Bool) {
+        lock.lock(); storedIsPlaying = playing; lock.unlock()
+    }
 
-    var calls: [Call] = []
-    var positionMs: Int64 = 0
+    var calls: [Call] {
+        lock.lock(); defer { lock.unlock() }
+        return storedCalls
+    }
+
+    var positionMs: Int64 {
+        lock.lock(); defer { lock.unlock() }
+        return storedPositionMs
+    }
+
+    func setPositionMs(_ value: Int64) {
+        lock.lock(); storedPositionMs = value; lock.unlock()
+    }
+
+    func clearCalls() {
+        lock.lock(); storedCalls = []; lock.unlock()
+    }
+
+    /// Waits until a resume has been RECORDED, or the deadline passes. This is the observable
+    /// settled signal: it reads the double's own synchronised state instead of polling a copy.
+    @discardableResult
+    func awaitResume(timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            lock.lock()
+            let seen = storedCalls.contains(.resume)
+            lock.unlock()
+            if seen { return true }
+            usleep(2_000)
+        }
+        return false
+    }
 
     func pause() -> VoiceResponse {
-        calls.append(.pause)
-        isPlaying = false
+        lock.lock()
+        storedCalls.append(.pause)
+        storedIsPlaying = false
+        lock.unlock()
         return .earcon(.success)
     }
 
     func resume() -> VoiceResponse {
-        calls.append(.resume)
-        isPlaying = true
+        lock.lock()
+        storedCalls.append(.resume)
+        storedIsPlaying = true
+        lock.unlock()
+        resumeLatch.broadcast()
         return .silent
     }
 
+    private func record(_ call: Call) {
+        lock.lock(); storedCalls.append(call); lock.unlock()
+    }
+
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
-        calls.append(.seekRelative(deltaSeconds, direction))
+        record(.seekRelative(deltaSeconds, direction))
         return .silent
     }
 
     func seekTo(positionSeconds: Int) -> VoiceResponse {
-        calls.append(.seekTo(positionSeconds))
+        record(.seekTo(positionSeconds))
         return .silent
     }
 
@@ -683,12 +743,12 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
         let resolved = positionSeconds < 0
             ? max(episodeDurationSeconds + positionSeconds, 0)
             : positionSeconds
-        calls.append(.seekTo(resolved))
+        record(.seekTo(resolved))
         return .silent
     }
 
     func nextEpisode() -> VoiceResponse {
-        calls.append(.nextEpisode)
+        record(.nextEpisode)
         return .silent
     }
 }
@@ -1185,8 +1245,19 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         // THE OUTPUT ASSERTION: the successor's audio actually reached the player and drained,
         // so the stale refusal neither suppressed nor discarded the live turn's output.
-        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
-        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
+        //
+        // The drain is observed with a BOUNDED WAIT rather than a single read: playback drains on
+        // the player's own task, so a read taken straight after completion can still see the last
+        // frames and the case then failed intermittently with no code change.
+        var enqueued: Int?
+        var pending: Bool?
+        let drainDeadline = Date().addingTimeInterval(5)
+        while Date() < drainDeadline {
+            enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
+            pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
+            if (enqueued ?? 0) > 0 && pending == false { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         // SCOPE: DELIVERY, not rendering — see the note in the positive control above. What these
         // two facts establish together is that the successor's audio was still handed to the
         // player after the stale refusal, and that the buffer was not left holding it.
