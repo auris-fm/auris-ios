@@ -28,6 +28,11 @@ class VoiceControlService: ObservableObject {
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics
+    /// Whether the app is playing through the shared `AVAudioSession`. Used so a
+    /// failed/cancelled acquisition never deactivates the session playback owns.
+    /// `AVAudioSession` exposes no active-state query and the category is not an
+    /// activity signal, so playback state is the reliable in-use signal.
+    private let isPlaybackActive: () -> Bool
 
     private var latestStageTiming: PipelineStageTiming?
     private var latestRouterMetrics: RouterClassificationMetrics?
@@ -75,7 +80,8 @@ class VoiceControlService: ObservableObject {
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
-        analytics: VoiceAnalytics
+        analytics: VoiceAnalytics,
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isPlaying }
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -88,6 +94,7 @@ class VoiceControlService: ObservableObject {
         self.audioRenderer = audioRenderer
         self.gracePeriodSignal = gracePeriodSignal
         self.analytics = analytics
+        self.isPlaybackActive = isPlaybackActive
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -502,7 +509,11 @@ class VoiceControlService: ObservableObject {
             // Cancelled before it starts: never touch the audio session, so a
             // blocked/`Off` posture cannot retain an input route.
             guard !Task.isCancelled else { return }
-            let result = await self.routeMonitor.acquireExternalInput()
+            // Playback belongs to the same shared session; the gate context may
+            // also already say playback is active. Either is enough to forbid
+            // deactivation on failure.
+            let playbackActive = self.isPlaybackActive() || posture.context == .playbackActive || posture.context == .both
+            let result = await self.routeMonitor.acquireExternalInput(playbackActive: playbackActive)
             guard !Task.isCancelled, self.acquisitionGeneration == generation else { return }
             self.acquisitionTask = nil
             guard result != .acquired, let reason = result.failureReason else { return }
