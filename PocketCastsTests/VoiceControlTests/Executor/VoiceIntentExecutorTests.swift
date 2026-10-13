@@ -345,18 +345,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
 
 
-    /// The ownership token makes two preparations of the SAME request distinguishable, which is
-    /// what the compare-and-clear needs and a request id alone cannot provide.
-    func testTwoPreparationsOfTheSameRequestAreNotEqual() {
-        let first = CloudRouteSink.RetainedPreparation(requestId: "req-A")
-        let second = CloudRouteSink.RetainedPreparation(requestId: "req-A")
-        XCTAssertEqual(first.requestId, second.requestId, "the logical id is stable")
-        XCTAssertNotEqual(
-            first, second,
-            "two preparations of the same request compared equal, so compare-and-clear cannot "
-                + "tell the entry it took from a later one"
-        )
-    }
+
 
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)

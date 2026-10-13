@@ -103,34 +103,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// double-restore the pause.
     private var activeTurn: CloudTurnToken?
 
-    /// The last prepared logical request, retained so an EXPLICIT retry can re-drive it with the
-    /// same ids. Retaining the envelope rather than rebuilding it is what makes identity
-    /// preservation structural: a retry has no other source for its `request_id`.
-    /// A handle to one prepared logical request, returned to the OWNER so a retry can be
-    /// request-scoped rather than "the last thing prepared".
-    ///
-    /// Holding the id (rather than letting the caller reach for whatever was prepared most
-    /// recently) is what stops an older retry selecting a successor. The owning lifecycle
-    /// is identity only.
-    /// refuses rather than re-driving something else.
-    struct RetainedPreparation: Equatable {
-        /// The STABLE logical/wire request id — preserved across a retry.
-        let requestId: String
-        /// A distinct OWNERSHIP TOKEN for THIS preparation.
-        ///
-        /// `requestId` alone is not enough to identify a preparation: two preparations can share a
-        /// logical id (a fresh attempt at the same turn), and then equality on the id cannot tell
-        /// them apart — so a compare-and-clear would mistake the second for the first and drop a
-        /// handle that belongs to a later preparation. The token is what makes "the entry I took"
-        /// distinguishable from "an entry with the same request id".
-        let ownershipToken: UUID
-
-        init(requestId: String, ownershipToken: UUID = UUID()) {
-            self.requestId = requestId
-            self.ownershipToken = ownershipToken
-        }
-    }
-
 
 
 
@@ -220,30 +192,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    /// - Parameter retainedTurn: a previously prepared logical request to re-drive. Passed ONLY by
-    ///   the originals rather than freshly
-    ///   minted — the identity requirement is then structural, not a convention each caller must
-    ///   remember.
     func routeToCloud(
         request: String,
         tier: CloudTier,
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?
-    ) async -> CloudRouteResult {
-        await route(request: request, tier: tier, context: context, origin: origin,
-                    selection: selection, retainedTurn: nil)
-    }
-
-    /// The shared body. `retainedTurn`, when present, is a previously prepared logical request
-    /// being re-driven, so its ids are the originals rather than freshly minted.
-    private func route(
-        request: String,
-        tier: CloudTier,
-        context: PlaybackContext,
-        origin: Int?,
-        selection: CloudConversationSelection?,
-        retainedTurn: CloudTurnEnvelope?
     ) async -> CloudRouteResult {
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -282,12 +236,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // token, action, result, done and error in one place, and a parallel path would diverge
         // from it the moment either changed.
         let conversation: CloudPreparedConversation
-        // The handle for THIS call's preparation, returned with the outcome. Nil on a re-drive,
-        // which prepares nothing.
-        var preparationHandle: RetainedPreparation?
-        if let retainedTurn, let retainedConversation = retainedTurn.conversation {
-            conversation = retainedConversation
-        } else {
+        do {
             guard let prepared = conversationManager.prepare(
                 // The captured selection when the caller supplied one; the provider is the
                 // fallback for callers that did not, which is the late-reading behaviour this
@@ -298,7 +247,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }
             conversation = prepared
-            preparationHandle = RetainedPreparation(requestId: prepared.requestId)
         }
 
         let client = clientFactory()
@@ -310,7 +258,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         activeTurn?.cancel()
         activeTurn = turnToken
 
-        let turn = retainedTurn ?? CloudTurnEnvelope.make(
+        let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
             recentConversation: recentConversationProvider(),
@@ -328,7 +276,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // possibly-submitted request left on the books is exactly the thing a replay path would
         // find. With no eligible producer, the honest state is to retain nothing.
         //
-        // The `RetainedPreparation` handle still rides on the result, because the ownership-token
         // mechanism is what the caller uses to identify a turn; it simply has no server-side entry
         // to reach any more.
 
