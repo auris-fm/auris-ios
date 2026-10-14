@@ -10,6 +10,10 @@ import Foundation
 /// `CloudTurnEnvelope.make`, not a server response. Acceptance recall must be judged on the INCOMING
 /// response, so this record is produced at the transport boundary where `CloudRouteEvent`s are parsed.
 struct CloudAcceptanceRecord: Equatable {
+    /// The REQUEST identity of the submitted turn, carried from the turn the route loop actually
+    /// submitted. A fresh recorder alone does not establish request identity: without this field two
+    /// steps' records are indistinguishable, so recall could be judged against the wrong turn.
+    let requestId: String?
     /// The conversation this turn belongs to.
     let conversationId: String?
     /// Text the SERVER sent for this turn (the `token` events), accumulated for this turn only.
@@ -29,8 +33,12 @@ struct CloudAcceptanceRecord: Equatable {
         private var text = ""
         private var terminal: Terminal?
         private let conversationId: String?
+        private let requestId: String?
 
-        init(conversationId: String?) { self.conversationId = conversationId }
+        init(requestId: String? = nil, conversationId: String?) {
+            self.requestId = requestId
+            self.conversationId = conversationId
+        }
 
         /// Called at the transport boundary for every event of THIS turn.
         func observe(_ event: CloudRouteEvent) {
@@ -51,7 +59,12 @@ struct CloudAcceptanceRecord: Equatable {
         /// outcome rather than a success.
         func record() -> CloudAcceptanceRecord {
             lock.lock(); defer { lock.unlock() }
-            return CloudAcceptanceRecord(conversationId: conversationId, responseText: text, terminal: terminal)
+            return CloudAcceptanceRecord(
+                requestId: requestId,
+                conversationId: conversationId,
+                responseText: text,
+                terminal: terminal
+            )
         }
     }
 }

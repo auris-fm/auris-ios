@@ -123,6 +123,35 @@ final class CloudRouteClient {
         }
     }
 
+    /// OPT-IN ACCEPTANCE COLLECTION. It consumes the route stream for ONE controlled acceptance turn and
+    /// emits a single `CloudAcceptanceRecord` carrying only the allowlisted fields — the turn's request
+    /// id, its conversation id, the server's response text and the terminal outcome — with the request
+    /// id taken from the TURN THAT WAS SUBMITTED, so the record can be matched to its own incoming
+    /// events. It is deliberately not a general traffic capture: a caller opts in per turn, for the
+    /// benign acceptance turns only, and nothing outside the allowlist is exported.
+    func collectAcceptance(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        let recorder = CloudAcceptanceRecord.Recorder(
+            requestId: turn.requestId,
+            conversationId: turn.conversation?.conversationId
+        )
+        let upstream = route(request: request, context: context, turn: turn)
+        let stream = AsyncStream<CloudRouteEvent> { continuation in
+            let task = Task {
+                for await event in upstream {
+                    recorder.observe(event)
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        return (stream, { recorder.record() })
+    }
+
     // MARK: - WebSocket implementation
 
     /// Drives the turn over the WebSocket and always terminates the stream —
