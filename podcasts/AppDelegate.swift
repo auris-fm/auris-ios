@@ -245,8 +245,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // writes no export at all.
         do {
             try FileManager.default.removeItem(at: url)
-        } catch let error as NSError where error.code == NSFileNoSuchFileError {
-            // Expected: there was no prior export.
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            // Expected: there was no prior export. THE DOMAIN IS CHECKED TOO: matching the code alone
+            // would treat any other domain's error with the same numeric code as a not-found, and the
+            // run would proceed believing no stale file exists.
         } catch {
             FileLog.shared.addMessage("[ScratchAcceptance] refusing to run: prior export could not be removed (\(error.localizedDescription))")
             return
