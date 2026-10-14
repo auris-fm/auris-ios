@@ -50,11 +50,27 @@ enum CloudAcceptanceHarness {
         context: CloudRouteContext
     ) async -> Export {
         func step(_ text: String, _ conversationId: String, _ mode: String) async -> CloudAcceptanceConsumer.StepOutcome {
-            let turn = CloudTurnEnvelope.make(
+            // The request_id on the WIRE is `turn.conversation?.requestId ?? turn.requestId`, and the
+            // conversation's value wins when present. An EMPTY string is present, so it was sent as
+            // `request_id = ""` — which is not a UUID, and the server refused it with exactly that
+            // message. The conversation must carry a real UUID, and it must be the SAME one the envelope
+            // minted so the retry identity stays stable.
+            let envelope = CloudTurnEnvelope.make(
                 capabilities: [],
                 routeHint: nil,
                 recentConversation: [],
-                conversation: CloudPreparedConversation(requestId: "", conversationId: conversationId, mode: mode)
+                conversation: nil
+            )
+            let turn = CloudTurnEnvelope(
+                requestId: envelope.requestId,
+                capabilities: [],
+                routeHint: nil,
+                recentConversation: [],
+                conversation: CloudPreparedConversation(
+                    requestId: envelope.requestId,
+                    conversationId: conversationId,
+                    mode: mode
+                )
             )
             let (stream, record) = client.collectAcceptance(request: text, context: context, turn: turn)
             for await _ in stream {}

@@ -30,7 +30,7 @@ struct CloudAcceptanceRun {
                 capabilities: [],
                 routeHint: nil,
                 recentConversation: [],
-                conversation: CloudPreparedConversation(requestId: "", conversationId: conversationId, mode: mode)
+                conversation: CloudPreparedConversation(requestId: UUID().uuidString, conversationId: conversationId, mode: mode)
             )
         }
         let a1 = submit("please remember this: \(nonce)", envelope(conversationA, mode: "create"))
