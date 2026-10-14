@@ -84,10 +84,9 @@ final class EpisodeOutputTap {
             // FileLog are not safe here, which is why the copy is the only work done.
             self?.capture(buffer, renderedAt: when, producer: admitted)
         }
-        installedClosures.append(closure)
-        if installedClosures.count > Self.closureHistoryLimit {
-            installedClosures.removeFirst(installedClosures.count - Self.closureHistoryLimit)
-        }
+        // Test-only observer, nil in production: the TEST retains closures it wants to invoke;
+        // this object keeps no history.
+        onInstalledClosure(closure)
         node.installTap(
             onBus: connection.bus,
             bufferSize: 4096,
@@ -101,18 +100,10 @@ final class EpisodeOutputTap {
     /// PRIOR install's closure after a reinstall — the seam that makes the capture itself
     /// observable: a closure that read the current identity at fire time would acquire the new
     /// incarnation here, where the immutable capture submits its own.
-    /// BOUNDED: only the most recent `closureHistoryLimit` installs are retained, so the seam
-    /// cannot accumulate closures indefinitely in production. Older installs' closures are
-    /// dropped as new ones arrive.
-    private var installedClosures: [(AVAudioPCMBuffer, AVAudioTime) -> Void] = []
-    private static let closureHistoryLimit = 4
-
-    /// Invokes the closure captured by the install at `index` (0 = the first install), exactly
-    /// as the graph would. The closure runs with whatever it captured at its own install time.
-    func invokeInstalledClosureForTesting(at index: Int, _ buffer: AVAudioPCMBuffer, at when: AVAudioTime) {
-        guard installedClosures.indices.contains(index) else { return }
-        installedClosures[index](buffer, when)
-    }
+    /// TEST-ONLY observer: receives each install's tap closure at install time. A test retains
+    /// the closures it wants to invoke later; production uses the no-op default and stores
+    /// nothing, so no closure history exists outside tests.
+    var onInstalledClosure: (@escaping (AVAudioPCMBuffer, AVAudioTime) -> Void) -> Void = { _ in }
 
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
     /// Read from the ENGINE rather than from a named unit, so a chain that changes — an added or
@@ -125,16 +116,31 @@ final class EpisodeOutputTap {
     /// connected. The bus is carried because it is the connection's own: tapping bus 0 regardless
     /// would miss a feeder whose output reaches the output node on another bus.
     static func outputFeederConnection(of engine: AVAudioEngine) -> (node: AVAudioNode, bus: AVAudioNodeBus)? {
-        // A feeder output bus can feed ANY of the output node's input buses, so every input bus is
-        // searched rather than assuming bus 0.
-        for inputBus in 0..<engine.outputNode.numberOfInputs {
-            guard let point = engine.inputConnectionPoint(for: engine.outputNode, inputBus: inputBus)
-            else { continue }
-            // Guard the self-reference: tapping the output node is the placement the SDK advises
-            // against, and an engine reporting it must not be mistaken for a valid feeder.
-            guard let node = point.node, node !== engine.outputNode else { continue }
-            // The connection point's bus is the FEEDER's OUTPUT bus; that is what a tap needs.
-            return (node, point.bus)
+        // The lookup is a parameter so a test can supply a controlled connection point whose bus
+        // is nonzero; production passes the engine's own.
+        let outputNode = engine.outputNode
+        return outputFeederConnection(inputBusCount: outputNode.numberOfInputs) { inputBus in
+            engine.inputConnectionPoint(for: outputNode, inputBus: inputBus).flatMap { point in
+                // Guard the self-reference: tapping the output node is the placement the SDK
+                // advises against, and an engine reporting it must not be mistaken for a feeder.
+                guard let node = point.node, node !== outputNode else { return nil }
+                return (node: node, bus: point.bus)
+            }
+        }
+    }
+
+    /// The core of the search, parameterized over the connection-point lookup. A feeder output
+    /// bus can feed ANY of the output node's input buses, so every input bus is searched rather
+    /// than assuming bus 0.
+    static func outputFeederConnection(
+        inputBusCount: Int,
+        connectionPoint: (AVAudioNodeBus) -> (node: AVAudioNode, bus: AVAudioNodeBus)?
+    ) -> (node: AVAudioNode, bus: AVAudioNodeBus)? {
+        for inputBus in 0..<inputBusCount {
+            guard let point = connectionPoint(inputBus) else { continue }
+            // The connection point's bus is the FEEDER's OUTPUT bus; that is what a tap needs,
+            // and it is carried as reported rather than assumed to be zero.
+            return (point.node, point.bus)
         }
         return nil
     }

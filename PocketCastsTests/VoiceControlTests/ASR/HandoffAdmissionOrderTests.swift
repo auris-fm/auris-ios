@@ -358,6 +358,36 @@ final class HeldOldCallbackIdentityTests: XCTestCase {
 /// resolved connection carries the bus the feeder reports, not an assumed zero.
 final class FeederBusDiscoveryTests: XCTestCase {
 
+    /// The CONTROLLED nonzero case: the lookup SUPPLIES a connection point whose feeder-output
+    /// bus is nonzero, and the search must carry that bus as reported. This is what distinguishes
+    /// "found the point's bus" from "assumed zero" — the real graph cannot supply a nonzero bus,
+    /// so reading it proves nothing about the bus handling.
+    func testNonzeroFeederBusIsCarriedAsReported() throws {
+        // The feeder is a REAL engine's node: constructing an AVAudioNode subclass standalone
+        // segfaults on this simulator runtime (measured), so the node must come from a live
+        // engine. The BUS is the control variable: input bus 0 of output is fed by the feeder's
+        // OUTPUT BUS 3.
+        let engine = AVAudioEngine()
+        let feeder = engine.mainMixerNode
+        let resolved = try XCTUnwrap(
+            EpisodeOutputTap.outputFeederConnection(inputBusCount: 1) { outputInputBus in
+                outputInputBus == 0 ? (node: feeder, bus: 3) : nil
+            },
+            "the injected connection point was not found"
+        )
+        XCTAssertEqual(resolved.node, feeder, "the wrong node was resolved")
+        XCTAssertEqual(resolved.bus, 3, "the feeder's reported bus was not carried — it was replaced with zero")
+
+        // And a point on a LATER input bus is still found by the search.
+        let later = try XCTUnwrap(
+            EpisodeOutputTap.outputFeederConnection(inputBusCount: 4) { outputInputBus in
+                outputInputBus == 2 ? (node: feeder, bus: 5) : nil
+            },
+            "a feeder on a later input bus was not found by the search"
+        )
+        XCTAssertEqual(later.bus, 5, "the later bus's reported feeder-output bus was not carried")
+    }
+
     func testFeederConnectionReportsTheFeedersOwnBus() throws {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
@@ -429,6 +459,15 @@ final class FeederBusDiscoveryTests: XCTestCase {
 /// closure is invoked AFTER a reinstall: if it acquired the new identity at fire time, its
 /// submission would pass the admission check and its audio would enter the reference under the
 /// wrong producer.
+/// Retains install closures for the capture test. A box class rather than a captured local:
+/// the compiler crashed type-checking the local-capture form.
+final class InstalledClosureBox {
+    var items: [(AVAudioPCMBuffer, AVAudioTime) -> Void] = []
+    func add(_ closure: @escaping (AVAudioPCMBuffer, AVAudioTime) -> Void) {
+        items.append(closure)
+    }
+}
+
 final class InstalledClosureCaptureTests: XCTestCase {
 
     private func toneBuffer(frames: Int = 512) -> AVAudioPCMBuffer {
@@ -454,6 +493,11 @@ final class InstalledClosureCaptureTests: XCTestCase {
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = handoff
 
+        // THE TEST retains the closures: the observer hands each install's closure over and the
+        // object itself stores nothing.
+        let box = InstalledClosureBox()
+        tap.onInstalledClosure = { closure in box.items.append(closure) }
+
         // The FIRST install: its closure captures the first identity.
         tap.install()
         let first = tap.producerIdentity
@@ -463,12 +507,11 @@ final class InstalledClosureCaptureTests: XCTestCase {
         tap.install()
         let second = tap.producerIdentity
         XCTAssertNotEqual(second, first, "the reinstall did not rotate the identity")
+        XCTAssertEqual(box.items.count, 2, "the observer did not see one closure per install")
 
-        // Invoke the OLD closure — index 0, the one the FIRST install captured — as the graph
-        // would. Reinstalling retained it; the graph itself may still fire it once.
-        tap.invokeInstalledClosureForTesting(
-            at: 0, toneBuffer(), at: AVAudioTime(sampleTime: 0, atRate: 44_100)
-        )
+        // Invoke the OLD closure — items[0], the one the FIRST install captured — as the graph
+        // would.
+        box.items[0](toneBuffer(), AVAudioTime(sampleTime: 0, atRate: 44_100))
         handoff.drain()
         XCTAssertEqual(
             reference.snapshot().count, 0,
@@ -476,10 +519,8 @@ final class InstalledClosureCaptureTests: XCTestCase {
             + "own retired identity — it acquired the new one at fire time"
         )
 
-        // POSITIVE CONTROL: the CURRENT closure (index 1) under the CURRENT identity is accepted.
-        tap.invokeInstalledClosureForTesting(
-            at: 1, toneBuffer(), at: AVAudioTime(sampleTime: 0, atRate: 44_100)
-        )
+        // POSITIVE CONTROL: the CURRENT closure (retained[1]) under the CURRENT identity is accepted.
+        box.items[1](toneBuffer(), AVAudioTime(sampleTime: 0, atRate: 44_100))
         handoff.drain()
         XCTAssertGreaterThan(
             reference.snapshot().count, 0,
