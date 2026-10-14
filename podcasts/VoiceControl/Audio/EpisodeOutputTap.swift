@@ -115,6 +115,11 @@ final class EpisodeOutputTap {
     /// advancing frame/host progression rather than infer them.
     var onCallbackArrived: ((_ sampleTime: Double?, _ hostSeconds: Double?) -> Void)?
 
+    /// TEST-ONLY observer of the buffers this tap PUBLISHES, with the callback's time. It exists so
+    /// a control can locate a distinctive marker in the published samples and correlate that
+    /// sample's index and host instant, rather than inferring the marker from a proxy.
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
     /// Read from the ENGINE rather than from a named unit, so a chain that changes — an added or
     /// removed effect, a bypassed unit — still resolves to whatever actually feeds output.
@@ -202,6 +207,7 @@ final class EpisodeOutputTap {
         renderedAt: AVAudioTime? = nil,
         producer: EchoReferenceHandoff.ProducerIdentity? = nil
     ) {
+        if let renderedAt { onBuffer?(buffer, renderedAt) }
         // The caller's ADMITTED identity when supplied; the current one otherwise, so existing
         // callers that publish without an admitted identity keep working.
         let producerIdentity = producer ?? self.producerIdentity
