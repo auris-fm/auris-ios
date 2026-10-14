@@ -26,6 +26,7 @@ struct VoiceControlSettingsView: View {
                 statusRow(label: "Gate", value: posture.allowed ? "Allowed" : "Blocked")
                 statusRow(label: "Off Reason", value: offReasonText(posture))
                 statusRow(label: "Listening Mode", value: listeningModeText(posture))
+                statusRow(label: "Capture", value: captureStateText())
                 statusRow(label: "Mic Exposure", value: "\(posture.micExposure)")
                 statusRow(label: "Grace Period", value: posture.gracePeriodActive ? "Active" : "Inactive")
                 statusRow(label: "Context", value: "\(posture.context)")
@@ -138,6 +139,20 @@ struct VoiceControlSettingsView: View {
         if posture.offReason == .exposedMicrophone {
             return "Built-in microphone; a headset or earbud microphone is required"
         }
+        // Activity comes from the actual capture state, not the listening mode: the posture stays
+        // `listening` whenever the route is eligible, including when capture never started.
+        if posture.micExposure == .isolated {
+            switch service.captureState {
+            case .startFailed:
+                return "Blocked: microphone capture failed to start"
+            case .starting:
+                return "Starting…"
+            case .idle:
+                return "Off"
+            case .active:
+                break
+            }
+        }
         if posture.listeningMode == .continuous {
             return "Active (grace period)"
         }
@@ -165,6 +180,15 @@ struct VoiceControlSettingsView: View {
         switch mode {
         case .continuous: return "continuous"
         case .wakeWord: return "wakeWord"
+        }
+    }
+
+    private func captureStateText() -> String {
+        switch service.captureState {
+        case .idle: return "idle"
+        case .starting: return "starting"
+        case .active: return "active"
+        case .startFailed: return "startFailed"
         }
     }
 }

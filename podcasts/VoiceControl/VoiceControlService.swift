@@ -4,11 +4,25 @@ import Foundation
 import OSLog
 import PocketCastsUtils
 
+/// The actual microphone-capture state, distinct from the listening mode the gate resolves.
+/// `Idle`/`Starting`/`Active`/`StartFailed` mirror the Android capture-state holder so both
+/// clients' settings status tells the same story.
+enum VoiceControlCaptureState {
+    case idle
+    case starting
+    case active
+    case startFailed
+}
+
 class VoiceControlService: ObservableObject {
     static weak var shared: VoiceControlService?
 
     @Published private(set) var isListening = false
     @Published private(set) var listeningMode: ListeningMode = .wakeWord
+    /// The actual capture state, distinct from `gatePosture`: the posture stays `listening` whenever
+    /// the route is eligible, including when capture never started (stream confirmation or
+    /// attachment failed), so settings must not equate "eligible" with "listening".
+    @Published private(set) var captureState: VoiceControlCaptureState = .idle
     @Published private(set) var gateState: GateState = .off(reason: .noContext)
     @Published private(set) var gatePosture = GatePosture(
         allowed: false, listeningMode: nil,
@@ -271,6 +285,7 @@ class VoiceControlService: ObservableObject {
         }
         FileLog.shared.addMessage("[VoicePipeline] start listening (\(mode))")
         asrEngine.listeningMode = mode
+        captureState = .starting
         guard asrEngine.start() else {
             // Capture failed to start (configure/engine error). Reporting
             // listening would retain the acquired external route with no
@@ -279,6 +294,7 @@ class VoiceControlService: ObservableObject {
             // built-in mic, which must not be mistaken for a device change that
             // re-arms acquisition for the same device.
             FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
+            captureState = .startFailed
             captureStartFailedInputUID = routeMonitor.currentExternalInputUID
                 ?? routeMonitor.lastAcquisitionTargetUID
             captureStartFailedEpoch = routeMonitor.physicalDeviceChangeEpoch
@@ -286,6 +302,7 @@ class VoiceControlService: ObservableObject {
             return
         }
         isListening = true
+        captureState = .active
         listeningMode = mode
         if mode == .wakeWord {
             audioRenderer.playEarcon(.listeningStart)
@@ -297,6 +314,7 @@ class VoiceControlService: ObservableObject {
         FileLog.shared.addMessage("[VoicePipeline] stop listening")
         asrEngine.stop()
         isListening = false
+        captureState = .idle
         audioRenderer.release()
         transcriptLock.lock()
         transcriptEpoch &+= 1
