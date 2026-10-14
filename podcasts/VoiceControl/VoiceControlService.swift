@@ -76,6 +76,11 @@ class VoiceControlService: ObservableObject {
     /// acquisition is not retried on every gate re-evaluation but *is* retried
     /// when a different device presents the same route types (port UIDs differ).
     private var acquisitionAttemptedRoute: AudioRouteIdentity?
+    /// External device whose capture start failed. Acquisition must not re-arm
+    /// for this device until a genuine change (it disappears or a different
+    /// candidate appears): releasing the preferred input reverts the live route
+    /// to the built-in mic, which is not a device change and must not re-arm.
+    private var captureStartFailedInputUID: String?
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -264,8 +269,13 @@ class VoiceControlService: ObservableObject {
         guard asrEngine.start() else {
             // Capture failed to start (configure/engine error). Reporting
             // listening would retain the acquired external route with no
-            // capture running, so release it and stay off.
+            // capture running, so release it and stay off. Remember which
+            // external device failed: its release reverts the live route to the
+            // built-in mic, which must not be mistaken for a device change that
+            // re-arms acquisition for the same device.
             FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
+            captureStartFailedInputUID = routeMonitor.currentExternalInputUID
+                ?? routeMonitor.lastAcquisitionTargetUID
             routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
             return
         }
@@ -525,6 +535,14 @@ class VoiceControlService: ObservableObject {
             return
         }
         guard acquisitionTask == nil else { return }
+        // A capture start that failed for an external device must not re-arm
+        // acquisition for that same device. Release reverts the live route to
+        // the built-in mic; that is not a genuine device change. Clear the
+        // suppression once the failed device is gone or replaced.
+        if let failedInputUID = captureStartFailedInputUID {
+            guard routeMonitor.currentExternalInputUID != failedInputUID else { return }
+            captureStartFailedInputUID = nil
+        }
         let route = routeMonitor.currentRouteIdentity
         guard acquisitionAttemptedRoute != route else { return }
         acquisitionAttemptedRoute = route

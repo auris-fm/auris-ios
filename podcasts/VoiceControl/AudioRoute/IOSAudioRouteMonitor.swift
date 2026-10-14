@@ -191,6 +191,11 @@ class IOSAudioRouteMonitor: ObservableObject {
     private var lastAcquisitionActivatedSession = false
     /// Whether the last successful acquisition selected a preferred input.
     private var lastAcquisitionSelectedInput = false
+    /// UID of the external input the last acquisition selected. Retained across
+    /// the preferred-input release so a failed capture start can be keyed to the
+    /// physical device rather than the transient live route (which reverts to the
+    /// built-in mic on release).
+    private(set) var lastAcquisitionTargetUID: String?
 
     init(
         gracePeriodSignal: GracePeriodSignal = GracePeriodSignal(),
@@ -228,6 +233,14 @@ class IOSAudioRouteMonitor: ObservableObject {
         )
     }
 
+    /// The live external input candidate (from `availableInputs`) — the physical
+    /// device a route acquisition would select. Stable across the preferred-input
+    /// release, unlike `currentRouteIdentity`, so it can key the "capture start
+    /// failed" suppression.
+    var currentExternalInputUID: String? {
+        audioSession.availableInputs.first { isExternalInput($0.portType) }?.uid
+    }
+
     /// Re-read the live route and recompute exposure. Classification uses only
     /// `currentRoute.inputs`: `availableInputs` lists what *could* be selected and
     /// must never be treated as the selected microphone.
@@ -254,6 +267,10 @@ class IOSAudioRouteMonitor: ObservableObject {
         // A task cancelled before it starts must not touch the audio session at
         // all — otherwise a blocked/`Off` posture would still open an input route.
         guard !Task.isCancelled else { return .cancelled }
+        // Each attempt starts fresh: do not let a previous attempt's device key
+        // leak into the "capture start failed" fallback if this one does not
+        // select an input.
+        lastAcquisitionTargetUID = nil
 
         // Only an external output can carry an external microphone. A built-in
         // speaker/earpiece route has nothing to acquire, so do not touch the session.
@@ -316,6 +333,7 @@ class IOSAudioRouteMonitor: ObservableObject {
 
         do {
             try audioSession.selectPreferredInput(uid: candidate.uid)
+            lastAcquisitionTargetUID = candidate.uid
         } catch {
             FileLog.shared.addMessage("[VoicePipeline] acquisition: select failed — \(error)")
             closeSession(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: true, isPlaybackActive: isPlaybackActive)

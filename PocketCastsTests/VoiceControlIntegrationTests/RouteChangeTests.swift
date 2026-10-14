@@ -18,6 +18,10 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     /// When false, `setPreferredInput` is accepted but the live route keeps the
     /// built-in mic — the "availability is not selection" case.
     var selectionTakesEffect = true
+    /// Inputs the live route reverts to when the preferred input is cleared.
+    /// On device, `setPreferredInput(nil)` returns to the built-in mic; `nil`
+    /// keeps the older fake behavior (the route keeps no input).
+    var inputsOnClear: [AudioPort]?
 
     private(set) var configureCount = 0
     private(set) var activateCount = 0
@@ -66,7 +70,7 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
         // Only a selection this fake actually applied is released; a built-in
         // default input is not manufactured into the route.
         if let selected = selectedUIDs.last, inputs.first?.uid == selected {
-            inputs = []
+            inputs = inputsOnClear ?? []
         }
     }
 }
@@ -775,6 +779,10 @@ final class RouteChangeTests: XCTestCase {
         session.available = []
         session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
         session.selectionTakesEffect = true
+        // On device, clearing the preferred input reverts the live route to the
+        // built-in default mic. That revert must not be mistaken for a genuine
+        // device change that re-arms acquisition for the same external device.
+        session.inputsOnClear = [port(.builtInMic, uid: "built-in")]
 
         let service = VoiceControlAssembly()
             .buildVoiceControlService(audioSession: session, capture: FailingCapture())!
@@ -782,12 +790,49 @@ final class RouteChangeTests: XCTestCase {
 
         // Acquisition succeeds (exposure flips isolated), then capture start fails.
         await waitUntil(timeout: 5) { session.clearCount >= 1 }
+        // Give any (incorrect) re-acquisition a chance to run before asserting
+        // that acquisition was not re-armed.
+        try? await Task.sleep(for: .milliseconds(300))
 
         XCTAssertFalse(service.isListening, "a failed capture start must not report listening")
         XCTAssertNotEqual(service.micExposure, .isolated,
                           "the acquired external route is released when capture cannot start")
         XCTAssertGreaterThanOrEqual(session.clearCount, 1,
                                     "the preferred external input is released")
+        XCTAssertEqual(session.configureCount, 1,
+                       "a failed capture start must not re-arm acquisition for the same device")
+    }
+
+    /// Control for the suppression above: a *genuine* device change (a different
+    /// external mic) must still re-arm acquisition after a failed capture start.
+    @MainActor
+    func test_captureStartFailure_rearmsAfterGenuineDeviceChange() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-A-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "mic-A")]
+        session.selectionTakesEffect = true
+        session.inputsOnClear = [port(.builtInMic, uid: "built-in")]
+
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, capture: FailingCapture())!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { session.clearCount >= 1 }
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(session.configureCount, 1, "the failed device is not retried")
+
+        // A different external microphone appears: a genuine device change.
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-B-out")]
+        session.inputs = [port(.builtInMic, uid: "built-in")]
+        session.available = [port(.bluetoothHFP, uid: "mic-B")]
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "mic-B")]
+        postRouteChange()
+
+        await waitUntil(timeout: 5) { session.configureCount >= 2 }
+        XCTAssertEqual(session.configureCount, 2,
+                       "a genuine device change must re-arm acquisition for the new device")
     }
 
     private func postRouteChange() {
