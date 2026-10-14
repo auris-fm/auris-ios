@@ -157,6 +157,9 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 32)
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = handoff
+        // THE TAP MUST BE INSTALLED. Without this the fixture receives no callbacks at all, which is
+        // what the earlier zero-output run measured — a fixture defect, not a scheduling result.
+        tap.install()
 
         // Carrier survives the floor; the marker is a multi-sample burst well above it.
         let carrierLevel: Float = 0.2
@@ -253,12 +256,77 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         XCTAssertNotNil(index, "the distinctive marker was not found in the published samples")
         XCTAssertNotNil(markerHost, "the marker's callback carried no valid host instant")
         XCTAssertGreaterThan(anchors, 0, "the reference accepted no blocks alongside the marker")
-        // Correlate the marker's own instant with the asserted schedule target.
-        if let markerHost {
-            let elapsed = markerHost - targetSeconds
-            print("CARRIER markerElapsedSinceTarget=\(elapsed)")
+        // CORRELATE THE MARKER'S OWN INSTANT, not the callback's: the marker sits at index `index`
+        // within its buffer, and the callback's sample time labels that buffer's START (measured in
+        // ExplicitScheduleOriginProbe), so the marker's instant is the callback instant advanced by
+        // index/rate. Using the raw callback instant instead reports the buffer's start as if it
+        // were the marker's.
+        if let markerHost, let index {
+            let markerInstant = markerHost + Double(index) / rate
+            let elapsed = markerInstant - targetSeconds
+            print("CARRIER markerInstant=\(markerInstant) elapsed=\(elapsed) (rawCallbackDelta=\(markerHost - targetSeconds))")
             XCTAssertGreaterThan(elapsed, -0.005, "the marker appeared before its asserted schedule instant")
             XCTAssertLessThan(elapsed, 1.0, "the marker appeared more than a second after its target")
         }
+    }
+
+    /// BARRIER AT THE ATOMIC PUBLICATION: `onBlockAccepted` fires inside `deliver()`, after the
+    /// samples are appended and the anchor is written, before any later queued operation runs. The
+    /// anchor observed THERE must map the REPRESENTED position (the block's start frame) into the
+    /// reference; passing the range end as the represented position maps to the far end of the
+    /// block instead, which this control catches.
+    func testAtomicPublicationPublishesACoherentFrameAndInstant() throws {
+        let f = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        let eq = AVAudioUnitEQ(numberOfBands: 1)
+        let mixer = AVAudioMixerNode()
+        engine.attach(player); engine.attach(eq); engine.attach(mixer)
+        engine.connect(player, to: eq, format: f)
+        engine.connect(eq, to: mixer, format: f)
+        engine.connect(mixer, to: engine.outputNode, format: f)
+
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 32)
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.handoff = handoff
+
+        var acceptedOffset: Int?
+        var acceptedHost: Double?
+        var acceptedCount = 0
+        let lock = NSLock()
+        handoff.onBlockAccepted = {
+            lock.lock()
+            acceptedCount += 1
+            acceptedOffset = reference.audibleEndOffsetInRetainedWindow()
+            acceptedHost = reference.currentRenderAnchor?.hostTime
+            lock.unlock()
+        }
+
+        tap.install()
+        let frames = 4_800
+        let start: AVAudioFramePosition = 96_000
+        let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: AVAudioFrameCount(frames)))
+        buf.frameLength = AVAudioFrameCount(frames)
+        if let ch = buf.floatChannelData?[0] {
+            for i in 0..<frames { ch[i] = Float(sin(Double(i) * 0.05) * 0.2) }
+        }
+        let hostSeconds = AVAudioTime.seconds(forHostTime: AVAudioTime.hostTime(forSeconds: 12))
+        tap.publish(buf, renderedAt: AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: 12), sampleTime: start, atRate: f.sampleRate))
+        handoff.drain()
+
+        lock.lock()
+        let count = acceptedCount
+        let offset = acceptedOffset
+        let host = acceptedHost
+        lock.unlock()
+
+        print("ATOMIC accepted=\(count) offsetIntoBlock=\(offset as Any) host=\(host as Any) blockLength=\(frames)")
+        XCTAssertGreaterThan(count, 0, "no block was accepted, so the barrier observed nothing")
+        XCTAssertEqual(host, hostSeconds, "the published anchor carried the wrong instant")
+        XCTAssertEqual(
+            offset, 0,
+            "the atomic publication mapped the range end as the position (offset would be the block length)"
+        )
     }
 }
