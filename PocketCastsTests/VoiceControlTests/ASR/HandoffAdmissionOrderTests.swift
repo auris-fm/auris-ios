@@ -250,3 +250,265 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         )
     }
 }
+
+
+/// SAMPLE ACCEPTANCE of a retired producer's submission, at the handoff boundary. This case
+/// drives `publish(producer:)` with an explicit identity, so it measures the ACCEPTANCE BOUNDARY
+/// only — NOT the closure capture, which `InstalledClosureCaptureTests` covers through the seam.
+///
+/// `install()` captures `let admitted = producerIdentity` at install time and the tap closure
+/// submits that captured value. When the tap is reinstalled, the old closure may still be
+/// invoked once (a render already in flight, or a stale tap the graph has not yet torn down).
+/// If the closure read `self.producerIdentity` when it fired, that held-old callback would
+/// submit the NEW incarnation and pass the admission check for audio that belongs to the old
+/// producer — the stale-sample failure delivered by the callback door.
+///
+/// This control drives the same submission the held-old closure makes: publish with the OLD
+/// admitted identity after a reinstall, and require the boundary to refuse it.
+final class HeldOldCallbackIdentityTests: XCTestCase {
+
+    private func toneBuffer(frames: Int = 512) -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        if let channels = buffer.floatChannelData {
+            for i in 0..<frames { channels[0][i] = Float(sin(Double(i) * 0.2) * 0.4) }
+        }
+        return buffer
+    }
+
+    func testHeldOldCallbackAfterReinstallIsRefused() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        // A REAL CONNECTED GRAPH. A bare `AVAudioEngine()` has nothing feeding its output node, so
+        // `outputFeederConnection` correctly returns nil and `install()` correctly does nothing —
+        // there would be no feeder to tap and the case would be measuring an empty graph. A
+        // player node connected to output gives the engine a feeder, which is what the placement
+        // code resolves.
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.handoff = handoff
+
+        // The FIRST install, whose identity its callback captures.
+        tap.install()
+        XCTAssertFalse(
+            tap.isInstalledOnOutputNode(engine.outputNode),
+            "the tap installed itself on the output node, the placement the SDK advises against"
+        )
+        let admittedAtFirstInstall = tap.producerIdentity
+
+        // A reinstall: installing again removes the prior tap and rotates the incarnation, so the
+        // identity the first callback carries is retired.
+        tap.install()
+        let admittedNow = tap.producerIdentity
+        XCTAssertNotEqual(
+            admittedNow, admittedAtFirstInstall,
+            "the reinstall did not rotate the identity, so the held-old case was not set up"
+        )
+        XCTAssertEqual(
+            admittedNow.kind, admittedAtFirstInstall.kind,
+            "the rotation changed the producer KIND, so this is no longer the same producer"
+        )
+
+        // The HELD-OLD callback fires: it publishes with the identity IT was admitted under.
+        tap.publish(
+            toneBuffer(),
+            renderedAt: AVAudioTime(sampleTime: 0, atRate: 44_100),
+            producer: admittedAtFirstInstall
+        )
+
+        // The boundary must refuse: the producer is retired, so its audio is not the current
+        // producer's and must not enter the reference.
+        handoff.drain()
+        XCTAssertEqual(
+            reference.snapshot().count, 0,
+            "a held-old callback submitted a retired producer's audio and it reached the reference: "
+            + "the callback acquired the new identity instead of carrying its own"
+        )
+
+        // POSITIVE CONTROL: the same submission under the CURRENT identity must be accepted.
+        tap.publish(
+            toneBuffer(),
+            renderedAt: AVAudioTime(sampleTime: 0, atRate: 44_100),
+            producer: admittedNow
+        )
+        handoff.drain()
+        XCTAssertGreaterThan(
+            reference.snapshot().count, 0,
+            "the current-identity submission was also refused, so the refusal proves nothing "
+            + "about identity: the boundary refused the publish itself"
+        )
+    }
+}
+
+
+/// The feeder is discovered on the bus that ACTUALLY feeds output, not on bus 0.
+///
+/// `outputFeederConnection` searches every input bus of the output node and returns the
+/// connection point's own bus. Tapping bus 0 regardless would install on the wrong bus of a
+/// chain whose connection is elsewhere, and CoreAudio reports that as no tap rather than as an
+/// error — the reference would silently receive nothing while the object reported installed.
+///
+/// This control builds a graph whose output node has more than one input bus and asserts the
+/// resolved connection carries the bus the feeder reports, not an assumed zero.
+final class FeederBusDiscoveryTests: XCTestCase {
+
+    /// DOCUMENTED LIMITATION, measured rather than assumed: every node constructible through the
+    /// public AVAudioEngine API on the simulator reports exactly ONE output bus, and the connection
+    /// point's feeder-output bus is therefore always 0. A nonzero feeder-output bus cannot be built
+    /// here, so "found bus 0" is indistinguishable from "assumed bus 0" in this environment. The
+    /// every-bus search in `outputFeederConnection` remains correct by construction; its
+    /// distinguishing case is device-shaped and is NOT covered by executed tests.
+    func test_zeroBusIsTheOnlyConstructibleFeederBus() throws {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        let eq = AVAudioUnitEQ(numberOfBands: 1)
+        engine.attach(eq)
+        engine.connect(player, to: eq, format: nil)
+        engine.connect(eq, to: engine.outputNode, format: nil)
+
+        XCTAssertEqual(eq.numberOfOutputs, 1, "the feeder reports more than one output bus; the limitation changed")
+        for bus in 0..<engine.outputNode.numberOfInputs {
+            if let point = engine.inputConnectionPoint(for: engine.outputNode, inputBus: bus) {
+                XCTAssertEqual(point.bus, 0, "a nonzero feeder-output bus became constructible; add a case that exercises it")
+            }
+        }
+    }
+
+    func testFeederConnectionReportsTheFeedersOwnBus() throws {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+
+        // The output node's input count is what makes the search meaningful: with one bus the
+        // loop cannot distinguish "found on bus 0" from "assumed bus 0".
+        let inputCount = engine.outputNode.numberOfInputs
+        XCTAssertGreaterThan(inputCount, 0, "the output node reports no input buses, so no feeder can exist")
+
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+
+        let resolved = try XCTUnwrap(
+            EpisodeOutputTap.outputFeederConnection(of: engine),
+            "a connected graph resolved to no feeder"
+        )
+
+        // The resolved bus must be the connection point's OWN bus for that node, read back from
+        // the engine rather than assumed. Enumerating every bus and finding the point whose node
+        // is the resolved node makes the assertion about the engine's report, not about a literal.
+        var reportedBus: AVAudioNodeBus? = nil
+        for bus in 0..<engine.outputNode.numberOfInputs {
+            if let point = engine.inputConnectionPoint(for: engine.outputNode, inputBus: bus),
+               point.node === resolved.node {
+                reportedBus = point.bus
+                break
+            }
+        }
+        let expected = try XCTUnwrap(reportedBus, "the resolved feeder is not connected to the output node")
+        XCTAssertEqual(
+            resolved.bus, expected,
+            "the feeder was tapped on a bus other than the one the engine reports it feeds on"
+        )
+
+        // The feeder must not be the output node itself: tapping it is the placement the SDK
+        // advises against, and a self-report must not be mistaken for a valid feeder.
+        XCTAssertFalse(
+            resolved.node === engine.outputNode,
+            "the resolved feeder is the output node itself"
+        )
+    }
+
+    /// A graph with nothing feeding output resolves to no feeder, and `install()` therefore
+    /// installs nothing rather than falling back to a blind bus-0 tap on the output node.
+    func testUnconnectedGraphResolvesToNoFeeder() {
+        let engine = AVAudioEngine()
+        XCTAssertNil(
+            EpisodeOutputTap.outputFeederConnection(of: engine),
+            "an unconnected engine claimed a feeder, so the wrong node would be tapped"
+        )
+
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.install()
+        XCTAssertFalse(
+            tap.isInstalledOnOutputNode(engine.outputNode),
+            "install() fell back to tapping the output node with no feeder present"
+        )
+    }
+}
+
+
+
+
+/// The CAPTURE itself: the closure production installs must carry the identity it was ADMITTED
+/// under, captured at install time, rather than reading `self.producerIdentity` when it fires.
+///
+/// This uses the test seam that retains the actual closure `install()` installed. The old
+/// closure is invoked AFTER a reinstall: if it acquired the new identity at fire time, its
+/// submission would pass the admission check and its audio would enter the reference under the
+/// wrong producer.
+final class InstalledClosureCaptureTests: XCTestCase {
+
+    private func toneBuffer(frames: Int = 512) -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+        buffer.frameLength = AVAudioFrameCount(frames)
+        if let channels = buffer.floatChannelData {
+            for i in 0..<frames { channels[0][i] = Float(sin(Double(i) * 0.2) * 0.4) }
+        }
+        return buffer
+    }
+
+    func testOldClosureSubmitsItsOwnIdentityAndIsRefused() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.handoff = handoff
+
+        // The FIRST install: its closure captures the first identity.
+        tap.install()
+        let first = tap.producerIdentity
+
+        // The reinstall: remove-first runs, the incarnation rotates, and a NEW closure is
+        // captured under the new identity.
+        tap.install()
+        let second = tap.producerIdentity
+        XCTAssertNotEqual(second, first, "the reinstall did not rotate the identity")
+
+        // Invoke the OLD closure — index 0, the one the FIRST install captured — as the graph
+        // would. Reinstalling retained it; the graph itself may still fire it once.
+        tap.invokeInstalledClosureForTesting(
+            at: 0, toneBuffer(), at: AVAudioTime(sampleTime: 0, atRate: 44_100)
+        )
+        handoff.drain()
+        XCTAssertEqual(
+            reference.snapshot().count, 0,
+            "the OLD closure submitted audio that reached the reference, so it did not carry its "
+            + "own retired identity — it acquired the new one at fire time"
+        )
+
+        // POSITIVE CONTROL: the CURRENT closure (index 1) under the CURRENT identity is accepted.
+        tap.invokeInstalledClosureForTesting(
+            at: 1, toneBuffer(), at: AVAudioTime(sampleTime: 0, atRate: 44_100)
+        )
+        handoff.drain()
+        XCTAssertGreaterThan(
+            reference.snapshot().count, 0,
+            "the current closure was refused too, so the refusal proves nothing about capture"
+        )
+    }
+}
+
+

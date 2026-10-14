@@ -79,15 +79,32 @@ final class EpisodeOutputTap {
         let node = connection.node
         installedNode = node
         installedBus = connection.bus
-        node.installTap(
-            onBus: connection.bus,
-            bufferSize: 4096,
-            format: nil
-        ) { [weak self] buffer, when in
+        let closure: (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, when in
             // On the real-time thread: copy off and hand off, nothing else. `Task {}` and
             // FileLog are not safe here, which is why the copy is the only work done.
             self?.capture(buffer, renderedAt: when, producer: admitted)
         }
+        installedClosures.append(closure)
+        node.installTap(
+            onBus: connection.bus,
+            bufferSize: 4096,
+            format: nil
+        ) { buffer, when in
+            closure(buffer, when)
+        }
+    }
+
+    /// The tap closures each install captured, in install order. Retained so a test can invoke a
+    /// PRIOR install's closure after a reinstall — the seam that makes the capture itself
+    /// observable: a closure that read the current identity at fire time would acquire the new
+    /// incarnation here, where the immutable capture submits its own.
+    private var installedClosures: [(AVAudioPCMBuffer, AVAudioTime) -> Void] = []
+
+    /// Invokes the closure captured by the install at `index` (0 = the first install), exactly
+    /// as the graph would. The closure runs with whatever it captured at its own install time.
+    func invokeInstalledClosureForTesting(at index: Int, _ buffer: AVAudioPCMBuffer, at when: AVAudioTime) {
+        guard installedClosures.indices.contains(index) else { return }
+        installedClosures[index](buffer, when)
     }
 
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
@@ -125,8 +142,9 @@ final class EpisodeOutputTap {
         handoff?.rotateIncarnation(for: .episodeTap, to: nodeIncarnation)
     }
 
-    /// Whether the tap is installed on the output node rather than on a node inside the
-    /// effects chain. Read from the engine so it reflects what was actually installed.
+    /// Whether the tap is installed on `node`. Despite the historical name the placement is the
+    /// FEEDER — the node connected to output — so callers assert against
+    /// `EpisodeOutputTap.outputFeederNode(of:)`, not against `engine.outputNode`.
     func isInstalledOnOutputNode(_ node: AVAudioNode) -> Bool {
         installedNode === node
     }

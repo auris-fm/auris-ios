@@ -319,7 +319,11 @@ final class EchoReferenceHandoff {
             range.producer == producer
                 && range.generation == submittedGeneration
                 && producerFrames >= range.producerStart
-                && producerFrames < range.producerEnd
+                // INCLUSIVE end: the tap callback's sample time is the END of the buffer it just
+                // delivered, so a position equal to `producerEnd` is the normal production case --
+                // the exclusive form refused every callback's anchor. With `last`, a position that
+                // is both one block's end and the next block's start matches the NEWER block.
+                && producerFrames <= range.producerEnd
                 && range.referenceStart >= residentStart
         }
         guard let containing else {

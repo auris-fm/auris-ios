@@ -1292,6 +1292,12 @@ final class EchoReferenceWiringTests: XCTestCase {
 
         let player = EffectsPlayer()
         let engine = AVAudioEngine()
+        // A CONNECTED graph: placement resolves the node feeding output, so a bare engine with
+        // no feeder would leave the helper with nothing to tap.
+        let feeder = AVAudioPlayerNode()
+        engine.attach(feeder)
+        engine.connect(feeder, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         player.setEngineForTesting(engine)
         defer { player.setEngineForTesting(nil) }
 
@@ -1301,9 +1307,11 @@ final class EchoReferenceWiringTests: XCTestCase {
             XCTFail("the helper installed no tap")
             return
         }
+        // The placement is the FEEDER — the node connected to output — not the output node
+        // itself, which the SDK advises against tapping.
         XCTAssertTrue(
-            tap.isInstalledOnOutputNode(engine.outputNode),
-            "the tap was created but never installed on the output node"
+            tap.isInstalledOnOutputNode(EpisodeOutputTap.outputFeederNode(of: engine) ?? engine.outputNode),
+            "the tap was created but never installed on the feeder node"
         )
     }
 
@@ -2492,15 +2500,23 @@ final class EchoReferenceWiringTests: XCTestCase {
     func test_aTapInstallCycleRetiresItsPreviousIdentity() {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        // A CONNECTED graph: a bare engine has nothing feeding its output node, so install()
+        // correctly resolves no feeder and this case would measure an empty graph.
         let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         let tap = EpisodeOutputTap(engine: engine)
         let before = tap.producerIdentity
 
-        // Install, so the tap's own placement is observable as well as its identity.
+        // Install, so the tap's own placement is observable as well as its identity. The
+        // placement is the FEEDER — the node connected to output — which here is the mixer, not
+        // the output node itself.
         tap.install()
         XCTAssertTrue(
-            tap.isInstalledOnOutputNode(engine.outputNode),
-            "the tap was not installed on the output node, so the cycle was not real"
+            tap.isInstalledOnOutputNode(EpisodeOutputTap.outputFeederNode(of: engine) ?? engine.outputNode),
+            "the tap was not installed on the feeder node, so the cycle was not real"
         )
 
         // A block published under the pre-cycle identity.
