@@ -117,14 +117,34 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         let m = try XCTUnwrap(marker, "the marker was never observed; the setup did not render it")
         print("PROBE marker T=\(m.sampleTime) N=\(m.frames) j=\(m.j) callbackHostSeconds=\(m.hostSeconds) targetSeconds=\(targetSeconds)")
         // Both readings expressed as the marker's own elapsed time from the schedule target.
-        // The marker's node-frame position under each reading. Comparing these against the schedule
-        // instant needs the NODE FRAME AT THE SCHEDULE INSTANT, which is the same unmapped onset
-        // this experiment cannot supply; the readings are therefore reported, not decided.
-        let startModelNodePosition = m.sampleTime + Double(m.j)
-        let endModelNodePosition = m.sampleTime - Double(m.frames) + Double(m.j)
-        print("PROBE markerNodePosition START=\(startModelNodePosition) END=\(endModelNodePosition) (differ by N, as expected)")
-        print("PROBE scheduleInstantSeconds=\(targetSeconds) callbackSeconds=\(m.hostSeconds) (both host domain, delta=\(m.hostSeconds - targetSeconds))")
-        print("PROBE NOTE: node frames at the schedule instant are unknown here, so neither reading is selected")
+        // HOST-DOMAIN COMPARISON, no node-frame origin invented. The marker sits at SOURCE-FILE
+        // offset 0 (asserted below), so its expected host instant is the asserted schedule target.
+        // Callback host instant H, marker index j, buffer length N, callback rate R:
+        //   START predicts the marker at H + j/R   (the buffer begins at H)
+        //   END   predicts the marker at H + (j-N)/R (the buffer ends at H)
+        XCTAssertEqual(markerIndex, 0, "the marker must be at source offset 0 for this expected instant")
+        let callbackRate = rate
+        print("PROBE markerSourceOffsetFrames=\(markerIndex) callbackRate=\(callbackRate)")
+        let startPrediction = m.hostSeconds + Double(m.j) / callbackRate
+        let endPrediction = m.hostSeconds + (Double(m.j) - Double(m.frames)) / callbackRate
+        let startError = startPrediction - targetSeconds
+        let endError = endPrediction - targetSeconds
+        print("PROBE expectedMarkerInstant=\(targetSeconds)")
+        print("PROBE START prediction=\(startPrediction) error=\(startError)")
+        print("PROBE END   prediction=\(endPrediction) error=\(endError)")
+        print("PROBE ONE_BUFFER=\(Double(m.frames) / callbackRate) (the gap between the predictions)")
+
+        // THE DISCRIMINATION, asserted. EXPECTED_PLACEMENT: sampleTime labels the buffer's START.
+        // The START error must be within a small tolerance of the asserted schedule instant while
+        // the END error is a full buffer away — a gap far outside any jitter seen here.
+        XCTAssertLessThan(
+            abs(startError), 0.005,
+            "the marker did not land at the schedule instant under START semantics (error \(startError))"
+        )
+        XCTAssertGreaterThan(
+            abs(endError), 0.05,
+            "END semantics was not excluded: its error (\(endError)) is within half a buffer"
+        )
         // The CONTROL file carries NO marker, so its peak is the tone (~0.15), not a marker peak.
         XCTAssertGreaterThan(controlPeak, 0.05, "the control was silent: the setup cannot render audio")
     }
