@@ -66,14 +66,24 @@ final class SameAccessGroupPreservationTests: XCTestCase {
 
         // --- AFTERWARDS: canary and container sentinel must be INTACT ---
         var verifyOut: CFTypeRef?
+        // BYTES, not presence: the writer reads its own synthetic value back and compares it to what
+        // it wrote, so "unchanged" is a byte comparison rather than a bare existence check.
         let verifyStatus = SecItemCopyMatching([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: syntheticService,
             kSecAttrAccount as String: syntheticAccount,
             kSecAttrAccessGroup as String: group,
+            kSecReturnData as String: true,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ] as CFDictionary, &verifyOut)
+        if let dict = verifyOut as? [String: Any], let data = dict[kSecValueData as String] as? Data {
+            let bytes = String(data: data, encoding: .utf8)
+            print("PRESERVE postRead bytesUnchanged=\(bytes == syntheticValue)")
+            XCTAssertEqual(bytes, syntheticValue, "the writer's synthetic bytes changed")
+        } else {
+            XCTFail("the writer could not read its own synthetic bytes back")
+        }
         let verifyAttrs = verifyOut as? [String: Any]
         print("PRESERVE postRead canaryStatus=\(verifyStatus) attributedGroup=\(verifyAttrs?[kSecAttrAccessGroup as String] as Any)")
         XCTAssertEqual(verifyStatus, errSecSuccess, "the synthetic canary did not survive the scoped read")

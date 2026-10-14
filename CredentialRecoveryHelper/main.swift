@@ -16,6 +16,39 @@ enum Helper {
 
     static func run() -> Int32 {
         let args = Array(CommandLine.arguments.dropFirst())
+
+        // SYNTHETIC-CANARY MODE: a narrowly scoped read of ONE caller-supplied synthetic service,
+        // used by the disposable same-access-group control. It is deliberately separate from the
+        // assigned production keys below, so this mode can never be pointed at a production service:
+        // the service must carry the synthetic marker, and it returns ATTRIBUTES ONLY.
+        // usage: credential-recovery-helper --synthetic <group> <service> <account>
+        if args.first == "--synthetic" {
+            let rest = Array(args.dropFirst())
+            guard rest.count == 3 else {
+                print("usage: credential-recovery-helper --synthetic <accessGroup> <service> <account>")
+                return 2
+            }
+            let (group, service, account) = (rest[0], rest[1], rest[2])
+            guard service.hasPrefix("fm.auris.SCRATCH") else {
+                print("refused: synthetic mode accepts only synthetic services (fm.auris.SCRATCH*)")
+                return 2
+            }
+            print("RECOVERY-CHECK synthetic group=\(group) service=\(service) account=\(account)")
+            var result: AnyObject?
+            let status = SecItemCopyMatching([
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: group,
+                kSecReturnAttributes as String: true,   // attributes ONLY; no kSecReturnData
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ] as CFDictionary, &result)
+            let attrs = result as? [String: Any]
+            let attributed = attrs?[kSecAttrAccessGroup as String] as? String
+            print("  synthetic: status=\(status) attributedGroup=\(attributed as Any)")
+            return status == errSecSuccess ? 0 : 4
+        }
+
         guard let group = args.first, !group.isEmpty else {
             print("usage: credential-recovery-helper <accessGroup> [service-key ...]")
             return 2
