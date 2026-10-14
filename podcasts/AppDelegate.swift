@@ -41,6 +41,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         TraceManager.shared.setup(handler: traceHandler)
         #if DEBUG
         AsrIntentBenchmarkHarness.runIfRequested()
+        runScratchAcceptanceIfRequested()
         #endif
 
         // Optional prefetch hint on playback start (edge-particle Item 5).
@@ -203,6 +204,39 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             }
         }
         voiceControlService?.startIfAllowed()
+    }
+
+    /// SCRATCH ACCEPTANCE OPERATOR ENTRY.
+    ///
+    /// Disabled by default: it runs ONLY when the app is launched with the explicit scratch argument,
+    /// and it is restricted to the controlled acceptance protocol. It calls the production-factory
+    /// acceptance path and writes ONLY the allowlisted export (request id, conversation id, response
+    /// text, terminal, verdict) to a dedicated file in the app container, which the external runner
+    /// reads. It never logs general traffic and never reads a credential.
+    ///
+    ///   xcrun simctl launch <device> fm.auris.debug --scratch-acceptance <nonce>
+    static let scratchAcceptanceArgument = "--scratch-acceptance"
+    static let scratchAcceptanceExportName = "scratch-acceptance-export.json"
+
+    private func runScratchAcceptanceIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        guard let flagIndex = args.firstIndex(of: Self.scratchAcceptanceArgument),
+              flagIndex + 1 < args.count else { return }
+        let nonce = args[flagIndex + 1]
+        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count))")
+        Task { @MainActor in
+            let export = await VoiceControlAssembly().runAcceptance(nonce: nonce)
+            let url = URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Documents")
+                .appendingPathComponent(Self.scratchAcceptanceExportName)
+            do {
+                let data = try JSONEncoder().encode(export)
+                try data.write(to: url)
+                FileLog.shared.addMessage("[ScratchAcceptance] wrote export to \(url.path)")
+            } catch {
+                FileLog.shared.addMessage("[ScratchAcceptance] could not write export: \(error)")
+            }
+        }
     }
 
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
