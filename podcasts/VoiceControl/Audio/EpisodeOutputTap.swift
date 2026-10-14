@@ -243,20 +243,21 @@ final class EpisodeOutputTap {
         let producerFrames = renderedAt.flatMap { time -> Double? in
             time.isSampleTimeValid ? Double(time.sampleTime) : nil
         }
-        // The time describes the END of this buffer, so the position it began at is one
-        // buffer earlier. Both are carried: progress into the block is the difference, and a
-        // block that begins partway into the node's timeline would otherwise claim the whole
-        // of its running count as progress.
-        let producerBlockStart = producerFrames.map {
-            $0 - Double(buffer.frameLength)
-        }
+        // THE TIME IS THE BLOCK'S START. Measured through an explicitly scheduled marker
+        // (ExplicitScheduleOriginProbe): the marker's host instant matches H + j/R within ~0.6 ms
+        // and misses H + (j-N)/R by a full buffer, so `sampleTime` labels the buffer's FIRST
+        // sample. The block therefore spans [sampleTime, sampleTime + frameLength), and the range
+        // is submitted in exactly those terms — no backward shift, and the shared half-open
+        // containment in the handoff is untouched.
+        let producerBlockStart = producerFrames
+        let producerBlockEnd = producerFrames.map { $0 + Double(buffer.frameLength) }
 
         handoff.submit(
             mono,
             producer: producerIdentity,
             sampleRate: buffer.format.sampleRate,
             renderedAt: hostInstant,
-            renderedFramesInProducer: producerFrames,
+            renderedFramesInProducer: producerBlockEnd,
             producerBlockStart: producerBlockStart
         )
 

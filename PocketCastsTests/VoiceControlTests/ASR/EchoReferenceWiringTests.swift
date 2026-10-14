@@ -1933,6 +1933,79 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// This drives `publish` directly with a time whose sample position is known, so the
     /// assertion is about what the tap hands over rather than about `installTap` — a case
     /// built on a real tap would depend on the node actually rendering.
+    /// START SEMANTICS AT THE PRODUCTION TAP: the tap's `sampleTime` labels the buffer's FIRST
+    /// sample (measured in ExplicitScheduleOriginProbe: the marker's host instant matches H + j/R
+    /// within ~0.6 ms and misses H + (j-N)/R by a full buffer). The submitted producer range must
+    /// therefore be [sampleTime, sampleTime + frameLength) — not one buffer earlier — and a render
+    /// position inside that range must match the block that contains it.
+    func test_episodeTapSubmitsTheBlocksRangeAsStartPlusLength() throws {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
+        let tap = EpisodeOutputTap(engine: nil)
+        tap.handoff = handoff
+
+        let frames = 1_600
+        let start: AVAudioFramePosition = 8_000
+        let format = AVAudioFormat(standardFormatWithSampleRate: PlaybackEchoReference.pipelineSampleRate, channels: 1)!
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)))
+        buffer.frameLength = AVAudioFrameCount(frames)
+        if let channel = buffer.floatChannelData?[0] {
+            for index in 0..<frames { channel[index] = 0.5 }
+        }
+
+        // The tap's own time: the buffer BEGINS at `start`.
+        tap.publish(
+            buffer,
+            renderedAt: AVAudioTime(sampleTime: start, atRate: PlaybackEchoReference.pipelineSampleRate)
+        )
+        handoff.drain()
+        XCTAssertGreaterThan(reference.streamIndex, 0, "the block did not reach the reference")
+
+        // A render position INSIDE the block (start + frames/2) must match it: that is only true if
+        // the recorded range is [start, start + frames).
+        let inside = start + AVAudioFramePosition(frames / 2)
+        let identity = tap.producerIdentity
+        handoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(inside),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 20
+            ),
+            producer: identity
+        )
+        handoff.drain()
+        XCTAssertNotNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "a position inside the submitted range matched no block: the range was not [start, start + frames)"
+        )
+
+        // And a position one buffer EARLIER than the block start must NOT match: that is where the
+        // old end-of-buffer derivation put the block.
+        let beforeStart = start - 10
+        let probe = PlaybackEchoReference()
+        let probeHandoff = EchoReferenceHandoff(reference: probe, capacity: 8)
+        let probeTap = EpisodeOutputTap(engine: nil)
+        probeTap.handoff = probeHandoff
+        probeTap.publish(
+            buffer,
+            renderedAt: AVAudioTime(sampleTime: start, atRate: PlaybackEchoReference.pipelineSampleRate)
+        )
+        probeHandoff.drain()
+        probeHandoff.submitRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: Double(beforeStart),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 20
+            ),
+            producer: probeTap.producerIdentity
+        )
+        probeHandoff.drain()
+        XCTAssertNil(
+            probe.audibleEndOffsetInRetainedWindow(),
+            "a position BEFORE the block start matched: the range still begins one buffer early"
+        )
+    }
+
     func test_episodeTapPublishesTheNodesFramePosition() {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
@@ -1950,8 +2023,9 @@ final class EchoReferenceWiringTests: XCTestCase {
             for index in 0..<frames { channel[index] = 0.5 }
         }
 
-        // The node reports it has rendered this much in total, which is more than this one
-        // buffer: the position is cumulative, not an offset within the buffer.
+        // The node reports its position in its own cumulative clock — the START of this buffer
+        // (measured in ExplicitScheduleOriginProbe: the marker's host instant matches H + j/R and
+        // misses H + (j-N)/R by a full buffer). The position is cumulative, not a buffer offset.
         let nodePosition: AVAudioFramePosition = 8_000
         // Both fields are needed: the handoff only records an anchor when it has a host
         // instant, and the position comes from the sample time. A tap's real AVAudioTime
@@ -1966,14 +2040,19 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
         handoff.drain()
 
+        // The reported position IS this buffer's first sample, so the anchor lands at the START of
+        // the block's reference range — offset 0 into the retained window, not one buffer in. The
+        // earlier expectation of `frames` encoded the end-of-buffer reading that the scheduled
+        // marker experiment refuted.
         let offset = reference.audibleEndOffsetInRetainedWindow()
         XCTAssertNotNil(offset, "no anchor was recorded at all")
         XCTAssertEqual(
-            offset, frames,
+            offset, 0,
             """
-            the anchor is at \(String(describing: offset)) rather than \(frames). The tap \
-            either discarded the node's position, in which case the anchor falls back to the \
-            block's start, or converted it as if it were a per-buffer offset.
+            the anchor is at \(String(describing: offset)) rather than 0. Under the measured \
+            start semantics the node's sample time is this buffer's first sample, so the anchor \
+            belongs at the block's start; an anchor one buffer in would mean the tap shifted the \
+            position backward as if the time described the buffer's end.
             """
         )
     }
