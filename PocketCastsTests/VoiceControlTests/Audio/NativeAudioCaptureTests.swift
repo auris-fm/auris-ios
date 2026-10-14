@@ -205,3 +205,71 @@ final class NativeAudioCaptureTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Capture teardown ownership
+
+/// Records the session calls `NativeAudioCapture` makes so a test can assert on
+/// the ownership-sensitive teardown without touching the real `AVAudioSession`.
+final class FakeCaptureAudioSession: CaptureAudioSession {
+    private(set) var configureCount = 0
+    private(set) var restorePlaybackCategoryCount = 0
+    private(set) var setActiveCalls: [(active: Bool, notifyOthers: Bool)] = []
+
+    func configureForCapture() throws {
+        configureCount += 1
+    }
+
+    func restorePlaybackCategory() {
+        restorePlaybackCategoryCount += 1
+    }
+
+    func setActive(_ active: Bool, notifyOthers: Bool) throws {
+        setActiveCalls.append((active, notifyOthers))
+    }
+}
+
+extension NativeAudioCaptureTests {
+
+    /// Critical: stopping capture reached the real shared `AVAudioSession` and
+    /// unconditionally called `setActive(false, ...)`, so stopping listening
+    /// could stop the user's podcast. With playback owning the session, teardown
+    /// must restore the category but must not deactivate.
+    func test_stop_whenPlaybackOwnsSession_restoresCategoryButDoesNotDeactivate() {
+        let session = FakeCaptureAudioSession()
+        let capture = NativeAudioCapture(session: session, isPlaybackActive: { true })
+
+        capture.stop()
+
+        XCTAssertEqual(session.restorePlaybackCategoryCount, 1,
+                       "capture still restores the playback-friendly category")
+        XCTAssertFalse(session.setActiveCalls.contains { !$0.active },
+                       "a playback-owned session must never be deactivated (that stops the podcast)")
+    }
+
+    /// Control: with playback inactive, capture owns the session and may release it.
+    func test_stop_whenPlaybackInactive_deactivatesCaptureOwnedSession() {
+        let session = FakeCaptureAudioSession()
+        let capture = NativeAudioCapture(session: session, isPlaybackActive: { false })
+
+        capture.stop()
+
+        XCTAssertEqual(session.restorePlaybackCategoryCount, 1)
+        XCTAssertTrue(session.setActiveCalls.contains { !$0.active && $0.notifyOthers },
+                      "with playback inactive, the session capture activated is deactivated")
+    }
+
+    /// The ownership signal is read at teardown time, not sampled when capture
+    /// started: playback can begin while listening.
+    func test_stop_rechecksPlaybackOwnershipAtTeardownTime() {
+        var playbackActive = false
+        let session = FakeCaptureAudioSession()
+        let capture = NativeAudioCapture(session: session, isPlaybackActive: { playbackActive })
+
+        // Playback starts after the capture object was built.
+        playbackActive = true
+        capture.stop()
+
+        XCTAssertFalse(session.setActiveCalls.contains { !$0.active },
+                       "playback began during capture; teardown must observe it and leave the session active")
+    }
+}

@@ -1,25 +1,71 @@
 import AVFoundation
 import PocketCastsUtils
 
-class NativeAudioCapture {
-    let engine = AVAudioEngine()
-    private let sampleRate = 16000.0
-    private var energyLogged = false
-    var onSamples: (([Float]) -> Void)?
+/// Boundary over the shared `AVAudioSession` used by capture. The
+/// ownership-sensitive teardown goes through this seam so a unit test can prove
+/// that a session playback owns is never deactivated.
+protocol CaptureAudioSession: AnyObject {
+    /// Configure the shared session for simultaneous input and output.
+    func configureForCapture() throws
+    /// Restore the playback-friendly category. This is safe even while playback
+    /// owns the session; it does not deactivate it.
+    func restorePlaybackCategory()
+    /// Activate or deactivate the session.
+    func setActive(_ active: Bool, notifyOthers: Bool) throws
+}
 
-    func start() throws {
-        let session = AVAudioSession.sharedInstance()
+/// Live `AVAudioSession` adapter for capture.
+final class RealCaptureAudioSession: CaptureAudioSession {
+    private var session: AVAudioSession { AVAudioSession.sharedInstance() }
 
+    func configureForCapture() throws {
         // defaultToSpeaker: ensure audio plays through the main speaker, not the
         // earpiece, so podcast playback isn't silenced when VoiceControl is active.
         // mixWithOthers: allow other app audio to play alongside wake-word listening.
         // allowBluetooth: support Bluetooth headsets with built-in mics.
         try session.setCategory(.playAndRecord, options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
         try session.setMode(.default)
+    }
+
+    func restorePlaybackCategory() {
+        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+    }
+
+    func setActive(_ active: Bool, notifyOthers: Bool) throws {
+        if notifyOthers {
+            try session.setActive(active, options: .notifyOthersOnDeactivation)
+        } else {
+            try session.setActive(active)
+        }
+    }
+}
+
+class NativeAudioCapture {
+    let engine = AVAudioEngine()
+    private let sampleRate = 16000.0
+    private var energyLogged = false
+    private var tapInstalled = false
+    private let session: CaptureAudioSession
+    /// Live playback-ownership signal, re-read at teardown. Deactivating a
+    /// session playback owns would stop the user's podcast, so only a session
+    /// capture itself activated may be deactivated.
+    private let isPlaybackActive: () -> Bool
+    var onSamples: (([Float]) -> Void)?
+
+    init(
+        session: CaptureAudioSession = RealCaptureAudioSession(),
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
+    ) {
+        self.session = session
+        self.isPlaybackActive = isPlaybackActive
+    }
+
+    func start() throws {
+        try session.configureForCapture()
         // NOTE: Do NOT call setPreferredSampleRate — it locks the hardware to one
         // rate and breaks playback at other rates. The resample below handles any
         // rate mismatch between hardware input and the model's 16kHz requirement.
-        try session.setActive(true)
+        try session.setActive(true, notifyOthers: false)
 
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -83,6 +129,7 @@ class NativeAudioCapture {
                 self.onSamples?(converted)
             }
         }
+        tapInstalled = true
 
         engine.prepare()
         try engine.start()
@@ -90,12 +137,26 @@ class NativeAudioCapture {
     }
 
     func stop() {
-        engine.inputNode.removeTap(onBus: 0)
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
         engine.stop()
-        let session = AVAudioSession.sharedInstance()
-        // Restore playback-friendly category so podcast playback works normally.
-        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        teardownSession()
+    }
+
+    /// Ownership-aware session teardown. Restoring the playback-friendly category
+    /// is always safe; deactivating is not — a session playback owns must be left
+    /// active or the user's podcast stops. Playback ownership is re-read live here
+    /// because it can begin while capture is running.
+    func teardownSession() {
+        session.restorePlaybackCategory()
+        // Only a session capture itself activated may be deactivated. When
+        // playback owns the shared session, deactivating it would stop the
+        // user's podcast; leave it active. Ownership is re-read live here
+        // because playback can begin while capture is running.
+        guard !isPlaybackActive() else { return }
+        try? session.setActive(false, notifyOthers: true)
     }
 
     /// Downsample from `from` Hz to `to` Hz using linear interpolation.
