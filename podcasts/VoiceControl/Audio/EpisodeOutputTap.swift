@@ -61,11 +61,15 @@ final class EpisodeOutputTap {
     /// for one bus (which CoreAudio refuses outright). The bus is the one the feeder reports as
     /// feeding output, so a chain whose connection is not on bus 0 is still tapped correctly.
     func install() {
+        // REMOVE FIRST AND UNCONDITIONALLY, before any early return. An earlier version resolved the
+        // feeder before removing, so a guard failure (no engine, or nothing feeding output) returned
+        // EARLY and LEFT THE PRIOR TAP INSTALLED on the old node: the reference would keep receiving
+        // from the old tap under the old identity while the caller believed a fresh install had
+        // happened. Removing first means every exit path leaves at most the tap that was actually
+        // installed here, which is the state the object reports.
+        remove()
         guard let engine else { return }
         guard let connection = Self.outputFeederConnection(of: engine) else { return }
-        // Remove OUR previous tap first, from the node we actually installed on. Without this a
-        // second install would either fail (two taps on one bus) or orphan the earlier node's tap.
-        remove()
         nodeIncarnation &+= 1
         handoff?.rotateIncarnation(for: .episodeTap, to: nodeIncarnation)
         // THE ADMITTED IDENTITY, captured HERE so the callback carries the incarnation it was
