@@ -143,6 +143,8 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         defer { engine.disableManualRenderingMode() }
         engine.prepare()
         try engine.start()
+        // CLEANUP REGISTERED BEFORE ANY LATER THROW: stop() runs even if a following unwrap fails.
+        defer { engine.stop() }
 
         let count = frames()
         let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: count))
@@ -153,15 +155,21 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
+        // BOUNDED render loop: a status other than `.success`/`.error` must not spin forever.
         var rendered = 0
-        while rendered < Int(count) {
+        var attempts = 0
+        while rendered < Int(count) && attempts < 1_000 {
+            attempts += 1
             let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
-        // STOP, THEN EXPLICITLY AWAIT THE DRAIN: the tap callbacks complete at engine stop
-        // (RepeatInstallDeliveryProbe: afterStop carried the full delivery 10/10). `drain()` is
-        // `queue.sync`, returning only after every enqueued block has been dequeued AND
-        // delivered — an explicit completion acknowledgment, not a silence heuristic.
+        XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
+        // EXPLICIT COMPLETION ACKNOWLEDGMENT. The tap callbacks do NOT all complete by the time
+        // renderOffline returns, and engine.stop() does not synchronously flush them either: the
+        // synchronized trace in RepeatInstallDeliveryProbe shows further callbacks AND dequeues
+        // arriving AFTER stop() returns. `drain()` is `queue.sync`, so it returns only once every
+        // block that was enqueued has been dequeued and delivered. Stopping first ends the render
+        // so no NEW work is produced while the drain acknowledges what exists.
         engine.stop()
         handoff.drain()
 
@@ -204,6 +212,8 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         defer { engine.disableManualRenderingMode() }
         engine.prepare()
         try engine.start()
+        // CLEANUP REGISTERED BEFORE ANY LATER THROW: stop() runs even if a following unwrap fails.
+        defer { engine.stop() }
 
         let count = frames()
         let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: count))
@@ -214,15 +224,21 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
+        // BOUNDED render loop: a status other than `.success`/`.error` must not spin forever.
         var rendered = 0
-        while rendered < Int(count) {
+        var attempts = 0
+        while rendered < Int(count) && attempts < 1_000 {
+            attempts += 1
             let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
-        // STOP, THEN EXPLICITLY AWAIT THE DRAIN: the tap callbacks complete at engine stop
-        // (RepeatInstallDeliveryProbe: afterStop carried the full delivery 10/10). `drain()` is
-        // `queue.sync`, returning only after every enqueued block has been dequeued AND
-        // delivered — an explicit completion acknowledgment, not a silence heuristic.
+        XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
+        // EXPLICIT COMPLETION ACKNOWLEDGMENT. The tap callbacks do NOT all complete by the time
+        // renderOffline returns, and engine.stop() does not synchronously flush them either: the
+        // synchronized trace in RepeatInstallDeliveryProbe shows further callbacks AND dequeues
+        // arriving AFTER stop() returns. `drain()` is `queue.sync`, so it returns only once every
+        // block that was enqueued has been dequeued and delivered. Stopping first ends the render
+        // so no NEW work is produced while the drain acknowledges what exists.
         engine.stop()
         handoff.drain()
 
