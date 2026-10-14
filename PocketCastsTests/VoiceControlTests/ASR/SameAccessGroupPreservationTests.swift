@@ -68,10 +68,6 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     }
 
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
-        // SHARED GROUP: the same group the helper is entitled to, so both roles request an identical
-        // group. Measured rule: a simulator product is attributed the default group of its
-        // application-identifier, and requesting a different group is refused (-34018) — while a
-        // group matching its own identifier is usable (-25300 when absent).
         // THE SHARED GROUP both products are configured to declare for this control. Pointed
         // explicitly at the shared synthetic group so the writer and the helper request an identical
         // group; the measured default (`6LL2R2A55F.fm.auris`) is what a product gets otherwise.
