@@ -22,6 +22,37 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent("scratch-preservation-sentinel.txt")
     }
 
+    /// READ-ONLY POST-READ VERIFICATION: run AFTER the external helper has read the canary. It writes
+    /// nothing, so it checks the SAME item and bytes the helper saw, rather than replacing them. The
+    /// expected value is supplied from outside (the writer records what it wrote), so a match here is
+    /// a real comparison against the preset bytes, not a self-consistent round trip.
+    func testPostHelperReadCanaryBytesAndSentinelAreIntact() throws {
+        let group = "6LL2R2A55F.fm.auris.scratchshared"
+        let expectedFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-bytes.txt")
+        guard let expected = try? String(contentsOf: expectedFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            print("VERIFY skipped: no expected-bytes file, so this run cannot compare")
+            return
+        }
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: syntheticService,
+            kSecAttrAccount as String: syntheticAccount,
+            kSecAttrAccessGroup as String: group,
+            kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ] as CFDictionary, &out)
+        let dict = out as? [String: Any]
+        let bytes = (dict?[kSecValueData as String] as? Data).flatMap { String(data: $0, encoding: .utf8) }
+        let attributed = dict?[kSecAttrAccessGroup as String] as? String
+        print("VERIFY postHelperRead status=\(status) group=\(group) attributedGroup=\(attributed as Any) bytesMatch=\(bytes == expected)")
+        XCTAssertEqual(status, errSecSuccess, "the canary was not present after the helper read")
+        XCTAssertEqual(attributed, group, "the canary is no longer attributed to the shared group")
+        XCTAssertEqual(bytes, expected, "the canary bytes changed across the helper read")
+    }
+
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
         // SHARED GROUP: the same group the helper is entitled to, so both roles request an identical
         // group. Measured rule: a simulator product is attributed the default group of its
@@ -32,6 +63,9 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         // group; the measured default (`6LL2R2A55F.fm.auris`) is what a product gets otherwise.
         let group = "6LL2R2A55F.fm.auris.scratchshared"
         print("PRESERVE group=\(group)")
+        // Record what the writer wrote, so the post-helper verification compares against an
+        // independently recorded expectation rather than a fresh round trip.
+        try Data(syntheticValue.utf8).write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-bytes.txt"))
 
         // --- WRITER: synthetic canary in the named group, plus a container sentinel ---
         SecItemDelete([
@@ -99,13 +133,10 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         print("PRESERVE postRead sentinelIntact=\(sentinelAfter == sentinelContents)")
         XCTAssertEqual(sentinelAfter, sentinelContents, "the container sentinel was modified")
 
-        // CLEANUP: remove only our synthetic items.
-        SecItemDelete([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: syntheticService,
-            kSecAttrAccount as String: syntheticAccount,
-            kSecAttrAccessGroup as String: group
-        ] as CFDictionary)
-        try? FileManager.default.removeItem(at: sentinelURL)
+        // NO CLEANUP IN THIS RUN: the canary must SURVIVE the test so the separately-installed helper
+        // app can perform the cross-app read afterwards, and so the writer can verify it is intact
+        // after that read. The canary is synthetic (fm.auris.SCRATCH*) and is removed by a later run
+        // when the coordination file is absent; the sentinel likewise stays for the same reason.
+        print("PRESERVE retained for cross-app read at \(sentinelURL.path)")
     }
 }
