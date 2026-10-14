@@ -41,7 +41,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         TraceManager.shared.setup(handler: traceHandler)
         #if DEBUG
         AsrIntentBenchmarkHarness.runIfRequested()
-        runScratchAcceptanceIfRequested()
+        // NOT HERE: the acceptance run is started AFTER the normal defaults/migrations phase, because
+        // that phase can clear the keychain (measured: `checkDefaults v5Run clearTokensFromKeyChain`
+        // runs during launch). Starting the run first let initialization clear the session underneath
+        // it. It is deferred to the end of launch instead.
         #endif
 
         // Optional prefetch hint on playback start (edge-particle Item 5).
@@ -112,6 +115,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             ServerConfig.shared.syncDelegate = ServerSyncManager.shared
             ServerConfig.shared.playbackDelegate = PlaybackManager.shared
             checkDefaults()
+
+            #if DEBUG
+            // STARTED AFTER the defaults/migrations phase (which can clear the keychain), so
+            // initialization cannot clear the scratch session out from under the run.
+            runScratchAcceptanceIfRequested()
+            #endif
 
             logActiveDownloadTasks()
             logStaleDownloads()
@@ -228,10 +237,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             .appendingPathComponent(Self.scratchAcceptanceExportName)
         // A STALE EXPORT MUST NOT SURVIVE A NEW RUN. The previous run's file is removed BEFORE the
         // turns start, so a run that is interrupted or crashes cannot leave an older result that the
-        // runner would read as this run's outcome. The file's absence is itself the signal that no
-        // result was produced.
-        try? FileManager.default.removeItem(at: url)
-        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count)); removed any prior export")
+        // runner would read as this run's outcome.
+        //
+        // THE REMOVAL IS REQUIRED, not best-effort: `try?` would log success even when the stale file
+        // survived, which is the very defect this guards. A not-found error is expected and fine; any
+        // OTHER failure means a stale file may still be present, so the run REFUSES to proceed and
+        // writes no export at all.
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as NSError where error.code == NSFileNoSuchFileError {
+            // Expected: there was no prior export.
+        } catch {
+            FileLog.shared.addMessage("[ScratchAcceptance] refusing to run: prior export could not be removed (\(error.localizedDescription))")
+            return
+        }
+        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count)); prior export cleared")
         Task { @MainActor in
             let export = await VoiceControlAssembly().runAcceptance(nonce: nonce)
             do {

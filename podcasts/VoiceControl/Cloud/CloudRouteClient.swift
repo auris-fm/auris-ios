@@ -320,8 +320,11 @@ final class CloudRouteClient {
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
-                        if case .error(let code, let message) = event {
-                            FileLog.shared.addMessage("[CloudRoute] server error code=\(code) message=\(message)")
+                        if case .error(let code, _) = event {
+                            // BOUNDED: the CODE only. The server's free-form message is NOT written —
+                            // an arbitrary server string is not known to be free of sensitive content,
+                            // and the allowlist here is the acceptance protocol, not general traffic.
+                            FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")
                         }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
