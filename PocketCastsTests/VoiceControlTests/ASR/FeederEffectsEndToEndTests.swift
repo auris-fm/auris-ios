@@ -203,9 +203,14 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             }
             lock.unlock()
         }
+        // ACCEPTANCE OBSERVATIONS FROM THE REFERENCE SIDE, per accepted block: the reference's own
+        // stream position and the anchor it recorded for that block. These are asserted to ADVANCE
+        // below, measured independently of the callback progression.
+        var acceptedStreamIndices: [Int] = []
         handoff.onBlockAccepted = {
             lock.lock()
             acceptedAnchors += 1
+            acceptedStreamIndices.append(reference.streamIndex)
             if let offset = reference.audibleEndOffsetInRetainedWindow() { acceptedOffsets.append(offset) }
             lock.unlock()
         }
@@ -232,12 +237,17 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         player.scheduleFile(reading, at: AVAudioTime(hostTime: target))
         player.play()
 
-        let deadline = Date().addingTimeInterval(8)
+        // FIRST find the marker, then KEEP RUNNING so several blocks are accepted: advancement
+        // across accepted blocks cannot be asserted from a single acceptance, and stopping as soon
+        // as the marker appears would leave that assertion vacuous.
+        var deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             lock.lock(); let found = markerSampleIndex != nil; lock.unlock()
             if found { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
+        deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         engine.stop()
         handoff.drain()
 
@@ -247,6 +257,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let hosts = callbackHosts
         let anchors = acceptedAnchors
         let offsets = acceptedOffsets
+        let streamIndices = acceptedStreamIndices
         lock.unlock()
 
         let targetSeconds = Double(target) * secondsPerTick
@@ -256,6 +267,27 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         XCTAssertNotNil(index, "the distinctive marker was not found in the published samples")
         XCTAssertNotNil(markerHost, "the marker's callback carried no valid host instant")
         XCTAssertGreaterThan(anchors, 0, "the reference accepted no blocks alongside the marker")
+        // THE MARKER'S BLOCK IS AN ACCEPTED ONE: the marker was observed in a published buffer, and
+        // at least one block was accepted into the reference with a recorded anchor — so the
+        // marker's audio is associated with an accepted range rather than with a dropped callback.
+        XCTAssertFalse(offsets.isEmpty, "no accepted block recorded a reference anchor alongside the marker")
+        // ACCEPTED-REFERENCE ADVANCEMENT, asserted from the reference side and separately from the
+        // callback progression: each accepted block's stream position must be strictly greater than
+        // the previous one, so the reference is genuinely receiving successive audio rather than
+        // rewriting one position.
+        XCTAssertEqual(
+            streamIndices, streamIndices.sorted(),
+            "the accepted reference stream positions did not advance monotonically"
+        )
+        XCTAssertGreaterThan(
+            streamIndices.count, 1,
+            "only one block was accepted, so advancement across accepted blocks was not exercised"
+        )
+        XCTAssertGreaterThan(
+            streamIndices.last ?? 0, streamIndices.first ?? 0,
+            "the accepted reference stream position did not advance across blocks"
+        )
+        print("CARRIER acceptedStreamIndices=\(streamIndices.prefix(8))")
         // CORRELATE THE MARKER'S OWN INSTANT, not the callback's: the marker sits at index `index`
         // within its buffer, and the callback's sample time labels that buffer's START (measured in
         // ExplicitScheduleOriginProbe), so the marker's instant is the callback instant advanced by
