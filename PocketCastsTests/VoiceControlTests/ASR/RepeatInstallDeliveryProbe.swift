@@ -62,7 +62,10 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         try engine.start()
         defer { engine.stop() }
 
-        let count = 32_768
+        // The LIFECYCLE TEST's exact size (44 100): with the strict full-count acknowledgment the
+        // repeat-install case measured a PARTIAL delivery (3 200 of ~16 000), so the trace must
+        // use the same shape to see where it stalls.
+        let count = 44_100
         let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: AVAudioFrameCount(count)))
         buf.frameLength = AVAudioFrameCount(count)
         if let ch = buf.floatChannelData?[0] {
@@ -89,6 +92,19 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         // RECORDED IMMEDIATELY AT RETURN: placing later callbacks relative to this boundary is
         // only valid if the event is stamped before anything else runs.
         trace.record("stop() returned")
+        // Stage the wait: sample the reference count over time so a STALL is visible as a
+        // plateau, not hidden by a single drain.
+        var lastReported = -1
+        let waitDeadline = Date().addingTimeInterval(5)
+        while Date() < waitDeadline {
+            let c = reference.snapshot().count
+            if c != lastReported {
+                trace.record("refCount=\(c)")
+                lastReported = c
+            }
+            if c >= 15_900 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
         handoff.drain()
         trace.record("drain() returned")
         let afterAll = trace.snapshotState()

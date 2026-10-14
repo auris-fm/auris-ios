@@ -15,6 +15,7 @@ import AVFoundation
 /// MISSING PRECONDITION and was withdrawn. See helper-evidence/ledger/admission-orders-FINDING.txt.
 final class HandoffAdmissionOrderTests: XCTestCase {
 
+
     private func flat(_ frames: Int, _ value: Float) -> [Float] {
         [Float](repeating: value, count: frames)
     }
@@ -142,9 +143,9 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         try engine.enableManualRenderingMode(.offline, format: f, maximumFrameCount: 4096)
         defer { engine.disableManualRenderingMode() }
         engine.prepare()
-        try engine.start()
-        // CLEANUP REGISTERED BEFORE ANY LATER THROW: stop() runs even if a following unwrap fails.
+        // CLEANUP REGISTERED BEFORE START'S POSSIBLE THROW: stop() runs even if start() fails.
         defer { engine.stop() }
+        try engine.start()
 
         let count = frames()
         let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: count))
@@ -155,15 +156,37 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
-        // BOUNDED render loop: a status other than `.success`/`.error` must not spin forever.
-        var rendered = 0
-        var attempts = 0
-        while rendered < Int(count) && attempts < 1_000 {
-            attempts += 1
-            let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
-            if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
+        let arrivalLock = NSLock()
+        var deliveredCallbacks = 0
+        // ACTIVATION RACE, MEASURED (RepeatInstallDeliveryProbe stalling trace): the freshly
+        // (re)installed tap's activation can lose the race against the offline render start — the
+        // failing runs show ZERO callbacks during the whole render and only a residual flush at
+        // stop. Activation is a one-time latency, so the render is RETRIED (bounded) when no
+        // callback was observed; the acknowledgment check below still requires the FULL count.
+        handoff.onDeliveryDequeued = {
+            arrivalLock.lock(); deliveredCallbacks += 1; arrivalLock.unlock()
         }
-        XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
+        var rendered = 0
+        var renderAttempt = 0
+        let renderDeadline = Date().addingTimeInterval(15)
+        while rendered < Int(count) && renderAttempt < 3 && Date() < renderDeadline {
+            renderAttempt += 1
+            rendered = 0
+            var attempts = 0
+            player.scheduleBuffer(buf)
+            player.play()
+            while rendered < Int(count) && attempts < 1_000 {
+                attempts += 1
+                let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
+                if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
+            }
+            arrivalLock.lock(); let seen = deliveredCallbacks; arrivalLock.unlock()
+            if seen > 0 { break }
+            tracelessWait()
+        }
+        // renderOffline quantizes to its block size and can OVERSHOOT the request; the scheduled
+        // output is what matters.
+        XCTAssertGreaterThanOrEqual(rendered, Int(count), "the render loop ended before the scheduled output was fully rendered")
         // DELIVERY ACKNOWLEDGMENT, THEN DRAIN. The tap callbacks do not all complete when
         // renderOffline returns, and stop() does not flush them (the RepeatInstallDeliveryProbe
         // trace shows further callbacks AND dequeues after stop returns). `drain()` is
@@ -171,23 +194,18 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         // that have not submitted yet. So the test first AWAITS an actual delivery
         // acknowledgment (the handoff's own dequeue hook, bounded), and only then drains and
         // asserts; a bounded timeout fails explicitly rather than asserting on a quiet count.
-        let arrivalLock = NSLock()
-        var dequeued = 0
-        handoff.onDeliveryDequeued = {
-            arrivalLock.lock(); dequeued += 1; arrivalLock.unlock()
-        }
-        defer { handoff.onDeliveryDequeued = nil }
         engine.stop()
+        // The KNOWN scheduled output in the reference's pipeline domain: the SCHEDULED count
+        // (not the chunk-quantized rendered total, whose overshoot is silence and is dropped).
+        let expectedSamples = Double(count) * Double(PlaybackEchoReference.pipelineSampleRate) / f.sampleRate
         let ackDeadline = Date().addingTimeInterval(5)
         while Date() < ackDeadline {
-            arrivalLock.lock(); let seen = dequeued; arrivalLock.unlock()
-            if seen > 0 { break }
+            if reference.snapshot().count >= Int(expectedSamples) { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
-        arrivalLock.lock(); let acknowledged = dequeued; arrivalLock.unlock()
-        XCTAssertGreaterThan(
-            acknowledged, 0,
-            "no delivery was acknowledged within the bound, so the assertion below would be about the wait, not the install"
+        XCTAssertGreaterThanOrEqual(
+            reference.snapshot().count, Int(expectedSamples),
+            "the scheduled output was not fully acknowledged within the bound"
         )
         handoff.drain()
 
@@ -229,9 +247,9 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         try engine.enableManualRenderingMode(.offline, format: f, maximumFrameCount: 4096)
         defer { engine.disableManualRenderingMode() }
         engine.prepare()
-        try engine.start()
-        // CLEANUP REGISTERED BEFORE ANY LATER THROW: stop() runs even if a following unwrap fails.
+        // CLEANUP REGISTERED BEFORE START'S POSSIBLE THROW: stop() runs even if start() fails.
         defer { engine.stop() }
+        try engine.start()
 
         let count = frames()
         let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: count))
@@ -242,15 +260,37 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
-        // BOUNDED render loop: a status other than `.success`/`.error` must not spin forever.
-        var rendered = 0
-        var attempts = 0
-        while rendered < Int(count) && attempts < 1_000 {
-            attempts += 1
-            let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
-            if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
+        let arrivalLock = NSLock()
+        var deliveredCallbacks = 0
+        // ACTIVATION RACE, MEASURED (RepeatInstallDeliveryProbe stalling trace): the freshly
+        // (re)installed tap's activation can lose the race against the offline render start — the
+        // failing runs show ZERO callbacks during the whole render and only a residual flush at
+        // stop. Activation is a one-time latency, so the render is RETRIED (bounded) when no
+        // callback was observed; the acknowledgment check below still requires the FULL count.
+        handoff.onDeliveryDequeued = {
+            arrivalLock.lock(); deliveredCallbacks += 1; arrivalLock.unlock()
         }
-        XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
+        var rendered = 0
+        var renderAttempt = 0
+        let renderDeadline = Date().addingTimeInterval(15)
+        while rendered < Int(count) && renderAttempt < 3 && Date() < renderDeadline {
+            renderAttempt += 1
+            rendered = 0
+            var attempts = 0
+            player.scheduleBuffer(buf)
+            player.play()
+            while rendered < Int(count) && attempts < 1_000 {
+                attempts += 1
+                let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
+                if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
+            }
+            arrivalLock.lock(); let seen = deliveredCallbacks; arrivalLock.unlock()
+            if seen > 0 { break }
+            tracelessWait()
+        }
+        // renderOffline quantizes to its block size and can OVERSHOOT the request; the scheduled
+        // output is what matters.
+        XCTAssertGreaterThanOrEqual(rendered, Int(count), "the render loop ended before the scheduled output was fully rendered")
         // DELIVERY ACKNOWLEDGMENT, THEN DRAIN. The tap callbacks do not all complete when
         // renderOffline returns, and stop() does not flush them (the RepeatInstallDeliveryProbe
         // trace shows further callbacks AND dequeues after stop returns). `drain()` is
@@ -258,23 +298,18 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         // that have not submitted yet. So the test first AWAITS an actual delivery
         // acknowledgment (the handoff's own dequeue hook, bounded), and only then drains and
         // asserts; a bounded timeout fails explicitly rather than asserting on a quiet count.
-        let arrivalLock = NSLock()
-        var dequeued = 0
-        handoff.onDeliveryDequeued = {
-            arrivalLock.lock(); dequeued += 1; arrivalLock.unlock()
-        }
-        defer { handoff.onDeliveryDequeued = nil }
         engine.stop()
+        // The KNOWN scheduled output in the reference's pipeline domain: the SCHEDULED count
+        // (not the chunk-quantized rendered total, whose overshoot is silence and is dropped).
+        let expectedSamples = Double(count) * Double(PlaybackEchoReference.pipelineSampleRate) / f.sampleRate
         let ackDeadline = Date().addingTimeInterval(5)
         while Date() < ackDeadline {
-            arrivalLock.lock(); let seen = dequeued; arrivalLock.unlock()
-            if seen > 0 { break }
+            if reference.snapshot().count >= Int(expectedSamples) { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
-        arrivalLock.lock(); let acknowledged = dequeued; arrivalLock.unlock()
-        XCTAssertGreaterThan(
-            acknowledged, 0,
-            "no delivery was acknowledged within the bound, so the assertion below would be about the wait, not the install"
+        XCTAssertGreaterThanOrEqual(
+            reference.snapshot().count, Int(expectedSamples),
+            "the scheduled output was not fully acknowledged within the bound"
         )
         handoff.drain()
 
@@ -592,3 +627,7 @@ final class InstalledClosureCaptureTests: XCTestCase {
 }
 
 
+
+private func tracelessWait() {
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+}
