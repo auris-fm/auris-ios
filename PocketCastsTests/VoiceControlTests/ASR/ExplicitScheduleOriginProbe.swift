@@ -14,30 +14,48 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        // Build the tone at the node's rendering rate to keep the domain single; the graph is
-        // connected in THAT mono format so the player accepts the buffer.
+        // The KNOWN-WORKING graph configuration (format-nil connects, as in the probes that
+        // observed content); the tone is built at the node's rendering rate to keep the domain
+        // single.
         let rate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let mono = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-        engine.connect(player, to: engine.mainMixerNode, format: mono)
-        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: mono)
+        // scheduleBuffer(at:) requires the buffer to match the player's output format, which the
+        // nil connect infers from the mixer (stereo). The impulse is in BOTH channels.
+        let stereo = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         let frames = AVAudioFrameCount(rate) // one second
-        let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: frames))
-        buf.frameLength = frames
-        if let ch = buf.floatChannelData?[0] {
-            for i in 0..<Int(frames) { ch[i] = i == 0 ? 1.0 : Float(sin(Double(i) * 0.05) * 0.15) }
+        // FILE-based scheduling: every probe that observed content used scheduleFile; write the
+        // impulse (file frame 0) to CAF files.
+        func writeImpulseFile(name: String) throws -> AVAudioFile {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\\(name)-\\(UUID().uuidString).caf")
+            let fmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+            let file = try AVAudioFile(forWriting: url, settings: fmt.settings)
+            let b = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames))
+            b.frameLength = frames
+            if let ch = b.floatChannelData {
+                for c in 0..<2 {
+                    for i in 0..<Int(frames) { ch[c][i] = i == 0 ? 1.0 : Float(sin(Double(i) * 0.05) * 0.15) }
+                }
+            }
+            try file.write(from: b)
+            return try AVAudioFile(forReading: url)
         }
+        let scheduledFile = try writeImpulseFile(name: "explicit")
+        let controlFile = try writeImpulseFile(name: "control")
 
         var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, peak: Float)] = []
+        var lastPeak: Float = 0
         let lock = NSLock()
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { buffer, when in
             var j: Int? = nil
+            var hitsPeak: Float = 0
             // The resampler can smear the impulse; take the loudest sample instead of a threshold.
             if let ch = buffer.floatChannelData?[0] {
-                var best: Float = 0
-                for i in 0..<Int(buffer.frameLength) where abs(ch[i]) > best { best = abs(ch[i]); j = i }
-                if best < 0.6 { j = nil }
+                for i in 0..<Int(buffer.frameLength) where abs(ch[i]) > hitsPeak { hitsPeak = abs(ch[i]); j = i }
+                if hitsPeak < 0.45 { j = nil }
             }
             lock.lock()
+            lastPeak = max(lastPeak, hitsPeak)
             hits.append((
                 sampleTime: when.isSampleTimeValid ? Double(when.sampleTime) : Double.nan,
                 frames: Int(buffer.frameLength),
@@ -57,13 +75,32 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         var ti = mach_timebase_info_data_t(); mach_timebase_info(&ti)
         let halfSecondTicks = UInt64(0.5 * 1_000_000_000.0 * Double(ti.numer) / Double(ti.denom))
         let target = nowHost + halfSecondTicks
-        player.scheduleBuffer(buf, at: AVAudioTime(hostTime: target), options: [])
+        // CONTROL FIRST: if the player renders the nil-scheduled file, the player itself works
+        // and any silence on the explicit-time item is that item's own failure.
+        player.scheduleFile(controlFile, at: nil)
         player.play()
+        // The working probes' ordering (schedule, then play), now with the explicit host time.
 
         var deadline = Date().addingTimeInterval(10)
         while hits.isEmpty && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
-        deadline = Date().addingTimeInterval(2)
-        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        // CONTROL WINDOW: the nil-scheduled file (1 s) must be audible now.
+        deadline = Date().addingTimeInterval(3)
+        var controlPeak: Float = 0
+        while Date() < deadline {
+            lock.lock(); controlPeak = max(controlPeak, lastPeak); lock.unlock()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        print("PROBE controlPeak=\(controlPeak)")
+        // THEN the explicit-time item. Reset the peak so this window is measured on its own.
+        lock.lock(); lastPeak = 0; lock.unlock()
+        player.scheduleFile(scheduledFile, at: AVAudioTime(hostTime: target))
+        deadline = Date().addingTimeInterval(6)
+        var explicitPeak: Float = 0
+        while Date() < deadline {
+            lock.lock(); explicitPeak = max(explicitPeak, lastPeak); lock.unlock()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        print("PROBE explicitPeak=\(explicitPeak)")
         player.stop()
         engine.mainMixerNode.removeTap(onBus: 0)
         engine.stop()
@@ -89,6 +126,8 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
             print("PROBE   START prediction=\(startPrediction) delta=\(hostSeconds - startPrediction)")
         }
         XCTAssertFalse(captured.isEmpty, "no callbacks captured")
+        XCTAssertGreaterThan(controlPeak, 0.6, "the positive control was silent: the setup cannot render audio")
+        print("PROBE VERDICT explicitPeak=\(explicitPeak) (audible ⇒ host-time scheduling fires on this runtime)")
         XCTAssertTrue(found, "the frame-0 impulse was not observed; semantics cannot be read")
     }
 }
