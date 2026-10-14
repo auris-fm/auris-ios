@@ -17,6 +17,10 @@ enum CloudAcceptanceHarness {
         let conversationId: String?
         let responseText: String
         let terminal: String
+        /// WHERE the terminal originated, bounded to the protocol's observable stages. The export
+        /// previously carried only the code, so a client construction failure and a served error were
+        /// indistinguishable after the fact — which is what an "empty message" reading rested on.
+        let stage: String
     }
 
     struct Export: Codable, Equatable {
@@ -60,11 +64,14 @@ enum CloudAcceptanceHarness {
 
         let verdict = CloudAcceptanceConsumer(a1: a1, a2: a2, b1: b1, nonce: nonce).verdictLine()
         func export(_ s: CloudAcceptanceConsumer.StepOutcome) -> ExportedStep {
-            ExportedStep(
+            let stage: String
+            if case .transportFailure(let st, _) = s.terminal { stage = st.rawValue } else { stage = "none" }
+            return ExportedStep(
                 requestId: s.requestId,
                 conversationId: s.conversationId,
                 responseText: s.responseText,
-                terminal: s.terminal.map { String(describing: $0) } ?? "none"
+                terminal: s.terminal.map { String(describing: $0) } ?? "none",
+                stage: stage
             )
         }
         return Export(nonce: nonce, a1: export(a1), a2: export(a2), b1: export(b1), verdict: verdict)

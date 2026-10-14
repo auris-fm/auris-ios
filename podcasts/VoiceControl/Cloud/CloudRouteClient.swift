@@ -201,7 +201,7 @@ final class CloudRouteClient {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
             // than reporting both under `invalid_request`.
             FileLog.shared.addMessage("[CloudRoute] invalid_request: websocket URL could not be built from baseURL='\(baseURL)'")
-            continuation.yield(.error(code: "invalid_request", message: "url"))
+            continuation.yield(.error(code: "invalid_request", message: "stage=clientRequest"))
             continuation.finish()
             return true
         }
@@ -269,7 +269,7 @@ final class CloudRouteClient {
             let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
                 FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
-                continuation.yield(.error(code: "invalid_request", message: "auth_encoding"))
+                continuation.yield(.error(code: "invalid_request", message: "stage=clientRequest"))
                 continuation.finish()
                 return true
             }

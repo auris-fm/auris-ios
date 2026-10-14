@@ -63,7 +63,10 @@ final class AcceptanceTraversalTests: XCTestCase {
     func testStreamEndWithoutTerminalIsTransportFailureNotCancellation() {
         let failed = CloudAcceptanceRecord.Recorder(requestId: "req-1", conversationId: "conv-A")
         failed.observe(.error(code: "connection_lost", message: ""))
-        XCTAssertEqual(failed.record().terminal, .transportFailure(code: "connection_lost"))
+        // `connection_lost` arrives as an ERROR EVENT (the client yields it when the socket closes or a
+        // transport call throws), so its stage is serverEvent by the discriminator: the client does not
+        // tag it as a construction failure.
+        XCTAssertEqual(failed.record().terminal, .transportFailure(stage: .serverEvent, code: "connection_lost"))
 
         let cancelled = CloudAcceptanceRecord.Recorder(requestId: "req-2", conversationId: "conv-A")
         cancelled.observe(.token("partial"))

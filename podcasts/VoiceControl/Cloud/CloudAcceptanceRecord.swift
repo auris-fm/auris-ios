@@ -21,12 +21,28 @@ struct CloudAcceptanceRecord: Equatable {
     /// The terminal outcome of this turn, or nil while it is still open.
     let terminal: Terminal?
 
+    /// WHERE a terminal outcome originated. Bounded to the observable stages of this protocol.
+    enum Stage: String, Equatable {
+        /// The client could not construct the request (bad URL, unencodable frame).
+        case clientRequest
+        /// An ERROR EVENT parsed from the server's frames.
+        case serverEvent
+        /// The transport failed or the stream ended without a terminal event.
+        case transport
+        /// The caller cancelled the turn.
+        case cancelled
+    }
+
     enum Terminal: Equatable {
         case done
         /// A parsed server error, a transport failure, or a socket/stream that ended WITHOUT a
         /// terminal event. A missing done/error is an INCOMPLETE outcome and is classified as a
         /// transport failure, not as cancellation: upstream EOF is not, by itself, cancellation.
-        case transportFailure(code: String)
+        ///
+        /// The STAGE says WHERE the outcome originated, because the code alone does not: the same
+        /// code string can come from client request construction or from a served error, and the
+        /// export previously carried only the code, so neither could be distinguished after the fact.
+        case transportFailure(stage: Stage, code: String)
         /// The turn was EXPLICITLY cancelled. Only a caller saying "this turn was cancelled" produces
         /// this: it is never inferred from an upstream EOF or a downstream termination, because those
         /// also happen on ordinary completion and on failure.
@@ -61,7 +77,7 @@ struct CloudAcceptanceRecord: Equatable {
         /// transport failure rather than as cancellation or success.
         func markStreamEndedWithoutTerminal() {
             lock.lock(); defer { lock.unlock() }
-            if terminal == nil { terminal = .transportFailure(code: "stream_ended_without_terminal") }
+            if terminal == nil { terminal = .transportFailure(stage: .transport, code: "stream_ended_without_terminal") }
         }
 
         /// Called at the transport boundary for every event of THIS turn.
@@ -77,8 +93,13 @@ struct CloudAcceptanceRecord: Equatable {
                 text += t
             case .done:
                 terminal = .done
-            case .error(let code, _):
-                terminal = .transportFailure(code: code)
+            case .error(let code, let message):
+                // THE STAGE IS DISCRIMINATED BY THE MESSAGE THE CLIENT ITSELF SETS on its own
+                // construction failures. Anything else arriving as an error event is a server event:
+                // the client never sets a message on a parsed frame. This is what the export previously
+                // could not show, and what made "empty message" unfounded.
+                let stage: Stage = message.hasPrefix("stage=clientRequest") ? .clientRequest : .serverEvent
+                terminal = .transportFailure(stage: stage, code: code)
             default:
                 break   // audio, actions and discovery results carry no acceptance field
             }
