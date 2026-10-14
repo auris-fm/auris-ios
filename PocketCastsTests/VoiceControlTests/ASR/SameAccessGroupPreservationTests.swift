@@ -51,6 +51,18 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         XCTAssertEqual(status, errSecSuccess, "the canary was not present after the helper read")
         XCTAssertEqual(attributed, group, "the canary is no longer attributed to the shared group")
         XCTAssertEqual(bytes, expected, "the canary bytes changed across the helper read")
+
+        // THE CONTAINER SENTINEL is verified here too, against the value recorded when it was created,
+        // so "intact" covers the container as well as the keychain item rather than the canary alone.
+        let expectedSentinelFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-sentinel.txt")
+        let expectedSentinel = (try? String(contentsOf: expectedSentinelFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentinelPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-preservation-sentinel.txt")
+        let actualSentinel = (try? String(contentsOf: sentinelPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        print("VERIFY postHelperRead sentinelPresent=\(actualSentinel != nil) sentinelMatch=\(actualSentinel == expectedSentinel) path=\(sentinelPath.path)")
+        XCTAssertNotNil(expectedSentinel, "the writer recorded no expected sentinel, so it cannot be checked")
+        XCTAssertEqual(actualSentinel, expectedSentinel, "the container sentinel changed across the helper read")
     }
 
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
@@ -87,6 +99,9 @@ final class SameAccessGroupPreservationTests: XCTestCase {
 
         let sentinelContents = "sentinel-\(UUID().uuidString)"
         try Data(sentinelContents.utf8).write(to: sentinelURL)
+        // Record the sentinel value so the post-helper verification compares against it rather than
+        // re-reading whatever is there.
+        try Data(sentinelContents.utf8).write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-sentinel.txt"))
         print("PRESERVE sentinel written at \(sentinelURL.path)")
 
         // --- READER: the helper's scoped shape — presence + group attribution, NO value returned ---
