@@ -283,3 +283,31 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
         XCTAssertNotEqual(client.record().terminal, server.record().terminal, "the stage did not discriminate")
     }
 }
+
+/// The export must carry NO free-form server text — not in the reason field (bounded token), and not
+/// smuggled inside the serialized terminal, where `String(describing:)` would have embedded it.
+final class AcceptanceExportBoundingTests: XCTestCase {
+
+    func testSerializedTerminalCarriesNoServerText() {
+        let sentinel = "secret-server-prose-that-must-not-be-exported"
+        let terminal = CloudAcceptanceRecord.Terminal.transportFailure(
+            stage: .serverEvent, code: "invalid_request", message: sentinel
+        )
+        let serialized = CloudAcceptanceHarness.boundedTerminal(terminal)
+        XCTAssertFalse(
+            serialized.contains(sentinel),
+            "the serialized terminal embedded raw server text: \(serialized)"
+        )
+        XCTAssertEqual(serialized, "serverEvent:invalid_request", "the terminal must be stage:code only")
+    }
+
+    func testBoundedTerminalHandlesEveryCase() {
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(nil), "none")
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(.done), "done")
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(.cancelled), "cancelled")
+        XCTAssertEqual(
+            CloudAcceptanceHarness.boundedTerminal(.transportFailure(stage: .clientRequest, code: "invalid_request", message: nil)),
+            "clientRequest:invalid_request"
+        )
+    }
+}

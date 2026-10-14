@@ -37,6 +37,17 @@ enum CloudAcceptanceHarness {
         let verdict: String
     }
 
+    /// A BOUNDED serialization of a terminal: stage and code only, never a server message. The
+    /// verdict line is built from the same parts, so raw server text cannot reach either.
+    static func boundedTerminal(_ terminal: CloudAcceptanceRecord.Terminal?) -> String {
+        guard let terminal else { return "none" }
+        switch terminal {
+        case .done: return "done"
+        case .cancelled: return "cancelled"
+        case .transportFailure(let stage, let code, _): return "\(stage.rawValue):\(code)"
+        }
+    }
+
     /// Runs the protocol against the production client and returns the export.
     ///
     /// It records the CLIENT'S OWN resolved base URL and whether a credential is present BEFORE the
@@ -106,7 +117,10 @@ enum CloudAcceptanceHarness {
                 requestId: s.requestId,
                 conversationId: s.conversationId,
                 responseText: s.responseText,
-                terminal: s.terminal.map { String(describing: $0) } ?? "none",
+                // BOUNDED: the terminal is serialized from the bounded parts only. `String(describing:)`
+                // on the case would embed the raw server message, which is the free-form text this
+                // export must not carry.
+                terminal: Self.boundedTerminal(s.terminal),
                 stage: stage,
                 serverReason: serverReason,
                 serverReasonLength: serverReason?.count
