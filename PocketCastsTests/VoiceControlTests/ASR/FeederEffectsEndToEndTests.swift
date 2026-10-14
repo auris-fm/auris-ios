@@ -367,6 +367,28 @@ final class FeederEffectsEndToEndTests: XCTestCase {
                     "consecutive accepted blocks derived different reference lengths, so an anchor is misplaced"
                 )
             }
+            // ABSOLUTE ANCHOR CHECK: equal derived lengths alone cannot detect a UNIFORM shift, so
+            // the anchor is pinned absolutely. `referenceIndexForProducerPosition` returns
+            // `rangeStart + played` with `played == 0` for the position the tap reports, and
+            // `rangeStart` is the reference's stream index BEFORE this block is appended — which is
+            // exactly the PREVIOUS record's post-append stream index. The first record's anchor must
+            // therefore be the reference's own start for its block, and each later record's anchor
+            // must equal its predecessor's stream index.
+            if matchedIndex > 0 {
+                XCTAssertEqual(
+                    matched.anchorPipelineFrames, Double(accepted[matchedIndex - 1].streamIndex),
+                    "the matched anchor is not the previous block's reference end, so the anchor is uniformly shifted"
+                )
+            } else {
+                // The FIRST accepted block of a fresh reference begins at reference position 0, and
+                // its anchor is `rangeStart + played` with `played == 0`, so the anchor must be 0
+                // exactly — an absolute pin that a uniform shift cannot satisfy.
+                XCTAssertEqual(
+                    matched.anchorPipelineFrames, 0,
+                    "the first accepted block's anchor is not reference position 0"
+                )
+            }
+            print("CARRIER matchedIndex=\(matchedIndex) anchorAbs=\(matched.anchorPipelineFrames) blockLength=\(blockReferenceLength)")
         } else {
             XCTFail("the matched record was not found among the accepted records")
         }
