@@ -172,3 +172,44 @@ final class AcceptanceRunPathTests: XCTestCase {
         }
     }
 }
+
+/// Gates the reviewer asked to keep: an empty nonce, an empty B1 response and empty/absent ids must all
+/// be REJECTED, because each of them would make a check pass for the wrong reason.
+final class AcceptanceGateTests: XCTestCase {
+
+    private func step(_ id: String?, _ conv: String?, _ text: String, _ t: CloudAcceptanceRecord.Terminal? = .done) -> CloudAcceptanceConsumer.StepOutcome {
+        .init(requestId: id, conversationId: conv, responseText: text, terminal: t)
+    }
+
+    private func verdict(nonce: String, a1: CloudAcceptanceConsumer.StepOutcome, a2: CloudAcceptanceConsumer.StepOutcome, b1: CloudAcceptanceConsumer.StepOutcome) -> CloudAcceptanceConsumer.Verdict {
+        CloudAcceptanceConsumer(a1: a1, a2: a2, b1: b1, nonce: nonce).evaluate()
+    }
+
+    func testEmptyNonceIsRejected() {
+        let v = verdict(nonce: "",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", "ok"), b1: step("r3", "B", "no"))
+        if case .pass = v { XCTFail("an empty nonce was accepted") }
+    }
+
+    func testEmptyB1ResponseIsNotIsolation() {
+        let v = verdict(nonce: "N",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", "you said N"), b1: step("r3", "B", ""))
+        if case .pass = v { XCTFail("an empty B1 response was accepted as isolation") }
+    }
+
+    func testEmptyA2ResponseIsNotRecall() {
+        let v = verdict(nonce: "N",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", ""), b1: step("r3", "B", "no"))
+        if case .pass = v { XCTFail("an empty A2 response was accepted as recall") }
+    }
+
+    func testAbsentOrReusedIdsAreRejected() {
+        let absent = verdict(nonce: "N",
+                             a1: step(nil, "A", "ok"), a2: step("r2", "A", "you said N"), b1: step("r3", "B", "no"))
+        if case .pass = absent { XCTFail("an absent request id was accepted") }
+
+        let reused = verdict(nonce: "N",
+                             a1: step("r1", "A", "ok"), a2: step("r1", "A", "you said N"), b1: step("r3", "B", "no"))
+        if case .pass = reused { XCTFail("a reused request id was accepted") }
+    }
+}

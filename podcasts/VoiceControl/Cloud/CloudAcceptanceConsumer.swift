@@ -33,6 +33,10 @@ struct CloudAcceptanceConsumer {
     let nonce: String
 
     func evaluate() -> Verdict {
+        // An EMPTY NONCE proves nothing: every response would vacuously "not contain" it, so isolation
+        // would pass for the wrong reason and recall could never be demonstrated.
+        guard !nonce.isEmpty else { return .fail("the nonce is empty, so recall cannot be demonstrated") }
+
         // Every step needs its own request identity, and they must be distinct: a reused or missing id
         // means the evidence cannot be tied to its turn.
         for (name, step) in [("A1", a1), ("A2", a2), ("B1", b1)] {
@@ -61,9 +65,19 @@ struct CloudAcceptanceConsumer {
         guard a2.responseText.contains(nonce) else {
             return .fail("conversation A did not recall the nonce (response: \(a2.responseText.prefix(80)))")
         }
-        // Isolation is judged on B1's response: a new conversation must not reach A's history.
+        // Isolation is judged on B1's response: a new conversation must not reach A's history. An EMPTY
+        // response is not evidence of isolation — it says the turn produced nothing, so the question was
+        // never answered and the check must fail rather than pass vacuously.
+        guard !b1.responseText.isEmpty else {
+            return .fail("B1 returned no response, so isolation was not demonstrated")
+        }
         guard !b1.responseText.contains(nonce) else {
             return .fail("a NEW conversation recalled the nonce, so conversations are not isolated")
+        }
+        // Recall needs a nonempty incoming response too: an empty A2 response cannot contain the nonce,
+        // and the earlier check already fails for it — stated here so the requirement is explicit.
+        guard !a2.responseText.isEmpty else {
+            return .fail("A2 returned no response, so recall was not demonstrated")
         }
         return .pass
     }
