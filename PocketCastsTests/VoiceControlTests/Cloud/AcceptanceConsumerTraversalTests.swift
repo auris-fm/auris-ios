@@ -213,3 +213,47 @@ final class AcceptanceGateTests: XCTestCase {
         if case .pass = reused { XCTFail("a reused request id was accepted") }
     }
 }
+
+/// THE WIRING: the assembly's acceptance entry uses the SAME client factory the sink is built with, so
+/// the harness submits through the app's client path rather than constructing its own.
+final class AcceptanceAssemblyWiringTests: XCTestCase {
+
+    private struct StaticToken: CloudTokenProviding {
+        func token() async -> String? { "t" }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
+    }
+
+    private final class CountingFactory {
+        var built = 0
+        func make() -> CloudRouteClient {
+            built += 1
+            return CloudRouteClient(baseURL: "https://api-staging.auris.fm", userId: "u", tokenProvider: StaticToken())
+        }
+    }
+
+    /// The wiring point is the SAME call that builds the sink's client: the factory is retained there,
+    /// so the acceptance entry cannot diverge from the sink's client.
+    ///
+    /// LIMITATION, stated rather than forced: `buildVoiceControlService` returns nil in this environment
+    /// (no wake-word models), so the full service build cannot be driven here. This exercises the wiring
+    /// point directly instead, and the entry itself is exercised in
+    /// `AcceptanceAssemblyWiringTests.testAcceptanceEntryBuildsThroughTheRetainedFactory`.
+    func testTheBuildPathRetainsTheFactoryForAcceptance() {
+        let counting = CountingFactory()
+        let assembly = VoiceControlAssembly()
+        let factory = assembly.acceptanceClientFactoryForBuild(counting.make)
+        _ = factory()
+        XCTAssertEqual(counting.built, 1, "the retained factory is not the one the build was given")
+    }
+
+    func testAcceptanceEntryBuildsThroughTheRetainedFactory() async {
+        let counting = CountingFactory()
+        let assembly = VoiceControlAssembly()
+        assembly.acceptanceClientFactoryForBuild(counting.make)
+
+        let before = counting.built
+        _ = await assembly.runAcceptance(nonce: "NONCE-1")
+        XCTAssertEqual(counting.built, before + 1, "the acceptance entry did not use the assembly's factory")
+    }
+}

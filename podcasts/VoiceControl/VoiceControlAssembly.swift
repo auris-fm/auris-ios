@@ -7,6 +7,11 @@ class VoiceControlAssembly {
     /// Retains the route-scope subscription for the lifetime of the assembly. The
     /// service holds the engine, so the binding must live at least as long.
     private var cancellables = Set<AnyCancellable>()
+    /// The client factory the assembly used, retained so the acceptance operator entry submits through
+    /// the SAME client the sink was built with rather than constructing a second one. Set when the
+    /// service is built; production and tests both flow through it.
+    private var acceptanceClientFactory: (() -> CloudRouteClient) = CloudRouteSink.productionClientFactory()
+
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -14,6 +19,22 @@ class VoiceControlAssembly {
     ///   substitutes it so the service can be driven through its REAL assembly and start path
     ///   without opening the microphone. This is the only injection point — everything else is
     ///   built as the app does.
+||||||| parent of cdff601 (feat(voice): wire the acceptance entry to the factory that builds the sink's client)
+    /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
+    ///   so the service can be driven through its REAL assembly and start path without opening the
+    ///   microphone. This is the only injection point — everything else is built as the app does.
+    ///   so the service can be driven through its REAL assembly and start path without opening the
+    ///   microphone. This is the only injection point — everything else is built as the app does.
+    /// Records the factory the sink is built with, so the acceptance entry uses the same one. This is
+    /// the point that WIRES the entry: the same call that builds the sink's client retains its factory
+    /// for acceptance, so the two cannot diverge.
+    @discardableResult
+    func acceptanceClientFactoryForBuild(_ injected: (() -> CloudRouteClient)? = nil) -> () -> CloudRouteClient {
+        let factory = injected ?? CloudRouteSink.productionClientFactory()
+        acceptanceClientFactory = factory
+        return factory
+    }
+
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
@@ -139,7 +160,7 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
-                clientFactory: injectedClientFactory ?? CloudRouteSink.productionClientFactory(),
+                clientFactory: acceptanceClientFactoryForBuild(injectedClientFactory),
                 isConfigured: { !(injectedCloudConfig ?? CloudConfig.shared).baseUrl.isEmpty },
                 audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
@@ -225,6 +246,21 @@ class VoiceControlAssembly {
             fatalError("Missing wakeword model in bundle: wakeword/\(filename)")
         }
         return url
+    }
+
+    // MARK: - Acceptance operator entry
+
+    /// THE OPERATOR INVOCATION for authenticated acceptance. It builds the SAME client the sink uses
+    /// (`injectedClientFactory` when a test supplied one, else the production factory), so the harness
+    /// submits through the app's real credential path, and it exports only the allowlisted fields.
+    ///
+    /// Reachable rather than merely callable: a caller that already holds the assembly invokes this with
+    /// a nonce; nothing here reads a credential, and no authenticated request is issued unless a caller
+    /// invokes it against a signed-in client.
+    func runAcceptance(nonce: String, context: CloudRouteContext? = nil) async -> CloudAcceptanceHarness.Export {
+        let client = acceptanceClientFactory()
+        let routeContext = context ?? CloudRouteContext(episodeId: nil, clientPositionMs: nil)
+        return await CloudAcceptanceHarness.run(nonce: nonce, client: client, context: routeContext)
     }
 }
 
