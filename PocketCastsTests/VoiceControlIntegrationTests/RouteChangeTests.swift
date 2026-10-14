@@ -94,6 +94,35 @@ final class FailingCapture: NativeAudioCapture {
     }
 }
 
+/// A failing capture whose teardown mirrors the real shared session: restoring `.playback`
+/// leaves the route monitor with no `availableInputs` even though the headset is still
+/// connected. That is not a device change, so it must not re-arm acquisition.
+final class FailingCaptureWithPlaybackTeardown: NativeAudioCapture {
+    private let monitorSession: FakeAudioSessionControlling
+
+    init(monitorSession: FakeAudioSessionControlling) {
+        self.monitorSession = monitorSession
+        super.init()
+    }
+
+    override func start() throws {
+        throw NSError(
+            domain: "FailingCaptureWithPlaybackTeardown",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "capture start failed"]
+        )
+    }
+
+    override func stop() {
+        // `VoiceAsrEngine` calls this on the start failure; on device it restores `.playback`,
+        // after which `availableInputs` is empty even though the headset stays connected. The
+        // live route reverts to the built-in mic (via `clearPreferredInput`), which changes the
+        // route identity — so only the suppression, not identity dedup, can block a re-arm.
+        monitorSession.available = []
+        super.stop()
+    }
+}
+
 final class RouteChangeTests: XCTestCase {
 
     private func port(_ type: AVAudioSession.Port, uid: String = UUID().uuidString) -> AudioPort {
@@ -833,6 +862,38 @@ final class RouteChangeTests: XCTestCase {
         await waitUntil(timeout: 5) { session.configureCount >= 2 }
         XCTAssertEqual(session.configureCount, 2,
                        "a genuine device change must re-arm acquisition for the new device")
+    }
+
+    /// The failed-capture-start suppression must survive the `.playback` restore, which leaves
+    /// the session with no `availableInputs` even though the headset is still connected. A
+    /// missing candidate UID is ambiguous, not evidence of removal, and must not re-arm the
+    /// acquire→fail→release loop.
+    @MainActor
+    func test_captureStartFailure_suppressionSurvivesPlaybackRestore() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+        session.inputsOnClear = [port(.builtInMic, uid: "built-in")]
+
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(
+                audioSession: session,
+                capture: FailingCaptureWithPlaybackTeardown(monitorSession: session)
+            )!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { session.clearCount >= 1 }
+        // Teardown removed the external input from availableInputs, as `.playback` does.
+        XCTAssertEqual(session.available, [], "teardown hides availableInputs, as the real session does")
+        // Give any (incorrect) re-acquisition a chance to run before asserting it did not.
+        try? await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertFalse(service.isListening, "a failed capture start must not report listening")
+        XCTAssertEqual(session.configureCount, 1,
+                       "teardown hiding availableInputs must not re-arm acquisition for the same device")
     }
 
     private func postRouteChange() {

@@ -81,6 +81,11 @@ class VoiceControlService: ObservableObject {
     /// candidate appears): releasing the preferred input reverts the live route
     /// to the built-in mic, which is not a device change and must not re-arm.
     private var captureStartFailedInputUID: String?
+    /// Physical-device-change epoch recorded with [captureStartFailedInputUID]. The
+    /// suppression is kept until a later physical change advances the epoch — a missing
+    /// `availableInputs` on its own is ambiguous, because the `.playback` restore after a
+    /// failed capture exposes no inputs even while the headset stays connected.
+    private var captureStartFailedEpoch: UInt = 0
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -276,6 +281,7 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
             captureStartFailedInputUID = routeMonitor.currentExternalInputUID
                 ?? routeMonitor.lastAcquisitionTargetUID
+            captureStartFailedEpoch = routeMonitor.physicalDeviceChangeEpoch
             routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
             return
         }
@@ -536,12 +542,15 @@ class VoiceControlService: ObservableObject {
         }
         guard acquisitionTask == nil else { return }
         // A capture start that failed for an external device must not re-arm
-        // acquisition for that same device. Release reverts the live route to
-        // the built-in mic; that is not a genuine device change. Clear the
-        // suppression once the failed device is gone or replaced.
-        if let failedInputUID = captureStartFailedInputUID {
-            guard routeMonitor.currentExternalInputUID != failedInputUID else { return }
+        // acquisition for that same device. Release restores `.playback`, which
+        // exposes no `availableInputs` even while the headset stays connected, so
+        // a missing candidate UID is not evidence of removal — treating it as one
+        // cleared the suppression and re-armed the acquire→fail→release loop. Keep
+        // the key until a physical device change (a real connect or disconnect).
+        if captureStartFailedInputUID != nil {
+            guard routeMonitor.physicalDeviceChangeEpoch != captureStartFailedEpoch else { return }
             captureStartFailedInputUID = nil
+            captureStartFailedEpoch = 0
         }
         let route = routeMonitor.currentRouteIdentity
         guard acquisitionAttemptedRoute != route else { return }

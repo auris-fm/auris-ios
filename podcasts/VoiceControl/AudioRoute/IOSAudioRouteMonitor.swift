@@ -191,6 +191,12 @@ class IOSAudioRouteMonitor: ObservableObject {
     private var lastAcquisitionActivatedSession = false
     /// Whether the last successful acquisition selected a preferred input.
     private var lastAcquisitionSelectedInput = false
+    /// Counts physical audio-device changes — a device connected or disconnected, as reported by
+    /// the route-change notification. Selection changes do not advance it. It is the only reliable
+    /// evidence that an external device is genuinely gone: `availableInputs` is empty whenever the
+    /// session is not input-capable, including the `.playback` restore after a failed capture, so a
+    /// missing candidate UID alone is not proof of removal.
+    private(set) var physicalDeviceChangeEpoch: UInt = 0
     /// UID of the external input the last acquisition selected. Retained across
     /// the preferred-input release so a failed capture start can be keyed to the
     /// physical device rather than the transient live route (which reverts to the
@@ -216,6 +222,7 @@ class IOSAudioRouteMonitor: ObservableObject {
                     AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                 ]
                 guard validReasons.contains(reason) else { return }
+                self.physicalDeviceChangeEpoch &+= 1
                 self.refreshRoute()
                 self.gracePeriodSignal.onAudioRouteChanged()
             }
