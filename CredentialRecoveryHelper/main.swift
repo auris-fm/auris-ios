@@ -66,6 +66,9 @@ enum Helper {
                 let sentinel = "sentinel-\(UUID().uuidString)"
                 try? Data(sentinel.utf8).write(to: sentinelURL)
                 try? Data(sentinel.utf8).write(to: sentinelURL.appendingPathExtension("expected"))
+                // Record the canary bytes too, so verify can compare against the ORIGINAL value rather
+                // than merely observing that something is present.
+                try? Data(value.utf8).write(to: sentinelURL.appendingPathExtension("canary-expected"))
                 print("SCRATCH-ESTABLISH container=\(container) write=\(status) canary=\(value)")
                 print("SCRATCH-ESTABLISH sentinelPath=\(sentinelURL.path) sentinel=\(sentinel)")
                 return status == errSecSuccess ? 0 : 4
@@ -87,12 +90,15 @@ enum Helper {
                 let attributed = dict?[kSecAttrAccessGroup as String] as? String
                 let sentinel = try? String(contentsOf: sentinelURL, encoding: .utf8)
                 let expected = try? String(contentsOf: sentinelURL.appendingPathExtension("expected"), encoding: .utf8)
-                // A missing sentinel must FAIL, not compare nil == nil and pass.
+                let expectedCanary = try? String(contentsOf: sentinelURL.appendingPathExtension("canary-expected"), encoding: .utf8)
+                // Both comparisons must be against the RECORDED originals and must be non-vacuous: a
+                // missing expectation or a missing item FAILS rather than comparing nil == nil.
                 let sentinelOK = (sentinel != nil && sentinel == expected)
+                let canaryOK = (bytes != nil && bytes == expectedCanary)
                 print("SCRATCH-VERIFY container=\(container) read=\(status) attributedGroup=\(attributed as Any)")
                 print("SCRATCH-VERIFY sentinelPath=\(sentinelURL.path) sentinelPresent=\(sentinel != nil) sentinelMatch=\(sentinelOK)")
-                print("SCRATCH-VERIFY canaryPresent=\(bytes != nil)")
-                return (status == errSecSuccess && sentinelOK && bytes != nil) ? 0 : 6
+                print("SCRATCH-VERIFY canaryPresent=\(bytes != nil) canaryBytesMatch=\(canaryOK)")
+                return (status == errSecSuccess && sentinelOK && canaryOK) ? 0 : 6
             }
         }
 
