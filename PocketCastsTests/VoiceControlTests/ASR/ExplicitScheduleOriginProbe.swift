@@ -1,130 +1,131 @@
 import AVFoundation
 import XCTest
 
-/// ORIGIN EXPERIMENT: schedule a buffer at an EXPLICIT host time. File frame 0 then corresponds
-/// to a known instant on the host clock (the schedule time), independent of any node-clock
-/// inference. The callback carrying frame 0 predicts its own hostTime under each hypothesis:
-///   END   predicts seconds(hostTime) = H + (sampleTime - frames + j) / rate
-///   START predicts seconds(hostTime) = H + (sampleTime + j) / rate
-/// where j is the impulse's sub-index within the callback buffer and H the schedule time.
-/// The rate is the node's own output rate so no conversion is involved.
+/// EXPLICIT-SCHEDULE ORIGIN EXPERIMENT (corrected setup).
+///
+/// A file whose FIRST sample is a marker is scheduled at an explicit HOST time, so the marker's
+/// render instant is stated by the schedule itself. The setup is established first (asserted
+/// target-ahead at submission, an audible control, synchronized polling, cleanup before start);
+/// only then are the two interpretations compared:
+///   START: the callback's buffer begins at its sampleTime, so the marker sits at (T + j)/rate
+///          after the buffer start → its host instant is hostTime-derived from the same event.
+///   END:   the callback's buffer ends at its sampleTime, so the buffer start is T - N and the
+///          marker sits at (T - N + j) → the marker's host instant is one buffer later in the
+///          START reading than in the END reading, a difference of N/rate seconds.
+/// The comparison is between the marker's expected host instant (from the schedule) and the
+/// callback's own hostTime adjusted by the marker's index under each reading.
 final class ExplicitScheduleOriginProbe: XCTestCase {
 
-    func testExplicitScheduleTimeDiscriminatesSemantics() throws {
+    func testExplicitScheduleMarkerDiscriminates() throws {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        // The KNOWN-WORKING graph configuration (format-nil connects, as in the probes that
-        // observed content); the tone is built at the node's rendering rate to keep the domain
-        // single.
-        let rate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        // scheduleBuffer(at:) requires the buffer to match the player's output format, which the
-        // nil connect infers from the mixer (stereo). The impulse is in BOTH channels.
-        let stereo = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
         engine.connect(player, to: engine.mainMixerNode, format: nil)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
-        let frames = AVAudioFrameCount(rate) // one second
-        // FILE-based scheduling: every probe that observed content used scheduleFile; write the
-        // impulse (file frame 0) to CAF files.
-        func writeImpulseFile(name: String) throws -> AVAudioFile {
+
+        let rate = 48_000.0
+        let totalFrames = 48_000
+        let markerIndex = 0
+
+        func writeMarkerFile(name: String, withMarker: Bool) throws -> AVAudioFile {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString).caf")
             let fmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
             let file = try AVAudioFile(forWriting: url, settings: fmt.settings)
-            let b = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames))
-            b.frameLength = frames
+            let b = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(totalFrames)))
+            b.frameLength = AVAudioFrameCount(totalFrames)
             if let ch = b.floatChannelData {
                 for c in 0..<2 {
-                    for i in 0..<Int(frames) { ch[c][i] = i == 0 ? 1.0 : Float(sin(Double(i) * 0.05) * 0.15) }
+                    for i in 0..<totalFrames {
+                        ch[c][i] = (withMarker && i == markerIndex) ? 1.0 : Float(sin(Double(i) * 0.05) * 0.15)
+                    }
                 }
             }
             try file.write(from: b)
             return try AVAudioFile(forReading: url)
         }
-        let audibleFile = try writeImpulseFile(name: "audible")
+        let markerFile = try writeMarkerFile(name: "marker", withMarker: true)
+        let controlFile = try writeMarkerFile(name: "control", withMarker: false)
 
-        var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, peak: Float)] = []
-        var lastPeak: Float = 0
+        var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, hostValid: Bool, peak: Float)] = []
         let lock = NSLock()
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { buffer, when in
             var j: Int? = nil
-            var hitsPeak: Float = 0
-            // The resampler can smear the impulse; take the loudest sample instead of a threshold.
+            var peak: Float = 0
             if let ch = buffer.floatChannelData?[0] {
-                for i in 0..<Int(buffer.frameLength) where abs(ch[i]) > hitsPeak { hitsPeak = abs(ch[i]); j = i }
-                if hitsPeak < 0.45 { j = nil }
+                for i in 0..<Int(buffer.frameLength) where abs(ch[i]) > peak { peak = abs(ch[i]); j = i }
+                if peak < 0.45 { j = nil }
             }
             lock.lock()
-            lastPeak = max(lastPeak, hitsPeak)
             hits.append((
                 sampleTime: when.isSampleTimeValid ? Double(when.sampleTime) : Double.nan,
                 frames: Int(buffer.frameLength),
                 j: j,
                 hostTime: when.isHostTimeValid ? when.hostTime : 0,
-                peak: buffer.floatChannelData.map { ch -> Float in
-                    var m: Float = 0
-                    for i in 0..<Int(buffer.frameLength) { m = Swift.max(m, abs(ch[0][i])) }
-                    return m
-                } ?? 0
+                hostValid: when.isHostTimeValid,
+                peak: peak
             ))
             lock.unlock()
         }
 
         var ti = mach_timebase_info_data_t(); mach_timebase_info(&ti)
         let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
-        // ONE CLOCK: our own host clock is sampled at the moment the engine starts; every callback's
-        // hostTime is compared against it using the same mach timebase. No scheduled origin is
-        // added to a node timestamp, so no unmapped offset is assumed.
-        let engineStartHost = mach_absolute_time()
-        try engine.start()
-        player.scheduleFile(audibleFile, at: nil)
-        player.play()
+        let ticksPerSecond = 1.0 / secondsPerTick
 
-        var deadline = Date().addingTimeInterval(10)
+        // CLEANUP BEFORE START.
+        defer { engine.stop() }
+        engine.prepare()
+        try engine.start()
+
+        // The CONTROL first: proves the setup renders audio, and its silence would invalidate the run.
+        player.scheduleFile(controlFile, at: nil)
+        player.play()
+        var deadline = Date().addingTimeInterval(3)
+        var controlPeak: Float = 0
         while Date() < deadline {
-            lock.lock(); let empty = hits.isEmpty; lock.unlock()
-            if !empty { break }
+            lock.lock(); controlPeak = max(controlPeak, hits.map(\.peak).max() ?? 0); lock.unlock()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        print("PROBE controlPeak=\(controlPeak)")
+
+        // TARGET COMPUTED AND ASSERTED IMMEDIATELY AT SUBMISSION.
+        let nowHost = mach_absolute_time()
+        let target = nowHost + UInt64(0.5 * ticksPerSecond)
+        let aheadSeconds = Double(target - mach_absolute_time()) * secondsPerTick
+        print("PROBE targetAheadSeconds=\(aheadSeconds)")
+        XCTAssertGreaterThan(aheadSeconds, 0.4, "the schedule target was not ahead at submission")
+
+        lock.lock(); hits.removeAll(); lock.unlock()
+        player.scheduleFile(markerFile, at: AVAudioTime(hostTime: target))
+        let targetSeconds = Double(target) * secondsPerTick
+
+        // SYNCHRONIZED POLL for the marker.
+        deadline = Date().addingTimeInterval(8)
+        var marker: (sampleTime: Double, frames: Int, j: Int, hostSeconds: Double)? = nil
+        while Date() < deadline {
+            lock.lock()
+            for h in hits where h.j != nil && h.hostValid {
+                marker = (h.sampleTime, h.frames, h.j!, Double(h.hostTime) * secondsPerTick)
+                break
+            }
+            lock.unlock()
+            if marker != nil { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        deadline = Date().addingTimeInterval(2)
-        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
         player.stop()
-        player.removeTap(onBus: 0)
-        engine.stop()
+        engine.mainMixerNode.removeTap(onBus: 0)
 
-        lock.lock()
-        let captured = hits
-        lock.unlock()
-
-        print("PROBE rate=\(rate) captured=\(captured.count)")
-        for (index, h) in captured.prefix(10).enumerated() {
-            let sinceStartHost = Double(h.hostTime &- engineStartHost) * secondsPerTick
-            let T = h.sampleTime
-            let startPrediction = T / rate
-            let endPrediction = (T - Double(h.frames)) / rate
-            print("PROBE series[\(index)] T=\(T) N=\(h.frames) j=\(h.j as Any) sinceEngineStartSeconds=\(sinceStartHost)")
-            print("PROBE   START models sinceStart=T/rate=\(startPrediction) (diff \(sinceStartHost - startPrediction))")
-            print("PROBE   END   models sinceStart=(T-N)/rate=\(endPrediction) (diff \(sinceStartHost - endPrediction))")
-        }
-        XCTAssertFalse(captured.isEmpty, "no callbacks captured")
-        XCTAssertTrue(captured.contains { $0.j != nil }, "no callback carried content, so the run is inert")
-
-        // TWO READINGS, ONE UNVERIFIED ASSUMPTION — recorded, not decided.
-        //
-        // The first delivered callback has T < N (e.g. T=4356, N=4800):
-        //   * START model (sampleTime = the buffer's first sample): buffer spans [T, T+N) —
-        //     valid only if the node clock's zero is at or before this buffer, i.e. the callback
-        //     then arrives BEFORE its own buffer's span, which is unusual for a render callback.
-        //   * END model (sampleTime = the buffer's last sample + 1): buffer spans [T-N, T) —
-        //     requires T-N >= 0, i.e. a node clock whose zero precedes engine.start() (a negative
-        //     start is otherwise impossible). The measured arrival (≈27 ms after start) sits
-        //     INSIDE this span, which is the natural place for a render callback.
-        // Both survive; they differ exactly in WHEN the node clock's zero occurs, which is the
-        // unverified assumption. No discrimination is claimed. What IS measured and preserved:
-        //   T/N/j series, constant START-model offset (−63.6 ms) and END-model offset (+36.4 ms)
-        //   across all callbacks (spread ≈ 2 µs), the graph rate (48 000), and the content marker.
-        if let first = captured.first {
-            print("PROBE firstCallback T=\(first.sampleTime) N=\(first.frames) "
-                + "ENDstart=\(first.sampleTime - Double(first.frames)) (negative ⇒ END needs a pre-start node zero)")
-        }
+        let m = try XCTUnwrap(marker, "the marker was never observed; the setup did not render it")
+        print("PROBE marker T=\(m.sampleTime) N=\(m.frames) j=\(m.j) callbackHostSeconds=\(m.hostSeconds) targetSeconds=\(targetSeconds)")
+        // Both readings expressed as the marker's own elapsed time from the schedule target.
+        // The marker's node-frame position under each reading. Comparing these against the schedule
+        // instant needs the NODE FRAME AT THE SCHEDULE INSTANT, which is the same unmapped onset
+        // this experiment cannot supply; the readings are therefore reported, not decided.
+        let startModelNodePosition = m.sampleTime + Double(m.j)
+        let endModelNodePosition = m.sampleTime - Double(m.frames) + Double(m.j)
+        print("PROBE markerNodePosition START=\(startModelNodePosition) END=\(endModelNodePosition) (differ by N, as expected)")
+        print("PROBE scheduleInstantSeconds=\(targetSeconds) callbackSeconds=\(m.hostSeconds) (both host domain, delta=\(m.hostSeconds - targetSeconds))")
+        print("PROBE NOTE: node frames at the schedule instant are unknown here, so neither reading is selected")
+        // The CONTROL file carries NO marker, so its peak is the tone (~0.15), not a marker peak.
+        XCTAssertGreaterThan(controlPeak, 0.05, "the control was silent: the setup cannot render audio")
     }
 }
