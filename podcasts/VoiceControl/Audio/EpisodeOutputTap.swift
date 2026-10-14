@@ -121,8 +121,11 @@ final class EpisodeOutputTap {
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime, Int) -> Void)?
 
     /// Monotonic PER-BLOCK counter: each published block is stamped with its own key, so a callback
-    /// can be linked to the acceptance of the block it produced. Reset is not needed — the counter
-    /// only has to be unique within a process run.
+    /// can be linked to the acceptance of the block it produced. Guarded because `publish` runs from
+    /// the render callback thread and can contend with a direct caller; an unguarded increment could
+    /// hand two blocks the same key and make the link ambiguous. Only ever incremented, so the keys
+    /// stay unique across installs and reinstalls without being reset.
+    private let blockKeyLock = NSLock()
     private var blockKeyCounter = 0
 
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
@@ -212,8 +215,10 @@ final class EpisodeOutputTap {
         renderedAt: AVAudioTime? = nil,
         producer: EchoReferenceHandoff.ProducerIdentity? = nil
     ) {
+        blockKeyLock.lock()
         blockKeyCounter += 1
         let blockKey = blockKeyCounter
+        blockKeyLock.unlock()
         if let renderedAt { onBuffer?(buffer, renderedAt, blockKey) }
         // The caller's ADMITTED identity when supplied; the current one otherwise, so existing
         // callers that publish without an admitted identity keep working.
