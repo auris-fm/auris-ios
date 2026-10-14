@@ -103,3 +103,72 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
         XCTAssertFalse(a2.responseText.contains(nonce), "outgoing-only evidence was read as recall")
     }
 }
+
+/// The OPT-IN CLIENT PATH end to end: `CloudAcceptanceRun.run` submits A1/A2/B1, and the verdict comes
+/// from the records those submissions produced. This exercises the integration rather than the consumer
+/// in isolation.
+final class AcceptanceRunPathTests: XCTestCase {
+
+    private struct StaticToken: CloudTokenProviding {
+        func token() async -> String? { "t" }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
+    }
+
+    private final class ScriptedSubmit {
+        var conversationIds: [String] = []
+        var modes: [String] = []
+        var steps: [CloudAcceptanceConsumer.StepOutcome] = []
+        func submit(_ request: String, _ turn: CloudTurnEnvelope) -> CloudAcceptanceConsumer.StepOutcome {
+            conversationIds.append(turn.conversation?.conversationId ?? "nil")
+            modes.append(turn.conversation?.mode ?? "nil")
+            return steps.isEmpty ? .init(requestId: nil, conversationId: nil, responseText: "", terminal: nil) : steps.removeFirst()
+        }
+    }
+
+    private func step(_ id: String, _ conv: String, _ text: String, _ terminal: CloudAcceptanceRecord.Terminal?) -> CloudAcceptanceConsumer.StepOutcome {
+        .init(requestId: id, conversationId: conv, responseText: text, terminal: terminal)
+    }
+
+    func testRunPathSubmitsThreeTurnsAndPasses() {
+        let scripted = ScriptedSubmit()
+        let nonce = "NONCE-314"
+        scripted.steps = [
+            step("r1", "conv-A", "ok", .done),
+            step("r2", "conv-A", "you asked me to remember \(nonce)", .done),
+            step("r3", "conv-B", "I have no idea", .done),
+        ]
+        let client = CloudRouteClient(baseURL: "https://api-staging.auris.fm", userId: "u", tokenProvider: StaticToken())
+        let verdict = CloudAcceptanceRun.run(
+            nonce: nonce, conversationA: "conv-A", conversationB: "conv-B",
+            client: client, context: CloudRouteContext(episodeId: nil, clientPositionMs: nil),
+            submit: scripted.submit
+        )
+        XCTAssertEqual(verdict, .pass)
+        XCTAssertEqual(scripted.modes, ["create", "resume", "create"], "the run must continue the same conversation for A2")
+        XCTAssertEqual(scripted.conversationIds, ["conv-A", "conv-A", "conv-B"], "A1/A2 share A; B1 uses B")
+    }
+
+    /// A non-done terminal on any step is a FAILED acceptance, never a pass: an error, a transport
+    /// failure or a cancellation is not a completed turn.
+    func testRunPathFailsWhenAStepDidNotComplete() {
+        for terminal in [CloudAcceptanceRecord.Terminal.transportFailure(code: "connection_lost"), .cancelled, nil] as [CloudAcceptanceRecord.Terminal?] {
+            let scripted = ScriptedSubmit()
+            let nonce = "NONCE-314"
+            scripted.steps = [
+                step("r1", "conv-A", "ok", .done),
+                step("r2", "conv-A", "you asked me to remember \(nonce)", terminal),
+                step("r3", "conv-B", "I have no idea", .done),
+            ]
+            let client = CloudRouteClient(baseURL: "https://api-staging.auris.fm", userId: "u", tokenProvider: StaticToken())
+            let verdict = CloudAcceptanceRun.run(
+                nonce: nonce, conversationA: "conv-A", conversationB: "conv-B",
+                client: client, context: CloudRouteContext(episodeId: nil, clientPositionMs: nil),
+                submit: scripted.submit
+            )
+            if case .pass = verdict {
+                XCTFail("a step with terminal \(String(describing: terminal)) was accepted as a pass")
+            }
+        }
+    }
+}

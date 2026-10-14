@@ -38,7 +38,13 @@ struct CloudAcceptanceConsumer {
         for (name, step) in [("A1", a1), ("A2", a2), ("B1", b1)] {
             guard let id = step.requestId, !id.isEmpty else { return .fail("\(name) has no request id") }
             guard let conv = step.conversationId, !conv.isEmpty else { return .fail("\(name) has no conversation id") }
-            guard step.terminal != nil else { return .fail("\(name) has no terminal outcome") }
+            // A SUCCESSFUL done terminal is REQUIRED. An error, a transport failure or a cancellation is
+            // not a completed turn: counting any terminal as success would let a failed step pass, and a
+            // missing done/error would be indistinguishable from one.
+            guard step.terminal == .done else {
+                let described = step.terminal.map { "\($0)" } ?? "none"
+                return .fail("\(name) did not complete successfully (terminal: \(described))")
+            }
         }
         let ids = [a1.requestId!, a2.requestId!, b1.requestId!]
         guard Set(ids).count == 3 else { return .fail("request ids are not distinct: \(ids)") }
@@ -58,10 +64,6 @@ struct CloudAcceptanceConsumer {
         // Isolation is judged on B1's response: a new conversation must not reach A's history.
         guard !b1.responseText.contains(nonce) else {
             return .fail("a NEW conversation recalled the nonce, so conversations are not isolated")
-        }
-        // A1's terminal must be a completed turn too; a transport failure there means nothing was sent.
-        if case .transportFailure(let code) = a1.terminal {
-            return .fail("A1 did not complete: \(code)")
         }
         return .pass
     }
