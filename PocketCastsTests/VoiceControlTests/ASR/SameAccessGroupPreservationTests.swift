@@ -29,11 +29,13 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     func testPostHelperReadCanaryBytesAndSentinelAreIntact() throws {
         let group = "6LL2R2A55F.fm.auris.scratchshared"
         let expectedFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-bytes.txt")
-        guard let expected = try? String(contentsOf: expectedFile, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines) else {
-            print("VERIFY skipped: no expected-bytes file, so this run cannot compare")
-            return
-        }
+        // REQUIRED, not optional: without the phase-1 expectation this test has nothing to compare
+        // against, so a missing file must FAIL rather than pass silently.
+        let expected = try XCTUnwrap(
+            try? String(contentsOf: expectedFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "phase 1 recorded no expected canary bytes at \(expectedFile.path), so this verification would be vacuous"
+        )
         var out: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass as String: kSecClassGenericPassword,
@@ -61,8 +63,8 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         let actualSentinel = (try? String(contentsOf: sentinelPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         print("VERIFY postHelperRead sentinelPresent=\(actualSentinel != nil) sentinelMatch=\(actualSentinel == expectedSentinel) path=\(sentinelPath.path)")
-        XCTAssertNotNil(expectedSentinel, "the writer recorded no expected sentinel, so it cannot be checked")
-        XCTAssertEqual(actualSentinel, expectedSentinel, "the container sentinel changed across the helper read")
+        let expectedSentinelValue = try XCTUnwrap(expectedSentinel, "phase 1 recorded no expected sentinel, so the container check would be vacuous")
+        XCTAssertEqual(actualSentinel, expectedSentinelValue, "the container sentinel changed across the helper read")
     }
 
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
