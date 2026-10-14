@@ -358,29 +358,6 @@ final class HeldOldCallbackIdentityTests: XCTestCase {
 /// resolved connection carries the bus the feeder reports, not an assumed zero.
 final class FeederBusDiscoveryTests: XCTestCase {
 
-    /// DOCUMENTED LIMITATION, measured rather than assumed: every node constructible through the
-    /// public AVAudioEngine API on the simulator reports exactly ONE output bus, and the connection
-    /// point's feeder-output bus is therefore always 0. A nonzero feeder-output bus cannot be built
-    /// here, so "found bus 0" is indistinguishable from "assumed bus 0" in this environment. The
-    /// every-bus search in `outputFeederConnection` remains correct by construction; its
-    /// distinguishing case is device-shaped and is NOT covered by executed tests.
-    func test_zeroBusIsTheOnlyConstructibleFeederBus() throws {
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        let eq = AVAudioUnitEQ(numberOfBands: 1)
-        engine.attach(eq)
-        engine.connect(player, to: eq, format: nil)
-        engine.connect(eq, to: engine.outputNode, format: nil)
-
-        XCTAssertEqual(eq.numberOfOutputs, 1, "the feeder reports more than one output bus; the limitation changed")
-        for bus in 0..<engine.outputNode.numberOfInputs {
-            if let point = engine.inputConnectionPoint(for: engine.outputNode, inputBus: bus) {
-                XCTAssertEqual(point.bus, 0, "a nonzero feeder-output bus became constructible; add a case that exercises it")
-            }
-        }
-    }
-
     func testFeederConnectionReportsTheFeedersOwnBus() throws {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()

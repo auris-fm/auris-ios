@@ -85,6 +85,9 @@ final class EpisodeOutputTap {
             self?.capture(buffer, renderedAt: when, producer: admitted)
         }
         installedClosures.append(closure)
+        if installedClosures.count > Self.closureHistoryLimit {
+            installedClosures.removeFirst(installedClosures.count - Self.closureHistoryLimit)
+        }
         node.installTap(
             onBus: connection.bus,
             bufferSize: 4096,
@@ -98,7 +101,11 @@ final class EpisodeOutputTap {
     /// PRIOR install's closure after a reinstall — the seam that makes the capture itself
     /// observable: a closure that read the current identity at fire time would acquire the new
     /// incarnation here, where the immutable capture submits its own.
+    /// BOUNDED: only the most recent `closureHistoryLimit` installs are retained, so the seam
+    /// cannot accumulate closures indefinitely in production. Older installs' closures are
+    /// dropped as new ones arrive.
     private var installedClosures: [(AVAudioPCMBuffer, AVAudioTime) -> Void] = []
+    private static let closureHistoryLimit = 4
 
     /// Invokes the closure captured by the install at `index` (0 = the first install), exactly
     /// as the graph would. The closure runs with whatever it captured at its own install time.
