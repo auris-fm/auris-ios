@@ -29,10 +29,10 @@ final class CloudAcceptanceRecordTests: XCTestCase {
         XCTAssertEqual(record.responseText, "partial")
     }
 
-    func testErrorIsTerminalAndDistinctFromDone() {
+    func testServerErrorIsATransportFailureTerminalDistinctFromDone() {
         let recorder = CloudAcceptanceRecord.Recorder(requestId: "req-3", conversationId: nil)
         recorder.observe(.error(code: "invalid_response", message: "x"))
-        XCTAssertEqual(recorder.record().terminal, .error(code: "invalid_response"))
+        XCTAssertEqual(recorder.record().terminal, .transportFailure(code: "invalid_response"))
     }
 
     /// The recall assertion is against the INCOMING response text. This proves the two directions are

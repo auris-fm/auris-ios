@@ -60,10 +60,10 @@ final class AcceptanceTraversalTests: XCTestCase {
 
     /// TRANSPORT TERMINALS are covered: a cancelled turn and a transport error are both terminal, and
     /// neither reads as success.
-    func testTransportFailureAndCancellationAreBothTerminal() {
+    func testStreamEndWithoutTerminalIsTransportFailureNotCancellation() {
         let failed = CloudAcceptanceRecord.Recorder(requestId: "req-1", conversationId: "conv-A")
         failed.observe(.error(code: "connection_lost", message: ""))
-        XCTAssertEqual(failed.record().terminal, .error(code: "connection_lost"))
+        XCTAssertEqual(failed.record().terminal, .transportFailure(code: "connection_lost"))
 
         let cancelled = CloudAcceptanceRecord.Recorder(requestId: "req-2", conversationId: "conv-A")
         cancelled.observe(.token("partial"))

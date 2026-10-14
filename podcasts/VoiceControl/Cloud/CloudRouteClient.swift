@@ -141,18 +141,25 @@ final class CloudRouteClient {
         let upstream = route(request: request, context: context, turn: turn)
         let stream = AsyncStream<CloudRouteEvent> { continuation in
             let task = Task {
+                var sawTerminal = false
                 for await event in upstream {
                     recorder.observe(event)
+                    if case .done = event { sawTerminal = true }
+                    if case .error = event { sawTerminal = true }
                     continuation.yield(event)
                 }
-                // The upstream finishes WITHOUT a terminal event when its task was cancelled, so a
-                // cancelled turn is recorded as cancelled rather than read as still-open or complete.
-                if Task.isCancelled { recorder.markCancelled() }
+                // AN END WITHOUT A TERMINAL IS AN INCOMPLETE TURN, not a cancellation: an upstream EOF
+                // happens on completion and on failure too. It is classified as a transport failure so
+                // a missing done/error cannot pass as success, and cancellation is NOT inferred here.
+                if !sawTerminal { recorder.markStreamEndedWithoutTerminal() }
                 continuation.finish()
             }
             continuation.onTermination = { _ in
+                // Downstream termination cancels the work but does NOT by itself mean the TURN was
+                // cancelled: the consumer may simply have stopped reading. The recorder is left to
+                // whichever terminal it observed, and the caller marks .cancelled explicitly if it
+                // actually cancelled the turn.
                 task.cancel()
-                recorder.markCancelled()
             }
         }
         return (stream, { recorder.record() })

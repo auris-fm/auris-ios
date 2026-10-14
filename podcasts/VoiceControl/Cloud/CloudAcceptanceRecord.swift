@@ -23,12 +23,13 @@ struct CloudAcceptanceRecord: Equatable {
 
     enum Terminal: Equatable {
         case done
-        /// A parsed server error, a transport failure, OR a socket that closed with no terminal —
-        /// the transport paths all surface as an error event carrying a code.
-        case error(code: String)
-        /// The turn was CANCELLED. The transport finishes the stream with NO terminal event on
-        /// cancellation, so a cancelled turn is recorded as such rather than left looking open (or,
-        /// worse, looking successful). This is the case a parsed-done/error-only recorder misses.
+        /// A parsed server error, a transport failure, or a socket/stream that ended WITHOUT a
+        /// terminal event. A missing done/error is an INCOMPLETE outcome and is classified as a
+        /// transport failure, not as cancellation: upstream EOF is not, by itself, cancellation.
+        case transportFailure(code: String)
+        /// The turn was EXPLICITLY cancelled. Only a caller saying "this turn was cancelled" produces
+        /// this: it is never inferred from an upstream EOF or a downstream termination, because those
+        /// also happen on ordinary completion and on failure.
         case cancelled
     }
 
@@ -47,12 +48,20 @@ struct CloudAcceptanceRecord: Equatable {
             self.conversationId = conversationId
         }
 
-        /// Marks the turn cancelled. The transport `finish()`es without a terminal event when the
-        /// task is cancelled, so without this the turn would be indistinguishable from one still
-        /// running; a cancelled turn must never read as a completed one.
+        /// Marks the turn EXPLICITLY cancelled. The caller must know the turn was cancelled: this is
+        /// never inferred, because an upstream EOF or a downstream termination also occurs on ordinary
+        /// completion and on failure, and mislabelling those as cancellation would hide a real
+        /// transport failure.
         func markCancelled() {
             lock.lock(); defer { lock.unlock() }
             if terminal == nil { terminal = .cancelled }
+        }
+
+        /// Marks the stream ENDED WITHOUT a terminal event: an incomplete turn, classified as a
+        /// transport failure rather than as cancellation or success.
+        func markStreamEndedWithoutTerminal() {
+            lock.lock(); defer { lock.unlock() }
+            if terminal == nil { terminal = .transportFailure(code: "stream_ended_without_terminal") }
         }
 
         /// Called at the transport boundary for every event of THIS turn.
@@ -64,7 +73,7 @@ struct CloudAcceptanceRecord: Equatable {
             case .done:
                 terminal = .done
             case .error(let code, _):
-                terminal = .error(code: code)
+                terminal = .transportFailure(code: code)
             default:
                 break   // audio, actions and discovery results carry no acceptance field
             }
