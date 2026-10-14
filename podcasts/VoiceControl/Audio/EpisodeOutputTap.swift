@@ -118,7 +118,12 @@ final class EpisodeOutputTap {
     /// TEST-ONLY observer of the buffers this tap PUBLISHES, with the callback's time. It exists so
     /// a control can locate a distinctive marker in the published samples and correlate that
     /// sample's index and host instant, rather than inferring the marker from a proxy.
-    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime, Int) -> Void)?
+
+    /// Monotonic PER-BLOCK counter: each published block is stamped with its own key, so a callback
+    /// can be linked to the acceptance of the block it produced. Reset is not needed — the counter
+    /// only has to be unique within a process run.
+    private var blockKeyCounter = 0
 
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
     /// Read from the ENGINE rather than from a named unit, so a chain that changes — an added or
@@ -207,7 +212,9 @@ final class EpisodeOutputTap {
         renderedAt: AVAudioTime? = nil,
         producer: EchoReferenceHandoff.ProducerIdentity? = nil
     ) {
-        if let renderedAt { onBuffer?(buffer, renderedAt) }
+        blockKeyCounter += 1
+        let blockKey = blockKeyCounter
+        if let renderedAt { onBuffer?(buffer, renderedAt, blockKey) }
         // The caller's ADMITTED identity when supplied; the current one otherwise, so existing
         // callers that publish without an admitted identity keep working.
         let producerIdentity = producer ?? self.producerIdentity
@@ -274,7 +281,8 @@ final class EpisodeOutputTap {
             // the later render-position submit corrected it.
             renderedFramesInProducer: producerFrames,
             producerBlockStart: producerBlockStart,
-            producerBlockEnd: producerBlockEnd
+            producerBlockEnd: producerBlockEnd,
+            blockKey: blockKey
         )
 
         // A SECOND submitRenderPosition IS NOT NEEDED: the block above already carries the

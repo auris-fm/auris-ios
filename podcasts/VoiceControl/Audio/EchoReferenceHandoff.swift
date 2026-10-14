@@ -65,6 +65,10 @@ final class EchoReferenceHandoff {
         let renderedFramesInProducer: Double?
         /// The producer's own frame count when this block began.
         let producerBlockStart: Double?
+        /// A STABLE PER-BLOCK KEY supplied by the producer: unique per submitted block, so a
+        /// callback can be linked to the acceptance of ITS OWN block. The producer identity alone
+        /// cannot do this — one installation publishes many blocks.
+        let blockKey: Int?
         /// The producer's own frame count at the END of this block (exclusive). Carried separately
         /// from `renderedFramesInProducer`, which is the RENDER POSITION the timestamp describes:
         /// one field cannot serve as both the range end and the represented position, because the
@@ -85,7 +89,10 @@ final class EchoReferenceHandoff {
     /// automatic anchor is published, inside the same critical section — i.e. BEFORE any later
     /// queued correction can run. It is the observation point at which a coherent frame/instant
     /// pair must already hold, and it is what makes the end-position mutation detectable.
-    var onBlockAccepted: ((_ producerStart: Double?, _ producerEnd: Double?) -> Void)?
+    /// The acknowledgment carries the accepted block's STABLE IDENTITY together with the range
+    /// that identity covers, so a caller can link one callback to one acceptance rather than
+    /// matching ranges to a list of counts.
+    var onBlockAccepted: ((_ producer: ProducerIdentity, _ blockKey: Int?, _ producerStart: Double?, _ producerEnd: Double?, _ rate: Double) -> Void)?
 
     /// Where an appended block's audio sits, in both clocks it has to be matched in.
     ///
@@ -191,7 +198,8 @@ final class EchoReferenceHandoff {
         renderedAt: MonotonicTime? = nil,
         renderedFramesInProducer: Double? = nil,
         producerBlockStart: Double? = nil,
-        producerBlockEnd: Double? = nil
+        producerBlockEnd: Double? = nil,
+        blockKey: Int? = nil
     ) {
         guard !samples.isEmpty else { return }
 
@@ -212,6 +220,7 @@ final class EchoReferenceHandoff {
                 renderedAt: renderedAt,
                 renderedFramesInProducer: renderedFramesInProducer,
                 producerBlockStart: producerBlockStart,
+                blockKey: blockKey,
                 producerBlockEnd: producerBlockEnd
             )
         )
@@ -474,7 +483,7 @@ final class EchoReferenceHandoff {
         // FIRED AFTER THE ATOMIC PUBLICATION: the samples are appended and the anchor is written
         // inside this same critical section, so a coherent frame/instant pair already holds here and
         // no later queued operation has yet run.
-        onBlockAccepted?(block.producerBlockStart, block.producerBlockEnd)
+        onBlockAccepted?(block.producer, block.blockKey, block.producerBlockStart, block.producerBlockEnd, block.sampleRate)
     }
 
     private var dropLogged = false

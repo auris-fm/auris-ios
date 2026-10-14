@@ -183,43 +183,61 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         // Observe the PUBLISHED samples: the marker's index within the delivered stream, the
         // callback clocks, and the accepted reference observations.
 
-        var markerSampleIndex: Int?
-        var markerHostSeconds: Double?
-        var markerProducerPosition: Double?
-        var callbackHosts: [Double] = []
-        var acceptedAnchors = 0
-        var acceptedOffsets: [Int] = []
+        // ONE IDENTITY-LINKED RECORD PER ACCEPTANCE. Each record carries the accepted block's
+        // IDENTITY (so callbacks and acceptances link by identity rather than by matching a range to
+        // a count), the range that identity covers, the OBSERVED BUFFER RATE, and the anchor the
+        // reference recorded for it.
+        struct AcceptedRecord {
+            let identity: EchoReferenceHandoff.ProducerIdentity
+            let blockKey: Int?
+            let producerStart: Double?
+            let producerEnd: Double?
+            let rate: Double
+            let anchorFrames: Double
+            let anchorHost: Double
+            let streamIndex: Int
+        }
+        var records: [AcceptedRecord] = []
+        // The callback side: each published buffer with its identity-carried rate and clocks, so the
+        // marker's record can be linked to an acceptance by identity.
+        struct CallbackRecord {
+            let blockKey: Int
+            let rate: Double
+            let sampleTime: Double?
+            let hostSeconds: Double?
+            let markerIndex: Int?
+        }
+        var callbackRecords: [CallbackRecord] = []
+        var observedBufferRate: Double?
         let lock = NSLock()
-        tap.onBuffer = { buffer, when in
-            lock.lock()
-            if when.isHostTimeValid { callbackHosts.append(AVAudioTime.seconds(forHostTime: when.hostTime)) }
+        tap.onBuffer = { buffer, when, key in
+            var index: Int? = nil
             if let ch = buffer.floatChannelData?[0] {
-                for i in 0..<Int(buffer.frameLength) where ch[i] >= markerLevel * 0.8 {
-                    if markerSampleIndex == nil {
-                        markerSampleIndex = i
-                        markerProducerPosition = when.isSampleTimeValid ? Double(when.sampleTime) + Double(i) : nil
-                        if when.isHostTimeValid { markerHostSeconds = AVAudioTime.seconds(forHostTime: when.hostTime) }
-                    }
-                    break
-                }
+                for i in 0..<Int(buffer.frameLength) where ch[i] >= markerLevel * 0.8 { index = i; break }
             }
+            lock.lock()
+            if observedBufferRate == nil { observedBufferRate = buffer.format.sampleRate }
+            callbackRecords.append(CallbackRecord(
+                blockKey: key,
+                rate: buffer.format.sampleRate,
+                sampleTime: when.isSampleTimeValid ? Double(when.sampleTime) : nil,
+                hostSeconds: when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil,
+                markerIndex: index
+            ))
             lock.unlock()
         }
-        // ACCEPTANCE OBSERVATIONS FROM THE REFERENCE SIDE, per accepted block: the reference's own
-        // stream position and the anchor it recorded for that block. These are asserted to ADVANCE
-        // below, measured independently of the callback progression.
-        var acceptedStreamIndices: [Int] = []
-        var acceptedRanges: [(start: Double?, end: Double?)] = []
-        var acceptedAnchorsObserved: [(frames: Double, host: Double)] = []
-        handoff.onBlockAccepted = { producerStart, producerEnd in
+        handoff.onBlockAccepted = { producer, blockKey, producerStart, producerEnd, rate in
             lock.lock()
-            acceptedAnchors += 1
-            acceptedStreamIndices.append(reference.streamIndex)
-            acceptedRanges.append((producerStart, producerEnd))
-            if let anchor = reference.currentRenderAnchor {
-                acceptedAnchorsObserved.append((anchor.renderedFrames, anchor.hostTime))
-            }
-            if let offset = reference.audibleEndOffsetInRetainedWindow() { acceptedOffsets.append(offset) }
+            records.append(AcceptedRecord(
+                identity: producer,
+                blockKey: blockKey,
+                producerStart: producerStart,
+                producerEnd: producerEnd,
+                rate: rate,
+                anchorFrames: reference.currentRenderAnchor?.renderedFrames ?? .nan,
+                anchorHost: reference.currentRenderAnchor?.hostTime ?? .nan,
+                streamIndex: reference.streamIndex
+            ))
             lock.unlock()
         }
 
@@ -237,132 +255,87 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         print("CARRIER targetAheadSeconds=\(ahead)")
         XCTAssertGreaterThan(ahead, 0.4, "the target was not ahead at submission")
 
-        // MEASURED, SAME CASE, ONE VARIABLE: with the explicit host time removed the result is
-        // IDENTICAL (callbacks=0), so the explicit schedule is NOT the cause of the missing
-        // callbacks here. The passing case in this same suite schedules a BUFFER and awaits
-        // delivery with a longer window; this case schedules a FILE. Which of those differs is
-        // not established, and the cause is left unproven.
         player.scheduleFile(reading, at: AVAudioTime(hostTime: target))
         player.play()
 
-        // FIRST find the marker, then KEEP RUNNING so several blocks are accepted: advancement
-        // across accepted blocks cannot be asserted from a single acceptance, and stopping as soon
-        // as the marker appears would leave that assertion vacuous.
+        // Run until at least two complete accepted records exist, so adjacency is genuinely
+        // exercised rather than conditionally skipped.
         var deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
-            lock.lock(); let found = markerSampleIndex != nil; lock.unlock()
-            if found { break }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            lock.lock(); let count = records.count; lock.unlock()
+            if count >= 2 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        deadline = Date().addingTimeInterval(1.0)
-        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         engine.stop()
         handoff.drain()
 
         lock.lock()
-        let index = markerSampleIndex
-        let markerHost = markerHostSeconds
-        let hosts = callbackHosts
-        let anchors = acceptedAnchors
-        let offsets = acceptedOffsets
-        let streamIndices = acceptedStreamIndices
-        let ranges = acceptedRanges
-        let anchorsObserved = acceptedAnchorsObserved
-        let markerPosition = markerProducerPosition
+        let accepted = records
+        let callbacks = callbackRecords
+        let bufferRate = observedBufferRate
         lock.unlock()
 
         let targetSeconds = Double(target) * secondsPerTick
-        print("CARRIER markerSampleIndex=\(index as Any) markerHostSeconds=\(markerHost as Any) targetSeconds=\(targetSeconds) callbacks=\(hosts.count) acceptedAnchors=\(anchors) offsets=\(offsets.prefix(6))")
+        print("CARRIER targetSeconds=\(targetSeconds) callbacks=\(callbacks.count) acceptedRecords=\(accepted.count) bufferRate=\(bufferRate as Any)")
 
-        // THE MARKER MUST BE FOUND: this is the assertion the zero-delivery version lacked.
-        XCTAssertNotNil(index, "the distinctive marker was not found in the published samples")
-        XCTAssertNotNil(markerHost, "the marker's callback carried no valid host instant")
-        XCTAssertGreaterThan(anchors, 0, "the reference accepted no blocks alongside the marker")
-        // THE MARKER'S BLOCK IS AN ACCEPTED ONE: the marker was observed in a published buffer, and
-        // at least one block was accepted into the reference with a recorded anchor — so the
-        // marker's audio is associated with an accepted range rather than with a dropped callback.
-        XCTAssertFalse(offsets.isEmpty, "no accepted block recorded a reference anchor alongside the marker")
-        // ACCEPTED-REFERENCE ADVANCEMENT, asserted from the reference side and separately from the
-        // callback progression: each accepted block's stream position must be strictly greater than
-        // the previous one, so the reference is genuinely receiving successive audio rather than
-        // rewriting one position.
+        // 1. THE OBSERVED BUFFER RATE is asserted (and is the rate the records carry).
+        let observedRate = try XCTUnwrap(bufferRate, "no buffer rate was observed")
+        XCTAssertEqual(observedRate, f.sampleRate, "the observed buffer rate is not the graph rate")
+
+        // 2. AT LEAST TWO COMPLETE ACCEPTED RECORDS: every field present, so neither adjacency nor
+        //    the marker link can be satisfied by a single or partial record.
+        XCTAssertGreaterThanOrEqual(accepted.count, 2, "fewer than two complete accepted records")
+        for record in accepted {
+            XCTAssertEqual(record.identity.kind, .episodeTap, "an accepted record carried the wrong producer kind")
+            XCTAssertEqual(record.rate, observedRate, "an accepted record's rate is not the observed buffer rate")
+            XCTAssertNotNil(record.producerStart, "an accepted record is missing its range start")
+            XCTAssertNotNil(record.producerEnd, "an accepted record is missing its range end")
+            XCTAssertFalse(record.anchorHost.isNaN, "an accepted record is missing its anchor host instant")
+        }
+        // 3. EVERY ADJACENT PAIR strictly advances, in frame and in host.
+        for (previous, next) in zip(accepted, accepted.dropFirst()) {
+            XCTAssertGreaterThan(next.anchorFrames, previous.anchorFrames, "adjacent accepted anchor frames did not strictly advance")
+            XCTAssertGreaterThan(next.anchorHost, previous.anchorHost, "adjacent accepted anchor host instants did not strictly advance")
+            XCTAssertGreaterThan(next.streamIndex, previous.streamIndex, "adjacent accepted stream indices did not strictly advance")
+        }
+        // 4. THE MARKER'S CALLBACK AND ITS ACCEPTANCE LINK BY IDENTITY: find the callback record that
+        //    carried the marker, take its producer position, and require that EXACTLY ONE accepted
+        //    record's HALF-OPEN range contains it, with that record's anchor host equal to the
+        //    marker callback's own instant.
+        let markerCallback = try XCTUnwrap(
+            callbacks.first { $0.markerIndex != nil },
+            "no callback record carried the marker"
+        )
+        let markerIndex = try XCTUnwrap(markerCallback.markerIndex, "marker index missing")
+        let markerSampleTime = try XCTUnwrap(markerCallback.sampleTime, "marker callback had no sample time")
+        let markerHost = try XCTUnwrap(markerCallback.hostSeconds, "marker callback had no host instant")
+        let markerPosition = markerSampleTime + Double(markerIndex)
+        // PRIMARY LINK: THE BLOCK KEY. The marker callback's own key must match exactly one
+        // accepted record's key, which identifies the marker-bearing block without relying on a
+        // producer identity (shared by many blocks) or on range arithmetic.
+        let byKey = accepted.filter { $0.blockKey == markerCallback.blockKey }
+        print("CARRIER markerBlockKey=\(markerCallback.blockKey) byKey=\(byKey.count) markerPosition=\(markerPosition) markerHost=\(markerHost)")
+        XCTAssertEqual(byKey.count, 1, "the marker's block key did not match exactly one accepted record")
+        let matched = try XCTUnwrap(byKey.first)
+        // CORROBORATION: the marker's producer position also lies in that record's HALF-OPEN range,
+        // so the key and the range agree rather than the key standing alone.
+        let matchedStart = try XCTUnwrap(matched.producerStart, "the matched record has no range start")
+        let matchedEnd = try XCTUnwrap(matched.producerEnd, "the matched record has no range end")
+        XCTAssertTrue(
+            markerPosition >= matchedStart && markerPosition < matchedEnd,
+            "the marker's position is outside the half-open range of the record its key identifies"
+        )
         XCTAssertEqual(
-            streamIndices, streamIndices.sorted(),
-            "the accepted reference stream positions did not advance monotonically"
+            matched.anchorHost, markerHost, accuracy: 0.001,
+            "the matched acceptance's anchor host is not the marker callback's instant"
         )
-        XCTAssertGreaterThan(
-            streamIndices.count, 1,
-            "only one block was accepted, so advancement across accepted blocks was not exercised"
-        )
-        XCTAssertGreaterThan(
-            streamIndices.last ?? 0, streamIndices.first ?? 0,
-            "the accepted reference stream position did not advance across blocks"
-        )
-        let markerRanges = ranges.filter { range in
-            guard let start = range.start, let end = range.end, let position = markerPosition else { return false }
-            return position >= start && position <= end
-        }
-        print("CARRIER acceptedStreamIndices=\(streamIndices.prefix(8))")
-
-        // INDIVIDUAL MATCH: the block that CARRIED the marker must be identified among the accepted
-        // blocks, by testing the marker's own producer position against each accepted producer
-        // range. Coexisting with a list of accepted blocks is not association.
-        XCTAssertEqual(markerRanges.count, 1, "the marker's producer position did not fall in exactly one accepted range")
-        print("CARRIER marker acceptedRange=\(markerRanges.first as Any) of \(ranges.count) accepted ranges")
-
-        // THE MARKER'S ACCEPTED ANCHOR IS THE MATCHED BLOCK'S ANCHOR: find the index of the accepted
-        // block whose range carried the marker, and assert the anchor recorded at THAT acceptance is
-        // the one associated with the marker -- not merely that some anchor exists.
-        let matchedIndex = ranges.firstIndex { range in
-            guard let start = range.start, let end = range.end, let position = markerPosition else { return false }
-            return position >= start && position <= end
-        }
-        let matchedAnchor = try XCTUnwrap(matchedIndex.flatMap { index in anchorsObserved.indices.contains(index) ? anchorsObserved[index] : nil },
-                                         "the matched block recorded no accepted anchor")
-        print("CARRIER matchedBlockIndex=\(String(describing: matchedIndex)) matchedAnchor=\(matchedAnchor)")
-        XCTAssertEqual(
-            matchedAnchor.host, markerHost ?? .nan, accuracy: 0.001,
-            "the matched block's accepted anchor host instant is not the marker's callback instant"
-        )
-
-        // SEQUENTIAL ACCEPTED HOST/FRAME PAIRS: the anchors the reference recorded must advance in
-        // both frame and host, not merely in stream count.
-        let anchorFrames = anchorsObserved.map(\.frames)
-        let anchorHosts = anchorsObserved.map(\.host)
-        print("CARRIER acceptedAnchorFrames=\(anchorFrames.prefix(6)) acceptedAnchorHosts=\(anchorHosts.prefix(6))")
-        // EVERY ADJACENT PAIR must strictly advance — sorted arrays plus an end-to-end inequality
-        // would pass for a sequence that stalls or repeats in the middle.
-        XCTAssertGreaterThan(anchorFrames.count, 1, "fewer than two accepted anchors, so adjacency was not exercised")
-        for (previous, next) in zip(anchorFrames, anchorFrames.dropFirst()) {
-            XCTAssertGreaterThan(next, previous, "an adjacent accepted anchor frame did not strictly advance")
-        }
-        for (previous, next) in zip(anchorHosts, anchorHosts.dropFirst()) {
-            XCTAssertGreaterThan(next, previous, "an adjacent accepted anchor host instant did not strictly advance")
-        }
-        // The HOST/FIRM cadence: the frame step is one pipeline block and the host step matches it.
-        if let first = anchorFrames.first, let second = anchorFrames.dropFirst().first,
-           let firstHost = anchorHosts.first, let secondHost = anchorHosts.dropFirst().first {
-            let hostStep = secondHost - firstHost
-            let frameStep = second - first
-            XCTAssertGreaterThan(frameStep, 0, "no frame step between the first two accepted anchors")
-            XCTAssertGreaterThan(hostStep, 0, "no host step between the first two accepted anchors")
-            XCTAssertEqual(
-                hostStep, frameStep / Double(PlaybackEchoReference.pipelineSampleRate), accuracy: 0.001,
-                "the accepted anchor host step did not match the frame step at the pipeline rate"
-            )
-        }
-        // CORRELATE THE MARKER'S OWN INSTANT, not the callback's: the marker sits at index `index`
-        // within its buffer, and the callback's sample time labels that buffer's START (measured in
-        // ExplicitScheduleOriginProbe), so the marker's instant is the callback instant advanced by
-        // index/rate. Using the raw callback instant instead reports the buffer's start as if it
-        // were the marker's.
-        if let markerHost, let index {
-            let markerInstant = markerHost + Double(index) / rate
-            let elapsed = markerInstant - targetSeconds
-            print("CARRIER markerInstant=\(markerInstant) elapsed=\(elapsed) (rawCallbackDelta=\(markerHost - targetSeconds))")
-            XCTAssertGreaterThan(elapsed, -0.005, "the marker appeared before its asserted schedule instant")
-            XCTAssertLessThan(elapsed, 1.0, "the marker appeared more than a second after its target")
-        }
+        // 5. THE MARKER LANDS AT ITS ASSERTED SCHEDULE INSTANT once its own index is applied.
+        let markerInstant = markerHost + Double(markerIndex) / observedRate
+        let elapsed = markerInstant - targetSeconds
+        let anchorSeconds = matched.anchorHost
+        print("CARRIER markerInstant=\(markerInstant) elapsed=\(elapsed) matchedAnchorHostSeconds=\(anchorSeconds)")
+        XCTAssertGreaterThan(elapsed, -0.005, "the marker appeared before its asserted schedule instant")
+        XCTAssertLessThan(elapsed, 1.0, "the marker appeared more than a second after its target")
     }
 
     /// BARRIER AT THE ATOMIC PUBLICATION: `onBlockAccepted` fires inside `deliver()`, after the
@@ -390,7 +363,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         var acceptedHost: Double?
         var acceptedCount = 0
         let lock = NSLock()
-        handoff.onBlockAccepted = { _, _ in
+        handoff.onBlockAccepted = { _, _, _, _, _ in
             lock.lock()
             acceptedCount += 1
             acceptedOffset = reference.audibleEndOffsetInRetainedWindow()
