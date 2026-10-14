@@ -28,7 +28,9 @@ final class RealCaptureAudioSession: CaptureAudioSession {
     }
 
     func restorePlaybackCategory() {
-        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+        // Match `PlaybackManager.setAudioSessionProperties`, which selects `.spokenAudio`: restoring
+        // `.default` here would silently change the mode of a live playback session.
+        try? session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
     }
 
     func setActive(_ active: Bool, notifyOthers: Bool) throws {
