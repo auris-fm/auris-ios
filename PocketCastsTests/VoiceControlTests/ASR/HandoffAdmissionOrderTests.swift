@@ -164,13 +164,31 @@ final class EpisodeTapLifecycleTests: XCTestCase {
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
-        // EXPLICIT COMPLETION ACKNOWLEDGMENT. The tap callbacks do NOT all complete by the time
-        // renderOffline returns, and engine.stop() does not synchronously flush them either: the
-        // synchronized trace in RepeatInstallDeliveryProbe shows further callbacks AND dequeues
-        // arriving AFTER stop() returns. `drain()` is `queue.sync`, so it returns only once every
-        // block that was enqueued has been dequeued and delivered. Stopping first ends the render
-        // so no NEW work is produced while the drain acknowledges what exists.
+        // DELIVERY ACKNOWLEDGMENT, THEN DRAIN. The tap callbacks do not all complete when
+        // renderOffline returns, and stop() does not flush them (the RepeatInstallDeliveryProbe
+        // trace shows further callbacks AND dequeues after stop returns). `drain()` is
+        // `queue.sync`, so it drains only work ALREADY enqueued — it does not wait for callbacks
+        // that have not submitted yet. So the test first AWAITS an actual delivery
+        // acknowledgment (the handoff's own dequeue hook, bounded), and only then drains and
+        // asserts; a bounded timeout fails explicitly rather than asserting on a quiet count.
+        let arrivalLock = NSLock()
+        var dequeued = 0
+        handoff.onDeliveryDequeued = {
+            arrivalLock.lock(); dequeued += 1; arrivalLock.unlock()
+        }
+        defer { handoff.onDeliveryDequeued = nil }
         engine.stop()
+        let ackDeadline = Date().addingTimeInterval(5)
+        while Date() < ackDeadline {
+            arrivalLock.lock(); let seen = dequeued; arrivalLock.unlock()
+            if seen > 0 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        arrivalLock.lock(); let acknowledged = dequeued; arrivalLock.unlock()
+        XCTAssertGreaterThan(
+            acknowledged, 0,
+            "no delivery was acknowledged within the bound, so the assertion below would be about the wait, not the install"
+        )
         handoff.drain()
 
         let delivered = reference.snapshot()
@@ -233,13 +251,31 @@ final class EpisodeTapLifecycleTests: XCTestCase {
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         XCTAssertGreaterThan(rendered, 0, "no frames were rendered, so the render loop never ran")
-        // EXPLICIT COMPLETION ACKNOWLEDGMENT. The tap callbacks do NOT all complete by the time
-        // renderOffline returns, and engine.stop() does not synchronously flush them either: the
-        // synchronized trace in RepeatInstallDeliveryProbe shows further callbacks AND dequeues
-        // arriving AFTER stop() returns. `drain()` is `queue.sync`, so it returns only once every
-        // block that was enqueued has been dequeued and delivered. Stopping first ends the render
-        // so no NEW work is produced while the drain acknowledges what exists.
+        // DELIVERY ACKNOWLEDGMENT, THEN DRAIN. The tap callbacks do not all complete when
+        // renderOffline returns, and stop() does not flush them (the RepeatInstallDeliveryProbe
+        // trace shows further callbacks AND dequeues after stop returns). `drain()` is
+        // `queue.sync`, so it drains only work ALREADY enqueued — it does not wait for callbacks
+        // that have not submitted yet. So the test first AWAITS an actual delivery
+        // acknowledgment (the handoff's own dequeue hook, bounded), and only then drains and
+        // asserts; a bounded timeout fails explicitly rather than asserting on a quiet count.
+        let arrivalLock = NSLock()
+        var dequeued = 0
+        handoff.onDeliveryDequeued = {
+            arrivalLock.lock(); dequeued += 1; arrivalLock.unlock()
+        }
+        defer { handoff.onDeliveryDequeued = nil }
         engine.stop()
+        let ackDeadline = Date().addingTimeInterval(5)
+        while Date() < ackDeadline {
+            arrivalLock.lock(); let seen = dequeued; arrivalLock.unlock()
+            if seen > 0 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        arrivalLock.lock(); let acknowledged = dequeued; arrivalLock.unlock()
+        XCTAssertGreaterThan(
+            acknowledged, 0,
+            "no delivery was acknowledged within the bound, so the assertion below would be about the wait, not the install"
+        )
         handoff.drain()
 
         let delivered = reference.snapshot()

@@ -9,7 +9,9 @@ import XCTest
 /// Counters are wired and synchronized: the tap callback increments `callbacks`; the handoff's
 /// `onDeliveryDequeued` hook increments `dequeued`; both are read under the same lock, and every
 /// transition is stamped with a monotonic sequence number so arrival and append ordering is
-/// visible in one trace.
+/// visible in one trace. The stop-return boundary is stamped immediately at return, so any
+/// callback appearing after it is genuinely after the boundary rather than merely after a later
+/// bookkeeping line.
 final class RepeatInstallDeliveryProbe: XCTestCase {
 
     final class Trace {
@@ -84,8 +86,11 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         trace.record("beforeStop callbacks=\(beforeStop.callbacks) dequeued=\(beforeStop.dequeued) refCount=\(countBeforeStop)")
 
         engine.stop()
-        trace.record("afterStop")
+        // RECORDED IMMEDIATELY AT RETURN: placing later callbacks relative to this boundary is
+        // only valid if the event is stamped before anything else runs.
+        trace.record("stop() returned")
         handoff.drain()
+        trace.record("drain() returned")
         let afterAll = trace.snapshotState()
         let countAfterDrain = reference.snapshot().count
         trace.record("afterDrain callbacks=\(afterAll.callbacks) dequeued=\(afterAll.dequeued) refCount=\(countAfterDrain)")
