@@ -123,6 +123,17 @@ final class CloudRouteClient {
         }
     }
 
+    /// The configured base URL, for a run to record as configuration (not a credential). It is what the
+    /// client will dial, and an empty value is the one condition that produces `invalid_request` before
+    /// any authentication is attempted.
+    var resolvedBaseURLForDiagnostics: String { baseURL }
+
+    /// Whether a credential is available, as a BOOLEAN: the value itself is never read out here. This
+    /// distinguishes `unauthorized` (no credential) from `invalid_request` (a malformed request).
+    var hasCredentialForDiagnostics: Bool {
+        get async { await tokenProvider.token() != nil }
+    }
+
     /// OPT-IN ACCEPTANCE COLLECTION. It consumes the route stream for ONE controlled acceptance turn and
     /// emits a single `CloudAcceptanceRecord` carrying only the allowlisted fields — the turn's request
     /// id, its conversation id, the server's response text and the terminal outcome — with the request

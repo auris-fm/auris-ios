@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// THE OPERATOR ENTRY for authenticated acceptance. It is the ONE place that reaches the acceptance
 /// path through the PRODUCTION client — the same factory the app's sink uses, hence the same base URL,
@@ -27,6 +28,11 @@ enum CloudAcceptanceHarness {
     }
 
     /// Runs the protocol against the production client and returns the export.
+    ///
+    /// It records the CLIENT'S OWN resolved base URL and whether a credential is present BEFORE the
+    /// turns run, because `invalid_request` and `unauthorized` have different sources and the difference
+    /// decides what the run is evidence of. Neither value is a credential: the URL is configuration and
+    /// the credential is reported as a boolean.
     static func run(
         nonce: String,
         conversationA: String = UUID().uuidString,
@@ -47,6 +53,7 @@ enum CloudAcceptanceHarness {
             return .init(requestId: r.requestId, conversationId: r.conversationId, responseText: r.responseText, terminal: r.terminal)
         }
 
+        FileLog.shared.addMessage("[ScratchAcceptance] client baseURL=\(client.resolvedBaseURLForDiagnostics) credentialPresent=\(await client.hasCredentialForDiagnostics)")
         let a1 = await step("please remember this token: \(nonce)", conversationA, "create")
         let a2 = await step("what was the token I asked you to remember?", conversationA, "resume")
         let b1 = await step("what was the token I asked you to remember?", conversationB, "create")
