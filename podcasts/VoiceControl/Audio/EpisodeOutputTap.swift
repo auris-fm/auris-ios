@@ -266,29 +266,11 @@ final class EpisodeOutputTap {
             producerBlockEnd: producerBlockEnd
         )
 
-        // THE RENDER POSITION, published through the SAME route as the samples. The three fields are
-        // the callback's own: the node's cumulative rendered frames in ITS rate, that rate, and the
-        // instant those frames correspond to. Nothing is manufactured from scheduling time, and the
-        // frames are the NODE's count rather than a tap-relative offset — the handoff maps them into
-        // the reference range the block lands in, so they are not labelled as caller frames.
-        //
-        // THE CLOCK DOMAIN IS THE HOST CLOCK, and it is REQUIRED. `PlaybackRenderAnchor.hostTime`
-        // means "the instant the render position corresponds to, on the shared monotonic basis", so
-        // it may only be filled from a callback that actually carries a valid HOST time. A valid
-        // SAMPLE time does not license a host-clock anchor: the sample count advances without saying
-        // what instant it corresponds to, and filling `hostTime` from it would change what the field
-        // means for every other consumer. Where the host time is invalid, NO anchor is published and
-        // the sample-side progression is asserted separately by the tests.
-        if let frames = producerFrames, let instant = hostInstant {
-            handoff.submitRenderPosition(
-                PlaybackRenderAnchor(
-                    renderedFrames: frames,
-                    sourceSampleRate: buffer.format.sampleRate,
-                    hostTime: instant
-                ),
-                producer: producerIdentity
-            )
-        }
+        // A SECOND submitRenderPosition IS NOT NEEDED: the block above already carries the
+        // producer's rendered position (T) and its host instant, and the handoff publishes the
+        // anchor from exactly those two fields when it accepts the block. Publishing the same pair
+        // again through the render-position queue would leave two operations whose only difference
+        // is when they run, which is what let an incoherent intermediate exist.
     }
 
     private static let silenceFloor: Float = 1e-5

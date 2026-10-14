@@ -81,6 +81,12 @@ final class EchoReferenceHandoff {
     /// recall a block that has already been removed from it.
     var onDeliveryDequeued: (() -> Void)?
 
+    /// TEST-ONLY acknowledgment fired IMMEDIATELY AFTER a block's samples are appended and its
+    /// automatic anchor is published, inside the same critical section — i.e. BEFORE any later
+    /// queued correction can run. It is the observation point at which a coherent frame/instant
+    /// pair must already hold, and it is what makes the end-position mutation detectable.
+    var onBlockAccepted: (() -> Void)?
+
     /// Where an appended block's audio sits, in both clocks it has to be matched in.
     ///
     /// The producer's own frame count says which of that producer's blocks a later position
@@ -465,6 +471,10 @@ final class EchoReferenceHandoff {
                 }
             }
         )
+        // FIRED AFTER THE ATOMIC PUBLICATION: the samples are appended and the anchor is written
+        // inside this same critical section, so a coherent frame/instant pair already holds here and
+        // no later queued operation has yet run.
+        onBlockAccepted?()
     }
 
     private var dropLogged = false
