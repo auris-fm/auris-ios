@@ -159,6 +159,19 @@ final class EpisodeTapLifecycleTests: XCTestCase {
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         handoff.drain()
+        // STOP, THEN AWAIT STABLE DELIVERY: the tap callbacks complete at engine stop, but stop
+        // itself returns while the render thread may still be finishing them (measured: stop
+        // alone still raced; delivery is partial unless awaited). Await until the count is
+        // stable across 100 ms AND non-empty, bounded at 5 s.
+        engine.stop()
+        var lastCount = -1
+        let awaitDeadline = Date().addingTimeInterval(5)
+        while Date() < awaitDeadline {
+            let c = reference.snapshot().count
+            if c > 0 && c == lastCount { break }
+            lastCount = c
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
 
         let delivered = reference.snapshot()
         let peak = delivered.map { abs($0) }.max() ?? 0
@@ -215,6 +228,19 @@ final class EpisodeTapLifecycleTests: XCTestCase {
             if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         handoff.drain()
+        // STOP, THEN AWAIT STABLE DELIVERY: the tap callbacks complete at engine stop, but stop
+        // itself returns while the render thread may still be finishing them (measured: stop
+        // alone still raced; delivery is partial unless awaited). Await until the count is
+        // stable across 100 ms AND non-empty, bounded at 5 s.
+        engine.stop()
+        var lastCount = -1
+        let awaitDeadline = Date().addingTimeInterval(5)
+        while Date() < awaitDeadline {
+            let c = reference.snapshot().count
+            if c > 0 && c == lastCount { break }
+            lastCount = c
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
 
         let delivered = reference.snapshot()
         let peak = delivered.map { abs($0) }.max() ?? 0
