@@ -23,8 +23,11 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     }
 
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
-        // The measured effective group for this context (from ScratchKeychainContextProbe).
-        let group = "6LL2R2A55F.fm.auris"
+        // SHARED GROUP: the same group the helper is entitled to, so both roles request an identical
+        // group. Measured rule: a simulator product is attributed the default group of its
+        // application-identifier, and requesting a different group is refused (-34018) — while a
+        // group matching its own identifier is usable (-25300 when absent).
+        let group = ProcessInfo.processInfo.environment["SCRATCH_SHARED_GROUP"] ?? "6LL2R2A55F.fm.auris"
 
         // --- WRITER: synthetic canary in the named group, plus a container sentinel ---
         SecItemDelete([
