@@ -40,8 +40,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
             try file.write(from: b)
             return try AVAudioFile(forReading: url)
         }
-        let scheduledFile = try writeImpulseFile(name: "explicit")
-        let controlFile = try writeImpulseFile(name: "control")
+        let audibleFile = try writeImpulseFile(name: "audible")
 
         var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, peak: Float)] = []
         var lastPeak: Float = 0
@@ -70,72 +69,62 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
             lock.unlock()
         }
 
-        try engine.start()
         var ti = mach_timebase_info_data_t(); mach_timebase_info(&ti)
         let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
-        // The target is computed IMMEDIATELY BEFORE submission and asserted to be ahead.
-        let nowHost = mach_absolute_time()
-        let target = nowHost + UInt64(0.5 * Double(ti.denom) / Double(ti.numer) * 1_000_000_000.0)
-        let targetAheadSeconds = Double(target - mach_absolute_time()) * secondsPerTick
-        print("PROBE targetAheadSeconds=\(targetAheadSeconds)")
-        XCTAssertGreaterThan(targetAheadSeconds, 0.4, "the schedule target was not ahead of now at submission")
-        // CONTROL FIRST: if the player renders the nil-scheduled file, the player itself works
-        // and any silence on the explicit-time item is that item's own failure.
-        player.scheduleFile(controlFile, at: nil)
+        // ONE CLOCK: our own host clock is sampled at the moment the engine starts; every callback's
+        // hostTime is compared against it using the same mach timebase. No scheduled origin is
+        // added to a node timestamp, so no unmapped offset is assumed.
+        let engineStartHost = mach_absolute_time()
+        try engine.start()
+        player.scheduleFile(audibleFile, at: nil)
         player.play()
-        // The working probes' ordering (schedule, then play), now with the explicit host time.
 
         var deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
             lock.lock(); let empty = hits.isEmpty; lock.unlock()
             if !empty { break }
-        // CONTROL WINDOW: the nil-scheduled file (1 s) must be audible now.
-        deadline = Date().addingTimeInterval(3)
-        var controlPeak: Float = 0
-        while Date() < deadline {
-            lock.lock(); controlPeak = max(controlPeak, lastPeak); lock.unlock()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        print("PROBE controlPeak=\(controlPeak)")
-        // THEN the explicit-time item. Reset the peak so this window is measured on its own.
-        lock.lock(); lastPeak = 0; lock.unlock()
-        player.scheduleFile(scheduledFile, at: AVAudioTime(hostTime: target))
-        deadline = Date().addingTimeInterval(6)
-        var explicitPeak: Float = 0
-        while Date() < deadline {
-            lock.lock(); explicitPeak = max(explicitPeak, lastPeak); lock.unlock()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
-        print("PROBE explicitPeak=\(explicitPeak)")
+        deadline = Date().addingTimeInterval(2)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
         player.stop()
-        engine.mainMixerNode.removeTap(onBus: 0)
+        player.removeTap(onBus: 0)
         engine.stop()
 
         lock.lock()
         let captured = hits
         lock.unlock()
 
-        print("PROBE captured=\(captured.count) scheduleTargetHost=\(target) rate=\(rate)")
-        for (index, h) in captured.prefix(6).enumerated() {
-            print("PROBE series[\(index)] sampleTime=\(h.sampleTime) frames=\(h.frames) peak=\(h.peak) j=\(h.j as Any)")
-        }
-        var found = false
-        for (index, h) in captured.enumerated() where h.j != nil {
-            found = true
-            let j = h.j!
-            let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
-            let hostSeconds = Double(h.hostTime) * secondsPerTick
-            // ABSOLUTE host domain: the schedule target converted to seconds anchors frame 0.
-            let targetSeconds = Double(target) * secondsPerTick
-            let endPrediction = targetSeconds + (h.sampleTime - Double(h.frames) + Double(j)) / rate
-            let startPrediction = targetSeconds + (h.sampleTime + Double(j)) / rate
-            print("PROBE callback[\(index)] sampleTime=\(h.sampleTime) frames=\(h.frames) j=\(j) hostSeconds=\(hostSeconds)")
-            print("PROBE   END   prediction=\(endPrediction) delta=\(hostSeconds - endPrediction)")
-            print("PROBE   START prediction=\(startPrediction) delta=\(hostSeconds - startPrediction)")
+        print("PROBE rate=\(rate) captured=\(captured.count)")
+        for (index, h) in captured.prefix(10).enumerated() {
+            let sinceStartHost = Double(h.hostTime &- engineStartHost) * secondsPerTick
+            let T = h.sampleTime
+            let startPrediction = T / rate
+            let endPrediction = (T - Double(h.frames)) / rate
+            print("PROBE series[\(index)] T=\(T) N=\(h.frames) j=\(h.j as Any) sinceEngineStartSeconds=\(sinceStartHost)")
+            print("PROBE   START models sinceStart=T/rate=\(startPrediction) (diff \(sinceStartHost - startPrediction))")
+            print("PROBE   END   models sinceStart=(T-N)/rate=\(endPrediction) (diff \(sinceStartHost - endPrediction))")
         }
         XCTAssertFalse(captured.isEmpty, "no callbacks captured")
-        XCTAssertGreaterThan(controlPeak, 0.45, "the positive control was silent: the setup cannot render audio")
-        print("PROBE VERDICT explicitPeak=\(explicitPeak) (audible ⇒ host-time scheduling fires on this runtime)")
-        XCTAssertTrue(found, "the frame-0 impulse was not observed; semantics cannot be read")
+        XCTAssertTrue(captured.contains { $0.j != nil }, "no callback carried content, so the run is inert")
+
+        // TWO READINGS, ONE UNVERIFIED ASSUMPTION — recorded, not decided.
+        //
+        // The first delivered callback has T < N (e.g. T=4356, N=4800):
+        //   * START model (sampleTime = the buffer's first sample): buffer spans [T, T+N) —
+        //     valid only if the node clock's zero is at or before this buffer, i.e. the callback
+        //     then arrives BEFORE its own buffer's span, which is unusual for a render callback.
+        //   * END model (sampleTime = the buffer's last sample + 1): buffer spans [T-N, T) —
+        //     requires T-N >= 0, i.e. a node clock whose zero precedes engine.start() (a negative
+        //     start is otherwise impossible). The measured arrival (≈27 ms after start) sits
+        //     INSIDE this span, which is the natural place for a render callback.
+        // Both survive; they differ exactly in WHEN the node clock's zero occurs, which is the
+        // unverified assumption. No discrimination is claimed. What IS measured and preserved:
+        //   T/N/j series, constant START-model offset (−63.6 ms) and END-model offset (+36.4 ms)
+        //   across all callbacks (spread ≈ 2 µs), the graph rate (48 000), and the content marker.
+        if let first = captured.first {
+            print("PROBE firstCallback T=\(first.sampleTime) N=\(first.frames) "
+                + "ENDstart=\(first.sampleTime - Double(first.frames)) (negative ⇒ END needs a pre-start node zero)")
+        }
     }
 }
