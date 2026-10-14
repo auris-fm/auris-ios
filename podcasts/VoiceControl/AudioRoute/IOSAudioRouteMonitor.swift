@@ -108,6 +108,11 @@ protocol AudioSessionControlling: AnyObject {
     /// Release any preferred input (`setPreferredInput(nil)`) so an external
     /// input route is not retained after a failed/cancelled acquisition.
     func clearPreferredInput()
+    /// Restore the playback-friendly category after acquisition configured an input-capable one.
+    /// An acquisition that never became capture must not leave the shared session in
+    /// `.playAndRecord`: playback then routes through `.defaultToSpeaker`, and `PlaybackManager`
+    /// skips the category restore for `.playAndRecord`, so nothing recovers it.
+    func restorePlaybackCategory()
 }
 
 /// Live `AVAudioSession` adapter. The acquisition sequence follows Apple QA1799:
@@ -163,6 +168,10 @@ final class RealAudioSession: AudioSessionControlling {
 
     func clearPreferredInput() {
         try? session.setPreferredInput(nil)
+    }
+
+    func restorePlaybackCategory() {
+        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
     }
 }
 
@@ -221,10 +230,16 @@ class IOSAudioRouteMonitor: ObservableObject {
                     AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue,
                     AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                 ]
-                guard validReasons.contains(reason) else { return }
-                self.physicalDeviceChangeEpoch &+= 1
+                let isPhysicalDeviceChange = validReasons.contains(reason)
+                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
+                // `.routeConfigurationChange` can move the input away from the headset, and a stale
+                // `.isolated` would leave capture running on the built-in microphone. Only a
+                // physical connect/disconnect advances the epoch and breaks grace.
                 self.refreshRoute()
-                self.gracePeriodSignal.onAudioRouteChanged()
+                if isPhysicalDeviceChange {
+                    self.physicalDeviceChangeEpoch &+= 1
+                    self.gracePeriodSignal.onAudioRouteChanged()
+                }
             }
             .store(in: &cancellables)
     }
@@ -437,6 +452,10 @@ class IOSAudioRouteMonitor: ObservableObject {
         if hadSelectedInput {
             audioSession.clearPreferredInput()
         }
+        // Restore the playback category whether or not we deactivate: an acquisition that never
+        // became capture must not leave the shared session input-capable, and nothing else restores
+        // it for `.playAndRecord`.
+        audioSession.restorePlaybackCategory()
         lastAcquisitionActivatedSession = false
         lastAcquisitionSelectedInput = false
         // Re-check live playback ownership at cleanup time, not the value

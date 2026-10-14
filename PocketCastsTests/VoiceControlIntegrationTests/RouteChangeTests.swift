@@ -27,6 +27,7 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     private(set) var activateCount = 0
     private(set) var deactivateCount = 0
     private(set) var clearCount = 0
+    private(set) var restorePlaybackCount = 0
     private(set) var selectedUIDs: [String] = []
     var isActive = false
     /// Invoked when the session is activated — lets a test cancel the
@@ -73,18 +74,28 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
             inputs = inputsOnClear ?? []
         }
     }
+
+    func restorePlaybackCategory() {
+        restorePlaybackCount += 1
+    }
 }
 
 /// Test double whose `start()` succeeds without touching the shared
 /// `AVAudioEngine`/`AVAudioSession`, so service-level tests are deterministic
 /// about whether capture started.
 final class SucceedingCapture: NativeAudioCapture {
+    // A fake session, not the real shared one: the inherited `stop()` would otherwise
+    // re-categorise and deactivate the process session during these service-level tests.
+    init() { super.init(session: FakeCaptureAudioSession()) }
+
     override func start() throws {}
 }
 
 /// Test double whose `start()` fails, to drive the failed-capture-start path.
 /// `VoiceAsrEngine.start()` must report this and the service must not listen.
 final class FailingCapture: NativeAudioCapture {
+    init() { super.init(session: FakeCaptureAudioSession()) }
+
     override func start() throws {
         throw NSError(
             domain: "FailingCapture",
@@ -102,7 +113,7 @@ final class FailingCaptureWithPlaybackTeardown: NativeAudioCapture {
 
     init(monitorSession: FakeAudioSessionControlling) {
         self.monitorSession = monitorSession
-        super.init()
+        super.init(session: FakeCaptureAudioSession())
     }
 
     override func start() throws {
@@ -131,6 +142,45 @@ final class RouteChangeTests: XCTestCase {
 
     private func makeMonitor(_ session: FakeAudioSessionControlling) -> IOSAudioRouteMonitor {
         IOSAudioRouteMonitor(gracePeriodSignal: GracePeriodSignal(), audioSession: session)
+    }
+
+    /// Every route change re-reads the selected input, not only physical device changes: an
+    /// `.override`, `.categoryChange` or `.routeConfigurationChange` can move the input to the
+    /// built-in microphone, and a stale `.isolated` would leave capture running on it.
+    func test_routeChange_forNonDeviceReasonStillRefreshesExposure() {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.builtInMic, uid: "built-in")]
+        let monitor = makeMonitor(session)
+        XCTAssertEqual(monitor.micExposure, .exposed)
+
+        let epoch = monitor.physicalDeviceChangeEpoch
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+
+        XCTAssertEqual(monitor.micExposure, .isolated,
+                       "the selected input is re-read for every route change")
+        XCTAssertEqual(monitor.physicalDeviceChangeEpoch, epoch,
+                       "only a physical connect/disconnect advances the device-change epoch")
+    }
+
+    /// An acquisition that never becomes capture must not leave the shared session in
+    /// `.playAndRecord`: playback would then route through the speaker, and nothing else restores
+    /// the category for `.playAndRecord`.
+    @MainActor
+    func test_failedAcquisition_restoresPlaybackCategory() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.builtInMic, uid: "built-in")]
+        session.available = []
+        session.availableAfterConfigure = [] // no external candidate
+        let monitor = makeMonitor(session)
+
+        let result = await monitor.acquireExternalInput()
+
+        XCTAssertEqual(result, .builtInOnly)
+        XCTAssertGreaterThanOrEqual(session.restorePlaybackCount, 1,
+                                    "the release restores the playback category")
     }
 
     // MARK: - Classifier
@@ -896,13 +946,12 @@ final class RouteChangeTests: XCTestCase {
                        "teardown hiding availableInputs must not re-arm acquisition for the same device")
     }
 
-    private func postRouteChange() {
+    private func postRouteChange(reason: AVAudioSession.RouteChangeReason = .newDeviceAvailable) {
         NotificationCenter.default.post(
             name: AVAudioSession.routeChangeNotification,
             object: nil,
             userInfo: [
-                AVAudioSessionRouteChangeReasonKey:
-                    AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue,
+                AVAudioSessionRouteChangeReasonKey: reason.rawValue,
             ]
         )
     }
