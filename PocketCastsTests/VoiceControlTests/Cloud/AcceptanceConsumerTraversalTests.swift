@@ -264,7 +264,7 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
 
     func testClientConstructionFailureIsStagedClientRequest() {
         let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        r.observe(.error(source: .client, code: "invalid_request", message: "request could not be built"))   // the client's own tag
+        r.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))   // the client's own tag
         XCTAssertEqual(r.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
     }
 
@@ -277,7 +277,7 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
     /// THE POINT: the same code, two different stages, distinguishable after the fact.
     func testSameCodeWithDifferentSourcesIsDistinguishable() {
         let client = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        client.observe(.error(source: .client, code: "invalid_request", message: "request could not be built"))
+        client.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
         let server = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
         server.observe(.error(source: .server, code: "invalid_request", message: ""))
         XCTAssertNotEqual(client.record().terminal, server.record().terminal, "the stage did not discriminate")
@@ -326,5 +326,27 @@ final class AcceptanceVerdictBoundingTests: XCTestCase {
         guard case .fail(let why) = v.evaluate() else { return XCTFail("expected a failure verdict") }
         XCTAssertFalse(why.contains(sentinel), "the verdict embedded raw server text: \(why)")
         XCTAssertTrue(why.contains("serverEvent:invalid_request"), "the verdict must name stage and code")
+    }
+}
+
+/// TRANSPORT is distinct from REQUEST CONSTRUCTION. A connection that drops may have been admitted; a
+/// frame that was never built has provably not left. Conflating them would misreport which happened.
+final class AcceptanceOriginDistinctionTests: XCTestCase {
+
+    func testTransportAndConstructionStageDifferently() {
+        let transport = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        transport.observe(.error(source: .transport, code: "connection_lost", message: ""))
+        XCTAssertEqual(transport.record().terminal, .transportFailure(stage: .transport, code: "connection_lost", message: nil))
+
+        let construction = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        construction.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
+        XCTAssertEqual(construction.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
+
+        let server = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        server.observe(.error(source: .server, code: "invalid_request", message: ""))
+        XCTAssertEqual(server.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
+
+        let stages = [transport.record().terminal, construction.record().terminal, server.record().terminal]
+        XCTAssertEqual(Set(stages.map { String(describing: $0) }).count, 3, "the three origins did not stage distinctly")
     }
 }

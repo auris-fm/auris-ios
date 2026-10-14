@@ -86,8 +86,10 @@ struct CloudSpeechUsage: Equatable {
 /// Events from the cloud WebSocket route (cloud-assistant.md).
 /// The origin of a `CloudRouteEvent.error`.
 enum CloudRouteErrorSource: String, Equatable {
-    /// The CLIENT could not construct or send the request.
-    case client
+    /// The client could not CONSTRUCT the request (bad URL, unencodable frame). The frame never left.
+    case requestConstruction
+    /// The TRANSFER failed or the connection dropped. The frame may or may not have been admitted.
+    case transport
     /// An error FRAME parsed from the server.
     case server
 }

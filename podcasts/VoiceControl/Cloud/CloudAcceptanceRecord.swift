@@ -104,7 +104,12 @@ struct CloudAcceptanceRecord: Equatable {
                 // misclassifies whenever a server message happens to look like a tag or a tag is
                 // reworded. The SERVER MESSAGE is retained for a served error so the export can answer
                 // whether it was present and empty.
-                let stage: Stage = source == .client ? .clientRequest : .serverEvent
+                let stage: Stage
+                switch source {
+                case .requestConstruction: stage = .clientRequest
+                case .transport: stage = .transport
+                case .server: stage = .serverEvent
+                }
                 terminal = .transportFailure(
                     stage: stage,
                     code: code,
