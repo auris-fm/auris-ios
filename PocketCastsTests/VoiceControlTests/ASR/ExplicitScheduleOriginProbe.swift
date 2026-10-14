@@ -46,7 +46,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         let markerFile = try writeMarkerFile(name: "marker", withMarker: true)
         let controlFile = try writeMarkerFile(name: "control", withMarker: false)
 
-        var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, hostValid: Bool, peak: Float)] = []
+        var hits: [(sampleTime: Double, frames: Int, j: Int?, hostTime: UInt64, hostValid: Bool, peak: Float, rate: Double)] = []
         let lock = NSLock()
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { buffer, when in
             var j: Int? = nil
@@ -62,7 +62,8 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
                 j: j,
                 hostTime: when.isHostTimeValid ? when.hostTime : 0,
                 hostValid: when.isHostTimeValid,
-                peak: peak
+                peak: peak,
+                rate: buffer.format.sampleRate
             ))
             lock.unlock()
         }
@@ -100,11 +101,11 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
 
         // SYNCHRONIZED POLL for the marker.
         deadline = Date().addingTimeInterval(8)
-        var marker: (sampleTime: Double, frames: Int, j: Int, hostSeconds: Double)? = nil
+        var marker: (sampleTime: Double, frames: Int, j: Int, hostSeconds: Double, rate: Double)? = nil
         while Date() < deadline {
             lock.lock()
             for h in hits where h.j != nil && h.hostValid {
-                marker = (h.sampleTime, h.frames, h.j!, Double(h.hostTime) * secondsPerTick)
+                marker = (h.sampleTime, h.frames, h.j!, Double(h.hostTime) * secondsPerTick, h.rate)
                 break
             }
             lock.unlock()
@@ -123,8 +124,12 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         //   START predicts the marker at H + j/R   (the buffer begins at H)
         //   END   predicts the marker at H + (j-N)/R (the buffer ends at H)
         XCTAssertEqual(markerIndex, 0, "the marker must be at source offset 0 for this expected instant")
-        let callbackRate = rate
-        print("PROBE markerSourceOffsetFrames=\(markerIndex) callbackRate=\(callbackRate)")
+        // R FROM THE CALLBACK BUFFER FORMAT, not the file rate: the comparison is only exact if R is
+        // the rate the reported sample times are counted in.
+        let callbackRate = m.rate
+        XCTAssertGreaterThan(callbackRate, 0, "the callback reported no rate")
+        XCTAssertEqual(callbackRate, rate, "the callback rate differs from the file rate; the predictions must be expressed at the callback rate")
+        print("PROBE markerSourceOffsetFrames=\(markerIndex) callbackRate=\(callbackRate) fileRate=\(rate)")
         let startPrediction = m.hostSeconds + Double(m.j) / callbackRate
         let endPrediction = m.hostSeconds + (Double(m.j) - Double(m.frames)) / callbackRate
         let startError = startPrediction - targetSeconds
