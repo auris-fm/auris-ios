@@ -42,7 +42,10 @@ struct CloudAcceptanceRecord: Equatable {
         /// The STAGE says WHERE the outcome originated, because the code alone does not: the same
         /// code string can come from client request construction or from a served error, and the
         /// export previously carried only the code, so neither could be distinguished after the fact.
-        case transportFailure(stage: Stage, code: String)
+        /// The server's message, carried ONLY when the stage is a served event. It answers the question
+        /// the code alone cannot: whether an empty message was actually sent, or merely not surfaced.
+        /// The client's own construction failures carry no server message.
+        case transportFailure(stage: Stage, code: String, message: String?)
         /// The turn was EXPLICITLY cancelled. Only a caller saying "this turn was cancelled" produces
         /// this: it is never inferred from an upstream EOF or a downstream termination, because those
         /// also happen on ordinary completion and on failure.
@@ -77,7 +80,9 @@ struct CloudAcceptanceRecord: Equatable {
         /// transport failure rather than as cancellation or success.
         func markStreamEndedWithoutTerminal() {
             lock.lock(); defer { lock.unlock() }
-            if terminal == nil { terminal = .transportFailure(stage: .transport, code: "stream_ended_without_terminal") }
+            if terminal == nil {
+                terminal = .transportFailure(stage: .transport, code: "stream_ended_without_terminal", message: nil)
+            }
         }
 
         /// Called at the transport boundary for every event of THIS turn.
@@ -96,10 +101,14 @@ struct CloudAcceptanceRecord: Equatable {
             case .error(let code, let message):
                 // THE STAGE IS DISCRIMINATED BY THE MESSAGE THE CLIENT ITSELF SETS on its own
                 // construction failures. Anything else arriving as an error event is a server event:
-                // the client never sets a message on a parsed frame. This is what the export previously
-                // could not show, and what made "empty message" unfounded.
+                // the client never sets a message on a parsed frame. The SERVER MESSAGE IS RETAINED for
+                // the served case so the export can answer whether it was empty.
                 let stage: Stage = message.hasPrefix("stage=clientRequest") ? .clientRequest : .serverEvent
-                terminal = .transportFailure(stage: stage, code: code)
+                terminal = .transportFailure(
+                    stage: stage,
+                    code: code,
+                    message: stage == .serverEvent ? message : nil
+                )
             default:
                 break   // audio, actions and discovery results carry no acceptance field
             }

@@ -21,6 +21,11 @@ enum CloudAcceptanceHarness {
         /// previously carried only the code, so a client construction failure and a served error were
         /// indistinguishable after the fact — which is what an "empty message" reading rested on.
         let stage: String
+        /// The SERVER's message for a served error, and its LENGTH. Both are carried so "the server sent
+        /// an empty message" is a measurement rather than an inference: a present-but-empty message and
+        /// an absent one are different facts, and the length distinguishes them from a truncated view.
+        let serverMessage: String?
+        let serverMessageLength: Int?
     }
 
     struct Export: Codable, Equatable {
@@ -64,14 +69,20 @@ enum CloudAcceptanceHarness {
 
         let verdict = CloudAcceptanceConsumer(a1: a1, a2: a2, b1: b1, nonce: nonce).verdictLine()
         func export(_ s: CloudAcceptanceConsumer.StepOutcome) -> ExportedStep {
-            let stage: String
-            if case .transportFailure(let st, _) = s.terminal { stage = st.rawValue } else { stage = "none" }
+            var stage = "none"
+            var serverMessage: String? = nil
+            if case .transportFailure(let st, _, let message) = s.terminal {
+                stage = st.rawValue
+                serverMessage = message
+            }
             return ExportedStep(
                 requestId: s.requestId,
                 conversationId: s.conversationId,
                 responseText: s.responseText,
                 terminal: s.terminal.map { String(describing: $0) } ?? "none",
-                stage: stage
+                stage: stage,
+                serverMessage: serverMessage,
+                serverMessageLength: serverMessage?.count
             )
         }
         return Export(nonce: nonce, a1: export(a1), a2: export(a2), b1: export(b1), verdict: verdict)

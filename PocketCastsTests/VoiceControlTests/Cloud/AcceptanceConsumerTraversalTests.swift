@@ -97,7 +97,7 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
         // The COLLECTOR classifies a terminal-less end as a transport failure: the turn must not read
         // as open, and it must not read as success either.
         XCTAssertEqual(
-            a2.terminal, .transportFailure(stage: .transport, code: "stream_ended_without_terminal"),
+            a2.terminal, .transportFailure(stage: .transport, code: "stream_ended_without_terminal", message: nil),
             "a terminal-less turn was not classified as a transport failure"
         )
         XCTAssertFalse(a2.responseText.contains(nonce), "outgoing-only evidence was read as recall")
@@ -152,7 +152,7 @@ final class AcceptanceRunPathTests: XCTestCase {
     /// A non-done terminal on any step is a FAILED acceptance, never a pass: an error, a transport
     /// failure or a cancellation is not a completed turn.
     func testRunPathFailsWhenAStepDidNotComplete() {
-        for terminal in [CloudAcceptanceRecord.Terminal.transportFailure(stage: .transport, code: "connection_lost"), .cancelled, nil] as [CloudAcceptanceRecord.Terminal?] {
+        for terminal in [CloudAcceptanceRecord.Terminal.transportFailure(stage: .transport, code: "connection_lost", message: nil), .cancelled, nil] as [CloudAcceptanceRecord.Terminal?] {
             let scripted = ScriptedSubmit()
             let nonce = "NONCE-314"
             scripted.steps = [
@@ -265,13 +265,13 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
     func testClientConstructionFailureIsStagedClientRequest() {
         let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
         r.observe(.error(code: "invalid_request", message: "stage=clientRequest"))   // the client's own tag
-        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request"))
+        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
     }
 
     func testServedErrorIsStagedServerEvent() {
         let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
         r.observe(.error(code: "invalid_request", message: ""))                      // a served frame
-        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request"))
+        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
     }
 
     /// THE POINT: the same code, two different stages, distinguishable after the fact.
