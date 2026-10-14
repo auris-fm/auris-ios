@@ -27,7 +27,11 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         // group. Measured rule: a simulator product is attributed the default group of its
         // application-identifier, and requesting a different group is refused (-34018) — while a
         // group matching its own identifier is usable (-25300 when absent).
-        let group = ProcessInfo.processInfo.environment["SCRATCH_SHARED_GROUP"] ?? "6LL2R2A55F.fm.auris"
+        // THE SHARED GROUP both products are configured to declare for this control. Pointed
+        // explicitly at the shared synthetic group so the writer and the helper request an identical
+        // group; the measured default (`6LL2R2A55F.fm.auris`) is what a product gets otherwise.
+        let group = "6LL2R2A55F.fm.auris.scratchshared"
+        print("PRESERVE group=\(group)")
 
         // --- WRITER: synthetic canary in the named group, plus a container sentinel ---
         SecItemDelete([
