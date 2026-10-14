@@ -23,7 +23,13 @@ struct CloudAcceptanceRecord: Equatable {
 
     enum Terminal: Equatable {
         case done
+        /// A parsed server error, a transport failure, OR a socket that closed with no terminal —
+        /// the transport paths all surface as an error event carrying a code.
         case error(code: String)
+        /// The turn was CANCELLED. The transport finishes the stream with NO terminal event on
+        /// cancellation, so a cancelled turn is recorded as such rather than left looking open (or,
+        /// worse, looking successful). This is the case a parsed-done/error-only recorder misses.
+        case cancelled
     }
 
     /// A recorder for one turn. It is request-scoped: the caller creates one per turn and reads it
@@ -32,12 +38,21 @@ struct CloudAcceptanceRecord: Equatable {
         private let lock = NSLock()
         private var text = ""
         private var terminal: Terminal?
+        private var cancelled = false
         private let conversationId: String?
         private let requestId: String?
 
         init(requestId: String? = nil, conversationId: String?) {
             self.requestId = requestId
             self.conversationId = conversationId
+        }
+
+        /// Marks the turn cancelled. The transport `finish()`es without a terminal event when the
+        /// task is cancelled, so without this the turn would be indistinguishable from one still
+        /// running; a cancelled turn must never read as a completed one.
+        func markCancelled() {
+            lock.lock(); defer { lock.unlock() }
+            if terminal == nil { terminal = .cancelled }
         }
 
         /// Called at the transport boundary for every event of THIS turn.

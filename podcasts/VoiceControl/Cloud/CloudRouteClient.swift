@@ -145,9 +145,15 @@ final class CloudRouteClient {
                     recorder.observe(event)
                     continuation.yield(event)
                 }
+                // The upstream finishes WITHOUT a terminal event when its task was cancelled, so a
+                // cancelled turn is recorded as cancelled rather than read as still-open or complete.
+                if Task.isCancelled { recorder.markCancelled() }
                 continuation.finish()
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { _ in
+                task.cancel()
+                recorder.markCancelled()
+            }
         }
         return (stream, { recorder.record() })
     }
