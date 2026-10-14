@@ -1,19 +1,18 @@
 import AVFoundation
 import XCTest
 
-/// MEASUREMENT PROBE (not a contract control): what does the tap callback's `AVAudioTime`
-/// actually carry on a live render?
+/// MEASUREMENT PROBE: settle START-vs-END semantics of the tap callback's `sampleTime` in the
+/// PLAYER NODE'S OWN CLOCK, where file frame == node frame BY CONSTRUCTION (the file is
+/// scheduled from zero on that node).
 ///
-/// Measured so far (real-time engine, feeder tap, this simulator):
-///   - sampleTime is CUMULATIVE across callbacks and counted at the GRAPH rate (48000), not the
-///     source file's rate.
-///   - hostTime is valid and advances in lockstep with sampleTime (4800 frames = 2 400 000 host
-///     ticks = 0.1 s).
-///   - output-node taps deliver ZERO callbacks; the feeder tap is the one that fires.
-/// This probe settles START-vs-END semantics with an impulse at a known file index.
+/// Per callback (of a tap on the AVAudioPlayerNode itself) we record sampleTime, the buffer's
+/// frame length, and the impulse's sub-index j within the buffer. In that same node-clock domain:
+///   END prediction:   impulse node frame = sampleTime - frames + j
+///   START prediction: impulse node frame = sampleTime + j
+/// The file index of the impulse (20 000) is then compared against both predictions directly.
 final class TapTimestampMappingProbe: XCTestCase {
 
-    func testProbeRecordsCallbackTimesAcrossARender() throws {
+    func testImpulseSemanticsInPlayerNodeClock() throws {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
@@ -24,18 +23,23 @@ final class TapTimestampMappingProbe: XCTestCase {
         let impulseIndex = 20_000
         let totalFrames = 120_000
 
-        var hits: [(sampleTime: Double, frames: Int, hasImpulse: Bool)] = []
+        var hits: [(sampleTime: Double, playerSampleTime: Double, frames: Int, j: Int?)] = []
         let lock = NSLock()
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { buffer, when in
-            var hasImpulse = false
+        // Tap the PLAYER NODE: its sample time is the schedule's own frame count, so no
+        // source-to-graph conversion or schedule-origin inference is needed.
+        player.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak player] buffer, when in
+            var j: Int? = nil
             if let ch = buffer.floatChannelData?[0] {
-                for i in 0..<Int(buffer.frameLength) where ch[i] > 0.5 { hasImpulse = true }
+                for i in 0..<Int(buffer.frameLength) where ch[i] > 0.5 { j = i }
             }
+            // The PLAYER's own clock: file frame == playerTime by construction.
+            let playerTime = player.flatMap { $0.playerTime(forNodeTime: when) }
             lock.lock()
             hits.append((
                 sampleTime: when.isSampleTimeValid ? Double(when.sampleTime) : Double.nan,
+                playerSampleTime: playerTime.map { Double($0.sampleTime) } ?? Double.nan,
                 frames: Int(buffer.frameLength),
-                hasImpulse: hasImpulse
+                j: j
             ))
             lock.unlock()
         }
@@ -50,7 +54,7 @@ final class TapTimestampMappingProbe: XCTestCase {
         deadline = Date().addingTimeInterval(3)
         while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
         player.stop()
-        engine.mainMixerNode.removeTap(onBus: 0)
+        player.removeTap(onBus: 0)
         engine.stop()
 
         lock.lock()
@@ -58,19 +62,22 @@ final class TapTimestampMappingProbe: XCTestCase {
         lock.unlock()
 
         print("PROBE captured=\(captured.count)")
-        for (index, h) in captured.enumerated() where h.hasImpulse {
-            print("PROBE impulse in callback[\(index)] sampleTime=\(h.sampleTime) frames=\(h.frames)")
-            print("PROBE   impulseIndex=\(impulseIndex)")
-            print("PROBE   END semantics predicts impulseIndex in [\(h.sampleTime - Double(h.frames)), \(h.sampleTime))")
-            print("PROBE   START semantics predicts impulseIndex in [\(h.sampleTime), \(h.sampleTime + Double(h.frames)))")
-            print("PROBE   endContains=\((Double(impulseIndex) >= h.sampleTime - Double(h.frames)) && (Double(impulseIndex) < h.sampleTime)) "
-                + "startContains=\((Double(impulseIndex) >= h.sampleTime) && (Double(impulseIndex) < h.sampleTime + Double(h.frames)))")
+        for (index, h) in captured.prefix(8).enumerated() {
+            let delta = index > 0 ? h.sampleTime - captured[index - 1].sampleTime : 0
+            print("PROBE series[\(index)] sampleTime=\(h.sampleTime) frames=\(h.frames) delta=\(delta) j=\(h.j as Any)")
+        }
+        var found = false
+        for (index, h) in captured.enumerated() where h.j != nil {
+            found = true
+            let endPrediction = h.playerSampleTime - Double(h.frames) + Double(h.j!)
+            let startPrediction = h.playerSampleTime + Double(h.j!)
+            print("PROBE callback[\(index)] playerSampleTime=\(h.playerSampleTime) nodeSampleTime=\(h.sampleTime) frames=\(h.frames) j=\(h.j!)")
+            print("PROBE   END   prediction: impulse at player frame \(endPrediction) (file index \(impulseIndex))")
+            print("PROBE   START prediction: impulse at player frame \(startPrediction)")
+            print("PROBE   endMatchesFileIndex=\(endPrediction == Double(impulseIndex)) startMatchesFileIndex=\(startPrediction == Double(impulseIndex))")
         }
         XCTAssertFalse(captured.isEmpty, "the tap fired no callbacks, so there is nothing to map")
-        XCTAssertTrue(
-            captured.contains { $0.hasImpulse },
-            "no callback carried the impulse at index \(impulseIndex), so semantics cannot be read"
-        )
+        XCTAssertTrue(found, "no callback carried the impulse, so semantics cannot be read")
     }
 
     private func impulseFile(frames: Int, rate: Double, impulseIndex: Int) throws -> AVAudioFile {
