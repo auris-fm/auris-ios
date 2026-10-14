@@ -193,7 +193,9 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             let producerStart: Double?
             let producerEnd: Double?
             let rate: Double
-            let anchorFrames: Double
+            /// The anchor's frame position in the PIPELINE domain: `renderedFrames` is in the
+            /// source rate, so the raw value is not comparable to a reference index.
+            let anchorPipelineFrames: Double
             let anchorHost: Double
             let streamIndex: Int
         }
@@ -206,6 +208,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             let sampleTime: Double?
             let hostSeconds: Double?
             let markerIndex: Int?
+            let frameLength: Int
         }
         var callbackRecords: [CallbackRecord] = []
         var observedBufferRate: Double?
@@ -222,7 +225,8 @@ final class FeederEffectsEndToEndTests: XCTestCase {
                 rate: buffer.format.sampleRate,
                 sampleTime: when.isSampleTimeValid ? Double(when.sampleTime) : nil,
                 hostSeconds: when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil,
-                markerIndex: index
+                markerIndex: index,
+                frameLength: Int(buffer.frameLength)
             ))
             lock.unlock()
         }
@@ -234,7 +238,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
                 producerStart: producerStart,
                 producerEnd: producerEnd,
                 rate: rate,
-                anchorFrames: reference.currentRenderAnchor?.renderedFrames ?? .nan,
+                anchorPipelineFrames: reference.currentRenderAnchor?.renderedPipelineSamples ?? .nan,
                 anchorHost: reference.currentRenderAnchor?.hostTime ?? .nan,
                 streamIndex: reference.streamIndex
             ))
@@ -294,8 +298,13 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         }
         // 3. EVERY ADJACENT PAIR strictly advances, in frame and in host.
         for (previous, next) in zip(accepted, accepted.dropFirst()) {
-            XCTAssertGreaterThan(next.anchorFrames, previous.anchorFrames, "adjacent accepted anchor frames did not strictly advance")
+            XCTAssertGreaterThan(next.anchorPipelineFrames, previous.anchorPipelineFrames, "adjacent accepted anchor pipeline frames did not strictly advance")
             XCTAssertGreaterThan(next.anchorHost, previous.anchorHost, "adjacent accepted anchor host instants did not strictly advance")
+            XCTAssertEqual(
+                next.streamIndex - Int(next.anchorPipelineFrames),
+                previous.streamIndex - Int(previous.anchorPipelineFrames),
+                "adjacent accepted blocks derived different reference lengths from their anchors"
+            )
             XCTAssertGreaterThan(next.streamIndex, previous.streamIndex, "adjacent accepted stream indices did not strictly advance")
         }
         // 4. THE MARKER'S CALLBACK AND ITS ACCEPTANCE LINK BY IDENTITY: find the callback record that
@@ -317,20 +326,56 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         print("CARRIER markerBlockKey=\(markerCallback.blockKey) byKey=\(byKey.count) markerPosition=\(markerPosition) markerHost=\(markerHost)")
         XCTAssertEqual(byKey.count, 1, "the marker's block key did not match exactly one accepted record")
         let matched = try XCTUnwrap(byKey.first)
-        // CORROBORATION: the marker's producer position also lies in that record's HALF-OPEN range,
-        // so the key and the range agree rather than the key standing alone.
+        // EXACT MAPPING, not containment. The matched record's range must be exactly the range the
+        // marker callback produced: its start is the callback's sample time, its end is that plus
+        // the callback's OWN frame length, and its rate is the callback's rate. A widened or shifted
+        // range that still happened to contain the marker would fail these.
         let matchedStart = try XCTUnwrap(matched.producerStart, "the matched record has no range start")
         let matchedEnd = try XCTUnwrap(matched.producerEnd, "the matched record has no range end")
+        XCTAssertEqual(matchedStart, markerSampleTime, "the matched range start is not the marker callback's sample time")
+        XCTAssertEqual(
+            matchedEnd, markerSampleTime + Double(markerCallback.frameLength),
+            "the matched range end is not the marker callback's sample time plus its frame length"
+        )
+        XCTAssertEqual(matched.rate, markerCallback.rate, "the matched record's rate is not the marker callback's rate")
         XCTAssertTrue(
             markerPosition >= matchedStart && markerPosition < matchedEnd,
             "the marker's position is outside the half-open range of the record its key identifies"
         )
+        // THE MATCHED ANCHOR'S CONVERTED FRAME POSITION must lie inside the matched block's accepted
+        // reference span. The span is [this record's stream start, the next record's stream start),
+        // so an anchor mapped into the neighbouring block is rejected.
+        // THE ANCHOR IS THE BLOCK'S OWN REFERENCE START. `referenceIndexForProducerPosition` maps
+        // `rangeStart + played`, where `rangeStart` is the reference stream index BEFORE this block
+        // is appended and `played` is how far the producer had rendered INTO the block. The tap
+        // reports the block's start as the rendered position, so `played == 0` and the anchor must
+        // equal this block's reference start. The record's `streamIndex` is read AFTER the append,
+        // so it is that start plus the block's pipeline length: the next record's start.
+        if let matchedIndex = accepted.firstIndex(where: { $0.blockKey == markerCallback.blockKey }) {
+            let blockReferenceLength = matched.streamIndex - Int(matched.anchorPipelineFrames)
+            print("CARRIER matchedAnchorPipelineFrames=\(matched.anchorPipelineFrames) recordStreamIndex=\(matched.streamIndex) derivedBlockLength=\(blockReferenceLength)")
+            XCTAssertGreaterThan(
+                matched.streamIndex, Int(matched.anchorPipelineFrames),
+                "the record's post-append stream index is not ahead of its own anchor, so the anchor is not the block's start"
+            )
+            // A block's pipeline length is the same for every block, so consecutive records must
+            // show the SAME derived length: a misplaced anchor would change it.
+            if matchedIndex + 1 < accepted.count {
+                let next = accepted[matchedIndex + 1]
+                XCTAssertEqual(
+                    next.streamIndex - Int(next.anchorPipelineFrames), blockReferenceLength,
+                    "consecutive accepted blocks derived different reference lengths, so an anchor is misplaced"
+                )
+            }
+        } else {
+            XCTFail("the matched record was not found among the accepted records")
+        }
         XCTAssertEqual(
             matched.anchorHost, markerHost, accuracy: 0.001,
             "the matched acceptance's anchor host is not the marker callback's instant"
         )
         // 5. THE MARKER LANDS AT ITS ASSERTED SCHEDULE INSTANT once its own index is applied.
-        let markerInstant = markerHost + Double(markerIndex) / observedRate
+        let markerInstant = markerHost + Double(markerIndex) / markerCallback.rate
         let elapsed = markerInstant - targetSeconds
         let anchorSeconds = matched.anchorHost
         print("CARRIER markerInstant=\(markerInstant) elapsed=\(elapsed) matchedAnchorHostSeconds=\(anchorSeconds)")
