@@ -310,16 +310,46 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         XCTAssertEqual(markerRanges.count, 1, "the marker's producer position did not fall in exactly one accepted range")
         print("CARRIER marker acceptedRange=\(markerRanges.first as Any) of \(ranges.count) accepted ranges")
 
+        // THE MARKER'S ACCEPTED ANCHOR IS THE MATCHED BLOCK'S ANCHOR: find the index of the accepted
+        // block whose range carried the marker, and assert the anchor recorded at THAT acceptance is
+        // the one associated with the marker -- not merely that some anchor exists.
+        let matchedIndex = ranges.firstIndex { range in
+            guard let start = range.start, let end = range.end, let position = markerPosition else { return false }
+            return position >= start && position <= end
+        }
+        let matchedAnchor = try XCTUnwrap(matchedIndex.flatMap { index in anchorsObserved.indices.contains(index) ? anchorsObserved[index] : nil },
+                                         "the matched block recorded no accepted anchor")
+        print("CARRIER matchedBlockIndex=\(String(describing: matchedIndex)) matchedAnchor=\(matchedAnchor)")
+        XCTAssertEqual(
+            matchedAnchor.host, markerHost ?? .nan, accuracy: 0.001,
+            "the matched block's accepted anchor host instant is not the marker's callback instant"
+        )
+
         // SEQUENTIAL ACCEPTED HOST/FRAME PAIRS: the anchors the reference recorded must advance in
         // both frame and host, not merely in stream count.
         let anchorFrames = anchorsObserved.map(\.frames)
         let anchorHosts = anchorsObserved.map(\.host)
         print("CARRIER acceptedAnchorFrames=\(anchorFrames.prefix(6)) acceptedAnchorHosts=\(anchorHosts.prefix(6))")
-        XCTAssertEqual(anchorFrames, anchorFrames.sorted(), "the accepted anchors' frames did not advance")
-        XCTAssertEqual(anchorHosts, anchorHosts.sorted(), "the accepted anchors' host instants did not advance")
-        if anchorFrames.count > 1 {
-            XCTAssertGreaterThan(anchorFrames.last ?? 0, anchorFrames.first ?? 0, "accepted anchor frames did not advance end to end")
-            XCTAssertGreaterThan(anchorHosts.last ?? 0, anchorHosts.first ?? 0, "accepted anchor host instants did not advance end to end")
+        // EVERY ADJACENT PAIR must strictly advance — sorted arrays plus an end-to-end inequality
+        // would pass for a sequence that stalls or repeats in the middle.
+        XCTAssertGreaterThan(anchorFrames.count, 1, "fewer than two accepted anchors, so adjacency was not exercised")
+        for (previous, next) in zip(anchorFrames, anchorFrames.dropFirst()) {
+            XCTAssertGreaterThan(next, previous, "an adjacent accepted anchor frame did not strictly advance")
+        }
+        for (previous, next) in zip(anchorHosts, anchorHosts.dropFirst()) {
+            XCTAssertGreaterThan(next, previous, "an adjacent accepted anchor host instant did not strictly advance")
+        }
+        // The HOST/FIRM cadence: the frame step is one pipeline block and the host step matches it.
+        if let first = anchorFrames.first, let second = anchorFrames.dropFirst().first,
+           let firstHost = anchorHosts.first, let secondHost = anchorHosts.dropFirst().first {
+            let hostStep = secondHost - firstHost
+            let frameStep = second - first
+            XCTAssertGreaterThan(frameStep, 0, "no frame step between the first two accepted anchors")
+            XCTAssertGreaterThan(hostStep, 0, "no host step between the first two accepted anchors")
+            XCTAssertEqual(
+                hostStep, frameStep / Double(PlaybackEchoReference.pipelineSampleRate), accuracy: 0.001,
+                "the accepted anchor host step did not match the frame step at the pipeline rate"
+            )
         }
         // CORRELATE THE MARKER'S OWN INSTANT, not the callback's: the marker sits at index `index`
         // within its buffer, and the callback's sample time labels that buffer's START (measured in
