@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// WebSocket client for `GET /api/v1/cloud/route`.
 ///
@@ -197,7 +198,10 @@ final class CloudRouteClient {
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
-            continuation.yield(.error(code: "invalid_request", message: ""))
+            // A distinguishable message, so a run's export says WHICH construction step failed rather
+            // than reporting both under `invalid_request`.
+            FileLog.shared.addMessage("[CloudRoute] invalid_request: websocket URL could not be built from baseURL='\(baseURL)'")
+            continuation.yield(.error(code: "invalid_request", message: "url"))
             continuation.finish()
             return true
         }
@@ -264,7 +268,8 @@ final class CloudRouteClient {
             // so the frame is serialized to JSON text here.
             let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
-                continuation.yield(.error(code: "invalid_request", message: ""))
+                FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
+                continuation.yield(.error(code: "invalid_request", message: "auth_encoding"))
                 continuation.finish()
                 return true
             }
@@ -315,6 +320,9 @@ final class CloudRouteClient {
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
+                        if case .error(let code, let message) = event {
+                            FileLog.shared.addMessage("[CloudRoute] server error code=\(code) message=\(message)")
+                        }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
                         // connection after `done`/`error`, so continuing to
@@ -380,6 +388,15 @@ final class CloudRouteClient {
         frame["type"] = "authenticate"
         frame["access_token"] = credential
         frame["codecs"] = Self.supportedCodecs
+        // Record the OUTGOING frame's shape (keys and the codec list only; never the token) and the
+        // request/conversation ids, so a server `invalid_request` can be attributed to the frame we
+        // actually sent rather than deduced from the code.
+        let keys = frame.keys.sorted().joined(separator: ",")
+        FileLog.shared.addMessage(
+            "[CloudRoute] auth frame keys=[\(keys)] codecs=\(Self.supportedCodecs) "
+            + "requestId=\(turn.requestId) conversationId=\(turn.conversation?.conversationId ?? "nil") "
+            + "mode=\(turn.conversation?.mode ?? "nil") credentialPresent=true"
+        )
         return frame
     }
 

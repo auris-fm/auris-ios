@@ -223,12 +223,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         guard let flagIndex = args.firstIndex(of: Self.scratchAcceptanceArgument),
               flagIndex + 1 < args.count else { return }
         let nonce = args[flagIndex + 1]
-        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count))")
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents")
+            .appendingPathComponent(Self.scratchAcceptanceExportName)
+        // A STALE EXPORT MUST NOT SURVIVE A NEW RUN. The previous run's file is removed BEFORE the
+        // turns start, so a run that is interrupted or crashes cannot leave an older result that the
+        // runner would read as this run's outcome. The file's absence is itself the signal that no
+        // result was produced.
+        try? FileManager.default.removeItem(at: url)
+        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count)); removed any prior export")
         Task { @MainActor in
             let export = await VoiceControlAssembly().runAcceptance(nonce: nonce)
-            let url = URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Documents")
-                .appendingPathComponent(Self.scratchAcceptanceExportName)
             do {
                 let data = try JSONEncoder().encode(export)
                 try data.write(to: url)
