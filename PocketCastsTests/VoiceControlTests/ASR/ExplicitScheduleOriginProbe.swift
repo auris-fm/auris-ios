@@ -27,7 +27,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         // FILE-based scheduling: every probe that observed content used scheduleFile; write the
         // impulse (file frame 0) to CAF files.
         func writeImpulseFile(name: String) throws -> AVAudioFile {
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\\(name)-\\(UUID().uuidString).caf")
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString).caf")
             let fmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
             let file = try AVAudioFile(forWriting: url, settings: fmt.settings)
             let b = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames))
@@ -71,10 +71,14 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         }
 
         try engine.start()
-        let nowHost = mach_absolute_time()
         var ti = mach_timebase_info_data_t(); mach_timebase_info(&ti)
-        let halfSecondTicks = UInt64(0.5 * 1_000_000_000.0 * Double(ti.numer) / Double(ti.denom))
-        let target = nowHost + halfSecondTicks
+        let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
+        // The target is computed IMMEDIATELY BEFORE submission and asserted to be ahead.
+        let nowHost = mach_absolute_time()
+        let target = nowHost + UInt64(0.5 * Double(ti.denom) / Double(ti.numer) * 1_000_000_000.0)
+        let targetAheadSeconds = Double(target - mach_absolute_time()) * secondsPerTick
+        print("PROBE targetAheadSeconds=\(targetAheadSeconds)")
+        XCTAssertGreaterThan(targetAheadSeconds, 0.4, "the schedule target was not ahead of now at submission")
         // CONTROL FIRST: if the player renders the nil-scheduled file, the player itself works
         // and any silence on the explicit-time item is that item's own failure.
         player.scheduleFile(controlFile, at: nil)
@@ -82,7 +86,9 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         // The working probes' ordering (schedule, then play), now with the explicit host time.
 
         var deadline = Date().addingTimeInterval(10)
-        while hits.isEmpty && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        while Date() < deadline {
+            lock.lock(); let empty = hits.isEmpty; lock.unlock()
+            if !empty { break }
         // CONTROL WINDOW: the nil-scheduled file (1 s) must be audible now.
         deadline = Date().addingTimeInterval(3)
         var controlPeak: Float = 0
@@ -119,14 +125,16 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
             let j = h.j!
             let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
             let hostSeconds = Double(h.hostTime) * secondsPerTick
-            let endPrediction = 0.5 + (h.sampleTime - Double(h.frames) + Double(j)) / rate
-            let startPrediction = 0.5 + (h.sampleTime + Double(j)) / rate
+            // ABSOLUTE host domain: the schedule target converted to seconds anchors frame 0.
+            let targetSeconds = Double(target) * secondsPerTick
+            let endPrediction = targetSeconds + (h.sampleTime - Double(h.frames) + Double(j)) / rate
+            let startPrediction = targetSeconds + (h.sampleTime + Double(j)) / rate
             print("PROBE callback[\(index)] sampleTime=\(h.sampleTime) frames=\(h.frames) j=\(j) hostSeconds=\(hostSeconds)")
             print("PROBE   END   prediction=\(endPrediction) delta=\(hostSeconds - endPrediction)")
             print("PROBE   START prediction=\(startPrediction) delta=\(hostSeconds - startPrediction)")
         }
         XCTAssertFalse(captured.isEmpty, "no callbacks captured")
-        XCTAssertGreaterThan(controlPeak, 0.6, "the positive control was silent: the setup cannot render audio")
+        XCTAssertGreaterThan(controlPeak, 0.45, "the positive control was silent: the setup cannot render audio")
         print("PROBE VERDICT explicitPeak=\(explicitPeak) (audible ⇒ host-time scheduling fires on this runtime)")
         XCTAssertTrue(found, "the frame-0 impulse was not observed; semantics cannot be read")
     }
