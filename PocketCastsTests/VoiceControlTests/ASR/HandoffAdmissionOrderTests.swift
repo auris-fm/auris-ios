@@ -156,33 +156,20 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
-        let arrivalLock = NSLock()
-        var deliveredCallbacks = 0
-        // ACTIVATION RACE, MEASURED (RepeatInstallDeliveryProbe stalling trace): the freshly
-        // (re)installed tap's activation can lose the race against the offline render start — the
-        // failing runs show ZERO callbacks during the whole render and only a residual flush at
-        // stop. Activation is a one-time latency, so the render is RETRIED (bounded) when no
-        // callback was observed; the acknowledgment check below still requires the FULL count.
-        handoff.onDeliveryDequeued = {
-            arrivalLock.lock(); deliveredCallbacks += 1; arrivalLock.unlock()
-        }
+        // STRICT SINGLE RENDER — NO AGGREGATE RETRIES. The stall (zero callbacks during a
+        // whole render, then a two-buffer residual flush at stop) is PRESERVED as a failure:
+        // re-scheduling the buffer across attempts could let accumulated partial deliveries
+        // reach the count without proving that ONE installation captured ITS scheduled
+        // output, so retries are NOT used to close the case. The cause of the missed
+        // callbacks is unresolved; this case keeps it visible.
         var rendered = 0
-        var renderAttempt = 0
-        let renderDeadline = Date().addingTimeInterval(15)
-        while rendered < Int(count) && renderAttempt < 3 && Date() < renderDeadline {
-            renderAttempt += 1
-            rendered = 0
-            var attempts = 0
-            player.scheduleBuffer(buf)
-            player.play()
-            while rendered < Int(count) && attempts < 1_000 {
-                attempts += 1
-                let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
-                if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
-            }
-            arrivalLock.lock(); let seen = deliveredCallbacks; arrivalLock.unlock()
-            if seen > 0 { break }
-            tracelessWait()
+        var attempts = 0
+        player.scheduleBuffer(buf)
+        player.play()
+        while rendered < Int(count) && attempts < 1_000 {
+            attempts += 1
+            let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
+            if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         // renderOffline quantizes to its block size and can OVERSHOOT the request; the scheduled
         // output is what matters.
@@ -260,33 +247,20 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         player.play()
         let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
                                                  frameCapacity: engine.manualRenderingMaximumFrameCount))
-        let arrivalLock = NSLock()
-        var deliveredCallbacks = 0
-        // ACTIVATION RACE, MEASURED (RepeatInstallDeliveryProbe stalling trace): the freshly
-        // (re)installed tap's activation can lose the race against the offline render start — the
-        // failing runs show ZERO callbacks during the whole render and only a residual flush at
-        // stop. Activation is a one-time latency, so the render is RETRIED (bounded) when no
-        // callback was observed; the acknowledgment check below still requires the FULL count.
-        handoff.onDeliveryDequeued = {
-            arrivalLock.lock(); deliveredCallbacks += 1; arrivalLock.unlock()
-        }
+        // STRICT SINGLE RENDER — NO AGGREGATE RETRIES. The stall (zero callbacks during a
+        // whole render, then a two-buffer residual flush at stop) is PRESERVED as a failure:
+        // re-scheduling the buffer across attempts could let accumulated partial deliveries
+        // reach the count without proving that ONE installation captured ITS scheduled
+        // output, so retries are NOT used to close the case. The cause of the missed
+        // callbacks is unresolved; this case keeps it visible.
         var rendered = 0
-        var renderAttempt = 0
-        let renderDeadline = Date().addingTimeInterval(15)
-        while rendered < Int(count) && renderAttempt < 3 && Date() < renderDeadline {
-            renderAttempt += 1
-            rendered = 0
-            var attempts = 0
-            player.scheduleBuffer(buf)
-            player.play()
-            while rendered < Int(count) && attempts < 1_000 {
-                attempts += 1
-                let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
-                if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
-            }
-            arrivalLock.lock(); let seen = deliveredCallbacks; arrivalLock.unlock()
-            if seen > 0 { break }
-            tracelessWait()
+        var attempts = 0
+        player.scheduleBuffer(buf)
+        player.play()
+        while rendered < Int(count) && attempts < 1_000 {
+            attempts += 1
+            let s = try engine.renderOffline(engine.manualRenderingMaximumFrameCount, to: out)
+            if s == .success { rendered += Int(out.frameLength) } else if s == .error { break }
         }
         // renderOffline quantizes to its block size and can OVERSHOOT the request; the scheduled
         // output is what matters.
@@ -627,7 +601,3 @@ final class InstalledClosureCaptureTests: XCTestCase {
 }
 
 
-
-private func tracelessWait() {
-    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-}

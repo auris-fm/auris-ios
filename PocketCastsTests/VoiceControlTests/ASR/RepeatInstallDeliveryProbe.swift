@@ -50,11 +50,14 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         // COUNT CALLBACK ARRIVAL THROUGH THE TAP'S OWN CLOSURE: CoreAudio refuses a second tap on
         // the same bus, so the observer wraps the closure install() captured rather than adding
         // another tap. The wrapper runs the production closure and counts the arrival.
+        // Per-attempt installation identity: each install's admitted identity is recorded, so a
+        // stalling run shows WHICH installation's callbacks (if any) arrived and which were due.
         tap.onCallbackArrived = { trace.didCallback() }
         trace.record("install#1")
         tap.install()
-        trace.record("install#2")
+        trace.record("identity after install#1 = \(tap.producerIdentity)")
         tap.install()
+        trace.record("identity after install#2 = \(tap.producerIdentity)")
 
         try engine.enableManualRenderingMode(.offline, format: f, maximumFrameCount: 4_096)
         defer { engine.disableManualRenderingMode() }
@@ -87,6 +90,9 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         let beforeStop = trace.snapshotState()
         let countBeforeStop = reference.snapshot().count
         trace.record("beforeStop callbacks=\(beforeStop.callbacks) dequeued=\(beforeStop.dequeued) refCount=\(countBeforeStop)")
+        // Scheduled range for the record: the buffer schedules `count` source frames at the node
+        // clock; the reference receives them resampled to the pipeline rate.
+        trace.record("scheduled source frames=\(count) expectedPipelineSamples=\(Int(Double(count) * 16_000.0 / 44_100.0))")
 
         engine.stop()
         // RECORDED IMMEDIATELY AT RETURN: placing later callbacks relative to this boundary is
