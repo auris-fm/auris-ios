@@ -185,6 +185,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
 
         var markerSampleIndex: Int?
         var markerHostSeconds: Double?
+        var markerProducerPosition: Double?
         var callbackHosts: [Double] = []
         var acceptedAnchors = 0
         var acceptedOffsets: [Int] = []
@@ -196,6 +197,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
                 for i in 0..<Int(buffer.frameLength) where ch[i] >= markerLevel * 0.8 {
                     if markerSampleIndex == nil {
                         markerSampleIndex = i
+                        markerProducerPosition = when.isSampleTimeValid ? Double(when.sampleTime) + Double(i) : nil
                         if when.isHostTimeValid { markerHostSeconds = AVAudioTime.seconds(forHostTime: when.hostTime) }
                     }
                     break
@@ -207,10 +209,16 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         // stream position and the anchor it recorded for that block. These are asserted to ADVANCE
         // below, measured independently of the callback progression.
         var acceptedStreamIndices: [Int] = []
-        handoff.onBlockAccepted = {
+        var acceptedRanges: [(start: Double?, end: Double?)] = []
+        var acceptedAnchorsObserved: [(frames: Double, host: Double)] = []
+        handoff.onBlockAccepted = { producerStart, producerEnd in
             lock.lock()
             acceptedAnchors += 1
             acceptedStreamIndices.append(reference.streamIndex)
+            acceptedRanges.append((producerStart, producerEnd))
+            if let anchor = reference.currentRenderAnchor {
+                acceptedAnchorsObserved.append((anchor.renderedFrames, anchor.hostTime))
+            }
             if let offset = reference.audibleEndOffsetInRetainedWindow() { acceptedOffsets.append(offset) }
             lock.unlock()
         }
@@ -258,6 +266,9 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let anchors = acceptedAnchors
         let offsets = acceptedOffsets
         let streamIndices = acceptedStreamIndices
+        let ranges = acceptedRanges
+        let anchorsObserved = acceptedAnchorsObserved
+        let markerPosition = markerProducerPosition
         lock.unlock()
 
         let targetSeconds = Double(target) * secondsPerTick
@@ -287,7 +298,29 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             streamIndices.last ?? 0, streamIndices.first ?? 0,
             "the accepted reference stream position did not advance across blocks"
         )
+        let markerRanges = ranges.filter { range in
+            guard let start = range.start, let end = range.end, let position = markerPosition else { return false }
+            return position >= start && position <= end
+        }
         print("CARRIER acceptedStreamIndices=\(streamIndices.prefix(8))")
+
+        // INDIVIDUAL MATCH: the block that CARRIED the marker must be identified among the accepted
+        // blocks, by testing the marker's own producer position against each accepted producer
+        // range. Coexisting with a list of accepted blocks is not association.
+        XCTAssertEqual(markerRanges.count, 1, "the marker's producer position did not fall in exactly one accepted range")
+        print("CARRIER marker acceptedRange=\(markerRanges.first as Any) of \(ranges.count) accepted ranges")
+
+        // SEQUENTIAL ACCEPTED HOST/FRAME PAIRS: the anchors the reference recorded must advance in
+        // both frame and host, not merely in stream count.
+        let anchorFrames = anchorsObserved.map(\.frames)
+        let anchorHosts = anchorsObserved.map(\.host)
+        print("CARRIER acceptedAnchorFrames=\(anchorFrames.prefix(6)) acceptedAnchorHosts=\(anchorHosts.prefix(6))")
+        XCTAssertEqual(anchorFrames, anchorFrames.sorted(), "the accepted anchors' frames did not advance")
+        XCTAssertEqual(anchorHosts, anchorHosts.sorted(), "the accepted anchors' host instants did not advance")
+        if anchorFrames.count > 1 {
+            XCTAssertGreaterThan(anchorFrames.last ?? 0, anchorFrames.first ?? 0, "accepted anchor frames did not advance end to end")
+            XCTAssertGreaterThan(anchorHosts.last ?? 0, anchorHosts.first ?? 0, "accepted anchor host instants did not advance end to end")
+        }
         // CORRELATE THE MARKER'S OWN INSTANT, not the callback's: the marker sits at index `index`
         // within its buffer, and the callback's sample time labels that buffer's START (measured in
         // ExplicitScheduleOriginProbe), so the marker's instant is the callback instant advanced by
@@ -327,7 +360,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         var acceptedHost: Double?
         var acceptedCount = 0
         let lock = NSLock()
-        handoff.onBlockAccepted = {
+        handoff.onBlockAccepted = { _, _ in
             lock.lock()
             acceptedCount += 1
             acceptedOffset = reference.audibleEndOffsetInRetainedWindow()
