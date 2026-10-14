@@ -98,7 +98,13 @@ enum Helper {
                 print("SCRATCH-VERIFY container=\(container) read=\(status) attributedGroup=\(attributed as Any)")
                 print("SCRATCH-VERIFY sentinelPath=\(sentinelURL.path) sentinelPresent=\(sentinel != nil) sentinelMatch=\(sentinelOK)")
                 print("SCRATCH-VERIFY canaryPresent=\(bytes != nil) canaryBytesMatch=\(canaryOK)")
-                return (status == errSecSuccess && sentinelOK && canaryOK) ? 0 : 6
+                // A single unambiguous MACHINE-READABLE verdict, because `simctl launch` reports the
+                // launch and always exits 0 — it does NOT surface the app's own status. A caller that
+                // read only the process exit code would treat a failed verification as success, so
+                // the verdict is printed explicitly and must be matched by the caller.
+                let pass = (status == errSecSuccess && sentinelOK && canaryOK)
+                print("SCRATCH-VERIFY VERDICT=\(pass ? "PASS" : "FAIL")")
+                return pass ? 0 : 6
             }
         }
 
