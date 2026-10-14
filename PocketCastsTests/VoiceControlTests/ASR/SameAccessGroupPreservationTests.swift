@@ -18,8 +18,12 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     private let syntheticAccount = "scratch-preservation"
     private let syntheticValue = "synthetic-canary-token"
 
+    /// The sentinel lives at a DEVICE-WIDE path, not in the app's data container. A container is
+    /// replaced when the app is reinstalled, so a container-resident sentinel cannot evidence
+    /// preservation across a run that installs the app — which is exactly the flaw found when the
+    /// container identity changed between phases. This path is stable across installs.
     private var sentinelURL: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("scratch-preservation-sentinel.txt")
+        URL(fileURLWithPath: "/tmp/scratch-preservation-sentinel.txt")
     }
 
     /// READ-ONLY POST-READ VERIFICATION: run AFTER the external helper has read the canary. It writes
@@ -56,10 +60,10 @@ final class SameAccessGroupPreservationTests: XCTestCase {
 
         // THE CONTAINER SENTINEL is verified here too, against the value recorded when it was created,
         // so "intact" covers the container as well as the keychain item rather than the canary alone.
-        let expectedSentinelFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-sentinel.txt")
+        let expectedSentinelFile = URL(fileURLWithPath: "/tmp/scratch-expected-sentinel.txt")
         let expectedSentinel = (try? String(contentsOf: expectedSentinelFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let sentinelPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-preservation-sentinel.txt")
+        let sentinelPath = URL(fileURLWithPath: "/tmp/scratch-preservation-sentinel.txt")
         let actualSentinel = (try? String(contentsOf: sentinelPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         print("VERIFY postHelperRead sentinelPresent=\(actualSentinel != nil) sentinelMatch=\(actualSentinel == expectedSentinel) path=\(sentinelPath.path)")
@@ -99,7 +103,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         try Data(sentinelContents.utf8).write(to: sentinelURL)
         // Record the sentinel value so the post-helper verification compares against it rather than
         // re-reading whatever is there.
-        try Data(sentinelContents.utf8).write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-sentinel.txt"))
+        try Data(sentinelContents.utf8).write(to: URL(fileURLWithPath: "/tmp/scratch-expected-sentinel.txt"))
         print("PRESERVE sentinel written at \(sentinelURL.path)")
 
         // --- READER: the helper's scoped shape — presence + group attribution, NO value returned ---
