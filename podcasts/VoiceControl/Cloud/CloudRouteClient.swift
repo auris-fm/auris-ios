@@ -134,11 +134,20 @@ final class CloudRouteClient {
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
     ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        collectAcceptance(turn: turn, upstream: route(request: request, context: context, turn: turn))
+    }
+
+    /// The same collector over an INJECTED event stream, so the wrapper and the consumer can be driven
+    /// by a control without subclassing this final client. The production entry point above passes the
+    /// real stream; both share one implementation, so the control exercises the same code path.
+    func collectAcceptance(
+        turn: CloudTurnEnvelope,
+        upstream: AsyncStream<CloudRouteEvent>
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
         let recorder = CloudAcceptanceRecord.Recorder(
             requestId: turn.requestId,
             conversationId: turn.conversation?.conversationId
         )
-        let upstream = route(request: request, context: context, turn: turn)
         let stream = AsyncStream<CloudRouteEvent> { continuation in
             let task = Task {
                 var sawTerminal = false

@@ -65,8 +65,13 @@ struct CloudAcceptanceRecord: Equatable {
         }
 
         /// Called at the transport boundary for every event of THIS turn.
+        ///
+        /// THE TERMINAL IS FINAL: once a turn has a terminal, later events are ignored, so a trailing
+        /// token cannot extend a finished turn's response and a second terminal cannot overwrite the
+        /// first. Overwriting would let a late frame rewrite the outcome a consumer had already read.
         func observe(_ event: CloudRouteEvent) {
             lock.lock(); defer { lock.unlock() }
+            guard terminal == nil else { return }
             switch event {
             case .token(let t):
                 text += t
