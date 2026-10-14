@@ -98,12 +98,13 @@ struct CloudAcceptanceRecord: Equatable {
                 text += t
             case .done:
                 terminal = .done
-            case .error(let code, let message):
-                // THE STAGE IS DISCRIMINATED BY THE MESSAGE THE CLIENT ITSELF SETS on its own
-                // construction failures. Anything else arriving as an error event is a server event:
-                // the client never sets a message on a parsed frame. The SERVER MESSAGE IS RETAINED for
-                // the served case so the export can answer whether it was empty.
-                let stage: Stage = message.hasPrefix("stage=clientRequest") ? .clientRequest : .serverEvent
+            case .error(let source, let code, let message):
+                // THE SOURCE IS STRUCTURAL, taken from the event itself rather than inferred from the
+                // message text. The previous version sniffed a `stage=clientRequest` prefix, which
+                // misclassifies whenever a server message happens to look like a tag or a tag is
+                // reworded. The SERVER MESSAGE is retained for a served error so the export can answer
+                // whether it was present and empty.
+                let stage: Stage = source == .client ? .clientRequest : .serverEvent
                 terminal = .transportFailure(
                     stage: stage,
                     code: code,

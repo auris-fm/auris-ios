@@ -73,7 +73,7 @@ final class CloudDiscoveryResultsTests: XCTestCase {
             #"{"type":"result","kind":"episode_results"}"#
         )
         XCTAssertEqual(events.count, 1)
-        guard case let .error(code, message) = events.first else {
+        guard case let .error(_, code, message) = events.first else {
             return XCTFail("expected invalid_response error, got \(events)")
         }
         XCTAssertEqual(code, "invalid_response")

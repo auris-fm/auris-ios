@@ -645,7 +645,7 @@ final class CloudTokenProviderRouterTests: XCTestCase {
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        XCTAssertEqual(events, [.error(source: .server, code: "unauthorized", message: "")])
         XCTAssertTrue(requests.isEmpty, "no credential ⇒ nothing dialled, and never the legacy bearer")
     }
 }

@@ -363,7 +363,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 return CloudRouteResult(response: .silent, outcome: .completed)
-            case let .error(code, message):
+            case let .error(_, code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
                 restoreTransientAudioState()

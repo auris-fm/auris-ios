@@ -264,22 +264,22 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
 
     func testClientConstructionFailureIsStagedClientRequest() {
         let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        r.observe(.error(code: "invalid_request", message: "stage=clientRequest"))   // the client's own tag
+        r.observe(.error(source: .client, code: "invalid_request", message: "request could not be built"))   // the client's own tag
         XCTAssertEqual(r.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
     }
 
     func testServedErrorIsStagedServerEvent() {
         let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        r.observe(.error(code: "invalid_request", message: ""))                      // a served frame
+        r.observe(.error(source: .server, code: "invalid_request", message: ""))                      // a served frame
         XCTAssertEqual(r.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
     }
 
     /// THE POINT: the same code, two different stages, distinguishable after the fact.
     func testSameCodeWithDifferentSourcesIsDistinguishable() {
         let client = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        client.observe(.error(code: "invalid_request", message: "stage=clientRequest"))
+        client.observe(.error(source: .client, code: "invalid_request", message: "request could not be built"))
         let server = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
-        server.observe(.error(code: "invalid_request", message: ""))
+        server.observe(.error(source: .server, code: "invalid_request", message: ""))
         XCTAssertNotEqual(client.record().terminal, server.record().terminal, "the stage did not discriminate")
     }
 }

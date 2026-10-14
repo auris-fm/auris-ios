@@ -31,7 +31,7 @@ final class CloudAcceptanceRecordTests: XCTestCase {
 
     func testServerErrorIsATransportFailureTerminalDistinctFromDone() {
         let recorder = CloudAcceptanceRecord.Recorder(requestId: "req-3", conversationId: nil)
-        recorder.observe(.error(code: "invalid_response", message: "x"))
+        recorder.observe(.error(source: .server, code: "invalid_response", message: "x"))
         // The served message is RETAINED, so the export can say whether it was empty.
         XCTAssertEqual(recorder.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_response", message: "x"))
     }

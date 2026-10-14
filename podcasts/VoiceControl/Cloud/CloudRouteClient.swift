@@ -201,7 +201,7 @@ final class CloudRouteClient {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
             // than reporting both under `invalid_request`.
             FileLog.shared.addMessage("[CloudRoute] invalid_request: websocket URL could not be built from baseURL='\(baseURL)'")
-            continuation.yield(.error(code: "invalid_request", message: "stage=clientRequest"))
+            continuation.yield(.error(source: .client, code: "invalid_request", message: "request could not be built"))
             continuation.finish()
             return true
         }
@@ -216,7 +216,7 @@ final class CloudRouteClient {
             // No credential: fail closed with a terminal event, so the sink can
             // speak/earcon the failure. Finishing silently would leave the user
             // with no error and no outcome.
-            continuation.yield(.error(code: "unauthorized", message: ""))
+            continuation.yield(.error(source: .client, code: "unauthorized", message: ""))
             continuation.finish()
             return true
         }
@@ -269,7 +269,7 @@ final class CloudRouteClient {
             let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
                 FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
-                continuation.yield(.error(code: "invalid_request", message: "stage=clientRequest"))
+                continuation.yield(.error(source: .client, code: "invalid_request", message: "request could not be built"))
                 continuation.finish()
                 return true
             }
@@ -302,7 +302,7 @@ final class CloudRouteClient {
                     return // cancelled: a frame arrived, the main loop owns the stream
                 }
                 if !terminalFlag.isSet {
-                    continuation.yield(.error(code: "connection_lost", message: ""))
+                    continuation.yield(.error(source: .client, code: "connection_lost", message: ""))
                     continuation.finish()
                 }
             }
@@ -320,7 +320,7 @@ final class CloudRouteClient {
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
-                        if case .error(let code, _) = event {
+                        if case .error(_, let code, _) = event {
                             // BOUNDED: the CODE only. The server's free-form message is NOT written —
                             // an arbitrary server string is not known to be free of sensitive content,
                             // and the allowlist here is the acceptance protocol, not general traffic.
@@ -342,7 +342,7 @@ final class CloudRouteClient {
 
             // WebSocket closed.
             if !terminalFlag.isSet {
-                continuation.yield(.error(code: "connection_lost", message: ""))
+                continuation.yield(.error(source: .client, code: "connection_lost", message: ""))
             }
             continuation.finish()
             return true
@@ -362,7 +362,7 @@ final class CloudRouteClient {
             // speaks a non-empty message verbatim, so it reached the user as
             // English prose in whatever locale they had set, instead of the
             // localized template or the error earcon.
-            continuation.yield(.error(code: "connection_lost", message: ""))
+            continuation.yield(.error(source: .client, code: "connection_lost", message: ""))
             continuation.finish()
             return true
         }
@@ -480,7 +480,7 @@ final class CloudRouteClient {
             // and is ignored. This guard lived in the retired SSE parser; the
             // contract it enforced rides the socket too.
             if isMalformedResultPayload(text) {
-                return [.error(code: "invalid_response", message: "")]
+                return [.error(source: .server, code: "invalid_response", message: "")]
             }
             guard let result = DiscoveryResult.parse(json: text) else { return [] }
             return [.result(result)]
@@ -493,7 +493,7 @@ final class CloudRouteClient {
             guard let code = json["code"] as? String,
                   let message = json["message"] as? String
             else { return [] }
-            return [.error(code: code, message: message)]
+            return [.error(source: .server, code: code, message: message)]
 
         default:
             return []

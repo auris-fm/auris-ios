@@ -84,6 +84,14 @@ struct CloudSpeechUsage: Equatable {
 }
 
 /// Events from the cloud WebSocket route (cloud-assistant.md).
+/// The origin of a `CloudRouteEvent.error`.
+enum CloudRouteErrorSource: String, Equatable {
+    /// The CLIENT could not construct or send the request.
+    case client
+    /// An error FRAME parsed from the server.
+    case server
+}
+
 enum CloudRouteEvent: Equatable {
     /// Server handshake: the codec selected for this turn's audio frames.
     case connected(codec: CloudAudioCodec)
@@ -101,7 +109,10 @@ enum CloudRouteEvent: Equatable {
     /// Terminal success: answer model finished, final audio delivered.
     case done(usage: CloudTurnUsage)
     /// Terminal error.
-    case error(code: String, message: String)
+    /// WHERE the error originated, carried STRUCTURALLY so a consumer never has to infer it from the
+    /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks
+    /// like a client tag, and a client tag could be reworded.
+    case error(source: CloudRouteErrorSource, code: String, message: String)
 
 }
 
