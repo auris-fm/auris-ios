@@ -369,6 +369,21 @@ final class EchoReferenceHandoff {
             lock.unlock()
             return
         }
+        // THE SAME PRODUCER-IDENTITY POLICY THE RENDER-POSITION PATH ENFORCES, applied to SAMPLES
+        // and enforced HERE, at the synchronized acceptance boundary rather than at enqueue. A
+        // callback retired before its block is delivered must be refused exactly as its position
+        // would be: the two halves of one producer's output cannot be policed differently. Checking
+        // here -- not in `submit` -- also covers a retirement that happens BETWEEN enqueue and this
+        // acceptance, which a check at enqueue could not see.
+        //
+        // ALREADY-ACCEPTED AUDIO IS UNTOUCHED: this refuses a NEWLY SUBMITTED stale callback and
+        // appends nothing; it does not delete blocks that were accepted before the retirement, so
+        // the existing retention contract is preserved.
+        if let active = activeIncarnations[block.producer.kind],
+           active != block.producer.incarnation {
+            lock.unlock()
+            return
+        }
         defer { lock.unlock() }
 
         let resampled = PlaybackResampler.toPipelineRate(
