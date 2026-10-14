@@ -257,8 +257,13 @@ final class EpisodeOutputTap {
             producer: producerIdentity,
             sampleRate: buffer.format.sampleRate,
             renderedAt: hostInstant,
-            renderedFramesInProducer: producerBlockEnd,
-            producerBlockStart: producerBlockStart
+            // THE RENDER POSITION IS T, the frame the timestamp describes — NOT the range end.
+            // Passing the end here made the handoff publish an automatic anchor pairing the
+            // block's last frame with the start's instant, an incoherent pair observable until
+            // the later render-position submit corrected it.
+            renderedFramesInProducer: producerFrames,
+            producerBlockStart: producerBlockStart,
+            producerBlockEnd: producerBlockEnd
         )
 
         // THE RENDER POSITION, published through the SAME route as the samples. The three fields are

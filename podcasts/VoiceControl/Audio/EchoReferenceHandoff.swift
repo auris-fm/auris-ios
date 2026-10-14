@@ -65,6 +65,11 @@ final class EchoReferenceHandoff {
         let renderedFramesInProducer: Double?
         /// The producer's own frame count when this block began.
         let producerBlockStart: Double?
+        /// The producer's own frame count at the END of this block (exclusive). Carried separately
+        /// from `renderedFramesInProducer`, which is the RENDER POSITION the timestamp describes:
+        /// one field cannot serve as both the range end and the represented position, because the
+        /// automatic anchor would then pair the end frame with the start's instant.
+        let producerBlockEnd: Double?
     }
 
     private let reference: PlaybackEchoReference
@@ -179,7 +184,8 @@ final class EchoReferenceHandoff {
         sampleRate: Double,
         renderedAt: MonotonicTime? = nil,
         renderedFramesInProducer: Double? = nil,
-        producerBlockStart: Double? = nil
+        producerBlockStart: Double? = nil,
+        producerBlockEnd: Double? = nil
     ) {
         guard !samples.isEmpty else { return }
 
@@ -199,7 +205,8 @@ final class EchoReferenceHandoff {
                 sampleRate: sampleRate,
                 renderedAt: renderedAt,
                 renderedFramesInProducer: renderedFramesInProducer,
-                producerBlockStart: producerBlockStart
+                producerBlockStart: producerBlockStart,
+                producerBlockEnd: producerBlockEnd
             )
         )
         lock.unlock()
@@ -403,7 +410,7 @@ final class EchoReferenceHandoff {
         // block that contains it. Recorded only when the producer reported its own range: a
         // block with no producer-local start or end cannot be matched against, and inventing
         // one would make an unknown position look like a known zero.
-        if let start = block.producerBlockStart, let end = block.renderedFramesInProducer {
+        if let start = block.producerBlockStart, let end = block.producerBlockEnd ?? block.renderedFramesInProducer {
             appendedRanges.append(
                 AppendedRange(
                     producer: block.producer,

@@ -173,4 +173,69 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         print("CHAIN delivered=\(delivered) targetSeconds=\(Double(target) * secondsPerTick)")
         XCTAssertGreaterThan(delivered, 0, "the marker never reached the reference through the chain")
     }
+
+    /// The anchor written for a block must map the REPRESENTED position (its start frame) into the
+    /// reference, not the range end. This asserts the FINAL state after the queue is drained.
+    ///
+    /// SCOPE, stated because I measured it: this case does NOT catch the incoherent INTERMEDIATE
+    /// anchor that existed before the range end and the render position were separated. That
+    /// intermediate is written by `deliver()` and corrected by the render-position submission later
+    /// on the same serial queue, and with the available hooks it cannot be observed between the two:
+    /// `onDeliveryDequeued` fires before the append, and after the drain the correction has already
+    /// run (measured: mutating the tap back to passing the range end leaves this case green). The
+    /// fix is structural — one field no longer serves as both range end and represented position —
+    /// and this case guards the final coherence, not the transient.
+    func testFirstAcceptedPublicationAnchorsACoherentFrameAndInstant() throws {
+        let f = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        let eq = AVAudioUnitEQ(numberOfBands: 1)
+        let mixer = AVAudioMixerNode()
+        engine.attach(player); engine.attach(eq); engine.attach(mixer)
+        engine.connect(player, to: eq, format: f)
+        engine.connect(eq, to: mixer, format: f)
+        engine.connect(mixer, to: engine.outputNode, format: f)
+
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 32)
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.handoff = handoff
+
+        // The hook fires inside deliver(), BEFORE the append and the later render-position submit.
+        // It cannot read this block's own anchor, so the barrier below reads the anchor AFTER the
+        // drain, once the automatic anchor for the block has been written.
+        var dequeuesSeen = 0
+        let lock = NSLock()
+        handoff.onDeliveryDequeued = {
+            lock.lock(); dequeuesSeen += 1; lock.unlock()
+        }
+
+        tap.install()
+        let frames = 4_800
+        let start: AVAudioFramePosition = 96_000
+        let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: f, frameCapacity: AVAudioFrameCount(frames)))
+        buf.frameLength = AVAudioFrameCount(frames)
+        if let ch = buf.floatChannelData?[0] {
+            for i in 0..<frames { ch[i] = Float(sin(Double(i) * 0.05) * 0.2) }
+        }
+        let hostSeconds = AVAudioTime.seconds(forHostTime: AVAudioTime.hostTime(forSeconds: 12))
+        tap.publish(buf, renderedAt: AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: 12), sampleTime: start, atRate: f.sampleRate))
+        handoff.drain()
+
+        // THE BARRIER: the anchor the handoff wrote for this block must map the REPRESENTED
+        // position (the block's start frame) into the reference, i.e. the block's own reference
+        // start. Passing the range end as the represented position maps to the far end of the
+        // block instead, which this assertion rejects.
+        lock.lock(); let dequeues = dequeuesSeen; lock.unlock()
+        XCTAssertGreaterThan(dequeues, 0, "the block was never accepted, so the barrier observed nothing")
+        let anchor = try XCTUnwrap(reference.currentRenderAnchor, "no anchor was recorded at all")
+        XCTAssertEqual(anchor.hostTime, hostSeconds, accuracy: 1e-6, "the anchor carried the wrong instant")
+        let offsetIntoBlock = reference.audibleEndOffsetInRetainedWindow()
+        print("BARRIER anchorFrames=\(anchor.renderedFrames) offsetIntoRetainedWindow=\(offsetIntoBlock as Any) "
+            + "blockLength=\(frames) (the start-mapped position is 0; the end-mapped one would be the block length)")
+        XCTAssertEqual(
+            offsetIntoBlock, 0,
+            "the automatic anchor did not map the represented position to the block's start: the range end was passed as the position"
+        )
+    }
 }
