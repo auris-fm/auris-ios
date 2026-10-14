@@ -82,7 +82,10 @@ final class EpisodeOutputTap {
         let closure: (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, when in
             // On the real-time thread: copy off and hand off, nothing else. `Task {}` and
             // FileLog are not safe here, which is why the copy is the only work done.
-            self?.onCallbackArrived?()
+            self?.onCallbackArrived?(
+                when.isSampleTimeValid ? Double(when.sampleTime) : nil,
+                when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
+            )
             self?.capture(buffer, renderedAt: when, producer: admitted)
         }
         // Test-only observer, nil in production: the TEST retains closures it wants to invoke;
@@ -107,8 +110,10 @@ final class EpisodeOutputTap {
     var onInstalledClosure: (@escaping (AVAudioPCMBuffer, AVAudioTime) -> Void) -> Void = { _ in }
 
     /// TEST-ONLY arrival counter hook, no-op in production: fires on the render thread as each tap
-    /// callback enters, so a trace can establish arrival ordering rather than infer it.
-    var onCallbackArrived: (() -> Void)?
+    /// callback enters, carrying the callback's own sample time and host instant (either may be nil
+    /// when the corresponding field is invalid), so a trace can establish arrival ordering and the
+    /// advancing frame/host progression rather than infer them.
+    var onCallbackArrived: ((_ sampleTime: Double?, _ hostSeconds: Double?) -> Void)?
 
     /// The node whose output bus feeds the engine's output node, or nil when nothing is connected.
     /// Read from the ENGINE rather than from a named unit, so a chain that changes — an added or

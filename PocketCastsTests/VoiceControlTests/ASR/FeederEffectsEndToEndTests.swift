@@ -36,10 +36,11 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         // Arrival bookkeeping: host-valid frame anchors and the retained install closures.
         let box = ClosureBox()
         tap.onInstalledClosure = { closure in box.items.append(closure) }
-        var arrivals = 0
+        var arrivals: [(sampleTime: Double, hostSeconds: Double)] = []
         let lock = NSLock()
-        tap.onCallbackArrived = {
-            lock.lock(); arrivals += 1; lock.unlock()
+        tap.onCallbackArrived = { sampleTime, hostSeconds in
+            guard let sampleTime, let hostSeconds else { return }
+            lock.lock(); arrivals.append((sampleTime, hostSeconds)); lock.unlock()
         }
 
         tap.install()
@@ -68,10 +69,27 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         engine.stop()
         handoff.drain()
 
-        lock.lock(); let seenArrivals = arrivals; lock.unlock()
+        lock.lock(); let seen = arrivals; lock.unlock()
         let delivered = reference.snapshot().count
-        print("END2END arrivals=\(seenArrivals) delivered=\(delivered) expected=\(expectedSamples)")
-        XCTAssertGreaterThan(seenArrivals, 0, "the installed tap received no callbacks on the effects chain")
+        print("END2END arrivals=\(seen.count) delivered=\(delivered) expected=\(expectedSamples)")
+        XCTAssertGreaterThan(seen.count, 1, "the installed tap received fewer than two callbacks on the effects chain")
+
+        // ADVANCING FRAME AND HOST OBSERVATIONS, asserted: both must increase monotonically between
+        // callbacks, which is what makes the pair usable as a position and an instant rather than
+        // two constants.
+        let observedFrames = seen.map(\.sampleTime)
+        let observedHosts = seen.map(\.hostSeconds)
+        XCTAssertEqual(observedFrames, observedFrames.sorted(), "the callback sample times did not advance monotonically")
+        XCTAssertEqual(observedHosts, observedHosts.sorted(), "the callback host instants did not advance monotonically")
+        XCTAssertGreaterThan(
+            (observedFrames.last ?? 0) - (observedFrames.first ?? 0), 0,
+            "the sample time did not advance across callbacks"
+        )
+        XCTAssertGreaterThan(
+            (observedHosts.last ?? 0) - (observedHosts.first ?? 0), 0,
+            "the host instant did not advance across callbacks"
+        )
+        print("END2END frameAdvance=\((observedFrames.last ?? 0) - (observedFrames.first ?? 0)) hostAdvance=\((observedHosts.last ?? 0) - (observedHosts.first ?? 0))")
         XCTAssertGreaterThanOrEqual(
             delivered, expectedSamples,
             "the known scheduled output did not reach the reference through the installed tap"
@@ -157,6 +175,13 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         print("CHAIN targetAheadSeconds=\(ahead)")
         XCTAssertGreaterThan(ahead, 0.4, "the target was not ahead at submission")
 
+        var observedHosts: [Double] = []
+        let lock = NSLock()
+        tap.onCallbackArrived = { sampleTime, hostSeconds in
+            guard let sampleTime, let hostSeconds else { return }
+            lock.lock(); observedHosts.append(hostSeconds); lock.unlock()
+        }
+
         player.scheduleFile(reading, at: AVAudioTime(hostTime: target))
         player.play()
 
@@ -170,7 +195,24 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         handoff.drain()
 
         let delivered = reference.snapshot().count
-        print("CHAIN delivered=\(delivered) targetSeconds=\(Double(target) * secondsPerTick)")
+        let targetSeconds = Double(target) * secondsPerTick
+        print("CHAIN delivered=\(delivered) targetSeconds=\(targetSeconds)")
+
+        // THE CHAIN DELAY IS BOUNDED FROM MEASURED INSTANTS, not absorbed. The callback stream
+        // starts before the schedule target (the chain renders ahead of it), so the FIRST instant
+        // sits before the target and cannot be the marker's instant. The marker is delivered at or
+        // before the LAST observed callback, so the interval from the target to that last instant
+        // is an upper BOUND on the delay; the lower end is measured as the target minus the first
+        // instant, which bounds how far ahead the chain runs.
+        lock.lock(); let hosts = observedHosts; lock.unlock()
+        let first = try XCTUnwrap(hosts.first, "no host-bearing callbacks were observed")
+        let last = try XCTUnwrap(hosts.last, "no host-bearing callbacks were observed")
+        let leadBeforeTarget = targetSeconds - first
+        let delayUpperBound = last - targetSeconds
+        print("CHAIN leadBeforeTargetSeconds=\(leadBeforeTarget) delayUpperBoundSeconds=\(delayUpperBound) callbacks=\(hosts.count)")
+        XCTAssertGreaterThan(last, first, "the host instants did not advance")
+        XCTAssertGreaterThan(leadBeforeTarget, 0, "the chain did not begin rendering before the schedule target")
+        XCTAssertLessThan(delayUpperBound, 2.0, "the marker had still not been delivered two seconds after its target")
         XCTAssertGreaterThan(delivered, 0, "the marker never reached the reference through the chain")
     }
 

@@ -52,7 +52,7 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         // another tap. The wrapper runs the production closure and counts the arrival.
         // Per-attempt installation identity: each install's admitted identity is recorded, so a
         // stalling run shows WHICH installation's callbacks (if any) arrived and which were due.
-        tap.onCallbackArrived = { trace.didCallback() }
+        tap.onCallbackArrived = { _, _ in trace.didCallback() }
         trace.record("install#1")
         tap.install()
         trace.record("identity after install#1 = \(tap.producerIdentity)")
