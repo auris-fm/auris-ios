@@ -17,6 +17,85 @@ enum Helper {
     static func run() -> Int32 {
         let args = Array(CommandLine.arguments.dropFirst())
 
+        // ESTABLISH / VERIFY MODES for the disposable no-reinstall container control. One installed
+        // binary, launched twice; the sentinel lives INSIDE this app's container, so the same
+        // container ID can be asserted across the two launches and the helper read in between.
+        // usage: credential-recovery-helper --scratch-establish <group> <service> <account> <sentinel>
+        //        credential-recovery-helper --scratch-verify    <group> <service> <account> <sentinel>
+        if args.first == "--scratch-establish" || args.first == "--scratch-verify" {
+            let verifying = args.first == "--scratch-verify"
+            let rest = Array(args.dropFirst())
+            guard rest.count == 4 else {
+                print("usage: credential-recovery-helper --scratch-establish|--scratch-verify <group> <service> <account> <sentinelPath>")
+                return 2
+            }
+            let (group, service, account, sentinelPath) = (rest[0], rest[1], rest[2], rest[3])
+            guard service.hasPrefix("fm.auris.SCRATCH") else {
+                print("refused: scratch modes accept only synthetic services (fm.auris.SCRATCH*)")
+                return 2
+            }
+            let container = NSHomeDirectory()
+            // The sentinel path is resolved RELATIVE TO THIS APP'S CONTAINER, so both launches touch
+            // the same file even though launchd may start each with a different working directory.
+            // A bare relative path made both reads return nil, which compared equal and passed
+            // vacuously.
+            // A BARE FILENAME is relative to this container; only a path with a directory prefix is
+            // treated as absolute. `URL(fileURLWithPath: "sentinel.txt").path` is "/sentinel.txt",
+            // so testing hasPrefix("/") wrongly classified a bare name as absolute and wrote to the
+            // filesystem root.
+            let sentinelURL = sentinelPath.contains("/")
+                ? URL(fileURLWithPath: sentinelPath)
+                : URL(fileURLWithPath: container).appendingPathComponent(sentinelPath)
+            if !verifying {
+                // ESTABLISH: write the canary and a sentinel INSIDE this container, recording the
+                // expected sentinel value beside it so the verify launch compares against it.
+                SecItemDelete([
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account,
+                    kSecAttrAccessGroup as String: group,
+                ] as CFDictionary)
+                let value = "canary-\(UUID().uuidString)"
+                let status = SecItemAdd([
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account,
+                    kSecAttrAccessGroup as String: group,
+                    kSecValueData as String: Data(value.utf8),
+                ] as CFDictionary, nil)
+                let sentinel = "sentinel-\(UUID().uuidString)"
+                try? Data(sentinel.utf8).write(to: sentinelURL)
+                try? Data(sentinel.utf8).write(to: sentinelURL.appendingPathExtension("expected"))
+                print("SCRATCH-ESTABLISH container=\(container) write=\(status) canary=\(value)")
+                print("SCRATCH-ESTABLISH sentinelPath=\(sentinelURL.path) sentinel=\(sentinel)")
+                return status == errSecSuccess ? 0 : 4
+            } else {
+                // VERIFY: read the canary back and compare the sentinel, both against the recorded
+                // expectations. Nothing is written on this path.
+                var out: CFTypeRef?
+                let status = SecItemCopyMatching([
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account,
+                    kSecAttrAccessGroup as String: group,
+                    kSecReturnData as String: true,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne,
+                ] as CFDictionary, &out)
+                let dict = out as? [String: Any]
+                let bytes = (dict?[kSecValueData as String] as? Data).flatMap { String(data: $0, encoding: .utf8) }
+                let attributed = dict?[kSecAttrAccessGroup as String] as? String
+                let sentinel = try? String(contentsOf: sentinelURL, encoding: .utf8)
+                let expected = try? String(contentsOf: sentinelURL.appendingPathExtension("expected"), encoding: .utf8)
+                // A missing sentinel must FAIL, not compare nil == nil and pass.
+                let sentinelOK = (sentinel != nil && sentinel == expected)
+                print("SCRATCH-VERIFY container=\(container) read=\(status) attributedGroup=\(attributed as Any)")
+                print("SCRATCH-VERIFY sentinelPath=\(sentinelURL.path) sentinelPresent=\(sentinel != nil) sentinelMatch=\(sentinelOK)")
+                print("SCRATCH-VERIFY canaryPresent=\(bytes != nil)")
+                return (status == errSecSuccess && sentinelOK && bytes != nil) ? 0 : 6
+            }
+        }
+
         // SYNTHETIC-CANARY MODE: a narrowly scoped read of ONE caller-supplied synthetic service,
         // used by the disposable same-access-group control. It is deliberately separate from the
         // assigned production keys below, so this mode can never be pointed at a production service:
