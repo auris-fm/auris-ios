@@ -311,3 +311,20 @@ final class AcceptanceExportBoundingTests: XCTestCase {
         )
     }
 }
+
+/// The VERDICT text must be bounded too: it is exported, and interpolating the terminal would carry the
+/// raw server message out with it.
+final class AcceptanceVerdictBoundingTests: XCTestCase {
+
+    func testVerdictTextCarriesNoServerMessage() {
+        let sentinel = "secret-server-prose-in-verdict"
+        let step = CloudAcceptanceConsumer.StepOutcome(
+            requestId: "r1", conversationId: "c1", responseText: "",
+            terminal: .transportFailure(stage: .serverEvent, code: "invalid_request", message: sentinel)
+        )
+        let v = CloudAcceptanceConsumer(a1: step, a2: step, b1: step, nonce: "N")
+        guard case .fail(let why) = v.evaluate() else { return XCTFail("expected a failure verdict") }
+        XCTAssertFalse(why.contains(sentinel), "the verdict embedded raw server text: \(why)")
+        XCTAssertTrue(why.contains("serverEvent:invalid_request"), "the verdict must name stage and code")
+    }
+}

@@ -32,6 +32,16 @@ struct CloudAcceptanceConsumer {
     /// The nonce the operator was asked to send in A1. Kept so the check compares CONTENT.
     let nonce: String
 
+    /// A BOUNDED rendering of a terminal for verdict text: stage and code only, never a server message.
+    static func bounded(_ terminal: CloudAcceptanceRecord.Terminal?) -> String {
+        guard let terminal else { return "none" }
+        switch terminal {
+        case .done: return "done"
+        case .cancelled: return "cancelled"
+        case .transportFailure(let stage, let code, _): return "\(stage.rawValue):\(code)"
+        }
+    }
+
     func evaluate() -> Verdict {
         // An EMPTY NONCE proves nothing: every response would vacuously "not contain" it, so isolation
         // would pass for the wrong reason and recall could never be demonstrated.
@@ -46,8 +56,10 @@ struct CloudAcceptanceConsumer {
             // not a completed turn: counting any terminal as success would let a failed step pass, and a
             // missing done/error would be indistinguishable from one.
             guard step.terminal == .done else {
-                let described = step.terminal.map { "\($0)" } ?? "none"
-                return .fail("\(name) did not complete successfully (terminal: \(described))")
+                // BOUNDED: the failure text is built from STAGE and CODE only. Interpolating the
+                // terminal would embed the raw server message in the verdict, which is the free-form
+                // text this protocol must not carry out of the app.
+                return .fail("\(name) did not complete successfully (terminal: \(Self.bounded(step.terminal)))")
             }
         }
         let ids = [a1.requestId!, a2.requestId!, b1.requestId!]
