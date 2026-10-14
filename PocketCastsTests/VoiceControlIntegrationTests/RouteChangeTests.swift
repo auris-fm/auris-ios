@@ -71,6 +71,25 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     }
 }
 
+/// Test double whose `start()` succeeds without touching the shared
+/// `AVAudioEngine`/`AVAudioSession`, so service-level tests are deterministic
+/// about whether capture started.
+final class SucceedingCapture: NativeAudioCapture {
+    override func start() throws {}
+}
+
+/// Test double whose `start()` fails, to drive the failed-capture-start path.
+/// `VoiceAsrEngine.start()` must report this and the service must not listen.
+final class FailingCapture: NativeAudioCapture {
+    override func start() throws {
+        throw NSError(
+            domain: "FailingCapture",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "capture start failed"]
+        )
+    }
+}
+
 final class RouteChangeTests: XCTestCase {
 
     private func port(_ type: AVAudioSession.Port, uid: String = UUID().uuidString) -> AudioPort {
@@ -530,7 +549,7 @@ final class RouteChangeTests: XCTestCase {
         session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
         session.selectionTakesEffect = true
 
-        let service = VoiceControlAssembly().buildVoiceControlService(audioSession: session)!
+        let service = VoiceControlAssembly().buildVoiceControlService(audioSession: session, capture: SucceedingCapture())!
         service.startIfAllowed()
 
         await waitUntil(timeout: 5) { service.isListening }
@@ -558,7 +577,7 @@ final class RouteChangeTests: XCTestCase {
 
         let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
         let service = VoiceControlAssembly()
-            .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor)!
+            .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor, capture: SucceedingCapture())!
         service.startIfAllowed()
 
         await waitUntil(timeout: 5) { session.configureCount >= 1 }
@@ -661,7 +680,7 @@ final class RouteChangeTests: XCTestCase {
 
         var playbackActive = false
         let service = VoiceControlAssembly()
-            .buildVoiceControlService(audioSession: session, isPlaybackActive: { playbackActive })!
+            .buildVoiceControlService(audioSession: session, capture: SucceedingCapture(), isPlaybackActive: { playbackActive })!
         service.startIfAllowed()
 
         await waitUntil(timeout: 5) { service.isListening }
@@ -690,7 +709,7 @@ final class RouteChangeTests: XCTestCase {
         session.selectionTakesEffect = true
 
         let service = VoiceControlAssembly()
-            .buildVoiceControlService(audioSession: session, isPlaybackActive: { false })!
+            .buildVoiceControlService(audioSession: session, capture: SucceedingCapture(), isPlaybackActive: { false })!
         service.startIfAllowed()
 
         await waitUntil(timeout: 5) { service.isListening }
@@ -702,6 +721,84 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertEqual(session.clearCount, 1, "an active stop releases the acquired preferred input")
         XCTAssertEqual(session.deactivateCount, 1,
                        "with playback inactive, the session acquisition activated is released")
+    }
+
+    // MARK: - Dedup is per physical device, not per route type
+
+    /// Two different devices can present the same port *types* (two Bluetooth
+    /// headsets are both `.bluetoothA2DP` output / `.bluetoothHFP` input). A
+    /// failed attempt on device A must not suppress the attempt for device B:
+    /// the dedup key must include port identity, not only the type enums.
+    @MainActor
+    func test_failedAcquisition_onDeviceA_doesNotSuppressAttemptForDeviceBWithSameRouteTypes() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-A")]
+        session.inputs = [port(.builtInMic, uid: "built-in-A")]
+        session.availableAfterConfigure = []  // A exposes no external mic → the attempt fails
+
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, capture: SucceedingCapture())!
+        service.startIfAllowed()
+
+        await waitUntil(timeout: 5) { session.configureCount >= 1 }
+        XCTAssertEqual(session.configureCount, 1, "device A gets one acquisition attempt")
+
+        // A re-evaluation for the *same* identity must not retry the failed route.
+        postRouteChange()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(session.configureCount, 1, "a failed route is not retried while it is unchanged")
+
+        // Device B: same route types, different physical device (different UIDs).
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-B")]
+        session.inputs = [port(.builtInMic, uid: "built-in-B")]
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "mic-B")]
+        session.selectionTakesEffect = true
+        postRouteChange()
+
+        await waitUntil(timeout: 5) { session.configureCount >= 2 }
+        XCTAssertEqual(session.configureCount, 2,
+                       "device B must get its own attempt even though it shares A's route types")
+    }
+
+    // MARK: - A capture that fails to start must not report listening
+
+    /// The engine catches capture errors internally and `start()` returns void,
+    /// so the service used to set `isListening = true` unconditionally. A failed
+    /// start must leave `isListening` false and release the acquired external
+    /// route (no microphone retained without capture).
+    @MainActor
+    func test_captureStartFailure_releasesAcquiredRouteAndIsNotListening() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session, capture: FailingCapture())!
+        service.startIfAllowed()
+
+        // Acquisition succeeds (exposure flips isolated), then capture start fails.
+        await waitUntil(timeout: 5) { session.clearCount >= 1 }
+
+        XCTAssertFalse(service.isListening, "a failed capture start must not report listening")
+        XCTAssertNotEqual(service.micExposure, .isolated,
+                          "the acquired external route is released when capture cannot start")
+        XCTAssertGreaterThanOrEqual(session.clearCount, 1,
+                                    "the preferred external input is released")
+    }
+
+    private func postRouteChange() {
+        NotificationCenter.default.post(
+            name: AVAudioSession.routeChangeNotification,
+            object: nil,
+            userInfo: [
+                AVAudioSessionRouteChangeReasonKey:
+                    AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue,
+            ]
+        )
     }
 
     @MainActor

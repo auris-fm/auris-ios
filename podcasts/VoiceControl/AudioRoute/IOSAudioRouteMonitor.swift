@@ -17,6 +17,18 @@ struct AudioRoute: Equatable {
     static let unknown = AudioRoute(output: .unknown, input: nil)
 }
 
+/// Physical route identity for acquisition dedup. Two different devices can
+/// present the same port *types* (e.g. two Bluetooth headsets, both
+/// `.bluetoothA2DP` output / `.bluetoothHFP` input), so the port UIDs are part
+/// of the key: a failed acquisition on one device must not suppress an attempt
+/// for another.
+struct AudioRouteIdentity: Equatable {
+    let output: AudioRouteOutput
+    let outputUID: String?
+    let input: AudioRouteInput?
+    let inputUID: String?
+}
+
 enum MicExposureClassifier {
     static func classify(_ route: AudioRoute) -> MicExposure {
         guard let input = route.input else { return .noMic }
@@ -203,6 +215,17 @@ class IOSAudioRouteMonitor: ObservableObject {
                 self.gracePeriodSignal.onAudioRouteChanged()
             }
             .store(in: &cancellables)
+    }
+
+    /// Current route keyed by physical port UID as well as port type, for the
+    /// service's one-attempt-per-route acquisition dedup.
+    var currentRouteIdentity: AudioRouteIdentity {
+        AudioRouteIdentity(
+            output: currentRoute.output,
+            outputUID: audioSession.currentOutputs.first?.uid,
+            input: currentRoute.input,
+            inputUID: audioSession.currentInputs.first?.uid
+        )
     }
 
     /// Re-read the live route and recompute exposure. Classification uses only

@@ -9,6 +9,7 @@ class VoiceControlAssembly {
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
+        capture: NativeAudioCapture? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
@@ -47,7 +48,7 @@ class VoiceControlAssembly {
         )
 
         let asrEngine = VoiceAsrEngine(
-            capture: NativeAudioCapture(isPlaybackActive: isPlaybackActive),
+            capture: capture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
             segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: asrBackend,
             signalFilter: SignalFilter(),

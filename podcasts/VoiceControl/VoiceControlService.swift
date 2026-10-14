@@ -72,9 +72,10 @@ class VoiceControlService: ObservableObject {
     private var isAcquiring = false
     /// Bumped on cancellation so a stale acquisition cannot apply its result.
     private var acquisitionGeneration: UInt64 = 0
-    /// The route an acquisition was last attempted for, so a failed acquisition
-    /// is not retried on every gate re-evaluation (only on an actual route change).
-    private var acquisitionAttemptedRoute: AudioRoute?
+    /// The physical route an acquisition was last attempted for, so a failed
+    /// acquisition is not retried on every gate re-evaluation but *is* retried
+    /// when a different device presents the same route types (port UIDs differ).
+    private var acquisitionAttemptedRoute: AudioRouteIdentity?
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -260,7 +261,14 @@ class VoiceControlService: ObservableObject {
         }
         FileLog.shared.addMessage("[VoicePipeline] start listening (\(mode))")
         asrEngine.listeningMode = mode
-        asrEngine.start()
+        guard asrEngine.start() else {
+            // Capture failed to start (configure/engine error). Reporting
+            // listening would retain the acquired external route with no
+            // capture running, so release it and stay off.
+            FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
+            routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
+            return
+        }
         isListening = true
         listeningMode = mode
         if mode == .wakeWord {
@@ -517,7 +525,7 @@ class VoiceControlService: ObservableObject {
             return
         }
         guard acquisitionTask == nil else { return }
-        let route = routeMonitor.currentRoute
+        let route = routeMonitor.currentRouteIdentity
         guard acquisitionAttemptedRoute != route else { return }
         acquisitionAttemptedRoute = route
         let generation = acquisitionGeneration
