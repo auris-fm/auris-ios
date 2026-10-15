@@ -15,16 +15,10 @@ class VoiceControlAssembly {
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
-    /// - Parameter injectedCapture: the microphone source. `nil` keeps the real one; a test
+/// - Parameter injectedCapture: the microphone source. `nil` keeps the real one; a test
     ///   substitutes it so the service can be driven through its REAL assembly and start path
     ///   without opening the microphone. This is the only injection point — everything else is
     ///   built as the app does.
-||||||| parent of cdff601 (feat(voice): wire the acceptance entry to the factory that builds the sink's client)
-    /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
-    ///   so the service can be driven through its REAL assembly and start path without opening the
-    ///   microphone. This is the only injection point — everything else is built as the app does.
-    ///   so the service can be driven through its REAL assembly and start path without opening the
-    ///   microphone. This is the only injection point — everything else is built as the app does.
     /// Records the factory the sink is built with, so the acceptance entry uses the same one. This is
     /// the point that WIRES the entry: the same call that builds the sink's client retains its factory
     /// for acceptance, so the two cannot diverge.
@@ -39,7 +33,6 @@ class VoiceControlAssembly {
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
         capture injectedCapture: (any AudioCaptureSource)? = nil,
-        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
         inference injectedInference: (any LfmInference)? = nil,
         modelManager injectedModelManager: ModelManager? = nil,
         clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
@@ -49,13 +42,9 @@ class VoiceControlAssembly {
         testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
         onInputBarrierSettled: (@Sendable (IntentRoutingInput, VoiceControlService.InputBarrierOutcome) -> Void)? = nil,
         onInputTerminal: (@Sendable (IntentRoutingInput, VoiceControlService.InputTerminalOutcome) -> Void)? = nil,
-        parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil
+        parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil,
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
-||||||| parent of 3a7a55f (test(voice): substitute the ASR backend the engine preloads)
-    /// - Parameter capture: the microphone source. `nil` keeps the real one; a test substitutes it
-    ///   so the service can be driven through its REAL assembly and start path without opening the
-    ///   microphone. This is the only injection point — everything else is built as the app does.
-    func buildVoiceControlService(capture injectedCapture: (any AudioCaptureSource)? = nil) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
         let conversationManager = CloudConversationManager()
         // Keep the manager's live origin in step with the window that actually opens. The
@@ -214,12 +203,12 @@ class VoiceControlAssembly {
             gracePeriodSignal: gracePeriodSignal,
             liveOriginManager: conversationManager,
             analytics: voiceAnalytics,
+            isPlaybackActive: isPlaybackActive,
             onInputRoutingFinished: onInputRoutingFinished,
             testInputBarrier: testInputBarrier,
             onInputBarrierSettled: onInputBarrierSettled,
             onInputTerminal: onInputTerminal,
-            parsedIntentObserverFactory: parsedIntentObserverFactory,
-            isPlaybackActive: isPlaybackActive
+            parsedIntentObserverFactory: parsedIntentObserverFactory
         )
     }
 
