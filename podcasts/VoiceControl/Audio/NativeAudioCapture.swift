@@ -27,17 +27,6 @@ protocol AudioCaptureSource: AnyObject {
     func stop()
 }
 
-    let engine = AVAudioEngine()
-    private let sampleRate = 16000.0
-    private var energyLogged = false
-    /// Delivers converted microphone audio with the instant it was captured.
-    ///
-    /// The tap receives the buffer's own `AVAudioTime`, which is when the hardware
-    /// captured those samples. The callback's arrival time is *not* a substitute: the tap
-    /// runs on a processing queue after an indeterminate delay, so using arrival time would
-    /// place a segment later than it was spoken and misalign the echo reference by however
-    /// long the queue was busy.
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
 
 /// Live `AVAudioSession` adapter for capture.
 final class RealCaptureAudioSession: CaptureAudioSession {
@@ -87,6 +76,13 @@ class NativeAudioCapture: AudioCaptureSource {
     ) {
         self.session = session
         self.isPlaybackActive = isPlaybackActive
+    }
+
+    /// The callback BOUNDARY: maps the tap buffer's own time to a capture instant.
+    /// A valid host time IS the hardware capture moment; an invalid one yields nil so
+    /// the consumer declines to align rather than guessing from arrival time.
+    static func captureInstant(when: AVAudioTime) -> MonotonicTime? {
+        when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
     }
 
     func start() throws {
@@ -158,9 +154,7 @@ class NativeAudioCapture: AudioCaptureSource {
                 // `when` is the buffer's own capture time, not this callback's arrival.
                 // It can be invalid on some routes, in which case the segment carries no
                 // instant and the echo filter declines to align rather than guessing.
-                let capturedAt: MonotonicTime? = when.isHostTimeValid
-                    ? AVAudioTime.seconds(forHostTime: when.hostTime)
-                    : nil
+                let capturedAt: MonotonicTime? = Self.captureInstant(when: when)
                 self.onCapturedSamples?(converted, capturedAt)
             }
         }
