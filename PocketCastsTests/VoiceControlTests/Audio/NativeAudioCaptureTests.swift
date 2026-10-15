@@ -274,26 +274,43 @@ extension NativeAudioCaptureTests {
     }
 }
 
-/// Pins the capture-instant callback boundary: the instant the subscriber receives is
-/// derived from the buffer's own host time (the hardware capture moment), and an
-/// invalid host time stays nil rather than falling back to arrival time.
+/// Pins the SUBSCRIBED capture-instant callback boundary: the control calls the same
+/// delivery function the production tap calls and observes what a real
+/// `onCapturedSamples` subscriber receives.
 extension NativeAudioCaptureTests {
-    func test_validHostTime_deliversTheHardwareCaptureInstantToTheConsumer() throws {
+    func test_validHostTime_deliversTheHardwareCaptureInstantToASubscriber() throws {
+        let capture = NativeAudioCapture()
+        var received: [([Float], MonotonicTime?)] = []
+        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+
         let hostTime: UInt64 = 987_654_321
         let when = AVAudioTime(hostTime: hostTime, sampleTime: 0, atRate: 16_000)
         XCTAssertTrue(when.isHostTimeValid, "fixture must carry a valid host time")
 
-        let instant = try XCTUnwrap(NativeAudioCapture.captureInstant(when: when))
+        // The SAME function the tap calls — not a parallel copy of its arithmetic.
+        capture.deliver([0.25, -0.25], when: when)
+
+        XCTAssertEqual(received.count, 1, "the subscriber must observe the tap's delivery")
+        XCTAssertEqual(received.first?.0, [0.25, -0.25], "the samples must reach the subscriber")
+        let instant = try XCTUnwrap(received.first?.1, "a valid host time must deliver an instant")
         XCTAssertEqual(instant, AVAudioTime.seconds(forHostTime: hostTime),
                        "the delivered instant must be the buffer's own host time, not arrival time")
     }
 
-    func test_invalidHostTime_deliversNilSoTheConsumerDoesNotGuess() {
+    func test_invalidHostTime_deliversNilToASubscriberSoTheConsumerDoesNotGuess() {
+        let capture = NativeAudioCapture()
+        var received: [([Float], MonotonicTime?)] = []
+        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+
         // A sample-time-only AVAudioTime has no valid host time — the shape the tap
         // sees on routes where the hardware clock is unavailable.
         let when = AVAudioTime(sampleTime: 512, atRate: 16_000)
         XCTAssertFalse(when.isHostTimeValid, "fixture must carry an INVALID host time")
-        XCTAssertNil(NativeAudioCapture.captureInstant(when: when),
-                     "an invalid host time must stay nil, never fall back to arrival time")
+
+        capture.deliver([0.25], when: when)
+
+        XCTAssertEqual(received.count, 1, "the subscriber must observe the delivery")
+        XCTAssertNil(received.first?.1,
+                     "an invalid host time must deliver nil, never fall back to arrival time")
     }
 }

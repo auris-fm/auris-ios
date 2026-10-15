@@ -85,6 +85,16 @@ class NativeAudioCapture: AudioCaptureSource {
         when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
     }
 
+    /// Delivers one tap buffer to the subscribed consumer with its capture instant.
+    ///
+    /// The tap calls THIS, and a control observes the same function, so the boundary under test
+    /// is the one production runs — not a parallel copy of its arithmetic. `when` is the
+    /// buffer's own capture time, not this call's arrival; on a route whose host time is invalid
+    /// the instant is nil and the echo filter declines to align rather than guessing.
+    func deliver(_ samples: [Float], when: AVAudioTime) {
+        onCapturedSamples?(samples, Self.captureInstant(when: when))
+    }
+
     func start() throws {
         try session.configureForCapture()
         // NOTE: Do NOT call setPreferredSampleRate — it locks the hardware to one
@@ -151,11 +161,7 @@ class NativeAudioCapture: AudioCaptureSource {
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
-                // `when` is the buffer's own capture time, not this callback's arrival.
-                // It can be invalid on some routes, in which case the segment carries no
-                // instant and the echo filter declines to align rather than guessing.
-                let capturedAt: MonotonicTime? = Self.captureInstant(when: when)
-                self.onCapturedSamples?(converted, capturedAt)
+                self.deliver(converted, when: when)
             }
         }
         tapInstalled = true
