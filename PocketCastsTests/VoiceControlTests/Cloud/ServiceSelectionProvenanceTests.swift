@@ -135,7 +135,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let backend = TranscribingAsrBackend(text: "what did the host mean by that remark")
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager, asrBackend: { backend }) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
@@ -162,13 +162,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
 
-        try XCTSkipUnless(
-            delivered != nil,
-            "the registered input produced no turn, so registration is not exercised; this is not "
-                + "a pass and must not be read as coverage"
+        // All prerequisites are supplied (external-mic session, seeded router, substituted
+        // backend), so a missing turn is a FAILURE, not a skip.
+        XCTAssertNotNil(
+            delivered,
+            "the registered input produced no turn even though every prerequisite is supplied"
         )
+        // The window was ALREADY OPEN when the audio arrived, so a wake-free registered input is
+        // a FOLLOW-UP, not a wake — the provenance this case exists to carry.
         XCTAssertEqual(
-            delivered, .wakeWord,
+            delivered, .followUp,
             "the registered input's provenance did not reach the sink"
         )
     }
