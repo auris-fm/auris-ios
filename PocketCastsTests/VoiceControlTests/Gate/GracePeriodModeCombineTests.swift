@@ -20,7 +20,7 @@ final class GracePeriodModeCombineTests: XCTestCase {
                     setup: .allAllowed,
                     conflicts: .noneBlocked,
                     context: context,
-                    micExposure: .exposed,
+                    micExposure: .isolated,
                     gracePeriodActive: graceActive
                 ).state
             }
@@ -49,7 +49,7 @@ final class GracePeriodModeCombineTests: XCTestCase {
                     setup: .allAllowed,
                     conflicts: .noneBlocked,
                     context: context,
-                    micExposure: .exposed,
+                    micExposure: .isolated,
                     gracePeriodActive: graceActive
                 ).state
             }
@@ -81,7 +81,7 @@ final class GracePeriodModeCombineTests: XCTestCase {
                     setup: .allAllowed,
                     conflicts: .noneBlocked,
                     context: context,
-                    micExposure: .exposed,
+                    micExposure: .isolated,
                     gracePeriodActive: graceActive
                 ).state
             }

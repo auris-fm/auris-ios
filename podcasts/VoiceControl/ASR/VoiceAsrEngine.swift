@@ -107,7 +107,11 @@ class VoiceAsrEngine {
         backendReadyBox.task = nil
     }
 
-    func start() {
+    /// Starts capture and returns whether it actually started. Capture errors
+    /// are reported rather than swallowed: the caller must not treat a failed
+    /// start as listening, and must release any acquired input route.
+    @discardableResult
+    func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         segmenter.onUtterance = { [weak self] utterance in
             Task { await self?.processUtterance(utterance) }
@@ -121,8 +125,14 @@ class VoiceAsrEngine {
         do {
             try capture.start()
             FileLog.shared.addMessage("[VoicePipeline] engine started mode=\(listeningMode)")
+            return true
         } catch {
             FileLog.shared.addMessage("[VoicePipeline] engine start failed: \(error)")
+            // Clean up a partially started capture (configure succeeded, engine
+            // start failed) so teardown still restores the playback category
+            // and releases a session capture owned.
+            capture.stop()
+            return false
         }
     }
 

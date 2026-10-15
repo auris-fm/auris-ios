@@ -28,11 +28,17 @@ class VoiceControlService: ObservableObject {
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics
+    /// Whether the app is playing through the shared `AVAudioSession`. Used so a
+    /// failed/cancelled acquisition never deactivates the session playback owns.
+    /// `AVAudioSession` exposes no active-state query and the category is not an
+    /// activity signal, so playback state is the reliable in-use signal.
+    private let isPlaybackActive: () -> Bool
+
+    /// Live microphone exposure from the route monitor, for diagnostics and tests.
+    var micExposure: MicExposure { routeMonitor.micExposure }
 
     private var latestStageTiming: PipelineStageTiming?
     private var latestRouterMetrics: RouterClassificationMetrics?
-
-    private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
 
     private var cancellables = Set<AnyCancellable>()
     /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
@@ -54,11 +60,32 @@ class VoiceControlService: ObservableObject {
     private var didArmLifecycle = false
     private var intentRouterReadyTask: Task<Void, Never>?
 
-    // Last blocking reason set logged for a blocked-never-acquired posture.
-    // nil when the last lifecycle event was not a non-acquiring posture, so
-    // `mic_acquisition_skipped` is emitted once on entry and again only when
-    // the blocking reason set changes — never on every Combine publication.
-    private var loggedSkippedReasons: [String]?
+    /// Owns the mic lifecycle logging rules (event choice, severity, dedup).
+    private let lifecycleLogger = MicLifecycleLogger(sink: OSLogMicLifecycleSink())
+
+    /// Route-acquisition attempt. Cancelled when the gate stops requiring it;
+    /// a late completion is discarded rather than starting capture.
+    private var acquisitionTask: Task<Void, Never>?
+    /// True while an acquisition is executing synchronously (including its
+    /// exposure flip). The flip publishes synchronously through the gate sink,
+    /// so the `.listening` branch must not cancel the task that produced it.
+    private var isAcquiring = false
+    /// Bumped on cancellation so a stale acquisition cannot apply its result.
+    private var acquisitionGeneration: UInt64 = 0
+    /// The physical route an acquisition was last attempted for, so a failed
+    /// acquisition is not retried on every gate re-evaluation but *is* retried
+    /// when a different device presents the same route types (port UIDs differ).
+    private var acquisitionAttemptedRoute: AudioRouteIdentity?
+    /// External device whose capture start failed. Acquisition must not re-arm
+    /// for this device until a genuine change (it disappears or a different
+    /// candidate appears): releasing the preferred input reverts the live route
+    /// to the built-in mic, which is not a device change and must not re-arm.
+    private var captureStartFailedInputUID: String?
+    /// Physical-device-change epoch recorded with [captureStartFailedInputUID]. The
+    /// suppression is kept until a later physical change advances the epoch — a missing
+    /// `availableInputs` on its own is ambiguous, because the `.playback` restore after a
+    /// failed capture exposes no inputs even while the headset stays connected.
+    private var captureStartFailedEpoch: UInt = 0
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -71,7 +98,8 @@ class VoiceControlService: ObservableObject {
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
-        analytics: VoiceAnalytics
+        analytics: VoiceAnalytics,
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) {
         self.conditionMonitor = conditionMonitor
         self.routeMonitor = routeMonitor
@@ -84,6 +112,7 @@ class VoiceControlService: ObservableObject {
         self.audioRenderer = audioRenderer
         self.gracePeriodSignal = gracePeriodSignal
         self.analytics = analytics
+        self.isPlaybackActive = isPlaybackActive
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -92,13 +121,10 @@ class VoiceControlService: ObservableObject {
             if wasCapturing {
                 // Audio session reclaimed by the system — an active-capture stop
                 // that the user did not request → ERROR per the mic lifecycle spec.
-                self.loggedSkippedReasons = nil
-                self.emitLifecycleEvent(
-                    event: "mic_capture_stopped",
-                    level: .error,
-                    reasons: ["audio_session_reclaimed"],
+                self.lifecycleLogger.runtimeCaptureStopped(
+                    reason: "audio_session_reclaimed",
                     posture: self.gatePosture,
-                    priorCaptureActive: true
+                    route: self.routeDescription()
                 )
             }
         }
@@ -157,7 +183,15 @@ class VoiceControlService: ObservableObject {
             switch gate.state {
             case .off:
                 self.stop()
+                self.considerAcquisition(for: gate.posture)
             case .listening(let mode):
+                // The acquisition's own exposure flip publishes synchronously
+                // from inside `acquireExternalInput`. Cancelling here would
+                // abort the very task committing the route, and its later
+                // cancellation check would clear the selection and drop capture.
+                if !self.isAcquiring {
+                    self.cancelAcquisition()
+                }
                 self.start(in: mode)
             }
             self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
@@ -237,7 +271,20 @@ class VoiceControlService: ObservableObject {
         }
         FileLog.shared.addMessage("[VoicePipeline] start listening (\(mode))")
         asrEngine.listeningMode = mode
-        asrEngine.start()
+        guard asrEngine.start() else {
+            // Capture failed to start (configure/engine error). Reporting
+            // listening would retain the acquired external route with no
+            // capture running, so release it and stay off. Remember which
+            // external device failed: its release reverts the live route to the
+            // built-in mic, which must not be mistaken for a device change that
+            // re-arms acquisition for the same device.
+            FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
+            captureStartFailedInputUID = routeMonitor.currentExternalInputUID
+                ?? routeMonitor.lastAcquisitionTargetUID
+            captureStartFailedEpoch = routeMonitor.physicalDeviceChangeEpoch
+            routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
+            return
+        }
         isListening = true
         listeningMode = mode
         if mode == .wakeWord {
@@ -256,6 +303,11 @@ class VoiceControlService: ObservableObject {
         transcriptSerialTask?.cancel()
         transcriptSerialTask = nil
         transcriptLock.unlock()
+        // An active capture stop ends the acquired external-input route. Release
+        // the preferred input acquisition selected and deactivate only a session
+        // acquisition itself activated, re-checking live playback ownership so a
+        // session playback holds is never stopped.
+        routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
     }
 
     /// Compatibility wrapper for tests that still pass a bare English transcript.
@@ -460,11 +512,224 @@ class VoiceControlService: ObservableObject {
 
     // MARK: - Lifecycle logging
 
+    private func logLifecycleTransition(posture: GatePosture, wasCapturing: Bool) {
+        lifecycleLogger.transition(
+            posture: posture,
+            route: routeDescription(),
+            wasCapturing: wasCapturing,
+            isCapturing: isListening
+        )
+    }
+
+    private func routeDescription() -> String {
+        let route = routeMonitor.currentRoute
+        return "\(route.output):\(route.input.map { "\($0)" } ?? "nil")"
+    }
+
+    // MARK: - Route acquisition
+
+    /// Attempt to acquire an external microphone only when every non-exposure
+    /// gate question passes. The attempt is once per route signature; a late or
+    /// cancelled completion is discarded rather than starting capture.
+    private func considerAcquisition(for posture: GatePosture) {
+        guard posture.setup.isReady,
+              posture.conflicts.isClear,
+              posture.context != .none,
+              posture.micExposure == .exposed || posture.micExposure == .noMic
+        else {
+            cancelAcquisition()
+            return
+        }
+        guard acquisitionTask == nil else { return }
+        // A capture start that failed for an external device must not re-arm
+        // acquisition for that same device. Release restores `.playback`, which
+        // exposes no `availableInputs` even while the headset stays connected, so
+        // a missing candidate UID is not evidence of removal — treating it as one
+        // cleared the suppression and re-armed the acquire→fail→release loop. Keep
+        // the key until a physical device change (a real connect or disconnect).
+        if captureStartFailedInputUID != nil {
+            guard routeMonitor.physicalDeviceChangeEpoch != captureStartFailedEpoch else { return }
+            captureStartFailedInputUID = nil
+            captureStartFailedEpoch = 0
+        }
+        let route = routeMonitor.currentRouteIdentity
+        guard acquisitionAttemptedRoute != route else { return }
+        acquisitionAttemptedRoute = route
+        let generation = acquisitionGeneration
+
+        acquisitionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Cancelled before it starts: never touch the audio session, so a
+            // blocked/`Off` posture cannot retain an input route.
+            guard !Task.isCancelled else { return }
+            // Playback belongs to the same shared session; the gate context may
+            // also already say playback is active. Either is enough to forbid
+            // deactivation on failure. Passed as a live provider, not a sampled
+            // value: playback can start during the async confirmation wait, and
+            // every cleanup path must re-check who owns the session then.
+            let contextPlaybackActive = posture.context == .playbackActive || posture.context == .both
+            let isPlaybackActive: () -> Bool = { [weak self] in
+                contextPlaybackActive || (self?.isPlaybackActive() ?? true)
+            }
+            // From here until the function returns, the exposure flip emits
+            // synchronously into the gate sink; mark the task so `.listening`
+            // does not cancel it.
+            self.isAcquiring = true
+            let result = await self.routeMonitor.acquireExternalInput(isPlaybackActive: isPlaybackActive)
+            self.isAcquiring = false
+            let isCurrent = !Task.isCancelled && self.acquisitionGeneration == generation
+            if isCurrent {
+                self.acquisitionTask = nil
+            }
+            switch result {
+            case .acquired:
+                // Capture starts from the gate sink the moment exposure flips
+                // to isolated. If the gate never reached `.listening` (a
+                // conflict landed first), the acquired route has no owner:
+                // release it so no external input is retained without capture.
+                // Also covers a success that a later cancel superseded before
+                // this task resumed, as long as no newer acquisition owns the
+                // route now.
+                if !self.isListening, self.acquisitionTask == nil {
+                    self.routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: self.isPlaybackActive())
+                }
+            case .cancelled, .notApplicable:
+                break
+            default:
+                guard isCurrent, let reason = result.failureReason else { break }
+                // Acquisition left the route Exposed/NoMic: report it as a
+                // non-acquisition with the route-acquisition failure reason. A
+                // later gate re-evaluation with the same posture will not
+                // duplicate it.
+                self.lifecycleLogger.transition(
+                    posture: self.gatePosture,
+                    route: self.routeDescription(),
+                    wasCapturing: false,
+                    isCapturing: false,
+                    acquisitionFailureReason: reason
+                )
+            }
+        }
+    }
+
+    private func cancelAcquisition() {
+        acquisitionGeneration &+= 1
+        acquisitionTask?.cancel()
+        acquisitionTask = nil
+        // Clear the one-shot dedup: a transient blocker (call, casting, other
+        // app, context loss) cancels a scheduled attempt, and the same route
+        // must be retried once the blocker clears. Failure completions do not
+        // call this, so a genuinely failed route is still not retried in a loop.
+        acquisitionAttemptedRoute = nil
+    }
+}
+
+// MARK: - Mic lifecycle logging
+
+/// One mic lifecycle event in structured form. Kept separate from OSLog so the
+/// transition, severity and dedup rules are unit-testable.
+struct MicLifecycleLogRecord: Equatable {
+    let event: String
+    let level: OSLogType
+    /// Deterministically ordered (gate evaluation order, then runtime reasons).
+    let reasons: [String]
+    let setupReady: Bool
+    let conflictsClear: Bool
+    let context: String
+    let micExposure: String
+    let route: String
+    let listeningMode: String
+    let priorCapture: Bool
+}
+
+protocol MicLifecycleLogSink: AnyObject {
+    func write(_ record: MicLifecycleLogRecord)
+}
+
+/// Production sink. Route details are indirectly identifying metadata, so they
+/// are marked private; audio and transcript text are never passed in.
+final class OSLogMicLifecycleSink: MicLifecycleLogSink {
+    private let log = Logger(subsystem: "com.pocketcasts", category: "VoicePipeline")
+
+    func write(_ record: MicLifecycleLogRecord) {
+        let reasons = record.reasons.joined(separator: ",")
+        log.log(
+            level: record.level,
+            """
+            event=\(record.event, privacy: .public) \
+            reasons=\(reasons, privacy: .public) \
+            setup=\(record.setupReady, privacy: .public) \
+            conflicts=\(record.conflictsClear, privacy: .public) \
+            context=\(record.context, privacy: .public) \
+            micExposure=\(record.micExposure, privacy: .public) \
+            route=\(record.route, privacy: .private) \
+            listeningMode=\(record.listeningMode, privacy: .public) \
+            priorCapture=\(record.priorCapture, privacy: .public)
+            """
+        )
+    }
+}
+
+/// Owns the mic lifecycle logging rules:
+/// - capture acquired → `mic_capture_started` (INFO)
+/// - active capture stopped → `mic_capture_stopped`; INFO only for a direct,
+///   attributable user request (voice control disabled), ERROR otherwise
+/// - blocked and never acquired → `mic_acquisition_skipped` (INFO) once on
+///   entry, again only when the blocking reason set changes
+final class MicLifecycleLogger {
+    private let sink: MicLifecycleLogSink
+    /// Last blocking reason set logged for a blocked-never-acquired posture.
+    private var loggedSkippedReasons: [String]?
+
+    init(sink: MicLifecycleLogSink) {
+        self.sink = sink
+    }
+
+    func transition(
+        posture: GatePosture,
+        route: String,
+        wasCapturing: Bool,
+        isCapturing: Bool,
+        acquisitionFailureReason: String? = nil
+    ) {
+        var reasons = Self.blockers(for: posture)
+        if let acquisitionFailureReason {
+            reasons.append(acquisitionFailureReason)
+        }
+
+        if isCapturing && !wasCapturing {
+            loggedSkippedReasons = nil
+            emit(event: "mic_capture_started", level: .info, reasons: reasons,
+                 posture: posture, route: route, priorCapture: wasCapturing)
+        } else if wasCapturing && !isCapturing {
+            // The stop event already records the entry into the blocked posture;
+            // remember its reason set so `mic_acquisition_skipped` only fires if
+            // the blockers change afterwards.
+            loggedSkippedReasons = reasons
+            let userRequested = !posture.setup.enabledByUser.isAllowed
+            emit(event: "mic_capture_stopped", level: userRequested ? .info : .error,
+                 reasons: reasons, posture: posture, route: route, priorCapture: wasCapturing)
+        } else if !isCapturing && !posture.allowed && reasons != loggedSkippedReasons {
+            loggedSkippedReasons = reasons
+            emit(event: "mic_acquisition_skipped", level: .info, reasons: reasons,
+                 posture: posture, route: route, priorCapture: wasCapturing)
+        }
+    }
+
+    /// Active-capture stop caused at runtime (e.g. the audio session was
+    /// reclaimed). Always ERROR: never a direct user request. Resets the skip
+    /// dedup so a subsequent blocked posture logs its own reason set.
+    func runtimeCaptureStopped(reason: String, posture: GatePosture, route: String) {
+        loggedSkippedReasons = nil
+        emit(event: "mic_capture_stopped", level: .error, reasons: [reason],
+             posture: posture, route: route, priorCapture: true)
+    }
+
     /// Deterministically ordered blocking reason set from the posture.
     /// Gate-owned reasons use their condition names, in gate evaluation order
     /// (setup → conflicts → context → mic exposure). Unknown conditions fail
     /// closed, so they count as blocking.
-    private func blockers(for posture: GatePosture) -> [String] {
+    static func blockers(for posture: GatePosture) -> [String] {
         var reasons: [String] = []
         if !posture.setup.enabledByUser.isAllowed { reasons.append("EnabledByUser") }
         if !posture.setup.deviceSupported.isAllowed { reasons.append("DeviceSupported") }
@@ -475,73 +740,31 @@ class VoiceControlService: ObservableObject {
         if !posture.conflicts.otherAppPlaying.isAllowed { reasons.append("OtherAppPlaying") }
         if posture.context == .none { reasons.append("ListeningContext") }
         if posture.micExposure == .noMic { reasons.append("NoMic") }
+        if posture.micExposure == .exposed { reasons.append("ExposedMic") }
         return reasons
     }
 
-    /// Emit mic lifecycle events on capture-state transitions only:
-    /// - capture acquired → `mic_capture_started` (INFO)
-    /// - active capture stopped → `mic_capture_stopped`; INFO only when the stop
-    ///   is a direct, attributable user request (voice control disabled by the
-    ///   user), ERROR for every other active-capture stop
-    /// - blocked and never acquired → `mic_acquisition_skipped` (INFO) once on
-    ///   entry, again only when the blocking reason set changes
-    private func logLifecycleTransition(posture: GatePosture, wasCapturing: Bool) {
-        let isCapturing = isListening
-        let reasons = blockers(for: posture)
-
-        if isCapturing && !wasCapturing {
-            loggedSkippedReasons = nil
-            emitLifecycleEvent(
-                event: "mic_capture_started", level: .info,
-                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
-            )
-        } else if wasCapturing && !isCapturing {
-            // The stop event already records the entry into the blocked posture;
-            // remember its reason set so `mic_acquisition_skipped` only fires if
-            // the blockers change afterwards.
-            loggedSkippedReasons = reasons
-            let userRequested = !posture.setup.enabledByUser.isAllowed
-            emitLifecycleEvent(
-                event: "mic_capture_stopped", level: userRequested ? .info : .error,
-                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
-            )
-        } else if !isCapturing && !posture.allowed && reasons != loggedSkippedReasons {
-            loggedSkippedReasons = reasons
-            emitLifecycleEvent(
-                event: "mic_acquisition_skipped", level: .info,
-                reasons: reasons, posture: posture, priorCaptureActive: wasCapturing
-            )
-        }
-    }
-
-    /// Write one structured lifecycle event with stable, ordered fields.
-    /// No audio or transcript text is ever included. Route details are
-    /// indirectly identifying metadata, so they are marked private.
-    private func emitLifecycleEvent(
+    private func emit(
         event: String,
         level: OSLogType,
         reasons: [String],
         posture: GatePosture,
-        priorCaptureActive: Bool
+        route: String,
+        priorCapture: Bool
     ) {
-        let route = routeMonitor.currentRoute
-        let modeString = posture.listeningMode.map { "\($0)" } ?? "none"
-        let reasonsString = reasons.joined(separator: ",")
-        let routeString = "\(route.output):\(route.input.map { "\($0)" } ?? "nil")"
-
-        log.log(
-            level: level,
-            """
-            event=\(event, privacy: .public) \
-            reasons=\(reasonsString, privacy: .public) \
-            setup=\(posture.setup.isReady, privacy: .public) \
-            conflicts=\(posture.conflicts.isClear, privacy: .public) \
-            context=\(String(describing: posture.context), privacy: .public) \
-            micExposure=\(String(describing: posture.micExposure), privacy: .public) \
-            route=\(routeString, privacy: .private) \
-            listeningMode=\(modeString, privacy: .public) \
-            priorCapture=\(priorCaptureActive, privacy: .public)
-            """
+        sink.write(
+            MicLifecycleLogRecord(
+                event: event,
+                level: level,
+                reasons: reasons,
+                setupReady: posture.setup.isReady,
+                conflictsClear: posture.conflicts.isClear,
+                context: String(describing: posture.context),
+                micExposure: String(describing: posture.micExposure),
+                route: route,
+                listeningMode: posture.listeningMode.map { "\($0)" } ?? "none",
+                priorCapture: priorCapture
+            )
         )
     }
 }

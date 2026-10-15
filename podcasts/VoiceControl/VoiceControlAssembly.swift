@@ -6,11 +6,16 @@ class VoiceControlAssembly {
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
-    func buildVoiceControlService() -> VoiceControlService? {
+    func buildVoiceControlService(
+        audioSession: AudioSessionControlling = RealAudioSession(),
+        conditionMonitor: LiveConditionMonitor? = nil,
+        capture: NativeAudioCapture? = nil,
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
+    ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
 
-        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal)
-        let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
+        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
+        let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
         let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
 
@@ -43,7 +48,7 @@ class VoiceControlAssembly {
         )
 
         let asrEngine = VoiceAsrEngine(
-            capture: NativeAudioCapture(),
+            capture: capture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
             segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: asrBackend,
             signalFilter: SignalFilter(),
@@ -116,7 +121,8 @@ class VoiceControlAssembly {
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
             gracePeriodSignal: gracePeriodSignal,
-            analytics: voiceAnalytics
+            analytics: voiceAnalytics,
+            isPlaybackActive: isPlaybackActive
         )
     }
 

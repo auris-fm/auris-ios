@@ -26,7 +26,17 @@ class VoiceControlGate {
         guard setup.isReady else { return .off(reason: .setupNotReady) }
         guard conflicts.isClear else { return .off(reason: .conflictBlocking) }
         guard context != .none else { return .off(reason: .noContext) }
-        guard micExposure != .noMic else { return .off(reason: .noMicrophone) }
+        // Capture requires an external (headset/earbud/Bluetooth) microphone:
+        // only `.isolated` permits it. `.noMic` and `.exposed` both block, with
+        // distinct reasons so settings and logs can tell them apart.
+        switch micExposure {
+        case .isolated:
+            break
+        case .exposed:
+            return .off(reason: .exposedMicrophone)
+        case .noMic:
+            return .off(reason: .noMicrophone)
+        }
         return .listening(mode: resolvedMode)
     }
 

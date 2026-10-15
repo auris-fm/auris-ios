@@ -135,13 +135,18 @@ struct VoiceControlSettingsView: View {
         if posture.offReason == .noMicrophone {
             return "No microphone on this route"
         }
-        if posture.listeningMode == .continuous {
+        if posture.offReason == .exposedMicrophone {
+            return "Built-in microphone; a headset or earbud microphone is required"
+        }
+        // "Active" requires actual capture: the posture stays `listening` whenever the route is
+        // eligible, including when a start failed, so eligibility alone must not read as listening.
+        if service.isListening, posture.listeningMode == .continuous {
             return "Active (grace period)"
         }
-        if posture.listeningMode == .wakeWord {
+        if service.isListening, posture.listeningMode == .wakeWord {
             return "Active (wake word required)"
         }
-        return "Unknown"
+        return "Off"
     }
 
     private func offReasonText(_ posture: GatePosture) -> String {
@@ -151,6 +156,7 @@ struct VoiceControlSettingsView: View {
         case .conflictBlocking: return "conflictBlocking"
         case .noContext: return "noContext"
         case .noMicrophone: return "noMicrophone"
+        case .exposedMicrophone: return "exposedMicrophone"
         case .onCall: return "onCall"
         case .modelsNotReady: return "modelsNotReady"
         }
