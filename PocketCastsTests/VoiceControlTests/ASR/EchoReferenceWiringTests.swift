@@ -18,9 +18,11 @@ import XCTest
 ///   * external routes — delay tracking, *not* the built-in correlation window;
 ///   * isolated route — reduced exposure, but **not** proof that echo is absent.
 ///
-/// These cases drive the engine's consumed seam, never `SignalFilter` directly: a test
-/// that constructs `SignalFilter` and calls `isPlaybackBleed` passes forever over a
-/// filter the app never reaches, which is why the gap this closes survived.
+/// The engine-level cases drive the engine's consumed seam, never `SignalFilter`
+/// directly: a test that constructs `SignalFilter` and calls `isPlaybackBleed` passes
+/// forever over a filter the app never reaches, which is why the gap this closure
+/// survived. The filter-level cases further down DO construct `SignalFilter` directly,
+/// and say so in their own docs — they pin the filter's arithmetic, not the wiring.
 ///
 /// What the route-scope cases in this file establish is **filter behaviour given
 /// emitted PCM**. Whether production actually fills the reference is a separate
@@ -81,7 +83,10 @@ final class EchoReferenceWiringTests: XCTestCase {
 
         // Orthogonal to constant playback audio: this is our own words, not echo.
         let userSpeech = (0..<320).map { $0 % 2 == 0 ? Float(0.5) : Float(-0.5) }
-        await harness.engine.processUtterance(userSpeech)
+        // `capturedAt: 0` makes the filter actually DECIDE: without a capture instant the
+        // positional lookup declines (offset -1) and preservation would come from the
+        // decline, not from correlation judging the speech not-bleed.
+        await harness.engine.processUtterance(userSpeech, capturedAt: 0)
 
         XCTAssertEqual(
             harness.backend.transcribeSamples.count, 1,
@@ -837,11 +842,34 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
+    /// An anchor past the retained end must DECLINE, not clamp: `min(offset, retained)`
+    /// would return exactly the retained end the class doc calls "not an alignment
+    /// reference even during steady playback", silently aligning against audio whose
+    /// position is unknown.
+    func test_anchorPastTheRetainedEnd_declinesInsteadOfClampingToTheRetainedEnd() {
+        let reference = PlaybackEchoReference()
+        reference.append([Float](repeating: 0.1, count: 1600))
+
+        // 4800 rendered vs 1600 appended: the anchor claims three times the stream.
+        reference.recordRenderPosition(
+            PlaybackRenderAnchor(
+                renderedFrames: 4800,
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: 10
+            )
+        )
+
+        XCTAssertNil(
+            reference.audibleEndOffsetInRetainedWindow(),
+            "an anchor past the retained end was clamped to the retained end instead of declining"
+        )
+    }
+
     /// **Bounded handoff contract for the audio-thread producer.**
     ///
     /// The tap callback runs on a real-time thread, so it must not block on the
-    /// reference's lock (`snapshot` copies the whole retained window inside it, `append`
-    /// does a memmove). It hands off to a serial queue the way `NativeAudioCapture`
+    /// reference's lock (`append` does a memmove inside it; a `snapshot` is a retain under
+    /// the lock whose copy-on-write copy lands later, possibly outside it). It hands off to a serial queue the way `NativeAudioCapture`
     /// already does, and the reference is updated off the real-time thread.
     ///
     /// These cases fix the three properties @spec required: capacity, overflow behaviour,

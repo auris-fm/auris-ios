@@ -128,7 +128,12 @@ final class PlaybackEchoReference {
         let renderedIndex = Int(anchor.renderedPipelineSamples)
         let offset = renderedIndex - windowStart
         guard offset >= 0 else { return nil }
-        return min(offset, samples.count)
+        // An offset past the retained end describes audio that was never appended — the
+        // queue-lead/invalid-anchor state. Clamping it to the retained end would hand back
+        // exactly the "not an alignment reference" position the class doc forbids, so it
+        // declines instead.
+        guard offset <= samples.count else { return nil }
+        return offset
     }
 
     /// The retained audio with the monotonic instant its first sample was emitted.

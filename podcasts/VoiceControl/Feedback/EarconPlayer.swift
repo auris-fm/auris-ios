@@ -113,9 +113,10 @@ open class EarconPlayer {
 
     /// Publishes an earcon's samples as audio about to be emitted.
     ///
-    /// Called at submission, matching the cloud renderer: the reference holds what the
-    /// microphone can hear, and the render position is read from the node rather than
-    /// assumed, because scheduling a buffer does not mean it is audible yet.
+    /// Called at submission, publishing what the microphone can hear. Unlike the cloud
+    /// renderer it records NO render position: the node read was measured to be nil on a
+    /// first play and negative immediately after one, so no block range is submitted and
+    /// an observation that cannot be placed is refused rather than guessed.
     ///
     /// The samples are published with the buffer's OWN rate rather than the pipeline's, so
     /// the handoff resamples them: the assets on disk are 44.1 kHz, not 16 kHz. Declaring the
