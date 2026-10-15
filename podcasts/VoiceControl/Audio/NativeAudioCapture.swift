@@ -77,21 +77,9 @@ class NativeAudioCapture: AudioCaptureSource {
     /// session playback owns would stop the user's podcast, so only a session
     /// capture itself activated may be deactivated.
     private let isPlaybackActive: () -> Bool
-    var onSamples: (([Float]) -> Void)?
-
-    /// The protocol-facing callback. `AudioCaptureSource` requires a capture instant alongside the
-    /// samples; this tap does not carry one (the capture instant work is a separate seam), so the
-    /// instant is delivered as nil and the consumer must not read it as a measurement.
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? {
-        get {
-            // The tap carries no capture instant, so the instant is nil: the consumer must not read it
-            // as a measurement.
-            onSamples.map { callback in { samples, instant in callback(samples) } }
-        }
-        set {
-            onSamples = newValue.map { callback in { samples in callback(samples, nil) } }
-        }
-    }
+    /// Delivers converted samples with the instant the hardware captured them (from the
+    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route.
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
 
     init(
         session: CaptureAudioSession = RealCaptureAudioSession(),
