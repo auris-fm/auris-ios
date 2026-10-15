@@ -14,6 +14,26 @@ final class FakeAudioCapture: AudioCaptureSource {
     }
 }
 
+/// A fake backend whose transcription is a fixed transcript, so the REAL capture→VAD→ASR
+/// pipeline can be driven end to end without the real model (which cannot load here).
+final class TranscribingAsrBackend: AsrBackend {
+    let text: String
+    private(set) var ensureReadyCount = 0
+    init(text: String) { self.text = text }
+    var requiredModel: ModelSpec { ModelSpec(id: "fake-transcribing", files: [], targetDir: "fake") }
+    var capabilities: AsrCapabilities {
+        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+    }
+    func ensureReady() async -> Result<Void, Error> {
+        ensureReadyCount += 1
+        return .success(())
+    }
+    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        AsrResult(text: text, detectedLanguage: nil, tokens: nil)
+    }
+    func release() {}
+}
+
 /// The CALLER-level provenance control: a wake during ACTIVE GRACE must reach the sink as
 /// `.wakeWord`, driven through the service's REAL assembly, start path and input registration.
 ///
@@ -37,6 +57,28 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
+    /// Main's #48 gate reaches `.listening` only on an EXTERNAL microphone. The simulator has no
+    /// external input route, so every provenance case supplies the same fake session shape the
+    /// acquisition tests use: an external BT output carrying an available BT HFP mic whose
+    /// selection takes effect. The condition monitor is fully allowed.
+    private func provenanceAudioSession() -> FakeAudioSessionControlling {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "prov-bt-out")]
+        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "prov-bt-mic")]
+        return session
+    }
+
+    @MainActor
+    private func provenanceConditionMonitor() -> LiveConditionMonitor {
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        monitor.conflicts = GateConflicts(
+            notOnCall: .allowed,
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        return monitor
+    }
     /// The PRODUCTION FALLBACK repair, covered on its own.
     ///
     /// The PRODUCTION FALLBACK repair, covered on its own: the input's own provenance is honoured
@@ -45,13 +87,20 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// coverage has to be added to, not moved.
     @MainActor
     func testTheInputProvenanceIsHonouredWhenTheParameterIsAbsent() async throws {
+        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
         service.gracePeriodSignalForTesting.onWakeWordDetected()
 
@@ -77,13 +126,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// traversed them all.
     @MainActor
     func testTheRegisteredInputCarriesItsProvenanceToTheSink() async throws {
+        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let backend = TranscribingAsrBackend(text: "what did the host mean by that remark")
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         XCTAssertGreaterThan(capture.startCount, 0, "the real start path did not begin capture")
         try await waitForRouter(service: service)
 
@@ -134,6 +191,19 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
     }
 
+    /// Acquisition is asynchronous: wait (bounded) for the gate to reach listening instead of
+    /// skipping at the first tick. A timeout here is a BLOCKER, not coverage.
+    @MainActor
+    private func waitForListening(service: VoiceControlService) async throws {
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            if service.isListening { return }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let state = service.gateState
+        throw XCTSkip("the gate did not reach listening within 8s; final state: \(state)")
+    }
+
     @MainActor
     private func waitForRouter(service: VoiceControlService) async throws {
         let deadline = Date().addingTimeInterval(20)
@@ -156,13 +226,20 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// This case fires the callback the engine holds, through the real assembly and start path.
     @MainActor
     func testTheASRWakeCallbackInstalledByTheServiceOpensTheGraceWindow() async throws {
+        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         XCTAssertFalse(
@@ -199,13 +276,20 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// selection stamped on the input must survive to the sink.
     @MainActor
     func testTheRegisteredASRInputCarriesItsProvenanceToTheSink() async throws {
+        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         // A window is already open, so a live read and the input's provenance would disagree —
@@ -254,12 +338,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let capture = FakeAudioCapture()
         let fakeBackend = FakeAsrBackend()
 
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture, asrBackend: { fakeBackend }) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, asrBackend: { fakeBackend }) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             if fakeBackend.ensureReadyCount > 0 { break }
@@ -281,12 +365,12 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let capture = FakeAudioCapture()
         let fakeBackend = FakeAsrBackend()
 
-        guard let service = VoiceControlAssembly().buildVoiceControlService(capture: capture, asrBackend: { fakeBackend }) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, asrBackend: { fakeBackend }) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
 
         let manager = service.liveOriginManagerForTesting
 
@@ -347,6 +431,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var injectedTask: StubWebSocketTask?
         var factoryInvocations = 0
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -365,7 +451,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         // REQUEST-SCOPED: the observer captures the identity prepared for THIS dispatch, rather
@@ -483,6 +569,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var factoryInvocations = 0
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -499,7 +587,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         let sink = service.executorForTesting.cloudRouteSinkForTesting
         try await waitForRouter(service: service)
 
@@ -571,6 +659,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -586,7 +676,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         // A window is OPEN, so the sink's provider would derive `.followUp`. Stamping `.wakeWord`
@@ -667,6 +757,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let aFinished = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -694,7 +786,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(
             fixtureConfig.baseUrl.isEmpty,
@@ -821,6 +913,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let aFinished = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -847,7 +941,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         let installed = service.asrEngineForTesting.onRoutingInput
@@ -926,6 +1020,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         var turnsBuilt = 0
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -947,7 +1043,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
 
@@ -1037,6 +1133,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let terminalWait = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -1084,7 +1182,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
 
@@ -1247,6 +1345,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let aFinished = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -1286,7 +1386,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         let installed = service.asrEngineForTesting.onRoutingInput
@@ -1417,6 +1517,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let terminalWait = AsyncStream<Void>.makeStream()
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
             capture: capture,
             inference: inference,
             modelManager: modelManager,
@@ -1452,7 +1554,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
         service.startIfAllowed()
-        try XCTSkipUnless(service.isListening, "the gate did not reach .listening")
+        try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
         let installed = service.asrEngineForTesting.onRoutingInput
@@ -1549,5 +1651,33 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "a cancelled input must NOT report routing completion; that would conflate cancellation "
                 + "with a route that finished. Finished: \(finishedInputs)"
         )
+    }
+}
+
+/// Names the ACTUAL gate blocker for the provenance path on this environment: builds the
+/// service exactly as the provenance cases do and reports the gate's off-reason. This is a
+/// diagnosis control — a skip above must cite this reason, never a bare count.
+extension ServiceSelectionProvenanceTests {
+    @MainActor
+    func testGateBlockerDiagnosis_forTheProvenancePath() {
+        let capture = FakeAudioCapture()
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: capture
+        ) else {
+            XCTFail("the assembly built no service — the manifest/assets are the blocker")
+            return
+        }
+        service.startIfAllowed()
+        let expectation = expectation(description: "gate settles")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 5)
+        let state = service.gateState
+        if case .off(let reason) = state {
+            XCTFail("gate did not reach listening; off reason: \(reason)")
+        } else {
+            print("[provenance-diagnosis] gate state: \(state)")
+        }
     }
 }
