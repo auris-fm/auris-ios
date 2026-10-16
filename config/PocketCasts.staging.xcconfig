@@ -3,4 +3,14 @@
 PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris.debug
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
+// Distinguishable from the base app: the hosted unit tests install the base
+// configuration alongside this one on a shared simulator.
+APP_DISPLAY_NAME = Auris Staging
+
+// The staging gateway, baked into the build so it survives reinstalls of the app on a
+// shared simulator (a UserDefaults override would be wiped by each reinstall).
+// Leave `auris_gateway_direct_upstream` unset so cutover stays active.
+// The \$() breaks up the //, which xcconfig would otherwise treat as a comment delimiter.
+AURIS_CLOUD_BASE_URL = https:/$()/api-staging.auris.fm
+
 OTHER_SWIFT_FLAGS = -D STAGING -D DEBUG

@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// Resolves the Pocket Casts **API-family** base URL for Auris gateway cutover
 /// (cloud-catalog.md#mobile-client-cutover).
@@ -56,8 +57,25 @@ public final class GatewayURLProvider {
     /// Collapses to gateway when cutover is active; otherwise returns `upstream`.
     /// Always returns a trailing-slash URL to match existing iOS call sites.
     public func resolve(upstream: String) -> String {
-        guard isCutoverActive() else { return upstream }
-        return Self.withTrailingSlash(configuredGatewayURL())
+        let gateway = configuredGatewayURL().trimmingCharacters(in: .whitespacesAndNewlines)
+        let direct = isDirectUpstreamForced()
+        let cutover = !gateway.isEmpty && !direct
+        let resolved = cutover ? Self.withTrailingSlash(gateway) : upstream
+        // Bounded diagnostic: the DECISION and the hosts, never a credential. Without this a
+        // cutover that silently stops applying is indistinguishable from one that never applied
+        // — which is exactly how API-family traffic was observed reverting from the gateway to
+        // the production upstream mid-session with nothing in the log to say why.
+        FileLog.shared.addMessage(
+            "[Gateway] resolve: gatewayConfigured=\(!gateway.isEmpty) directUpstreamForced=\(direct)"
+                + " cutoverActive=\(cutover) -> host=\(Self.hostLabel(resolved))"
+        )
+        return resolved
+    }
+
+    /// The host alone, for logging. Never a path or a query, so nothing credential-shaped or
+    /// account-specific can reach the log through this line.
+    static func hostLabel(_ url: String) -> String {
+        URL(string: url)?.host ?? "(unparseable)"
     }
 
     public static func withTrailingSlash(_ url: String) -> String {

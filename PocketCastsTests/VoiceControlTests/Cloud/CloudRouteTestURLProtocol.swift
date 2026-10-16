@@ -209,9 +209,22 @@ extension CloudRouteClient {
         baseURL: String = "https://cloud.test",
         userId: String = "user_test",
         token: String? = "test_token",
-        fixture: String
+        fixture: String,
+        /// OPT-IN binary audio. The transport delivers audio as `.data` frames
+        /// (`CloudRouteClient` maps `case .data` to `.audioFrame`), but this factory built only
+        /// text frames, so no case could put real audio in front of the player and an assertion
+        /// about audio output was vacuous. Each entry becomes one `.string`-after-`.data` pair:
+        /// the binary payload the transport treats as audio, followed by the text event that
+        /// follows it. Empty by default, so every existing text fixture behaves exactly as before.
+        audioPayloads: [Data] = []
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
-        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
+        var messages: [URLSessionWebSocketTask.Message] = []
+        let textFrames = StubWebSocketTask.frames(fromFixture: fixture)
+        // Interleave: deliver each audio payload, then the text frames that follow it. With no
+        // payloads this is exactly the previous text-only behaviour.
+        messages.append(contentsOf: audioPayloads.map { .data($0) })
+        messages.append(contentsOf: textFrames.map { .string($0) })
+        let task = StubWebSocketTask(messages)
         let client = CloudRouteClient(
             baseURL: baseURL,
             userId: userId,
@@ -299,8 +312,20 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.init(textFrames.map { .string($0) })
     }
 
+    /// When set, a send RECORDS the frame and then throws — the transmit-then-fail case. The frame
+    /// demonstrably left, so a client that marked submission only on a successful return would
+    /// misclassify this as never-submitted and replay a turn that may have been admitted.
+    var transmitsThenThrows = false
+
+    /// When set, a send THROWS WITHOUT RECORDING — the frame never reached the transport, which is
+    /// the pre-entry failure that proves it was never submitted and is therefore the one case
+    /// automatic recovery may re-drive.
+    var throwsBeforeRecording = false
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         sent.append(message)
+        if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
     /// Holds delivery until `release()`, so a test can keep one turn in flight

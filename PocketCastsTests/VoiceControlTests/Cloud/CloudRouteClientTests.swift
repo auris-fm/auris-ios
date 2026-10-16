@@ -111,7 +111,7 @@ final class CloudRouteClientTests: XCTestCase {
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(
             events,
-            [.error(code: "limit_exceeded", message: "You've used 10/10 free requests today.")]
+            [.error(source: .server, code: "limit_exceeded", message: "You've used 10/10 free requests today.")]
         )
     }
 
@@ -154,7 +154,7 @@ final class CloudRouteClientTests: XCTestCase {
 
         let events = await collect(client().route(request: "hello", context: sampleContext))
         XCTAssertEqual(events.first, .token("partial"))
-        guard case let .error(code, _)? = events.dropFirst().first else {
+        guard case let .error(_, code, _)? = events.dropFirst().first else {
             XCTFail("Expected connection_lost after partial token, got \(events)")
             return
         }
@@ -276,7 +276,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.last else {
+        guard case let .error(_, code, message)? = events.last else {
             return XCTFail("expected a terminal error, got \(events)")
         }
         XCTAssertEqual(code, "connection_lost")
@@ -296,7 +296,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.first else {
+        guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
         }
         XCTAssertEqual(code, "unauthorized")
@@ -312,7 +312,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             """
         let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.first else {
+        guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
         }
         XCTAssertEqual(code, "limit_exceeded")
@@ -381,7 +381,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let task = StubWebSocketTask([])
         let events = await collect(client(task: task, token: nil).route(request: "hello", context: context()))
 
-        XCTAssertEqual(events.last, .error(code: "unauthorized", message: ""),
+        XCTAssertEqual(events.last, .error(source: .server, code: "unauthorized", message: ""),
                        "a turn with no credential must report the failure, not end silently")
         XCTAssertEqual(task.sent.count, 0, "nothing is sent without a credential")
     }
@@ -419,7 +419,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let task = StubWebSocketTask([.string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#)])
         let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
 
-        guard case let .error(code, _)? = events.last else {
+        guard case let .error(_, code, _)? = events.last else {
             return XCTFail("expected a terminal error, got \(String(describing: events.last))")
         }
         XCTAssertEqual(code, "connection_lost", "a stream that ends without a terminal event is reported")
@@ -437,7 +437,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
 
         let events = await collect(client.route(request: "hello", context: context()))
 
-        guard case let .error(code, message)? = events.last else {
+        guard case let .error(_, code, message)? = events.last else {
             return XCTFail("a failed upgrade must report an error, got \(events)")
         }
         XCTAssertEqual(code, "connection_lost")

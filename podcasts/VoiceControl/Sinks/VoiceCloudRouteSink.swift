@@ -1,3 +1,20 @@
 protocol VoiceCloudRouteSink {
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse
+    /// - Parameter origin: the grace-window generation this turn was DISPATCHED under, or nil
+    ///   when it was not stamped. The captured value is what the conversation bound needs: a
+    ///   live read at turn time can belong to a different window than the turn does, and a
+    ///   follow-up must not resume a conversation it never belonged to.
+    /// - Parameter selection: what selected this turn, captured with the input. Nil when the
+    ///   caller did not capture it; the sink then falls back to a live reading, which is the
+    ///   behaviour that misattributes a queued turn, so a production caller should always supply
+    ///   it.
+    func routeToCloud(
+        request: String,
+        tier: CloudTier,
+        context: PlaybackContext,
+        origin: Int?,
+        selection: CloudConversationSelection?,
+        preparedObserver: CloudRouteSink.PreparedObserver?
+    ) async -> CloudRouteResult
+
+
 }

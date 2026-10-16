@@ -256,6 +256,22 @@ final class CloudAccountSessionCredentialProviderTests: XCTestCase {
         XCTAssertEqual(provider.credential(), "refresh-1")
     }
 
+    /// An ACCESS token must never be presented as the refresh credential. The verifier puts
+    /// whatever it is given into a `refresh_token` field and asks the upstream to refresh it,
+    /// so an access token there is relabelled — the server has one field and cannot tell the
+    /// difference, and the upstream answers `invalid_grant`, which is the client's own doing.
+    /// Failing closed locally is the honest outcome, not a server round trip.
+    func testAnAccessTokenIsNeverPresentedAsTheRefreshCredential() {
+        let provider = CloudAccountSessionCredentialProvider(
+            refreshTokenReader: { nil },
+            accessTokenReader: { "access-1" }
+        )
+        XCTAssertNil(
+            provider.credential(),
+            "an access token was relabelled as a refresh token"
+        )
+    }
+
     func testEmptyOrMissingRefreshTokenYieldsNil() {
         XCTAssertNil(CloudAccountSessionCredentialProvider(refreshTokenReader: { "" }).credential())
         XCTAssertNil(CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }).credential(), "signed out ⇒ callers fail closed")
@@ -629,7 +645,7 @@ final class CloudTokenProviderRouterTests: XCTestCase {
 
         let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        XCTAssertEqual(events, [.error(source: .server, code: "unauthorized", message: "")])
         XCTAssertTrue(requests.isEmpty, "no credential ⇒ nothing dialled, and never the legacy bearer")
     }
 }

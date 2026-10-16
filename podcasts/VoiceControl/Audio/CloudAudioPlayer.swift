@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import PocketCastsUtils
 import os.log
 
 /// Receives binary audio frames from the cloud and plays them through the
@@ -22,7 +23,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         /// Called when the player has drained and stopped output — the point at
         /// which playback the turn ducked may be restored, so the answer's tail
         /// does not play mixed with the resumed episode.
-        func audioPlayerDidStop()
+        /// `drainEpoch` is the identity of the drain this notification belongs to, pinned when the
+        /// drain was SCHEDULED. Delivery is asynchronous, so an identity taken at delivery time
+        /// would belong to whichever drain is current then.
+        func audioPlayerDidStop(drainEpoch: Int)
     }
 
     /// Codecs this player can actually decode and play.
@@ -55,6 +59,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     func enqueue(_ frame: CloudAudioFrame) {
         bufferLock.lock()
         buffer.append(frame)
+        // A CUMULATIVE record of every frame this player was actually handed. `bufferedFrameCount`
+        // is a current depth that drains, so after a turn ends it cannot distinguish "audio was
+        // delivered and played" from "audio never arrived" — which made an output assertion
+        // vacuous. This counts arrivals and never decreases.
+        framesEnqueued += 1
         bufferLock.unlock()
 
         // Wake the runner: `runnerRunning` is "there is work to do", and the
@@ -69,12 +78,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Drain remaining buffered frames and stop playback.
     /// Call on `done` / `error`.
-    func finish() {
+    /// Schedule the drain and RETURN the identity it allocated. The caller must record that
+    /// returned value rather than re-reading `currentDrainEpoch`: a re-read can observe a LATER
+    /// schedule, so the deferral would wait on an identity that is not its own.
+    @discardableResult
+    func finish() -> Int {
         runnerLock.lock()
+        drainEpoch += 1
+        let allocated = drainEpoch
         drainRemaining = true
         runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
+        return allocated
     }
 
     /// Reset state immediately (e.g. on cancellation).
@@ -90,6 +106,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         buffer.removeAll()
         bufferLock.unlock()
         runnerLock.lock()
+        drainEpoch += 1
         drainRemaining = false
         stopRequested = true
         runnerRunning = true
@@ -127,6 +144,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Sample rate the negotiated codec delivers, defaulting to the advertised
     /// codec's rate when no `connected` frame has been seen yet.
+    var negotiatedSampleRateForTesting: Double { negotiatedSampleRate }
     private var negotiatedSampleRate: Double {
         bufferLock.lock()
         defer { bufferLock.unlock() }
@@ -148,6 +166,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Request drain-and-stop (done / error).
     private var drainRemaining = false
 
+    /// Identity of the drain most recently SCHEDULED, incremented in `finish()`/`cancel()`.
+    private var drainEpoch = 0
+
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
 
@@ -164,6 +185,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var playerNode: AVAudioPlayerNode?
 
     // MARK: - Init / Deinit
+
+    /// Receives the PCM this player emits, so the echo filter can reference what was
+    /// actually sent to the output. Set by the assembly; nil when nothing is listening.
+    var emittedPCMReference: PlaybackEchoReference?
 
     init() {
         runnerThread = Thread(target: self, selector: #selector(runnerLoop), object: nil)
@@ -227,11 +252,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // Cancelled: drop everything and stop the engine, without draining.
             if stopRequested {
                 stopRequested = false
+                // Snapshot the identity WHILE HOLDING runnerLock: reading it after the unlock
+                // raced the writers in finish()/cancel().
+                let scheduledEpoch = drainEpoch
                 runnerLock.unlock()
                 stopEngine()
                 isPlaying = false
                 paused = false
-                notifyDidStop()
+                notifyDidStop(epoch: scheduledEpoch)
                 runnerLock.lock()
                 runnerExited = false
                 runnerLock.signal()
@@ -245,8 +273,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
+                // SNAPSHOT AT THE CLAIM, then RELEASE THE LOCK BEFORE any barrier. Holding
+                // `runnerLock` across `claimRelease.wait()` would block the test's own `finish()`,
+                // which needs the same lock — a lock must never span a barrier.
+                let claimedEpoch = drainEpoch
                 runnerLock.unlock()
-                drainAndStop()
+                claimReached?.signal()
+                // BOUNDED: a setup error must fail promptly, not consume the runner forever.
+                // The release outcome is RECORDED, not discarded: a bound alone does not make a
+                // timeout a failure, so the case asserts this value.
+                if let release = claimRelease {
+                    // FALSIFICATION: a much shorter bound, and the test's signal is too late.
+                    claimReleaseOutcome = (release.wait(timeout: .now() + 5) == .success) ? .released : .timedOut
+                }
+                drainAndStop(claimedEpoch: claimedEpoch)
                 continue
             }
 
@@ -291,6 +331,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // `playFrame` is best-effort (no engine, no output), but the frames are
         // still taken: a player that leaves them queued on an engine failure
         // would report "playing" with nothing coming out.
+        parkIfHeld()
         let framesToProcess = bufferedFrameCount
         for _ in 0..<framesToProcess {
             guard let frame = dequeueFrame() else { break }
@@ -339,6 +380,27 @@ final class CloudAudioPlayer: @unchecked Sendable {
         defer { bufferLock.unlock() }
         guard !buffer.isEmpty else { return nil }
         return buffer.removeFirst()
+    }
+
+    /// TEST-ONLY: park the drain runner until released, WITHOUT returning an exhaustion sentinel.
+    ///
+    /// An earlier version returned `nil` from `dequeueFrame` while held. That is indistinguishable
+    /// from "the buffer is empty", so the drain loop treated a deliberately-held player as an
+    /// underrun and took its exhaustion path — which is why a resume appeared while audio was
+    /// nominally pending. Parking here leaves the buffer intact and simply does not consume.
+    private func parkIfHeld() {
+        // ONE synchronization domain for the flag: `runnerLock` guards `drainHoldRequested` for
+        // every read and write, including the condition wait that releases the park.
+        //
+        // An earlier version read the flag under `bufferLock` for its first check and then RE-READ
+        // it under `runnerLock`, so the same variable had two domains and the two reads could
+        // disagree. (It did release `bufferLock` before waiting; the second flag read under the
+        // wrong lock was the defect.)
+        runnerLock.lock()
+        while drainHoldRequested {
+            runnerLock.wait(until: Date().addingTimeInterval(0.01))
+        }
+        runnerLock.unlock()
     }
 
     // MARK: - Audio engine
@@ -391,6 +453,50 @@ final class CloudAudioPlayer: @unchecked Sendable {
         self.engine = nil
     }
 
+    /// Appends this frame's audio to the emitted reference and records where the node had
+    /// reached, mapped into the reference's own timeline.
+    ///
+    /// Extracted from `playFrame` so the mapping is reachable by a test: the conversion is
+    /// the part that can be wrong, and it was — the node reports a position in its own
+    /// played audio, which restarts each turn while the reference keeps growing, so writing
+    /// it through unmapped placed second-turn audio against the wrong origin.
+    ///
+    /// This is the one producer that does not hand off, so it performs the same
+    /// range-plus-position conversion the handoff performs for the others.
+    func appendToEmittedReference(_ pcmBuffer: AVAudioPCMBuffer, node: AVAudioPlayerNode) {
+        guard let reference = emittedPCMReference,
+              let channel = pcmBuffer.floatChannelData?[0] else { return }
+
+        let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
+        let resampled = PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate)
+
+        // Read the range BEFORE the append: this is where the block will land, and it is the
+        // only correct origin for a position inside it. An interleaved producer's appends sit
+        // between this producer's frames, so no per-producer offset maps them.
+        let rangeStart = reference.streamIndex
+        reference.append(resampled)
+
+        let anchor = renderPosition(of: node).map { position -> PlaybackRenderAnchor in
+            PlaybackRenderAnchor(
+                renderedFrames: Double(
+                    referenceIndexForProducerPosition(
+                        rangeStart: rangeStart,
+                        // `playerTime.sampleTime` is the position at the END of what has been
+                        // rendered, so this block began one block earlier.
+                        producerBlockStart: position.renderedFrames - Double(resampled.count)
+                            / PlaybackEchoReference.pipelineSampleRate * position.sourceSampleRate,
+                        producerFrames: position.renderedFrames,
+                        producerRate: position.sourceSampleRate,
+                        blockLength: resampled.count
+                    )
+                ),
+                sourceSampleRate: PlaybackEchoReference.pipelineSampleRate,
+                hostTime: position.hostTime
+            )
+        }
+        reference.recordRenderPosition(anchor)
+    }
+
     private func playFrame(_ frame: CloudAudioFrame) {
         guard let node = playerNode, let engine = engine else { return }
 
@@ -404,8 +510,49 @@ final class CloudAudioPlayer: @unchecked Sendable {
             return
         }
 
+        // Publish what is about to be emitted, so the reference holds the audio the
+        // microphone can hear. Resampled into the pipeline's rate because the filter
+        // correlates in that domain.
+        //
+        // The node's render position is read here rather than assumed. Scheduling a
+        // buffer does not mean it is audible: the node may still be playing earlier
+        // audio, so the position that matters is what it has *rendered*, not what has
+        // been handed to it. `playerTime(forNodeTime:)` reports that, and using it means
+        // a queue lead or a restart shows up as a position jump instead of the reference
+        // silently claiming audio is audible before it is.
+        // Appends to the reference directly, rather than through `EchoReferenceHandoff`.
+        //
+        // Checked rather than assumed: this is called from the bounded drain loop above
+        // (`for _ in 0..<framesToProcess { dequeueFrame(); playFrame(frame) }`), not from an
+        // `AVAudioEngine` tap callback. The handoff's reason is a real-time deadline, and
+        // this path has none — the drain loop yields. So this is the one producer that
+        // legitimately does not hand off, and it is not an oversight. The producers that do
+        // run on a deadline callback (the episode tap and the earcon) both submit instead.
+        appendToEmittedReference(pcmBuffer, node: node)
         node.play()
         node.scheduleBuffer(pcmBuffer)
+    }
+
+    /// The output node's rendered position, or nil when the node is not rendering.
+    ///
+    /// `lastRenderTime` is the host instant of the most recent render; converting it
+    /// through `playerTime(forNodeTime:)` yields the position in the played audio's own
+    /// sample frames. Both are needed: the frames give the mapping onto the reference,
+    /// and the host instant places it on the shared monotonic basis. A node that is not
+    /// playing reports no render time, which is a discontinuity rather than a position
+    /// of zero.
+    private func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
+        guard let lastRender = node.lastRenderTime,
+              lastRender.isSampleTimeValid,
+              let playerTime = node.playerTime(forNodeTime: lastRender),
+              playerTime.isSampleTimeValid else { return nil }
+        return PlaybackRenderAnchor(
+            renderedFrames: Double(playerTime.sampleTime),
+            sourceSampleRate: playerTime.sampleRate,
+            hostTime: lastRender.hostTime > 0
+                ? AVAudioTime.seconds(forHostTime: lastRender.hostTime)
+                : 0
+        )
     }
 
     /// Whether this process has an audio output to render into. `AVAudioEngine`
@@ -452,6 +599,49 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// frames (a player that buffers forever plays nothing).
     var bufferedFrameCountForTesting: Int { bufferedFrameCount }
 
+    /// TEST-ONLY drain hold. Guarded by `runnerLock` — the single domain for every read and write,
+    /// including the condition wait in `parkIfHeld`.
+    private var drainHoldRequested = false
+
+    /// TEST-ONLY claim signals. See the drainRemaining branch.
+    var claimReached: DispatchSemaphore?
+    var claimRelease: DispatchSemaphore?
+
+    /// TEST-ONLY: how the runner's bounded wait on `claimRelease` ended, so a case can ASSERT the
+    /// release succeeded rather than a bound merely preventing an infinite block.
+    enum ClaimReleaseOutcome { case released, timedOut }
+
+    /// Guarded by `runnerLock`: the runner publishes and a test reads, so the value needs one
+    /// synchronization domain rather than a plain stored property.
+    private var storedClaimReleaseOutcome: ClaimReleaseOutcome?
+    var claimReleaseOutcome: ClaimReleaseOutcome? {
+        get { runnerLock.lock(); defer { runnerLock.unlock() }; return storedClaimReleaseOutcome }
+        set { runnerLock.lock(); storedClaimReleaseOutcome = newValue; runnerLock.unlock() }
+    }
+    var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
+
+    /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
+    /// the same drain loop continues.
+    func setDrainHoldForTesting(_ hold: Bool) {
+        runnerLock.lock()
+        drainHoldRequested = hold
+        // Re-arm the runner's own work predicate so a RELEASE is acted on rather than waiting for
+        // an unrelated signal.
+        runnerRunning = true
+        runnerLock.signal()
+        runnerLock.unlock()
+    }
+
+    /// Cumulative count of frames handed to this player, for asserting that audio actually
+    /// ARRIVED rather than merely that nothing is pending at the end.
+    var framesEnqueuedForTesting: Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return framesEnqueued
+    }
+
+    private var framesEnqueued = 0
+
     /// Whether this player holds nothing left to play. A turn that produced no
     /// audio can restore immediately; one that is still draining restores when
     /// the drain completes.
@@ -460,9 +650,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return !buffer.isEmpty
     }
 
+    /// The identity of the drain most recently SCHEDULED.
+    var currentDrainEpoch: Int {
+        runnerLock.lock(); defer { runnerLock.unlock() }
+        return drainEpoch
+    }
+
     // MARK: - Drain
 
-    private func drainAndStop() {
+    private func drainAndStop(claimedEpoch: Int) {
+        // `claimedEpoch` was snapshotted at the CLAIM, under the lock, in the drainRemaining
+        // branch. Re-reading the identity here would be after the claim boundary.
+        parkIfHeld()
         // Play any remaining frames.
         while true {
             guard let frame = dequeueFrame() else { break }
@@ -471,15 +670,29 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopEngine()
         isPlaying = false
         paused = false
-        notifyDidStop()
+        notifyDidStop(epoch: claimedEpoch)
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
     /// ducked. Delivered on the main queue like the other delegate callbacks.
-    private func notifyDidStop() {
+    private func notifyDidStop(epoch: Int) {
         guard let delegate = delegate else { return }
         DispatchQueue.main.async {
-            delegate.audioPlayerDidStop()
+            // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
+            // the delegate itself, so a delayed notification can be delivered at a chosen moment
+            // while another turn owns the hold.
+            if let capture = self.capturedStopNotification {
+                capture(epoch) { delegate.audioPlayerDidStop(drainEpoch: epoch) }
+                return
+            }
+            delegate.audioPlayerDidStop(drainEpoch: epoch)
         }
+    }
+
+
+    func setCapturedStopNotificationForTesting(_ capture: ((Int, @escaping () -> Void) -> Void)?) {
+        bufferLock.lock()
+        capturedStopNotification = capture
+        bufferLock.unlock()
     }
 }

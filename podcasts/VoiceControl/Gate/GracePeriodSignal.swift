@@ -74,6 +74,28 @@ class GracePeriodSignal: ObservableObject {
         return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
     }
 
+    /// Claims this window's escalation allowance **on behalf of a turn that captured `origin`**,
+    /// and refuses without consuming anything when that origin is not the live window.
+    ///
+    /// The comparison and the claim are ONE main-actor operation by construction: a separate
+    /// "is this origin current?" check followed by an unconditional claim leaves a gap in which a
+    /// wake or a privacy close could land, so a turn could still spend an allowance that was not
+    /// its own — or be refused against a window it never belonged to. `nil` means refused; the
+    /// caller must not consume, build a client, or act.
+    ///
+    /// `origin == nil` is a turn that captured nothing (no window identity of its own). That keeps
+    /// the pre-existing policy: such a turn is judged by the live window exactly as before.
+    func claimEscalationBudget(capturedOrigin origin: Int?) -> Int? {
+        if Thread.isMainThread { return claimEscalationBudgetOnMain(capturedOrigin: origin) }
+        return DispatchQueue.main.sync { claimEscalationBudgetOnMain(capturedOrigin: origin) }
+    }
+
+    private func claimEscalationBudgetOnMain(capturedOrigin origin: Int?) -> Int? {
+        // A turn with no captured identity keeps the live-window policy.
+        if let origin, origin != generation { return nil }
+        return claimEscalationBudgetOnMain()
+    }
+
     /// The generation a turn is running under, for stamping an intent that was
     /// not created by a fallback. Read when the turn starts, so a completion is
     /// judged against the window it actually belonged to.

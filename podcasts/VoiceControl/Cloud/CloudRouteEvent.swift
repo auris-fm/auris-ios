@@ -84,6 +84,16 @@ struct CloudSpeechUsage: Equatable {
 }
 
 /// Events from the cloud WebSocket route (cloud-assistant.md).
+/// The origin of a `CloudRouteEvent.error`.
+enum CloudRouteErrorSource: String, Equatable {
+    /// The client could not CONSTRUCT the request (bad URL, unencodable frame). The frame never left.
+    case requestConstruction
+    /// The TRANSFER failed or the connection dropped. The frame may or may not have been admitted.
+    case transport
+    /// An error FRAME parsed from the server.
+    case server
+}
+
 enum CloudRouteEvent: Equatable {
     /// Server handshake: the codec selected for this turn's audio frames.
     case connected(codec: CloudAudioCodec)
@@ -101,7 +111,11 @@ enum CloudRouteEvent: Equatable {
     /// Terminal success: answer model finished, final audio delivered.
     case done(usage: CloudTurnUsage)
     /// Terminal error.
-    case error(code: String, message: String)
+    /// WHERE the error originated, carried STRUCTURALLY so a consumer never has to infer it from the
+    /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks
+    /// like a client tag, and a client tag could be reworded.
+    case error(source: CloudRouteErrorSource, code: String, message: String)
+
 }
 
 /// JSON values that appear in action `params` (numbers normalized to Int64 when integral).
@@ -140,10 +154,13 @@ enum CloudRouteJSONValue: Equatable {
 
 /// Request context body for `/api/v1/cloud/route`.
 struct CloudRouteContext: Equatable, Encodable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: an empty id names nothing
+    /// but still reads as a supplied value, and the contract forbids inventing one.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to have a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 
@@ -166,10 +183,10 @@ struct CloudRouteContext: Equatable, Encodable {
     }
 
     init(
-        episodeId: String,
+        episodeId: String?,
         podcastId: String? = nil,
         referencePositionMs: Int64? = nil,
-        clientPositionMs: Int64,
+        clientPositionMs: Int64?,
         recentReferencePositions: [Int64] = [],
         previousReferencePositionMs: Int64? = nil
     ) {

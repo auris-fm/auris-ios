@@ -129,11 +129,24 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// site that omits it silently loses the check rather than failing.
     let generation: Int?
 
-    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall, generation: Int? = nil) {
+    /// What selected this turn, captured with the input. A wake word always opens a new
+    /// conversation; only a wake-free follow-up continues one. Captured rather than read at
+    /// dispatch time for the same reason as `generation`: the answer is a property of the input,
+    /// not of whatever the window looks like after routing.
+    let selection: CloudConversationSelection?
+
+    init(
+        request: String,
+        tier: CloudTier,
+        origin: CloudRouteOrigin = .modelCall,
+        generation: Int? = nil,
+        selection: CloudConversationSelection? = nil
+    ) {
         self.request = request
         self.tier = tier
         self.origin = origin
         self.generation = generation
+        self.selection = selection
     }
 }
 
@@ -151,10 +164,14 @@ enum CloudTier: String, Equatable {
 }
 
 struct PlaybackContext: Equatable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: the contract forbids
+    /// inventing an ID, and the discovery turn — nothing playing — must represent that as
+    /// absence rather than as an id that names nothing.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to hold a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 }

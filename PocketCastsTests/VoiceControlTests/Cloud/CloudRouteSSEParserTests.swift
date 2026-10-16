@@ -249,7 +249,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"error","code":"limit_exceeded","message":"Daily limit reached"}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .error(let code, let message) = events.first {
+        if case .error(_, let code, let message) = events.first {
             XCTAssertEqual(code, "limit_exceeded")
             XCTAssertEqual(message, "Daily limit reached")
         } else {

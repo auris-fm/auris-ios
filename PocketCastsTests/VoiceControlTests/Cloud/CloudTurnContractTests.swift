@@ -176,7 +176,13 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertNil(context["recent_conversation"])
     }
 
-    func testRecentConversationSerializesRoleAndText() async throws {
+    /// Superseded by the owning paragraph, which retains history server-side and forbids
+    /// client-supplied history in the frame. This case asserted the OLD contract — that the
+    /// client serialized `context.recent_conversation` — and it held the frame to a shape the
+    /// spec now refuses, so it is inverted rather than deleted: the field must be absent even
+    /// when the client still holds local context, or the model would receive text the server
+    /// never authenticated.
+    func testRecentConversationIsNeverSerializedIntoTheFrame() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
@@ -184,10 +190,10 @@ final class CloudTurnContractTests: XCTestCase {
         )
         let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
-        let conversation = try XCTUnwrap(context["recent_conversation"] as? [[String: Any]])
-        XCTAssertEqual(conversation.count, 1)
-        XCTAssertEqual(conversation[0]["role"] as? String, "user")
-        XCTAssertEqual(conversation[0]["text"] as? String, "who is speaking?")
+        XCTAssertNil(
+            context["recent_conversation"],
+            "client-supplied conversation history was sent; the server retains history itself"
+        )
     }
 
     // MARK: - existing contract preserved
@@ -246,4 +252,67 @@ final class CloudTurnContractTests: XCTestCase {
         capturedTasks.append(built.task)
         return built.client
     }
+    /// A send that TRANSMITS and then fails is reported as an ordinary transport failure.
+    ///
+    /// The distinction that matters is preserved even though the never-submitted case is gone: a
+    /// frame that left the client is NOT treated as one that never did, so nothing may re-drive it.
+    /// The assertion is that the failure is surfaced at all and the frame is recorded as sent —
+    /// there is no separate "never submitted" outcome for a transmitted frame to be misclassified
+    /// into, which is the stronger position.
+    func testASendThatTransmitsThenThrowsIsReportedAsATransportFailure() async {
+        let built = CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "")
+        let task = built.task
+        let client = built.client
+        task.transmitsThenThrows = true
+
+        var sawError = false
+        for await event in client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        ) {
+            if case .error = event { sawError = true }
+        }
+
+        XCTAssertEqual(task.sent.count, 1, "the frame was not transmitted, so the case is vacuous")
+        XCTAssertTrue(sawError, "the failure was not surfaced at all")
+    }
+
+    /// The PRODUCTION task must not be left suspended. A `URLSessionWebSocketTask` starts suspended
+    /// and must be resumed to begin connecting; without the resume the task never reached startup,
+    /// so a turn could not begin. (Startup is the observed requirement; "every suspended send
+    /// fails" was not measured and is not claimed.)
+    ///
+    /// This case deliberately does NOT inject `webSocketTaskFactory`: injecting it bypasses the
+    /// default path, which is exactly how the missing resume survived the entire suite. It drives
+    /// the real factory and reads the state of the task that factory produced.
+    func testTheProductionWebSocketTaskIsNotLeftSuspended() async {
+        let client = CloudRouteClient(baseURL: "wss://cloud.test", userId: "user_test")
+        // Drive the production path far enough to create its task. The connection itself cannot
+        // succeed here, which is fine: the assertion is about the task's STATE, not its outcome.
+        let stream = client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        )
+        let consumer = Task { for await _ in stream {} }
+        // Give the production path a moment to create and resume its task.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        consumer.cancel()
+
+        let state = client.lastProductionTaskStateForTesting
+        XCTAssertNotNil(state, "the production path never created a task, so this case is vacuous")
+        XCTAssertNotEqual(
+            state, .suspended,
+            "the production WebSocket task was left SUSPENDED, so it never began connecting and "
+                + "a turn could not start"
+        )
+    }
+
 }

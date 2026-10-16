@@ -317,7 +317,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
         // Code only: the message is empty so the sink emits its localized earcon
         // rather than TTS reading English prose to a non-English user.
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        XCTAssertEqual(events, [.error(source: .server, code: "unauthorized", message: "")])
     }
 
     func testPrefetchSendsNoRequestWithoutACredential() async {

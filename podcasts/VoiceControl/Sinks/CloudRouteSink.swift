@@ -6,10 +6,83 @@ import PocketCastsUtils
 /// Cloud answers arrive as synthesised audio streamed over the WebSocket; the
 /// client plays them directly through the shared audio output path. Text
 /// accumulation (`.token`) is removed — cloud answers are played, not spoken.
+/// How a cloud turn actually ended, reported separately from how it was rendered.
+///
+/// The rendered response cannot carry this: a spoken server error and a silent success
+/// are both "no earcon", so a caller deciding what happened from the response shape gets
+/// them backwards — which is how a failed turn was recorded as a completed cloud route
+/// and reopened the grace window for a turn that never happened.
+enum CloudRouteOutcome: Equatable {
+    /// The server sent `done`: the turn completed.
+    case completed
+    /// The server reported an error, or the route could not be dialled.
+    case failed(code: String?)
+    /// The stream ended without `done`: a truncated turn, not a completion.
+    case earlyClose
+    /// Cloud is not configured, so no turn was attempted.
+    case refused
+}
+
+/// A turn's terminal outcome together with the feedback it rendered.
+struct CloudRouteResult: Equatable {
+    let response: VoiceResponse
+    let outcome: CloudRouteOutcome
+}
+
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
+
+    /// The active turn's cancellation state, readable so a test can observe whether a refused
+    /// turn cancelled its predecessor. The cancellation is a FLAG the running turn checks at its
+    /// next event, so a held turn has not yet acted on it — reading the flag is what distinguishes
+    /// "cancelled but not yet observed" from "never cancelled".
+    /// Main-actor isolated like the rest of the sink: `activeTurn` is actor state, so the read
+    /// must be too. A test awaits it through `MainActor.run`.
+    var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
+
+    /// The selection the last turn arrived with, so a caller-level case can assert that the
+    /// service derived it from the turn's own provenance rather than from live window state.
+    /// Necessary because the two are indistinguishable from inside the sink when grace is active.
+    @MainActor private(set) var lastSelectionForTesting: CloudConversationSelection?
+    /// The ORIGIN the last turn arrived with, recorded at the same PRE-GUARD point as the selection.
+    /// A caller-level case can therefore assert that the turn carried the generation captured at its
+    /// callback — the raw `CloudRouteIntent.origin` — rather than whatever window is live later.
+    @MainActor private(set) var lastOriginForTesting: Int?
+
+    /// REQUEST-SCOPED preparation observer: the dispatch supplies it, so the prepared identity is
+    /// captured FOR THAT DISPATCH rather than read from a sink-wide "last" slot. A shared slot is a
+    /// last-value property: with more than one turn on a sink it reports whichever ran most
+    /// recently, which is the wrong subject for an identity comparison.
+    typealias PreparedObserver = @MainActor (CloudPreparedConversation) -> Void
+
+    /// The cloud player this sink drives, so a test can reach the real producer through
+    /// the chain the app builds rather than constructing its own.
+    var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
+    /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
+    /// substitutes it. Production is unchanged: the default is this same factory.
+    nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
+        {
+            CloudRouteClient(
+                baseURL: CloudConfig.shared.baseUrl,
+                userId: CloudIdentity.shared.userId,
+                tokenProvider: CloudTokenProviderRouter.provider()
+            )
+        }
+    }
+
     private let clientFactory: () -> CloudRouteClient
     private let isConfigured: () -> Bool
+    /// Prepares the conversation identity for each turn.
+    private let conversationManager: CloudConversationManager
+
+    /// The manager whose live origin must follow the grace window. Exposed so the SERVICE can own
+    /// the subscription: a binding stored in the assembly's `cancellables` is cancelled as soon as
+    /// What selected the current turn. Defaults to a wake word: a turn with no reported
+    /// selection is a new user act, and create-then-resume is the safe direction — resuming
+    /// a conversation nobody opened would attach an utterance to someone else's history.
+    private let conversationSelectionProvider: () -> CloudConversationSelection
+    /// The origin the turn runs under, so a resume cannot cross an ended window.
+
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let playbackPositionMs: () -> Int64
@@ -48,12 +121,25 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Set when the turn has completed and the player is draining: the hold is
     /// released from `audioPlayerDidStop` rather than at `done`.
-    private var restoreHeldForPlayerDrain = false
+    ///
+    /// It records WHICH turn deferred, not merely THAT one did. The player's stop notification
+    /// carries no turn identity, and a turn's audio can still be draining after a later turn has
+    /// taken over the hold, so acting on the flag alone let an older turn's notification restore
+    /// playback that the newer turn was deliberately holding.
+    /// The deferred restoration, carrying the identity captured WHEN ITS DRAIN WAS SCHEDULED:
+    /// which turn deferred and which drain it waits on. Neither alone suffices — the current owner
+    /// can be the same turn when a foreign notification arrives, and a drain identity alone cannot
+    /// say whether this turn still owns the release.
+    private var restoreHeldForPlayerDrain: (owner: CloudTurnToken, drainEpoch: Int)?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
     /// double-restore the pause.
     private var activeTurn: CloudTurnToken?
+
+
+
+
 
     /// Cancellation handle for one logical turn.
     final class CloudTurnToken {
@@ -79,15 +165,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     // (no main-actor state is touched), so the initializer is safe to call from
     // any context.
     nonisolated init(
-        clientFactory: @escaping () -> CloudRouteClient = {
-            CloudRouteClient(
-                baseURL: CloudConfig.shared.baseUrl,
-                userId: CloudIdentity.shared.userId,
-                // Per-call: a configured Auris origin switches the credential
-                // source to Auris-issued tokens; otherwise the static provider.
-                tokenProvider: CloudTokenProviderRouter.provider()
-            )
-        },
+        clientFactory: @escaping () -> CloudRouteClient = CloudRouteSink.productionClientFactory(),
         isConfigured: @escaping () -> Bool = { !CloudConfig.shared.baseUrl.isEmpty },
         audioPlayer: CloudAudioPlayer? = nil,
         playbackManager: PlaybackManager? = nil,
@@ -100,10 +178,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
         recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
         resultsPresenter: DiscoveryResultsPresenting? = nil,
-        spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver()
+        spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
+        // Last so a call site can always supply them after whatever other defaults it uses.
+        conversationManager: CloudConversationManager = CloudConversationManager(),
+        conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
     ) {
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
+        self.conversationManager = conversationManager
+        self.conversationSelectionProvider = conversationSelectionProvider
+
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
@@ -131,31 +215,76 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    func routeToCloud(
+        request: String,
+        tier: CloudTier,
+        context: PlaybackContext,
+        origin: Int?,
+        selection: CloudConversationSelection?,
+        preparedObserver: PreparedObserver? = nil
+    ) async -> CloudRouteResult {
+        // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
+        // whether the sink happens to be configured. Recording after the configured check made
+        // the seam blind to exactly the refused turns a caller-level case most needs to observe.
+        MainActor.assumeIsolated {
+            lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
+            lastOriginForTesting = origin
+        }
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
             let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
-            return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
+            return CloudRouteResult(
+                response: comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon),
+                outcome: .refused
+            )
+        }
+
+        // The conversation identity is prepared FIRST, before anything this turn can disturb.
+        // A nil result means the origin is NOT LIVE: this turn has no claim on any conversation,
+        // so it is refused — and it must be refused before touching successor-owned state. The
+        // supersede block below cancels the in-flight turn and claims `activeTurn`; running that
+        // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
+        // leave the sink pointing at a token nobody will ever complete.
+        let effectiveSelection = selection ?? conversationSelectionProvider()
+        let conversation: CloudPreparedConversation
+        do {
+            guard let prepared = conversationManager.prepare(
+                // The captured selection when the caller supplied one; the provider is the
+                // fallback for callers that did not, which is the late-reading behaviour this
+                // replaces.
+                selection: effectiveSelection,
+                origin: origin
+            ) else {
+                return CloudRouteResult(response: .silent, outcome: .refused)
+            }
+            conversation = prepared
+            preparedObserver?(prepared)
         }
 
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
         // Supersede any in-flight turn (double wake / barge-in) before touching
-        // shared per-turn state.
+        // shared per-turn state. Only a turn that will actually run supersedes.
         let turnToken = CloudTurnToken()
         activeTurn?.cancel()
         activeTurn = turnToken
 
-        // One envelope per logical turn: a fresh client-assigned `request_id`
-        // that any transport retry of this turn must reuse, capabilities gated
-        // on the renderer, a typed-only hint and a bounded prior conversation.
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
-            recentConversation: recentConversationProvider()
+            recentConversation: recentConversationProvider(),
+            conversation: conversation
         )
+        // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
+        // could re-drive it, and that retention IS what made replay possible: a completed or
+        // possibly-submitted request left on the books is exactly what a replay path would find.
+        // With no producer able to establish that a frame was never submitted, the honest state is
+        // to retain nothing, and there is no retry entry point left to consume one.
+        //
+        // The sink therefore has ONE path: prepare a turn, dispatch it, handle its events, report
+        // its outcome. Nothing here implies a second attempt is possible.
 
         // Per-turn quote state is turn-scoped: without this reset a `stop_quote`
         // in a turn that issued no `play_quote` would seek to a previous turn's
@@ -219,14 +348,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // not that the client has finished playing, so restoring here
                 // would resume the episode under the answer's tail. With nothing
                 // left to play the drain is a no-op and the restore is immediate.
-                if audioPlayer.hasPendingAudio {
-                    restoreHeldForPlayerDrain = true
+                // The turn's own drain is scheduled by `finish()`, and that is when the drain's
+                // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
+                // that `finish()` just assigned. Recording before would capture the PREVIOUS
+                // cycle's identity and reject this turn's own notification.
+                let needsDeferral = audioPlayer.hasPendingAudio
+                // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
+                // current value could pick up a later schedule, leaving this turn waiting on an
+                // identity that is not its own.
+                let scheduledEpoch = audioPlayer.finish()
+                if needsDeferral {
+                    restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
                 } else {
                     restoreTransientAudioState()
                 }
-                audioPlayer.finish()
-                return .silent
-            case let .error(code, message):
+                return CloudRouteResult(response: .silent, outcome: .completed)
+            case let .error(_, code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
                 restoreTransientAudioState()
@@ -244,18 +381,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
                 if spoken.isEmpty {
-                    return .earcon(.error)
+                    return CloudRouteResult(response: .earcon(.error), outcome: .failed(code: code))
                 }
-                return .spoken(spoken)
+                return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
             }
         }
 
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics.
-            return .silent
+            // The superseding turn owns pause/restore and analytics. Superseded is not a
+            // completion: the winner's turn decides the window, and reporting this one as
+            // completed would let a turn that was cancelled mid-stream reopen it.
+            return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
         restoreTransientAudioState()
-        return .silent
+        // The stream ended without `done`: the turn was truncated, which is not a
+        // completion and must not restore the allowance as though the model answered.
+        return CloudRouteResult(response: .silent, outcome: .earlyClose)
     }
 
     private func restoreTransientAudioState() {
@@ -276,9 +417,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         switch action {
         case "seek_to":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
-            capturePreActionPosition(referenceMs: referenceMs)
-            seekToReference(referenceMs)
+            // Two forms, per the wire contract's schema (app_operation_schema_map 11993ca):
+            // "ordinary" carries position_seconds in SINK time and seeks directly;
+            // "reference_target" carries reference_position_ms and requires the validated
+            // mapping. Both or neither is a malformed request, not a default to guess.
+            let sinkSeconds = params["position_seconds"]?.int64Value
+            let referenceMs = params["reference_position_ms"]?.int64Value
+            switch (sinkSeconds, referenceMs) {
+            case (let seconds?, nil):
+                seekToSinkSeconds(seconds)
+            case (nil, let reference?):
+                capturePreActionPosition(referenceMs: reference)
+                seekToReference(reference)
+            default:
+                recordSeekRejection(.nonSuccess(.refused, reason: OperationReason.malformedSeekTarget))
+            }
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
@@ -324,6 +477,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
     }
 
+    /// Records that a reference-time seek could not be mapped to playback time.
+    ///
+    /// The unavailable mapping is the operation's outcome: no position was changed, and the
+    /// reason the server is told is that this client cannot convert the target — not that it
+    /// sought somewhere arbitrary.
+    private func recordReferenceSeekUnavailable(referenceMs: Int64) {
+        unavailableReferenceSeek = OperationResult.nonSuccess(
+            .refused,
+            reason: OperationReason.referenceMappingUnavailable
+        )
+    }
+
+    /// The most recent unavailable-reference-seek outcome, consumed by the executor.
+    private(set) var unavailableReferenceSeek: OperationResult?
+
     /// Capture the current playback position before a relative seek so that a
     /// subsequent "go back to where I was" restores the correct place. The
     /// recovery contract (PR 59, cloud-seek-relative) requires this for all
@@ -347,10 +515,33 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return .forward // default: app's configurable interval
     }
 
+    /// Seeks to an absolute position in SINK time — the ordinary form, no mapping involved.
+    ///
+    /// Signed values are allowed: the duration-aware sink overload resolves a negative
+    /// position as an offset back from the episode end, matching how the local path behaves.
+    private func seekToSinkSeconds(_ seconds: Int64) {
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        _ = playbackSink.seekTo(positionSeconds: Int(seconds), episodeDurationSeconds: durationSeconds)
+    }
+
+    private func recordSeekRejection(_ result: OperationResult) {
+        lastSeekRejection = result
+    }
+
+    /// The most recent malformed-seek rejection, consumed by the executor.
+    @MainActor private(set) var lastSeekRejection: OperationResult?
+
     private func seekToReference(_ referenceMs: Int64) {
         let referenceSeconds = Double(referenceMs) / 1000.0
-        let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
-            ?? referenceSeconds
+        // Reference time is not playback time. The two happen to coincide on an unmapped
+        // episode, but taking the fallback when the mapping is *missing* silently seeks to a
+        // position the server never asked for — on a mapped episode that is the wrong place,
+        // and nothing downstream can tell it apart from a correct seek. So an unavailable
+        // mapping is reported as unavailable rather than converted by assumption.
+        guard let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds) else {
+            recordReferenceSeekUnavailable(referenceMs: referenceMs)
+            return
+        }
         let seconds = Int(playbackSeconds.rounded())
         // Negative positionSeconds is an offset back from the episode end.
         // Use the duration-aware overload so the sink resolves and bounds it.
@@ -374,13 +565,29 @@ extension CloudRouteSink {
         // frames arrive.
     }
 
-    func audioPlayerDidStop() {
+    func audioPlayerDidStop(drainEpoch: Int) {
         // The player has drained its buffer and stopped output. This is when a
         // hold taken for the turn may be released, so the answer is not played
         // over the resumed episode, and the turn's held state stays consistent
         // even though the sink has already returned to its caller.
-        guard restoreHeldForPlayerDrain else { return }
-        restoreHeldForPlayerDrain = false
+        //
+        // OWNERSHIP: act only for the turn that DEFERRED. A successor that inherited the hold has
+        // already taken it over (it keeps `didAutoPause`), so once ownership moves on, a
+        // notification belonging to the earlier turn must not release the newer turn's hold. The
+        // inherited transfer itself is unchanged — a turn that owns the hold still restores it,
+        // whether it took the hold or inherited it.
+        guard let deferred = restoreHeldForPlayerDrain else { return }
+        // The notification must belong to the drain this turn is waiting on. A foreign drain's
+        // notification is rejected on its own identity, and the record is LEFT INTACT so the turn
+        // that does own it is not robbed of its restoration.
+        guard deferred.drainEpoch == drainEpoch else {
+            return
+        }
+        // ...and the deferring turn must still own the release.
+        guard activeTurn == nil || activeTurn === deferred.owner else {
+            return
+        }
+        restoreHeldForPlayerDrain = nil
         restoreTransientAudioState()
     }
 }

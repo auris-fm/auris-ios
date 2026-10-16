@@ -1,18 +1,58 @@
 import AVFoundation
+import Combine
 import PocketCastsDataModel
 import PocketCastsUtils
 
 class VoiceControlAssembly {
+    /// Retains the route-scope subscription for the lifetime of the assembly. The
+    /// service holds the engine, so the binding must live at least as long.
+    private var cancellables = Set<AnyCancellable>()
+    /// The client factory the assembly used, retained so the acceptance operator entry submits through
+    /// the SAME client the sink was built with rather than constructing a second one. Set when the
+    /// service is built; production and tests both flow through it.
+    private var acceptanceClientFactory: (() -> CloudRouteClient) = CloudRouteSink.productionClientFactory()
+
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
+/// - Parameter injectedCapture: the microphone source. `nil` keeps the real one; a test
+    ///   substitutes it so the service can be driven through its REAL assembly and start path
+    ///   without opening the microphone. This is the only injection point — everything else is
+    ///   built as the app does.
+    /// Records the factory the sink is built with, so the acceptance entry uses the same one. This is
+    /// the point that WIRES the entry: the same call that builds the sink's client retains its factory
+    /// for acceptance, so the two cannot diverge.
+    @discardableResult
+    func acceptanceClientFactoryForBuild(_ injected: (() -> CloudRouteClient)? = nil) -> () -> CloudRouteClient {
+        let factory = injected ?? CloudRouteSink.productionClientFactory()
+        acceptanceClientFactory = factory
+        return factory
+    }
+
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
-        capture: NativeAudioCapture? = nil,
+        capture injectedCapture: (any AudioCaptureSource)? = nil,
+        inference injectedInference: (any LfmInference)? = nil,
+        modelManager injectedModelManager: ModelManager? = nil,
+        clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
+        cloudConfig injectedCloudConfig: CloudConfig? = nil,
+        asrBackend injectedBackend: (() -> AsrBackend?)? = nil,
+        onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
+        testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)? = nil,
+        onInputBarrierSettled: (@Sendable (IntentRoutingInput, VoiceControlService.InputBarrierOutcome) -> Void)? = nil,
+        onInputTerminal: (@Sendable (IntentRoutingInput, VoiceControlService.InputTerminalOutcome) -> Void)? = nil,
+        parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
         let gracePeriodSignal = GracePeriodSignal()
+        let conversationManager = CloudConversationManager()
+        // Keep the manager's live origin in step with the window that actually opens. The
+        // sink reads the origin from the INTENT (captured at dispatch), so this only supplies
+        // the value that decides whether a captured origin is still live.
+        // The live-origin binding is owned by the SERVICE (see `wireLiveOriginBinding`): a
+        // subscription stored here would be cancelled the moment this build call returns, leaving
+        // the manager unaware of every window that opens.
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
         let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
@@ -20,7 +60,7 @@ class VoiceControlAssembly {
         let playbackManager = PlaybackManager.shared
 
         let locale = Locale.current
-        guard let asrBackend = resolveAsrBackend(locale: locale) else {
+        guard let asrBackend = resolveAsrBackend(locale: locale, override: injectedBackend) else {
             let lang = locale.language.languageCode?.identifier ?? "?"
             FileLog.shared.addMessage(
                 "[VoicePipeline] unsupported locale \(lang) — voice control disabled (no Whisper product route)"
@@ -47,8 +87,10 @@ class VoiceControlAssembly {
             threshold: threshold
         )
 
+        let cloudAudioPlayer = CloudAudioPlayer()
+
         let asrEngine = VoiceAsrEngine(
-            capture: capture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
+            capture: injectedCapture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
             segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: asrBackend,
             signalFilter: SignalFilter(),
@@ -58,11 +100,33 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // One emitted-PCM reference for the whole session: the cloud-answer renderer
+        // feeds it, and the engine correlates against it. Without a producer the
+        // reference stays empty and the filter cannot fire.
+        let echoReference = PlaybackEchoReference()
+        cloudAudioPlayer.emittedPCMReference = echoReference
+        asrEngine.setEchoReference(echoReference)
+
+        // One handoff serves every producer whose audio the microphone can hear. It exists
+        // because the reference's append drops old samples with a memmove inside its lock,
+        // and a producer that appends from a deadline-bound callback can wait on that. The
+        // capacity is in blocks: at this size a saturated handoff drops rather than blocks,
+        // which leaves a visible gap in the reference instead of stalling the producer.
+        let echoHandoff = EchoReferenceHandoff(reference: echoReference, capacity: 8)
+        // The episode renderer publishes what it emits into this handoff. Set from here
+        // because the assembly holds both sides: the reference belongs to the voice layer and
+        // the renderer to playback. The renderer reads it inside `#if !APPCLIP`, since the
+        // App Clip compiles that file and has no voice layer to publish to.
+        EffectsPlayer.echoReferenceHandoff = echoHandoff
+
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).
 
-        let intentRouter = LfmIntentRouter()
+        let intentRouter = injectedInference == nil && injectedModelManager == nil
+            ? LfmIntentRouter()
+            : LfmIntentRouter(modelManager: injectedModelManager ?? ModelManager(),
+                              inference: injectedInference ?? LfmNativeInference())
 
         let analyticsService = DefaultAnalyticsService()
         let voiceAnalytics = VoiceAnalytics(analytics: analyticsService)
@@ -85,7 +149,9 @@ class VoiceControlAssembly {
             playbackQuerySink: PlaybackQuerySink(playbackManager: playbackManager),
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
-                audioPlayer: CloudAudioPlayer(),
+                clientFactory: acceptanceClientFactoryForBuild(injectedClientFactory),
+                isConfigured: { !(injectedCloudConfig ?? CloudConfig.shared).baseUrl.isEmpty },
+                audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
                 playbackSink: playbackSink,
                 fingerprintMapper: FingerprintTimingManager.shared,
@@ -93,7 +159,14 @@ class VoiceControlAssembly {
                     Int64((playbackManager.currentTime() * 1000).rounded())
                 },
                 cloudPlaybackContextState: cloudPlaybackContextState,
-                analytics: voiceAnalytics
+                analytics: voiceAnalytics,
+                // The live origin is the grace window's generation: a turn dispatched under
+                // an older window is refused rather than given a replacement conversation.
+                conversationManager: conversationManager,
+                conversationSelectionProvider: { [weak gracePeriodSignal] in
+                    // A wake opens a window; a recognised command continues the current one.
+                    (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
+                }
             ),
             playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,
@@ -102,6 +175,13 @@ class VoiceControlAssembly {
 
         let audioEngine = AVAudioEngine()
         let earconPlayer = EarconPlayer(engine: audioEngine)
+        // The earcon player is the second producer of emitted audio, after the cloud
+        // renderer. An earcon is audible to the microphone, so it belongs in the same
+        // reference; without it, a chime played while the user speaks forms a segment the
+        // filter cannot recognise as our output and the utterance is transcribed as if
+        // the user had said it.
+        earconPlayer.emittedPCMReference = echoReference
+        earconPlayer.handoff = echoHandoff
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 
@@ -121,14 +201,24 @@ class VoiceControlAssembly {
             dialogManager: VoiceDialogManager(),
             audioRenderer: audioRenderer,
             gracePeriodSignal: gracePeriodSignal,
+            liveOriginManager: conversationManager,
             analytics: voiceAnalytics,
-            isPlaybackActive: isPlaybackActive
+            isPlaybackActive: isPlaybackActive,
+            onInputRoutingFinished: onInputRoutingFinished,
+            testInputBarrier: testInputBarrier,
+            onInputBarrierSettled: onInputBarrierSettled,
+            onInputTerminal: onInputTerminal,
+            parsedIntentObserverFactory: parsedIntentObserverFactory
         )
     }
 
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
-    func resolveAsrBackend(locale: Locale) -> AsrBackend? {
-        AsrBackendSelector().select(locale: locale)
+    /// - Parameter override: PER-ASSEMBLY substitution; `nil` keeps the product selector, so
+    ///   production is unchanged. A per-instance parameter rather than a global static, so one
+    ///   fixture's substitution cannot leak into a concurrently running case.
+    func resolveAsrBackend(locale: Locale, override: (() -> AsrBackend?)? = nil) -> AsrBackend? {
+        if let override { return override() }
+        return AsrBackendSelector().select(locale: locale)
     }
 
     private func bundleURL(_ filename: String) -> URL {
@@ -145,6 +235,21 @@ class VoiceControlAssembly {
             fatalError("Missing wakeword model in bundle: wakeword/\(filename)")
         }
         return url
+    }
+
+    // MARK: - Acceptance operator entry
+
+    /// THE OPERATOR INVOCATION for authenticated acceptance. It builds the SAME client the sink uses
+    /// (`injectedClientFactory` when a test supplied one, else the production factory), so the harness
+    /// submits through the app's real credential path, and it exports only the allowlisted fields.
+    ///
+    /// Reachable rather than merely callable: a caller that already holds the assembly invokes this with
+    /// a nonce; nothing here reads a credential, and no authenticated request is issued unless a caller
+    /// invokes it against a signed-in client.
+    func runAcceptance(nonce: String, context: CloudRouteContext? = nil) async -> CloudAcceptanceHarness.Export {
+        let client = acceptanceClientFactory()
+        let routeContext = context ?? CloudRouteContext(episodeId: nil, clientPositionMs: nil)
+        return await CloudAcceptanceHarness.run(nonce: nonce, client: client, context: routeContext)
     }
 }
 

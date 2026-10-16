@@ -37,6 +37,7 @@
 
 /* Volume */
 "volume.current" = "Volume is %d%%";
+"volume.unavailable" = "Sorry, I can’t change the volume right now";
 
 /* Stats / Queries */
 "stats.check_profile" = "Check Stats in the Profile tab for %@";

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The APP's owning group, not a helper-only placeholder. A reader that declares its own
+	     group reports on itself; this helper exists to report on the app's store. -->
+	<!-- The group the helper's OWN application-identifier yields. Measured: a simulator product is
+	     attributed the default group of its application-identifier, and requesting a DIFFERENT group
+	     is refused (-34018). The helper's id is fm.auris.recoveryhelper, so its group is that id, not
+	     the app's fm.auris.debug. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)fm.auris.recoveryhelper</string>
+	</array>
+</dict>
+</plist>

@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// WebSocket client for `GET /api/v1/cloud/route`.
 ///
@@ -30,6 +31,10 @@ final class CloudRouteClient {
     /// Optional seam for the WebSocket task (see `WebSocketTasking`); `nil`
     /// uses the session's real web socket.
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
+
+    /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
+    /// injected-factory tests bypass the default path entirely.
+    private(set) var lastProductionTaskStateForTesting: URLSessionTask.State?
 
     /// Codecs advertised to the server in the authenticate frame.
     ///
@@ -119,6 +124,68 @@ final class CloudRouteClient {
         }
     }
 
+    /// The configured base URL, for a run to record as configuration (not a credential). It is what the
+    /// client will dial, and an empty value is the one condition that produces `invalid_request` before
+    /// any authentication is attempted.
+    var resolvedBaseURLForDiagnostics: String { baseURL }
+
+    /// Whether a credential is available, as a BOOLEAN: the value itself is never read out here. This
+    /// distinguishes `unauthorized` (no credential) from `invalid_request` (a malformed request).
+    var hasCredentialForDiagnostics: Bool {
+        get async { await tokenProvider.token() != nil }
+    }
+
+    /// OPT-IN ACCEPTANCE COLLECTION. It consumes the route stream for ONE controlled acceptance turn and
+    /// emits a single `CloudAcceptanceRecord` carrying only the allowlisted fields — the turn's request
+    /// id, its conversation id, the server's response text and the terminal outcome — with the request
+    /// id taken from the TURN THAT WAS SUBMITTED, so the record can be matched to its own incoming
+    /// events. It is deliberately not a general traffic capture: a caller opts in per turn, for the
+    /// benign acceptance turns only, and nothing outside the allowlist is exported.
+    func collectAcceptance(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        collectAcceptance(turn: turn, upstream: route(request: request, context: context, turn: turn))
+    }
+
+    /// The same collector over an INJECTED event stream, so the wrapper and the consumer can be driven
+    /// by a control without subclassing this final client. The production entry point above passes the
+    /// real stream; both share one implementation, so the control exercises the same code path.
+    func collectAcceptance(
+        turn: CloudTurnEnvelope,
+        upstream: AsyncStream<CloudRouteEvent>
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        let recorder = CloudAcceptanceRecord.Recorder(
+            requestId: turn.requestId,
+            conversationId: turn.conversation?.conversationId
+        )
+        let stream = AsyncStream<CloudRouteEvent> { continuation in
+            let task = Task {
+                var sawTerminal = false
+                for await event in upstream {
+                    recorder.observe(event)
+                    if case .done = event { sawTerminal = true }
+                    if case .error = event { sawTerminal = true }
+                    continuation.yield(event)
+                }
+                // AN END WITHOUT A TERMINAL IS AN INCOMPLETE TURN, not a cancellation: an upstream EOF
+                // happens on completion and on failure too. It is classified as a transport failure so
+                // a missing done/error cannot pass as success, and cancellation is NOT inferred here.
+                if !sawTerminal { recorder.markStreamEndedWithoutTerminal() }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                // Downstream termination cancels the work but does NOT by itself mean the TURN was
+                // cancelled: the consumer may simply have stopped reading. The recorder is left to
+                // whichever terminal it observed, and the caller marks .cancelled explicitly if it
+                // actually cancelled the turn.
+                task.cancel()
+            }
+        }
+        return (stream, { recorder.record() })
+    }
+
     // MARK: - WebSocket implementation
 
     /// Drives the turn over the WebSocket and always terminates the stream —
@@ -131,7 +198,10 @@ final class CloudRouteClient {
         continuation: AsyncStream<CloudRouteEvent>.Continuation
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
-            continuation.yield(.error(code: "invalid_request", message: ""))
+            // A distinguishable message, so a run's export says WHICH construction step failed rather
+            // than reporting both under `invalid_request`.
+            FileLog.shared.addMessage("[CloudRoute] invalid_request: websocket URL could not be built from baseURL='\(baseURL)'")
+            continuation.yield(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
             continuation.finish()
             return true
         }
@@ -146,14 +216,32 @@ final class CloudRouteClient {
             // No credential: fail closed with a terminal event, so the sink can
             // speak/earcon the failure. Finishing silently would leave the user
             // with no error and no outcome.
-            continuation.yield(.error(code: "unauthorized", message: ""))
+            continuation.yield(.error(source: .requestConstruction, code: "unauthorized", message: ""))
             continuation.finish()
             return true
         }
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        let wsTask: WebSocketTasking = webSocketTaskFactory?(req) ?? session.webSocketTask(with: req)
+        let wsTask: WebSocketTasking
+        if let injected = webSocketTaskFactory?(req) {
+            // A test double. It owns its own readiness, so nothing is resumed here.
+            wsTask = injected
+        } else {
+            // PRODUCTION PATH. A `URLSessionWebSocketTask` starts SUSPENDED and must be resumed to
+            // begin its connection: without this the task never reached startup, so a turn could
+            // not begin. (The observable is startup, not a claim about every send's behaviour —
+            // that stronger statement was not measured and is not made.) The controlled tests
+            // inject a factory and so never exercised this line, which is how the omission
+            // survived: a double bypasses the code it stands in for.
+            let task = session.webSocketTask(with: req)
+            task.resume()
+            // Exposed so a test can verify the PRODUCTION task is not left suspended. A test that
+            // injects a factory cannot reach this line at all, which is how the missing resume
+            // survived the whole suite.
+            lastProductionTaskStateForTesting = task.state
+            wsTask = task
+        }
 
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so
@@ -162,15 +250,38 @@ final class CloudRouteClient {
         // the connection held until the server's own idle timeout).
         defer { wsTask.cancel(with: .goingAway, reason: nil) }
 
+        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
+        // plainly rather than leave a dead branch implying otherwise.
+        //
+        // The failure kinds that could precede submission — frame construction and encoding —
+        // already return above as `invalid_request` BEFORE this point. Everything that can fail
+        // from here on happens after the send has been INVOKED, and a send may transmit and then
+        // throw, so admission is possible and the outcome must be preserved rather than replayed.
+        //
+        // Consequence, stated as a limit: this client cannot currently produce the one outcome that
+        // would make eligible automatic recovery possible. The transport never reports "provably
+        // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
+        // producer is separate work; until then, automatic retry of a turn is not available.
+
         do {
             // Send authentication frame. The task's text message is a String,
             // so the frame is serialized to JSON text here.
             let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
-                continuation.yield(.error(code: "invalid_request", message: ""))
+                FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
+                continuation.yield(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
                 continuation.finish()
                 return true
             }
+            // SUBMISSION PROVENANCE. The flag is set only AFTER the send returns, so a failure
+            // before this line is a frame that provably never left — the sole case where automatic
+            // recovery cannot duplicate a turn. Anything past this line may have been admitted.
+            // SUBMISSION IS ATTEMPTED BEFORE THE CALL, not proven after it. A send can TRANSMIT
+            // and then throw or lose its completion, so a flag set only on return would classify
+            // that frame as never-submitted — and it would be replayed although it may have been
+            // admitted. The conservative reading is the correct one here: once the send is
+            // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
+            // never left.
             try await wsTask.send(.string(authText))
 
             // Written by the receive loop and read by the timeout task, so the
@@ -191,7 +302,7 @@ final class CloudRouteClient {
                     return // cancelled: a frame arrived, the main loop owns the stream
                 }
                 if !terminalFlag.isSet {
-                    continuation.yield(.error(code: "connection_lost", message: ""))
+                    continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
                     continuation.finish()
                 }
             }
@@ -209,6 +320,12 @@ final class CloudRouteClient {
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
+                        if case .error(_, let code, _) = event {
+                            // BOUNDED: the CODE only. The server's free-form message is NOT written —
+                            // an arbitrary server string is not known to be free of sensitive content,
+                            // and the allowlist here is the acceptance protocol, not general traffic.
+                            FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")
+                        }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
                         // connection after `done`/`error`, so continuing to
@@ -225,7 +342,7 @@ final class CloudRouteClient {
 
             // WebSocket closed.
             if !terminalFlag.isSet {
-                continuation.yield(.error(code: "connection_lost", message: ""))
+                continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             }
             continuation.finish()
             return true
@@ -245,7 +362,7 @@ final class CloudRouteClient {
             // speaks a non-empty message verbatim, so it reached the user as
             // English prose in whatever locale they had set, instead of the
             // localized template or the error earcon.
-            continuation.yield(.error(code: "connection_lost", message: ""))
+            continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             continuation.finish()
             return true
         }
@@ -274,6 +391,15 @@ final class CloudRouteClient {
         frame["type"] = "authenticate"
         frame["access_token"] = credential
         frame["codecs"] = Self.supportedCodecs
+        // Record the OUTGOING frame's shape (keys and the codec list only; never the token) and the
+        // request/conversation ids, so a server `invalid_request` can be attributed to the frame we
+        // actually sent rather than deduced from the code.
+        let keys = frame.keys.sorted().joined(separator: ",")
+        FileLog.shared.addMessage(
+            "[CloudRoute] auth frame keys=[\(keys)] codecs=\(Self.supportedCodecs) "
+            + "requestId=\(turn.requestId) conversationId=\(turn.conversation?.conversationId ?? "nil") "
+            + "mode=\(turn.conversation?.mode ?? "nil") credentialPresent=true"
+        )
         return frame
     }
 
@@ -354,7 +480,7 @@ final class CloudRouteClient {
             // and is ignored. This guard lived in the retired SSE parser; the
             // contract it enforced rides the socket too.
             if isMalformedResultPayload(text) {
-                return [.error(code: "invalid_response", message: "")]
+                return [.error(source: .server, code: "invalid_response", message: "")]
             }
             guard let result = DiscoveryResult.parse(json: text) else { return [] }
             return [.result(result)]
@@ -367,7 +493,7 @@ final class CloudRouteClient {
             guard let code = json["code"] as? String,
                   let message = json["message"] as? String
             else { return [] }
-            return [.error(code: code, message: message)]
+            return [.error(source: .server, code: code, message: message)]
 
         default:
             return []

@@ -18,7 +18,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_vadSegmenter_energyBasedDetection() {
         let segmenter = NativeVadSegmenter()
         var utteranceReceived = false
-        segmenter.onUtterance = { _ in utteranceReceived = true }
+        segmenter.onUtterance = { _, _ in utteranceReceived = true }
 
         // Send speech-like samples (high energy)
         let speech: [Float] = (0..<320).map { sin(Float($0) * 0.1) }
@@ -40,7 +40,7 @@ final class NativeAudioCaptureTests: XCTestCase {
             minSpeechFrames: 2
         )
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         segmenter.process([1, 1])
         segmenter.process([0, 0])
@@ -71,7 +71,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_continuousSpeechPastAnyDurationBound_isNotEmittedAsAFragment() {
         let segmenter = NativeVadSegmenter()
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         // 16 kHz * 30 s = 480_000 samples, fed in 320-sample frames (20 ms).
         // Constant amplitude 1.0 => RMS 1.0, well above the default 0.002 threshold.
@@ -92,7 +92,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_continuousSpeech_isRetainedAndDeliveredWholeAtTheNaturalEndpoint() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         let frames = 480_000 / 320
         let speech = [Float](repeating: 1.0, count: 320)
@@ -115,7 +115,7 @@ final class NativeAudioCaptureTests: XCTestCase {
         // than an endpoint: the utterance stays open across it.
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: 10_000)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         // Two bursts separated by a single non-energetic frame: a framing boundary,
         // not an endpoint. Retention requires the two be delivered together.
@@ -146,7 +146,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_wordsBeforeAFramingBoundaryAreNotDiscarded() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         let speech = [Float](repeating: 1.0, count: 320)
         let silence = [Float](repeating: 0, count: 320)
@@ -165,7 +165,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_productionSegmenterWiresNoDurationBound() {
         let segmenter = NativeVadSegmenter(threshold: 0.020)  // exactly VoiceControlAssembly's construction
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         // 60 s of unbroken speech: far beyond any plausible bound.
         let speech = [Float](repeating: 1.0, count: 320)
@@ -187,7 +187,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_interruptionBeforeConfirmation_discardsPendingFrames_andIsNotTheRetentionDefect() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterances.append($0) }
+        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
 
         // Four energetic frames — one below the default minSpeechFrames of 5 — then an
         // interruption, then a confirmed utterance.
@@ -271,5 +271,46 @@ extension NativeAudioCaptureTests {
 
         XCTAssertFalse(session.setActiveCalls.contains { !$0.active },
                        "playback began during capture; teardown must observe it and leave the session active")
+    }
+}
+
+/// Pins the SUBSCRIBED capture-instant callback boundary: the control calls the same
+/// delivery function the production tap calls and observes what a real
+/// `onCapturedSamples` subscriber receives.
+extension NativeAudioCaptureTests {
+    func test_validHostTime_deliversTheHardwareCaptureInstantToASubscriber() throws {
+        let capture = NativeAudioCapture()
+        var received: [([Float], MonotonicTime?)] = []
+        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+
+        let hostTime: UInt64 = 987_654_321
+        let when = AVAudioTime(hostTime: hostTime, sampleTime: 0, atRate: 16_000)
+        XCTAssertTrue(when.isHostTimeValid, "fixture must carry a valid host time")
+
+        // The SAME function the tap calls — not a parallel copy of its arithmetic.
+        capture.deliver([0.25, -0.25], when: when)
+
+        XCTAssertEqual(received.count, 1, "the subscriber must observe the tap's delivery")
+        XCTAssertEqual(received.first?.0, [0.25, -0.25], "the samples must reach the subscriber")
+        let instant = try XCTUnwrap(received.first?.1, "a valid host time must deliver an instant")
+        XCTAssertEqual(instant, AVAudioTime.seconds(forHostTime: hostTime),
+                       "the delivered instant must be the buffer's own host time, not arrival time")
+    }
+
+    func test_invalidHostTime_deliversNilToASubscriberSoTheConsumerDoesNotGuess() {
+        let capture = NativeAudioCapture()
+        var received: [([Float], MonotonicTime?)] = []
+        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+
+        // A sample-time-only AVAudioTime has no valid host time — the shape the tap
+        // sees on routes where the hardware clock is unavailable.
+        let when = AVAudioTime(sampleTime: 512, atRate: 16_000)
+        XCTAssertFalse(when.isHostTimeValid, "fixture must carry an INVALID host time")
+
+        capture.deliver([0.25], when: when)
+
+        XCTAssertEqual(received.count, 1, "the subscriber must observe the delivery")
+        XCTAssertNil(received.first?.1,
+                     "an invalid host time must deliver nil, never fall back to arrival time")
     }
 }

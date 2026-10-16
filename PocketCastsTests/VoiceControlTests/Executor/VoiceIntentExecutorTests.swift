@@ -133,6 +133,124 @@ final class VoiceIntentExecutorTests: XCTestCase {
                      "an unattributable completion must not restore the allowance")
     }
 
+    /// A cloud turn that failed but reports itself by SPEAKING must not restore the
+    /// allowance. A spoken error and a silent success are both "no earcon", so the old
+    /// response-shape rule read this exact turn as a completion and reopened the window
+    /// for a turn that never happened.
+    func test_execute_spokenCloudErrorDoesNotRestoreTheAllowance() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        mockCloudRouteSink.response = .spoken("Connection lost. Please try again.")
+        mockCloudRouteSink.outcome = .failed(code: "connection_lost")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "a spoken cloud error restored the allowance as a completed turn")
+    }
+
+    /// The coming-soon refusal is the same shape: it renders as `.spoken` and must not
+    /// be recorded as a completed cloud route.
+    func test_execute_cloudRefusalDoesNotRestoreTheAllowance() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        mockCloudRouteSink.response = .spoken("Cloud processing is coming soon.")
+        mockCloudRouteSink.outcome = .refused
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
+                     "the coming-soon refusal was recorded as a completed cloud turn")
+    }
+
+    /// The executor must hand the sink the origin the turn was DISPATCHED under. Without
+    /// this the sink can only default, and a default makes the conversation bound inert: the
+    /// origin is then a constant, so no turn can ever be stale and every turn reads as a
+    /// fresh `create`. Asserting the captured value reaches the sink is what keeps that
+    /// property real rather than described.
+    func test_execute_passesTheCapturedOriginToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastOrigin, generation,
+            "the sink did not receive the turn's captured origin, so the conversation bound "
+                + "cannot distinguish a live dispatc from a stale one"
+        )
+    }
+
+    /// With nothing playing — the app's normal first interaction — the cloud turn must still be
+    /// dispatched with an ABSENT context, not refused locally. Refusing here is what made the
+    /// discovery turn unreachable on the client while the server had already been corrected.
+    func test_execute_dispatchesTheCloudTurnWithNoCurrentEpisode() async {
+        mockPlaybackContextProvider.context = nil
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what should I listen to",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertTrue(
+            mockCloudRouteSink.routeToCloudCalled,
+            "the turn was refused locally instead of being dispatched with absent context"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.episodeId,
+            "an episode id was invented for a turn with nothing playing"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.clientPositionMs,
+            "a position was invented for a turn with nothing playing"
+        )
+    }
+
+    /// The selection the turn was created with must reach the sink, not be re-read there. A
+    /// re-read happens after routing, so a queued turn would be classified by whatever the
+    /// window looks like later rather than by what selected it.
+    func test_execute_forwardsTheCapturedSelectionToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "and then",
+            tier: .unknown,
+            generation: generation,
+            selection: .followUp
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastSelection, .followUp,
+            "the sink did not receive the selection captured with the input"
+        )
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)
@@ -222,6 +340,13 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")
         XCTAssertEqual(mockCloudRouteSink.lastContext, context)
     }
+
+
+
+
+
+
+
 
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
@@ -419,12 +544,33 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var lastRequest: String?
     var lastContext: PlaybackContext?
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    /// Overridable so a case can drive a non-completing turn: the executor's grace
+    /// decision now depends on this, not on the rendered response.
+    var outcome: CloudRouteOutcome = .completed
+    var response: VoiceResponse = .spoken("Here's what I found")
+
+    /// The captured origin the executor passed, so a case can assert the turn carries the
+    /// window it was dispatched under rather than a live one.
+    var lastOrigin: Int?
+    /// The selection the executor captured, so a case can assert the turn carries what selected
+    /// it rather than whatever the window looks like later.
+    var lastSelection: CloudConversationSelection?
+    /// The request ids a retry named, in order.
+    var retriedRequestIds: [String] = []
+
+    func routeToCloud(
+        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
+        selection: CloudConversationSelection?,
+        preparedObserver: CloudRouteSink.PreparedObserver?
+    ) async -> CloudRouteResult {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
-        return .spoken("Here's what I found")
+        lastOrigin = origin
+        lastSelection = selection
+        return CloudRouteResult(response: response, outcome: outcome)
     }
+
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {
