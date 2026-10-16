@@ -1,0 +1,246 @@
+# Build the iOS app on every push, and run the tests on pull requests.
+#
+# Why every push, and not only pull requests: this repo has feature branches
+# that pull requests stack on top of. Those base branches have no PR of their
+# own, so PR-only CI never builds them and a compile error can sit on a shared
+# branch — invisible to review, because the broken file is not in any PR's diff.
+# Building on every push is what closes that gap.
+#
+# Which step would have caught the defect this workflow was written for:
+# **Build**. An unbalanced brace and `as? ?? ""` are compile errors, so the
+# build fails and no test needs to run. That is the whole case: a file that no
+# compiler had seen, on a branch that no PR described.
+#
+# The toolchain is pinned, not inherited. `.xcode-version` is this repo's pin
+# (the same file `.buildkite/shared-pipeline-vars` turns into the release image
+# `xcode-26.6`), so both jobs select that exact Xcode, install it if the image
+# does not ship it, and fail loudly if it cannot be selected. A run under a
+# different Xcode is worse than no run: `supportedModes: IntentModes` compiles
+# only against the iOS 26 SDK, so an image default of Xcode 16.4 reports a
+# toolchain failure as a code failure — and, in the other direction, a green
+# build under an unpinned toolchain does not vouch for the release toolchain.
+#
+# Prerequisites the runner must supply:
+#   - a macOS image (Xcode is installed below from the pin; the app's own
+#     frameworks are fetched/built here too)
+#   - network access (Xcode download, if needed, and the llama.cpp clone)
+# Platform and toolchain mismatches are asserted, never assumed: each job fails
+# at the step that detects the mismatch rather than later, opaquely, inside
+# `xcodebuild`.
+
+name: iOS build
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same ref cancels the older run — cheap check, cheap
+# cancel. Keyed on the branch, so the `push` and `pull_request` events for one
+# commit land in the SAME group and one cancels the other. That is how a single
+# build per commit is achieved: both events run the same build, so whichever
+# survives does the work (the surviving `pull_request` run also tests).
+# Keying on `github.ref` alone was the bug — `refs/heads/x` and
+# `refs/pull/N/merge` are different refs, so neither run cancelled the other and
+# every PR push built twice.
+concurrency:
+  group: ios-build-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (StagingDebug)
+    # Push only. The test job below compiles the app as part of
+    # `xcodebuild test`, so on a pull request this job was a **second full
+    # compile of the same commit** — 15m44s of a 25-minute run, twice paid.
+    # What the build job still uniquely covers is a **push to a branch with no
+    # PR**: a base branch that other PRs stack on has no PR of its own, so a
+    # compile error there is invisible to every review. That is the gap this
+    # job exists for, and it is the reason it must not be removed entirely.
+    if: github.event_name == 'push'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install and select the pinned Xcode (the image's default can be older,
+      # and "newest installed" is not the pin). The version is read from
+      # .xcode-version — the same pin the release image uses. The action
+      # downloads a version the image does not carry and fails when it cannot,
+      # so a wrong-toolchain run cannot look like a pass.
+      - name: Read pinned Xcode
+        id: xcode
+        run: echo "wanted=$(sed -E 's/^~> ?//' .xcode-version)" >> "$GITHUB_OUTPUT"
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ steps.xcode.outputs.wanted }}
+      - name: Assert pinned Xcode
+        run: |
+          want=$(sed -E 's/^~> ?//' .xcode-version)
+          xcodebuild -version
+          xcodebuild -version | grep -q "Xcode $want" || {
+            echo "expected Xcode $want, found:"; xcodebuild -version; exit 1; }
+
+      # The Staging scheme embeds an Apple Watch app, so **watchOS** is required
+      # as well as iOS. Install both up front so the check fails for the code
+      # rather than for a missing platform — and assert the outcome, because a
+      # download that yields no usable runtime must not report success
+      # (`|| true` here is what made that failure surface later, opaquely,
+      # inside `xcodebuild`).
+      - name: Ensure iOS and watchOS platforms
+        run: |
+          xcrun simctl list runtimes
+          for platform in iOS watchOS; do
+            if ! xcrun simctl list runtimes | grep -qi "$platform"; then
+              xcodebuild -downloadPlatform "$platform"
+            fi
+            xcrun simctl list runtimes | grep -qi "$platform" || {
+              echo "$platform runtime is not available after download"; exit 1; }
+          done
+          xcrun simctl list runtimes
+
+      # `make test_staging` resolves its simulator as
+      # `xcrun simctl list devices available | grep iPhone | tail -1`, so an
+      # empty device list would become an opaque destination error much later.
+      - name: Assert a simulator is available
+        run: |
+          xcrun simctl list devices available | grep -i iPhone
+
+      # The app cannot build without LocalApiCredentials.swift; this Makefile
+      # target writes an empty one (the repo's `external_contributor` path).
+      - name: Generate credentials stub
+        run: make external_contributor
+
+      # llama.cpp is a pinned static build that this script clones and compiles.
+      # Cache the checkout and the build output so repeat runs are minutes, not
+      # tens of minutes.
+      - name: Cache llama.cpp source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ThirdParty/llama-cpp-build
+            ${{ runner.temp }}/auris-llama-cpp
+          key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: deriveddata-${{ runner.os }}-
+
+      # THIS is the step that fails on a compile error such as an unbalanced
+      # brace or an invalid cast.
+      - name: Build
+        run: make build_staging
+
+  test:
+    name: Test (StagingDebug)
+    # Keep the expensive job where changes are already being reviewed.
+    #
+    # No `needs: build` on purpose: the jobs are independent, and depending on a
+    # build that the concurrency group may have cancelled (its sibling from the
+    # `push` event) would skip the tests for an ordinary PR.
+    #
+    # `make test_staging` compiles the app itself. The DerivedData cache step
+    # below restores `~/Library/Developer/Xcode/DerivedData`, but it does NOT
+    # spare this job the compile: a warm run measured 16m46s here with only
+    # ~4 minutes of testing, against a 15m44s build job. A restore *can* happen;
+    # the duration says what did. The build job no longer runs on PRs for that
+    # reason — this job was paying the compile twice over, not once.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      # Absolute and resolved in the shell for the check step's use; the upload
+      # step gets the same value through the job env rather than a step-local
+      # one (which does not reach a `uses:` step).
+      RESULTS_DIR: /Users/runner/Library/Developer/Xcode/DerivedData
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned Xcode
+        id: xcode
+        run: echo "wanted=$(sed -E 's/^~> ?//' .xcode-version)" >> "$GITHUB_OUTPUT"
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ steps.xcode.outputs.wanted }}
+      - name: Assert pinned Xcode
+        run: |
+          want=$(sed -E 's/^~> ?//' .xcode-version)
+          xcodebuild -version
+          xcodebuild -version | grep -q "Xcode $want" || {
+            echo "expected Xcode $want, found:"; xcodebuild -version; exit 1; }
+
+      # The test job runs the same Staging scheme with `buildForTesting = YES`,
+      # so it needs the watchOS runtime exactly as the build job does. Provision
+      # and assert here too, so a missing platform fails legibly instead of
+      # surfacing as an opaque test failure.
+      - name: Ensure iOS and watchOS platforms
+        run: |
+          for platform in iOS watchOS; do
+            if ! xcrun simctl list runtimes | grep -qi "$platform"; then
+              xcodebuild -downloadPlatform "$platform"
+            fi
+            xcrun simctl list runtimes | grep -qi "$platform" || {
+              echo "$platform runtime is not available after download"; exit 1; }
+          done
+          xcrun simctl list runtimes
+
+      - name: Assert a simulator is available
+        run: |
+          xcrun simctl list devices available | grep -i iPhone
+
+      - name: Generate credentials stub
+        run: make external_contributor
+
+      - name: Cache llama.cpp source and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ThirdParty/llama-cpp-build
+            ${{ runner.temp }}/auris-llama-cpp
+          key: llama-${{ runner.os }}-${{ hashFiles('scripts/build-llama-ios.sh') }}
+
+      # Same key as the build job. Measured on a warm run: this restore costs
+      # ~1m49s and 4.2 GB of transfer, and the build then recompiles 569 Swift
+      # files anyway — so it is not known to be buying anything. Kept for now
+      # rather than removed on reasoning, because the next run answers it either
+      # way: no slower without it ⇒ it was overhead; slower ⇒ it does carry
+      # dependency artefacts and needs a better key, not no key.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: deriveddata-${{ runner.os }}-
+
+      - name: Test
+        run: make test_staging
+
+      # Keep the result bundle per *attempt*. A re-run replaces the previous
+      # attempt's log in place, so without this a flaky failure's evidence is
+      # gone the moment anyone re-runs the job — the failing set becomes a
+      # recollection rather than an artifact. The name carries the attempt
+      # number for that reason.
+      # `if-no-files-found: error` on purpose: this step's only job is to
+      # upload, so finding nothing means the mechanism failed, and a green step
+      # with no artifact is the exact state this exists to prevent.
+      #
+      # The directory is an absolute path from the job env: `~` is not expanded
+      # by the action, and `runner.home` is not an Actions context (it expanded
+      # to nothing, giving `/Library/...`). The check step makes a miss say why,
+      # rather than surfacing only as an opaque upload error.
+      - name: Check the result bundle exists
+        if: failure()
+        run: |
+          ls -d "$RESULTS_DIR"/*/Logs/Test/*.xcresult || {
+            echo "no .xcresult bundle found under $RESULTS_DIR — the upload below would preserve nothing"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-attempt-${{ github.run_attempt }}
+          path: ${{ env.RESULTS_DIR }}/**/Logs/Test/*.xcresult
+          if-no-files-found: error
+          retention-days: 14
