@@ -1126,14 +1126,26 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// doc claimed a per-session climb — false semantics for any future diagnostic reader.
     func test_resetClearsSessionScopedDropDiagnostics() {
         let reference = PlaybackEchoReference()
-        let handoff = EchoReferenceHandoff(reference: reference, capacity: 1)
-
-        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        XCTAssertGreaterThan(
-            handoff.droppedBlockCount, 0,
-            "precondition: the first session must have recorded a drop"
+        // One notice per session is what "the latch is session-scoped" MEANS. Counting drops
+        // alone cannot see a suppressed notice, so the sink is injected and both sessions are
+        // asserted on their notices, not only on `droppedBlockCount` (reviewer finding).
+        let state = DropSinkRecorder()
+        let handoff = EchoReferenceHandoff(
+            reference: reference,
+            capacity: 1,
+            dropLog: { _ in state.record(sinkThread: Thread.current) }
         )
+
+        // --- Session 1 ---
+        var first = 0
+        handoff.withConsumerHeld {
+            handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            first = handoff.droppedBlockCount
+        }
+        XCTAssertGreaterThan(first, 0, "precondition: the first session must have recorded a drop")
+        handoff.drain()
+        XCTAssertEqual(state.noticeCount, 1, "session 1 did not get its single notice")
 
         handoff.reset()
         XCTAssertEqual(
@@ -1141,13 +1153,18 @@ final class EchoReferenceWiringTests: XCTestCase {
             "a reset left the previous session's drop count in place"
         )
 
-        // The latch is session-scoped too: the new session's first drop must be noticed.
-        // Nothing drains here, so capacity 1 overflows on the second submission.
-        handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        handoff.submit([Float](repeating: 0.4, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        // --- Session 2: the new session must be noticed too ---
+        var second = 0
+        handoff.withConsumerHeld {
+            handoff.submit([Float](repeating:0.3,count:100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            handoff.submit([Float](repeating:0.4,count:100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            second = handoff.droppedBlockCount
+        }
+        XCTAssertEqual(second, 1, "the new session's drop was not counted from zero")
+        handoff.drain()
         XCTAssertEqual(
-            handoff.droppedBlockCount, 1,
-            "the new session's drop was not counted from zero"
+            state.noticeCount, 2,
+            "a reset left the logged-once latch set: session 2 got no notice (total \(state.noticeCount))"
         )
     }
 
@@ -1163,36 +1180,51 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// case fails if that thread is the submitting thread. It also pins once-per-session
     /// latching under the new hop (two overflows, one notice).
     func test_dropNoticeRunsOffTheSubmittingThread_andLatchesOncePerSession() throws {
-        let submitThread = Thread.isMainThread
-        // The sink runs on the handoff's serial queue while the main thread reads the result
-        // after `drain()`, so the recorder is lock-guarded rather than a bare captured var.
+        // The submitting thread's REAL identity. This case does not declare @MainActor and
+        // XCTest may run it off the main thread, so "is the main thread" cannot distinguish
+        // the submitting thread from the handoff queue: both readings could be false, or both
+        // true, and a boolean comparison would still pass. Identity comparison is what makes
+        // the control measure the contract (reviewer finding on the previous version).
+        let submittingThread = Thread.current
         let state = DropSinkRecorder()
         let handoff = EchoReferenceHandoff(
             reference: PlaybackEchoReference(),
             capacity: 1,
-            dropLog: { _ in state.record(isMainThread: Thread.isMainThread) }
+            dropLog: { _ in state.record(sinkThread: Thread.current) }
         )
 
-        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
-        handoff.drain()  // flushes the queue hop as well
+        // Hold the serial consumer while overflowing, then release. Without this the second
+        // and third `submit` race the queued `deliver()` and may find `pending` already empty,
+        // so no drop occurs and the notice never fires — the old case passed on scheduling luck.
+        var droppedWhileHeld = 0
+        handoff.withConsumerHeld {
+            handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+            droppedWhileHeld = handoff.droppedBlockCount
+        }
+        XCTAssertEqual(
+            droppedWhileHeld, 2,
+            "precondition: holding the consumer at capacity 1 must overflow twice; got \(droppedWhileHeld)"
+        )
+
+        handoff.drain()  // releases the queue hop and lets every enqueued notice run
 
         let notices = state.noticeCount
         XCTAssertEqual(
             notices, 1,
             "the drop notice fired \(notices) times for two overflows — expected exactly one per session"
         )
-        // Comparing against the submitting thread's OWN identity, not `Thread.isMainThread`
-        // on both sides: this case does not declare @MainActor, and XCTest may run such cases
-        // off the main thread. If both readings happened to be `true`, an assertion written as
-        // "isMainThread == isMainThread" would pass even when the sink ran ON the submitting
-        // thread — which is the exact violation this case exists to catch.
-        let recorded = state.ranOnSubmittingThread
-        XCTAssertNotNil(recorded, "the sink never ran, so the thread contract was not exercised")
-        XCTAssertEqual(
-            recorded, false,
-            "the drop sink ran on the SUBMITTING thread, breaking the real-time contract"
+
+        let sinkIds = state.sinkThreadIds
+        XCTAssertFalse(
+            sinkIds.isEmpty,
+            "the sink never ran, so the thread contract was not exercised"
+        )
+        // THE CONTRACT: no recorded sink execution happened on the submitting thread.
+        XCTAssertTrue(
+            sinkIds.allSatisfy { $0 != ObjectIdentifier(submittingThread) },
+            "the drop sink ran on the SUBMITTING thread (\(sinkIds.contains(ObjectIdentifier(submittingThread)) ? "same identity" : "different")), breaking the real-time contract"
         )
     }
 
@@ -3183,13 +3215,17 @@ private final class FixedMonotonicClock: MonotonicClock {
 private final class DropSinkRecorder {
     private let lock = NSLock()
     private var _notices = 0
-    private var _threads: [Bool] = []
+    // ACTUAL thread identities, not `Thread.isMainThread`. Reviewer finding: a boolean main-thread
+    // reading made the control vacuous — a synchronous sink running on a non-main submitting
+    // thread recorded `false` and passed, even though it had run on the very thread it was
+    // supposed to avoid. Comparing identities is what measures "off the submitting thread".
+    private var _sinkThreads: [ObjectIdentifier] = []
 
-    func record(isMainThread: Bool) {
+    func record(sinkThread: Thread) {
         lock.lock()
         defer { lock.unlock() }
         _notices += 1
-        _threads.append(isMainThread)
+        _sinkThreads.append(ObjectIdentifier(sinkThread))
     }
 
     var noticeCount: Int {
@@ -3198,12 +3234,11 @@ private final class DropSinkRecorder {
         return _notices
     }
 
-    /// Whether the sink ever ran on the submitting thread. Read only AFTER `drain()`, which
-    /// fences the handoff's serial queue, so every hop has completed by then.
-    var ranOnSubmittingThread: Bool? {
+    /// Identities of the threads the sink actually ran on, in order. Empty when the sink never
+    /// ran, which the case treats as "the contract was never exercised" rather than as a pass.
+    var sinkThreadIds: [ObjectIdentifier] {
         lock.lock()
         defer { lock.unlock() }
-        guard let first = _threads.first else { return nil }
-        return first
+        return _sinkThreads
     }
 }

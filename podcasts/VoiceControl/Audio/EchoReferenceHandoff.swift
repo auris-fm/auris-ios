@@ -283,6 +283,19 @@ final class EchoReferenceHandoff {
         queue.sync {}
     }
 
+    /// Blocks until `body` returns, having first stopped the handoff's serial consumer at a
+    /// known point. Test-only seam for overflow controls.
+    ///
+    /// Without it a drop test is a race: `submit` enqueues `deliver()` on the same serial
+    /// queue, so with capacity 1 the consumer can empty `pending` between two submissions and
+    /// no overflow ever happens — the assertion then depends on scheduling luck (reviewer
+    /// finding). This runs `body` as a barrier ON the consumer queue, so nothing else queued
+    /// can run while it holds the queue; producers blocked in `submit` still accumulate, and
+    /// whatever drops were recorded inside `body` are guaranteed real.
+    func withConsumerHeld(_ body: () -> Void) {
+        queue.sync(execute: body)
+    }
+
     /// Ends the session: pending blocks are discarded and later deliveries from before the
     /// reset are refused. The session's DROP DIAGNOSTICS go with it — the count and the
     /// logged-once latch — so `droppedBlockCount` means "this session" and a new session
