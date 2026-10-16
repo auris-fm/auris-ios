@@ -31,7 +31,13 @@ struct FirebaseManager {
         // advances `lastFetchTime` inside updateMetadataWithFetchSuccessStatus, i.e. after a real
         // network exchange. So capture the time before the call and require it to have moved.
         #if os(iOS) && !APPCLIP
+        // Two independent reference points, both required. `fetchStartedAt` is our wall-clock start;
+        // `sdkTimeBeforeFetch` is the SDK's own prior timestamp. A backward clock jump can leave an OLD
+        // cached lastFetchTime still greater than our start, so comparing against only one of them can
+        // be fooled — the exchange must move the SDK timestamp from its previous value AND land past
+        // our start.
         let fetchStartedAt = VoiceSharingCoordinator.shared.nowForFreshnessCheck()
+        let sdkTimeBeforeFetch = VoiceSharingCoordinator.shared.lastFetchTime()
         let fetchToken = VoiceSharingCoordinator.shared.policy.tokenForFetchStart()
         #endif
         remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
@@ -57,7 +63,10 @@ struct FirebaseManager {
                 // correct for surfaces that cannot capture voice.
                 #if os(iOS) && !APPCLIP
                 let didActivate = activationError == nil
-                let provedFreshExchange = VoiceSharingCoordinator.shared.lastFetchAdvancedPast(fetchStartedAt)
+                let provedFreshExchange = VoiceSharingCoordinator.shared.lastFetchAdvancedPast(
+                    fetchStartedAt,
+                    previousSDKTime: sdkTimeBeforeFetch
+                )
                 VoiceSharingCoordinator.shared.policyRefreshAfterActivation(
                     freshActivationSucceeded: didActivate && provedFreshExchange,
                     fetchToken: fetchToken

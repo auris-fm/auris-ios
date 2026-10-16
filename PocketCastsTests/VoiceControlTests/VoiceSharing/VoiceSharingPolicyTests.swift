@@ -231,42 +231,49 @@ final class VoiceSharingPolicyTests: XCTestCase {
         )
         // The bridge's own freshness predicate is what rejects it — same function production calls.
         let startedAt = coordinator.nowForFreshnessCheck()
-        XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt),
+        let before = coordinator.lastFetchTime()
+        XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before),
                        "SDK lastFetchTime did not advance, so this was the cached short-circuit")
 
         // And the composed decision (didActivate && provedFreshExchange) therefore cannot install.
         let token = coordinator.policy.tokenForFetchStart()
         coordinator.policyRefreshAfterActivation(
-            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt),
+            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before),
             fetchToken: token)
         XCTAssertFalse(coordinator.policy.permitsCollection, "a cached success must not install a snapshot")
 
         // A genuine exchange advances the SDK clock past fetch start.
         coordinator.lastFetchTimeProvider = { Date(timeIntervalSince1970: 5_001) }
-        XCTAssertTrue(coordinator.lastFetchAdvancedPast(startedAt))
+        XCTAssertTrue(coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before))
         let freshToken = coordinator.policy.tokenForFetchStart()
         coordinator.policyRefreshAfterActivation(
-            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt),
+            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before),
             fetchToken: freshToken)
         XCTAssertTrue(coordinator.policy.permitsCollection, "a proven fresh exchange installs normally")
     }
 
-    /// Finding 2: identity captured at FETCH START and verified at INSTALL. A transition during the
-    /// config read must not let that callback's snapshot land.
+    /// Finding 2: identity captured at FETCH START and verified atomically at INSTALL — before AND
+    /// after the config read. A real account transition (sign-out/switch) landing while the read is in
+    /// flight bumps the generation, so that callback's snapshot cannot install afterwards.
     func test_identityChangesDuringConfigRead_blocksInstall() {
         let clock = StubMonotonicClock(time: 1_000)
-        var enrolled = true
+        // A box the read closure can drive once the policy exists: capturing a `var` here would be
+        // copied by value at closure creation, so it must be a reference cell.
+        final class Box { var invalidate: (() -> Void)? }
+        let box = Box()
         let policy = VoiceSharingPolicy(
             clock: clock,
-            readRemoteSwitch: {
-                // Models the account switching while the config read is in flight.
-                enrolled = false
+            readRemoteSwitch: { [box] in
+                // Models the account transitioning while the config read is in flight.
+                box.invalidate?()
                 return .valid(true)
             },
-            isAccountEnrolled: { enrolled }
+            isAccountEnrolled: { true }
         )
-        let token = policy.tokenForFetchStart()   // taken under the OLD identity
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: token))
+        box.invalidate = { [policy] in policy.invalidateForIdentityChange() }
+        let token = policy.tokenForFetchStart()   // taken under the OLD generation
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: token),
+                     "transition during the read must block install")
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -313,6 +320,99 @@ final class VoiceSharingPolicyTests: XCTestCase {
         // had raised the fence, this would stay dead forever.
         XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         XCTAssertTrue(policy.permitsCollection)
+    }
+
+    // MARK: - Review round 4: real SDK extraction, clock discontinuity, identity wiring
+
+    /// The SDK-facing extraction path driven with a faithful fixture: FIRRemoteConfigValue stores the
+    /// published value as UTF-8 bytes and exposes them via `dataValue`, so `"true"` arrives as the text
+    /// payload — NOT as an ObjC boolean. This is what production reads; a decoder that demanded a
+    /// boolean literal from `numberValue` would reject every real publication (see ROUND4 notes).
+    func test_extractRemoteSwitch_matchesSDKRepresentation() {
+        func data(_ s: String) -> Data { Data(s.utf8) }
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data("true"), sourceIsRemote: true), .valid(true))
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data("false"), sourceIsRemote: true), .valid(false))
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data(" true "), sourceIsRemote: true), .valid(true),
+                       "whitespace-tolerant but otherwise exact")
+        // Everything else fails closed, including things NSNumber coercion would have accepted.
+        for bad in ["1", "0", "yes", "1.5", "TRUE", "True", "", "null"] {
+            XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data(bad), sourceIsRemote: true), .unavailable,
+                           "\(bad.debugDescription) must not enable collection")
+        }
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: nil, sourceIsRemote: true), .unavailable)
+        // Non-remote sources (our compiled default, or an absent key) can never satisfy the policy.
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data("true"), sourceIsRemote: false), .unavailable,
+                       "a local default must never enable")
+    }
+
+    /// Same extraction reached through the injected value-source seam, i.e. the actual production
+    /// reader function rather than the static helper alone.
+    func test_productionReader_usesSeamAndExtraction() {
+        let clock = StubMonotonicClock(time: 1_000)
+        var published = Data("false".utf8)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            isAccountEnrolled: { true },
+            valueSource: { VoiceSharingCoordinator.RemoteValueSource(data: published, sourceIsRemote: true) }
+        )
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+
+        published = Data("true".utf8)   // server publishes the switch on
+        let token2 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token2)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "production reader picked up the remote change")
+    }
+
+    /// Clock discontinuity: a backward jump can leave an OLD cached SDK timestamp still ahead of our
+    /// wall-clock fetch start. Requiring the SDK timestamp to have MOVED from its prior value rejects
+    /// it, which a single-reference comparison would have accepted.
+    func test_backwardClockJump_oldCachedTimestamp_cannotPassFreshness() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 1_000) },          // clock jumped BACKWARD
+            lastFetchTime: { Date(timeIntervalSince1970: 9_000) } // stale cache, ahead of our start
+        )
+        let startedAt = coordinator.nowForFreshnessCheck()
+        let before = coordinator.lastFetchTime()
+        XCTAssertTrue(before! > startedAt, "precondition: cached SDK time exceeds wall-clock start")
+        XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before),
+                       "unmoved SDK timestamp must fail freshness even when it is ahead of start")
+
+        // Absent SDK timestamp also fails closed.
+        coordinator.lastFetchTimeProvider = { nil }
+        XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before))
+    }
+
+    /// Identity wiring through the real notification production uses.
+    func test_signOutNotification_invalidatesThroughRealObserver() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let center = NotificationCenter()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection)
+
+        center.post(name: .serverUserWillBeSignedOut, object: nil, userInfo: ["user_initiated": true])
+        XCTAssertFalse(coordinator.policy.permitsCollection, "real sign-out transition must drop permission")
+
+        // Fence stays until the new identity is readable; then a fresh install works again.
+        let staleToken = token
+        coordinator.identityBecameReadable()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: staleToken)
+        XCTAssertFalse(coordinator.policy.permitsCollection, "pre-transition token must not resurrect permission")
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true,
+                                                 fetchToken: coordinator.policy.tokenForFetchStart())
+        XCTAssertTrue(coordinator.policy.permitsCollection)
     }
 
     // MARK: - Target-membership boundary (the real defect this file must not re-break)

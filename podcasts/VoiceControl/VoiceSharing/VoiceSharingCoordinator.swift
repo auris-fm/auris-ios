@@ -24,13 +24,15 @@ final class VoiceSharingCoordinator {
         readRemoteSwitch: (() -> VoiceSharingPolicy.RemoteSwitchValue)? = nil,
         isAccountEnrolled: (() -> Bool)? = nil,
         now: @escaping () -> Date = Date.init,
-        lastFetchTime: @escaping () -> Date? = { RemoteConfig.remoteConfig().lastFetchTime }
+        lastFetchTime: @escaping () -> Date? = { RemoteConfig.remoteConfig().lastFetchTime },
+        valueSource: (() -> RemoteValueSource)? = nil
     ) {
         self.nowProvider = now
         self.lastFetchTimeProvider = lastFetchTime
+        self.valueSource = valueSource ?? Self.readSDKValue
         self.policy = VoiceSharingPolicy(
             clock: clock,
-            readRemoteSwitch: readRemoteSwitch ?? Self.readActivatedSwitch,
+            readRemoteSwitch: readRemoteSwitch ?? Self.defaultReadRemoteSwitch(valueSource: self.valueSource),
             isAccountEnrolled: isAccountEnrolled ?? { false }
         )
     }
@@ -55,15 +57,34 @@ final class VoiceSharingCoordinator {
     private let nowProvider: () -> Date
     var lastFetchTimeProvider: () -> Date?   // settable so tests drive the real decision function
 
+    /// The SDK-facing seam: exactly the two fields production reads off a config value. Isolated so
+    /// tests drive the SAME extraction path with a faithful fixture — a real `FIRRemoteConfigValue`, or
+    /// an equivalent data/source pair — without live Firebase credentials or configuration.
+    struct RemoteValueSource {
+        let data: Data?
+        let sourceIsRemote: Bool
+    }
+
+    var valueSource: () -> RemoteValueSource
+
     /// SDK bookkeeping accessors, exposed as functions so call sites read as intent.
     func nowForFreshnessCheck() -> Date { nowProvider() }
     func lastFetchTime() -> Date? { lastFetchTimeProvider() }
 
-    /// The fetch started at `startedAt`; a genuine network exchange advances the SDK's
-    /// `lastFetchTime` past it. Cached short-circuits leave it where it was.
-    func lastFetchAdvancedPast(_ startedAt: Date) -> Bool {
-        guard let last = lastFetchTimeProvider() else { return false }
-        return last > startedAt
+    /// Freshness predicate used by the production bridge. Requires BOTH:
+    ///  - the SDK timestamp advanced from its own prior value (`previousSDKTime`), and
+    ///  - the new value is past our wall-clock fetch start.
+    ///
+    /// A cached short-circuit leaves the SDK timestamp unchanged, so the first test fails. A backward
+    /// clock jump can leave an OLD cached timestamp still greater than our start, so the second test
+    /// alone is insufficient — that case fails closed here because the timestamp did not move.
+    ///
+    /// This is NOT a monotonic guarantee: it is the strongest statement the SDK's public bookkeeping
+    /// supports, and equal/absent/unmoved timestamps are all treated as "not proven".
+    func lastFetchAdvancedPast(_ startedAt: Date, previousSDKTime: Date?) -> Bool {
+        guard let now = lastFetchTimeProvider() else { return false }
+        if let previousSDKTime, now <= previousSDKTime { return false }   // SDK time did not move
+        return now > startedAt
     }
 
     /// Subscribes to sign-out/identity change so permission drops synchronously instead of
@@ -94,19 +115,32 @@ final class VoiceSharingCoordinator {
         if let identityObserver { NotificationCenter.default.removeObserver(identityObserver) }
     }
 
-    private static func readActivatedSwitch() -> VoiceSharingPolicy.RemoteSwitchValue {
-        guard FirebaseApp.app() != nil else { return .unavailable }
-        let config = RemoteConfig.remoteConfig()
-        // The VALUE SOURCE is the gate: only `.remote` (a genuinely published server value)
-        // counts. `.default` is OUR compiled fallback and `.static` means the key does not
-        // exist — neither may satisfy the policy. That is the fail-closed asymmetry the spec
-        // requires. (`RemoteConfigValue` has no `status` property; `source` is the only
-        // existence signal it offers.)
-        let value = config.configValue(forKey: Constants.RemoteParams.voiceSharingEnabled)
-        guard value.source == .remote else { return .unavailable }
-        // The decision is made by the production decoder, which refuses anything that is not a
-        // genuine boolean literal: `intValue` would coerce 1.5 → 1 and enable, and `boolValue`
-        // would accept "yes".
-        return VoiceSharingPolicy.decodeRemoteSwitch(value.numberValue)
+    /// Default reader: routes the seam's raw fields through the production extraction function.
+    /// Instance wiring passes `Self.defaultReadRemoteSwitch(valueSource:)` so an injected seam is
+    /// actually consulted instead of bypassed by a second static SDK read.
+    static func defaultReadRemoteSwitch(valueSource: @escaping () -> RemoteValueSource) -> () -> VoiceSharingPolicy.RemoteSwitchValue {
+        return {
+            let source = valueSource()
+            return VoiceSharingPolicy.extractRemoteSwitch(
+                data: source.data,
+                sourceIsRemote: source.sourceIsRemote
+            )
+        }
+    }
+
+    /// Reads the live SDK value into the seam's representation. `dataValue` is the UTF-8 payload the
+    /// server published; `.source` distinguishes a genuine remote publication from our compiled
+    /// default (`.default`) or an absent key (`.static`) — neither of which may satisfy the policy.
+    ///
+    /// NOTE: this deliberately does NOT use `numberValue`. FIRRemoteConfigValue implements it as
+    /// `[NSNumber numberWithDouble:self.stringValue.doubleValue]` (vendored Sources/FIRConfigValue.m),
+    /// so it always returns a boxed DOUBLE derived from text and never an ObjC boolean literal. A
+    /// decoder that demanded a boolean literal would reject every real publication — including
+    /// "true" — and the switch could never turn on at all. The faithful signals are the payload bytes
+    /// plus the source.
+    private static func readSDKValue() -> RemoteValueSource {
+        guard FirebaseApp.app() != nil else { return RemoteValueSource(data: nil, sourceIsRemote: false) }
+        let value = RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.voiceSharingEnabled)
+        return RemoteValueSource(data: value.dataValue as Data, sourceIsRemote: value.source == .remote)
     }
 }

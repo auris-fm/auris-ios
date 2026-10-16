@@ -61,6 +61,28 @@ final class VoiceSharingPolicy {
         return .unavailable
     }
 
+    /// SDK-facing extraction. This is the PRODUCTION path and the one controls must drive.
+    ///
+    /// Why it cannot simply read `numberValue`: FIRRemoteConfigValue's implementation is literally
+    /// `[NSNumber numberWithDouble:self.stringValue.doubleValue]` (vendored Sources/FIRConfigValue.m),
+    /// i.e. a boxed DOUBLE derived from text. It is never an ObjC boolean literal, so the strict
+    /// decoder above would reject every real publication — including `"true"` — and the feature could
+    /// never enable. The faithful signal is therefore the UTF-8 payload itself plus `source`.
+    ///
+    /// Accepted remote values are exactly `true` / `false` (case-sensitive, whitespace-tolerant);
+    /// anything else — `1`, `0`, `yes`, `1.5`, empty, absent, non-remote source — is unavailable ⇒ off.
+    static func extractRemoteSwitch(data: Data?, sourceIsRemote: Bool) -> RemoteSwitchValue {
+        guard sourceIsRemote, let data else { return .unavailable }
+        guard let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return .unavailable
+        }
+        switch text {
+        case "true": return .valid(true)
+        case "false": return .valid(false)
+        default: return .unavailable
+        }
+    }
+
     private let clock: MonotonicClock
     private let leaseSeconds: TimeInterval
     private let readRemoteSwitch: () -> RemoteSwitchValue
@@ -95,14 +117,13 @@ final class VoiceSharingPolicy {
     /// by a newer identity — cannot install under the new identity's authority.
     struct FetchToken: Equatable {
         let identityGeneration: Int
-        let enrolledAtFetchStart: Bool
     }
 
     /// Snapshot of identity for starting a fetch. Call this at FETCH START, not at completion.
     func tokenForFetchStart() -> FetchToken {
         lock.lock()
         defer { lock.unlock() }
-        return FetchToken(identityGeneration: identityGenerationCounter, enrolledAtFetchStart: isAccountEnrolled())
+        return FetchToken(identityGeneration: identityGenerationCounter)
     }
 
     /// `freshActivationSucceeded` is the caller's evidence that THIS call follows a fetch
@@ -147,11 +168,12 @@ final class VoiceSharingPolicy {
         // Enrollment is compared too: a transition that does NOT bump the generation (e.g. an
         // in-account withdrawal) still changes this, so the read-time value cannot be trusted as
         // "still the identity we started for".
+        // Generation alone is the identity authority: every real transition — sign-out, account
+        // switch, and in-account withdrawal — bumps it. Comparing enrollment here would re-check the
+        // same fact twice; enrollment is instead read at decision time by `permitsCollection`.
         guard pendingIdentityFence == 0,
               fetchToken.identityGeneration == identityGenerationCounter,
-              generationNowAtStart == identityGenerationCounter,
-              fetchToken.enrolledAtFetchStart == isAccountEnrolled(),
-              fetchToken.enrolledAtFetchStart == isAccountEnrolled()
+              generationNowAtStart == identityGenerationCounter
         else { return nil }
         switch value {
         case .unavailable:
