@@ -19,7 +19,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .unavailable },
             isAccountEnrolled: { true }
         )
-        XCTAssertNil(policy.refreshAfterActivation())
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
         XCTAssertFalse(policy.permitsCollection, "an unavailable remote value must never enable collection")
     }
 
@@ -30,7 +30,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(false) },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation()
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -41,7 +41,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { false }
         )
-        _ = policy.refreshAfterActivation()
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
         XCTAssertFalse(policy.permitsCollection, "Firebase supplies configuration, never authorization")
     }
 
@@ -53,7 +53,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation()
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
         XCTAssertTrue(policy.permitsCollection)
         clock.advance(59)
         XCTAssertTrue(policy.permitsCollection)
@@ -73,10 +73,10 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { remote },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation()
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
         XCTAssertTrue(policy.permitsCollection)
         remote = .unavailable
-        XCTAssertNil(policy.refreshAfterActivation(), "a bad publication must clear the snapshot")
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true), "a bad publication must clear the snapshot")
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -94,7 +94,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             isAccountEnrolled: { true }           // account still enrolled
         )
         XCTAssertFalse(relaunched.permitsCollection, "before activate completes after restart, collection is off regardless of remote/account state")
-        _ = relaunched.refreshAfterActivation()
+        _ = relaunched.refreshAfterActivation(freshActivationSucceeded: true)
         XCTAssertTrue(relaunched.permitsCollection, "only a fresh post-activation install enables it")
     }
 
@@ -105,6 +105,113 @@ final class VoiceSharingPolicyTests: XCTestCase {
         let storedNames = Set(mirror.children.map { $0.label ?? "" })
         XCTAssertFalse(storedNames.contains("restored"), "no hidden restore slot may exist")
         XCTAssertNotNil(storedNames)
+    }
+
+    // MARK: - Review round 2: activation evidence, strict decoding, identity invalidation
+
+    /// Finding 1: a failed fetch (cached / no-network) must NOT renew a stale lease.
+    func test_failedActivation_clearsAndDoesNotRenewLease() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            leaseSeconds: 60,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        clock.advance(30)
+        XCTAssertTrue(policy.permitsCollection)
+
+        // A later callback that reports failure must not extend anything: the original expiry
+        // (t=1060) still governs, so collection stops on schedule rather than living on.
+        policy.refreshAfterActivation(freshActivationSucceeded: false)
+        clock.advance(30) // t = 1060 -> past the ORIGINAL expiry
+        XCTAssertFalse(policy.permitsCollection, "a failed fetch/activate pair may not renew the lease")
+    }
+
+    /// The actual bridge shape: activate returning an error installs nothing even when the
+    /// store would have served a valid-looking value.
+    func test_activateError_installsNothingEvenIfValueLooksValid() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: false))
+        XCTAssertFalse(policy.permitsCollection)
+    }
+
+    /// Finding 2: drive the PRODUCTION decoder with raw published values. NSNumber.intValue
+    /// truncates 1.5 to 1 and boolValue accepts strings, so coercion must be refused here —
+    /// not hidden behind an injected `.valid(...)` enum.
+    func test_productionDecoder_rejectsNonBooleanPublications() {
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(kCFBooleanTrue), .valid(true))
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(kCFBooleanFalse), .valid(false))
+        // Numeric look-alikes are INVALID, and invalid means disabled.
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 1.5)), .unavailable, "intValue would coerce 1.5 -> 1 and enable")
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 1)), .unavailable)
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 0)), .unavailable)
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 2)), .unavailable)
+        XCTAssertEqual(VoiceSharingPolicy.decodeRemoteSwitch(nil), .unavailable)
+    }
+
+    /// The decoder's output feeds the same gate as everything else: a coerced-looking 1.5
+    /// publication cannot produce an enabled snapshot.
+    func test_coercedNumericPublication_disablesThroughTheRealGate() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: { VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 1.5)) },
+            isAccountEnrolled: { true }
+        )
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertFalse(policy.permitsCollection)
+    }
+
+    /// Finding 3: enrollment must not be frozen into the snapshot. Withdrawal flips permission
+    /// immediately, without waiting for the lease to lapse.
+    func test_withdrawalAfterInstall_stopsCollectionImmediately() {
+        let clock = StubMonotonicClock(time: 1_000)
+        var enrolled = true
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            leaseSeconds: 60,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { enrolled }
+        )
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertTrue(policy.permitsCollection)
+
+        enrolled = false // withdrawal / sign-out
+        policy.invalidateForIdentityChange()
+        XCTAssertFalse(policy.permitsCollection, "a frozen accountEnrolled flag would keep collecting after withdrawal")
+    }
+
+    /// Finding 3 fence: a refresh that belongs to the previous identity must not restore
+    /// permission while the new identity is still unknown.
+    func test_staleRefreshAfterIdentityChange_cannotRestorePermission() {
+        let clock = StubMonotonicClock(time: 1_000)
+        var enrolled = true
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { enrolled }
+        )
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        XCTAssertTrue(policy.permitsCollection)
+
+        // Account switch: old identity's fetch completes late, new enrollment not yet readable.
+        enrolled = false
+        policy.invalidateForIdentityChange()
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true), "fenced install must not restore permission")
+        XCTAssertFalse(policy.permitsCollection)
+
+        // Once the new state is readable, a genuine opt-in installs again.
+        enrolled = true
+        policy.identityBecameReadable()
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertTrue(policy.permitsCollection)
     }
 
     // MARK: - Target-membership boundary (the real defect this file must not re-break)

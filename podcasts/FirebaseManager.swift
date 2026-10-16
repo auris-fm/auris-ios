@@ -25,26 +25,31 @@ struct FirebaseManager {
         }
         remoteConfig.setDefaults(remoteConfigDefaults)
 
-        remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, _ in
-            if status == .success {
-                remoteConfig.activate { _, _ in
-                    #if !APPCLIP
-                    // Snapshot installation happens AFTER activate finishes, never after
-                    // fetch alone: reading values between fetch and activate would mix
-                    // template generations. Completion order matters for VoiceSharingPolicy's
-                    // "valid only post-fetch/activate" rule.
-                    //
-                    // App-only by necessity AND by policy: FirebaseManager.swift is also compiled
-                    // into the App Clip (and TV) targets, which do not include the VoiceControl
-                    // sources at all, so an unguarded reference there does not compile. Skipping
-                    // the refresh leaves those targets on the fail-closed snapshot (no valid
-                    // post-activate value => collection disabled), which is the correct state for
-                    // surfaces that cannot capture voice anyway.
-                    VoiceSharingCoordinator.shared.policyRefreshAfterActivation()
-                    #endif
-                    completion?(status)
-                }
-            } else {
+        remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
+            guard status == .success, error == nil else {
+                // A failed fetch — including cached/no-network outcomes — must NOT renew the
+                // lease. Nothing was activated, so whatever snapshot is installed keeps its
+                // existing expiry and simply stops permitting once it lapses.
+                completion?(status)
+                return
+            }
+            remoteConfig.activate { _, activationError in
+                // The only path that may install/renew a snapshot: a fresh fetch that succeeded
+                // AND an activate that returned without error. Installation happens after
+                // activate returns, never after fetch alone, so values cannot come from mixed
+                // template generations.
+                //
+                // Condition is `os(iOS) && !APPCLIP`, NOT `!APPCLIP` alone: this file is compiled
+                // into podcasts, Pocket Casts App Clip and Pocket Casts TV App, and the TV target's
+                // configurations define no APPCLIP flag at all (only Debug sets
+                // SWIFT_ACTIVE_COMPILATION_CONDITIONS there), so `!APPCLIP` would reference the
+                // app-only Coordinator from the tvOS build, whose sources do not include
+                // VoiceControl. Those targets stay on the fail-closed default (disabled), which is
+                // correct for surfaces that cannot capture voice.
+                #if os(iOS) && !APPCLIP
+                let didActivate = activationError == nil
+                VoiceSharingCoordinator.shared.policyRefreshAfterActivation(freshActivationSucceeded: didActivate)
+                #endif
                 completion?(status)
             }
         }
