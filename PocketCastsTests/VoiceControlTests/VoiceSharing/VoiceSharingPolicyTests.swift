@@ -447,6 +447,54 @@ final class VoiceSharingPolicyTests: XCTestCase {
                        "the app's own lifecycle must have established the subscription")
     }
 
+    /// Repeated activation is the shape that exposed the leak: `setupVoiceControlIfNeeded()` runs on
+    /// EVERY app activation, so a non-idempotent installer accumulates observers and one sign-out fires
+    /// several generation bumps. A single-activation control cannot see this at all.
+    func test_doubleActivation_oneSignOutCausesExactlyOneGenerationTransition() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        let center = NotificationCenter()
+        let appDelegate = AppDelegate()
+        appDelegate.setupVoiceSharingIdentityInvalidation(onNotificationCenter: center, coordinator: coordinator)
+        // Second activation (production calls this same path again).
+        appDelegate.setupVoiceSharingIdentityInvalidation(onNotificationCenter: center, coordinator: coordinator)
+
+        // Baseline install under current identity.
+        let firstToken = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: firstToken)
+        XCTAssertTrue(coordinator.policy.permitsCollection)
+
+        center.post(name: .serverUserWillBeSignedOut, object: nil, userInfo: ["user_initiated": true])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+
+        // ONE transition means exactly one generation step. If both observers survived, this sign-out
+        // would have bumped twice and the next token would be two ahead of `firstToken`.
+        coordinator.identityBecameReadable()
+        let secondToken = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: secondToken)
+        XCTAssertTrue(coordinator.policy.permitsCollection)
+
+        center.post(name: .serverUserWillBeSignedOut, object: nil, userInfo: ["user_initiated": true])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        coordinator.identityBecameReadable()
+        let thirdToken = coordinator.policy.tokenForFetchStart()
+
+        // A leaked duplicate observer invalidates twice per notification, so a token captured after the
+        // SECOND notification differs from one captured after the first — observable as an extra bump.
+        XCTAssertEqual(thirdToken.identityGeneration - secondToken.identityGeneration, 1,
+                       "one sign-out must advance identity generation by exactly 1 (duplicate observers bump more)")
+        XCTAssertEqual(secondToken.identityGeneration - firstToken.identityGeneration, 1,
+                       "same for the first transition")
+    }
+
     /// Identity wiring through the real notification production uses.
     func test_signOutNotification_invalidatesThroughRealObserver() {
         let clock = StubMonotonicClock(time: 1_000)

@@ -94,12 +94,23 @@ final class VoiceSharingCoordinator {
         return now > startedAt
     }
 
-    /// Subscribes to sign-out/identity change so permission drops synchronously instead of
-    /// surviving inside a still-valid snapshot. Returns the invalidation closure as well, so a
-    /// composition site that already observes this notification can call it directly rather
-    /// than registering a duplicate observer.
+    /// The center an installed observer was registered on. Removing an observer must be done through
+    /// the SAME center that added it — `removeObserver(_:)` alone would not reach a non-default center.
+    private var identityCenter: NotificationCenter?
+
+    /// Subscribes to sign-out/identity change so permission drops synchronously instead of surviving
+    /// inside a still-valid snapshot. IDEMPOTENT by construction: `setupVoiceControlIfNeeded()` runs on
+    /// every activation, so a second call removes the previous subscription (from its actual center)
+    /// before installing a new one. Without that, each activation leaked an observer and one sign-out
+    /// notification fired N invalidations — while a single-activation test could never see it.
+    ///
+    /// Returns the invalidation closure so a composition site that already observes this notification
+    /// can call it directly rather than registering a duplicate.
     @discardableResult
     func installIdentityInvalidation(onNotificationCenter center: NotificationCenter = .default) -> () -> Void {
+        if let previous = identityObserver {
+            (identityCenter ?? center).removeObserver(previous)
+        }
         let invalidate: () -> Void = { [weak self] in
             guard let self else { return }
             self.policy.invalidateForIdentityChange()
@@ -109,6 +120,7 @@ final class VoiceSharingCoordinator {
             object: nil,
             queue: .main
         ) { _ in invalidate() }
+        identityCenter = center
         return invalidate
     }
 
@@ -119,7 +131,9 @@ final class VoiceSharingCoordinator {
     }
 
     deinit {
-        if let identityObserver { NotificationCenter.default.removeObserver(identityObserver) }
+        if let identityObserver {
+            (identityCenter ?? .default).removeObserver(identityObserver)
+        }
     }
 
     /// Default reader: routes the seam's raw fields through the production extraction function.
