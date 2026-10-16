@@ -1185,7 +1185,6 @@ final class EchoReferenceWiringTests: XCTestCase {
         // the submitting thread from the handoff queue: both readings could be false, or both
         // true, and a boolean comparison would still pass. Identity comparison is what makes
         // the control measure the contract (reviewer finding on the previous version).
-        let submittingThread = Thread.current
         let state = DropSinkRecorder()
         let handoff = EchoReferenceHandoff(
             reference: PlaybackEchoReference(),
@@ -1196,8 +1195,14 @@ final class EchoReferenceWiringTests: XCTestCase {
         // Hold the serial consumer while overflowing, then release. Without this the second
         // and third `submit` race the queued `deliver()` and may find `pending` already empty,
         // so no drop occurs and the notice never fires — the old case passed on scheduling luck.
+        var submittingThreadId: ObjectIdentifier?
         var droppedWhileHeld = 0
         handoff.withConsumerHeld {
+            // Captured INSIDE the barrier, where `submit` actually executes — not before
+            // `queue.sync`, which would silently assume the sync body stays on the original
+            // caller's thread (reviewer precision note). Whoever performs the submits is, by
+            // definition, the submitting thread this assertion is measured against.
+            submittingThreadId = ObjectIdentifier(Thread.current)
             handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
             handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
             handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
@@ -1222,9 +1227,10 @@ final class EchoReferenceWiringTests: XCTestCase {
             "the sink never ran, so the thread contract was not exercised"
         )
         // THE CONTRACT: no recorded sink execution happened on the submitting thread.
+        let submitId = try XCTUnwrap(submittingThreadId, "the barrier body never ran, so the control measured nothing")
         XCTAssertTrue(
-            sinkIds.allSatisfy { $0 != ObjectIdentifier(submittingThread) },
-            "the drop sink ran on the SUBMITTING thread (\(sinkIds.contains(ObjectIdentifier(submittingThread)) ? "same identity" : "different")), breaking the real-time contract"
+            sinkIds.allSatisfy { $0 != submitId },
+            "the drop sink ran on the SUBMITTING thread (\(sinkIds.contains(submitId) ? "same identity" : "different")), breaking the real-time contract"
         )
     }
 
