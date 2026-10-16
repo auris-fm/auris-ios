@@ -25,6 +25,15 @@ struct FirebaseManager {
         }
         remoteConfig.setDefaults(remoteConfigDefaults)
 
+        // Freshness must be PROVEN, not assumed from `.success`: the SDK returns
+        // FIRRemoteConfigFetchStatusSuccess on its cached path too (RCNConfigFetch short-circuits
+        // with Success + nil error when the minimum fetch interval has not elapsed), and it only
+        // advances `lastFetchTime` inside updateMetadataWithFetchSuccessStatus, i.e. after a real
+        // network exchange. So capture the time before the call and require it to have moved.
+        #if os(iOS) && !APPCLIP
+        let fetchStartedAt = VoiceSharingCoordinator.shared.nowForFreshnessCheck()
+        let fetchToken = VoiceSharingCoordinator.shared.policy.tokenForFetchStart()
+        #endif
         remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
             guard status == .success, error == nil else {
                 // A failed fetch — including cached/no-network outcomes — must NOT renew the
@@ -48,7 +57,11 @@ struct FirebaseManager {
                 // correct for surfaces that cannot capture voice.
                 #if os(iOS) && !APPCLIP
                 let didActivate = activationError == nil
-                VoiceSharingCoordinator.shared.policyRefreshAfterActivation(freshActivationSucceeded: didActivate)
+                let provedFreshExchange = VoiceSharingCoordinator.shared.lastFetchAdvancedPast(fetchStartedAt)
+                VoiceSharingCoordinator.shared.policyRefreshAfterActivation(
+                    freshActivationSucceeded: didActivate && provedFreshExchange,
+                    fetchToken: fetchToken
+                )
                 #endif
                 completion?(status)
             }

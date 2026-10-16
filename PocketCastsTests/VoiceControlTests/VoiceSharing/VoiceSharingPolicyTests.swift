@@ -19,7 +19,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .unavailable },
             isAccountEnrolled: { true }
         )
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         XCTAssertFalse(policy.permitsCollection, "an unavailable remote value must never enable collection")
     }
 
@@ -30,7 +30,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(false) },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -41,7 +41,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { false }
         )
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         XCTAssertFalse(policy.permitsCollection, "Firebase supplies configuration, never authorization")
     }
 
@@ -53,7 +53,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         XCTAssertTrue(policy.permitsCollection)
         clock.advance(59)
         XCTAssertTrue(policy.permitsCollection)
@@ -73,10 +73,10 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { remote },
             isAccountEnrolled: { true }
         )
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         XCTAssertTrue(policy.permitsCollection)
         remote = .unavailable
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true), "a bad publication must clear the snapshot")
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()), "a bad publication must clear the snapshot")
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -94,7 +94,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             isAccountEnrolled: { true }           // account still enrolled
         )
         XCTAssertFalse(relaunched.permitsCollection, "before activate completes after restart, collection is off regardless of remote/account state")
-        _ = relaunched.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = relaunched.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: relaunched.tokenForFetchStart())
         XCTAssertTrue(relaunched.permitsCollection, "only a fresh post-activation install enables it")
     }
 
@@ -118,13 +118,13 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { true }
         )
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         clock.advance(30)
         XCTAssertTrue(policy.permitsCollection)
 
         // A later callback that reports failure must not extend anything: the original expiry
         // (t=1060) still governs, so collection stops on schedule rather than living on.
-        policy.refreshAfterActivation(freshActivationSucceeded: false)
+        policy.refreshAfterActivation(freshActivationSucceeded: false, fetchToken: policy.tokenForFetchStart())
         clock.advance(30) // t = 1060 -> past the ORIGINAL expiry
         XCTAssertFalse(policy.permitsCollection, "a failed fetch/activate pair may not renew the lease")
     }
@@ -138,7 +138,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { true }
         )
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: false))
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: false, fetchToken: policy.tokenForFetchStart()))
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -165,7 +165,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { VoiceSharingPolicy.decodeRemoteSwitch(NSNumber(value: 1.5)) },
             isAccountEnrolled: { true }
         )
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         XCTAssertFalse(policy.permitsCollection)
     }
 
@@ -180,7 +180,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { enrolled }
         )
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         XCTAssertTrue(policy.permitsCollection)
 
         enrolled = false // withdrawal / sign-out
@@ -198,19 +198,120 @@ final class VoiceSharingPolicyTests: XCTestCase {
             readRemoteSwitch: { .valid(true) },
             isAccountEnrolled: { enrolled }
         )
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true)
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         XCTAssertTrue(policy.permitsCollection)
 
         // Account switch: old identity's fetch completes late, new enrollment not yet readable.
         enrolled = false
         policy.invalidateForIdentityChange()
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true), "fenced install must not restore permission")
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()), "fenced install must not restore permission")
         XCTAssertFalse(policy.permitsCollection)
 
         // Once the new state is readable, a genuine opt-in installs again.
         enrolled = true
         policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true))
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
+        XCTAssertTrue(policy.permitsCollection)
+    }
+
+    // MARK: - Review round 3: real bridge (freshness proof, token fencing, transient failure)
+
+    /// Finding 1: `.success` alone is NOT freshness. The SDK returns Success with nil error on its
+    /// cached short-circuit (RCNConfigFetch reports Success without touching lastFetchTime), so the
+    /// production bridge must prove `lastFetchTime` advanced past fetch start. Drives the real
+    /// coordinator decision function rather than an injected bool.
+    func test_cachedSuccess_lastFetchNotAdvanced_cannotRenewLease() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },          // fetch starts at wall 5000
+            lastFetchTime: { Date(timeIntervalSince1970: 4_000) } // SDK time is OLDER => cached path
+        )
+        // The bridge's own freshness predicate is what rejects it — same function production calls.
+        let startedAt = coordinator.nowForFreshnessCheck()
+        XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt),
+                       "SDK lastFetchTime did not advance, so this was the cached short-circuit")
+
+        // And the composed decision (didActivate && provedFreshExchange) therefore cannot install.
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(
+            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt),
+            fetchToken: token)
+        XCTAssertFalse(coordinator.policy.permitsCollection, "a cached success must not install a snapshot")
+
+        // A genuine exchange advances the SDK clock past fetch start.
+        coordinator.lastFetchTimeProvider = { Date(timeIntervalSince1970: 5_001) }
+        XCTAssertTrue(coordinator.lastFetchAdvancedPast(startedAt))
+        let freshToken = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(
+            freshActivationSucceeded: true && coordinator.lastFetchAdvancedPast(startedAt),
+            fetchToken: freshToken)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "a proven fresh exchange installs normally")
+    }
+
+    /// Finding 2: identity captured at FETCH START and verified at INSTALL. A transition during the
+    /// config read must not let that callback's snapshot land.
+    func test_identityChangesDuringConfigRead_blocksInstall() {
+        let clock = StubMonotonicClock(time: 1_000)
+        var enrolled = true
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: {
+                // Models the account switching while the config read is in flight.
+                enrolled = false
+                return .valid(true)
+            },
+            isAccountEnrolled: { enrolled }
+        )
+        let token = policy.tokenForFetchStart()   // taken under the OLD identity
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: token))
+        XCTAssertFalse(policy.permitsCollection)
+    }
+
+    /// Finding 2 (fence-clear race): an old callback arriving AFTER the fence was lifted by a newer
+    /// identity still cannot install, because its token predates the generation bump.
+    func test_oldCallbackArrivingAfterFenceCleared_stillRejected() {
+        let clock = StubMonotonicClock(time: 1_000)
+        var enrolled = false
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { enrolled }
+        )
+        // Token taken under the old identity, BEFORE any transition.
+        let staleToken = policy.tokenForFetchStart()
+        policy.invalidateForIdentityChange()           // real account transition: clears + fences + bumps generation
+        policy.identityBecameReadable()                // new identity becomes readable; fence lifted
+        enrolled = true
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()),
+                        "a current-identity refresh installs once the new identity is readable")
+        // The stale callback now arrives late. The fence is already clear, so ONLY the generation
+        // check can stop it — this is the race the reviewer named.
+        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: staleToken),
+                     "stale-generation token must never install, even after the fence was cleared")
+    }
+
+    /// Finding 3: a transient config failure clears permission but must NOT fabricate an identity
+    /// change; a later genuine success has to recover.
+    func test_transientConfigFailure_clearsButLaterSuccessRecovers() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let policy = VoiceSharingPolicy(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
+        XCTAssertTrue(policy.permitsCollection)
+
+        // Transient failure: permission drops immediately...
+        policy.refreshAfterActivation(freshActivationSucceeded: false, fetchToken: policy.tokenForFetchStart())
+        XCTAssertFalse(policy.permitsCollection)
+
+        // ...and a later success recovers WITHOUT needing identityBecameReadable(). If the failure
+        // had raised the fence, this would stay dead forever.
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         XCTAssertTrue(policy.permitsCollection)
     }
 

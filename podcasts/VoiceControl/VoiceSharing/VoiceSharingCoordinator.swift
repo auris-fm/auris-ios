@@ -1,6 +1,7 @@
 import Foundation
 import Firebase
 import PocketCastsServer
+import FirebaseRemoteConfig
 
 /// Composition point for the Voice Sharing feature on iOS.
 ///
@@ -21,8 +22,12 @@ final class VoiceSharingCoordinator {
     init(
         clock: MonotonicClock = SystemMonotonicClock(),
         readRemoteSwitch: (() -> VoiceSharingPolicy.RemoteSwitchValue)? = nil,
-        isAccountEnrolled: (() -> Bool)? = nil
+        isAccountEnrolled: (() -> Bool)? = nil,
+        now: @escaping () -> Date = Date.init,
+        lastFetchTime: @escaping () -> Date? = { RemoteConfig.remoteConfig().lastFetchTime }
     ) {
+        self.nowProvider = now
+        self.lastFetchTimeProvider = lastFetchTime
         self.policy = VoiceSharingPolicy(
             clock: clock,
             readRemoteSwitch: readRemoteSwitch ?? Self.readActivatedSwitch,
@@ -31,10 +36,34 @@ final class VoiceSharingCoordinator {
     }
 
     /// Called from the fetch→activate completion path with the caller's evidence about that
-    /// specific callback pair. A cached or no-network outcome passes `false` and therefore
-    /// cannot renew the lease.
-    func policyRefreshAfterActivation(freshActivationSucceeded: Bool) {
-        policy.refreshAfterActivation(freshActivationSucceeded: freshActivationSucceeded)
+    /// specific callback pair plus the token captured at fetch start. A cached or no-network
+    /// outcome passes `freshActivationSucceeded: false` and cannot renew the lease; a token from
+    /// a superseded identity cannot install at all.
+    func policyRefreshAfterActivation(
+        freshActivationSucceeded: Bool,
+        fetchToken: VoiceSharingPolicy.FetchToken
+    ) {
+        policy.refreshAfterActivation(
+            freshActivationSucceeded: freshActivationSucceeded,
+            fetchToken: fetchToken
+        )
+    }
+
+    /// Freshness plumbing reads the SDK's own bookkeeping rather than trusting `.success`, which
+    /// the SDK also reports for cached returns. Injectable so tests drive the real decision
+    /// function without a live Firebase instance.
+    private let nowProvider: () -> Date
+    var lastFetchTimeProvider: () -> Date?   // settable so tests drive the real decision function
+
+    /// SDK bookkeeping accessors, exposed as functions so call sites read as intent.
+    func nowForFreshnessCheck() -> Date { nowProvider() }
+    func lastFetchTime() -> Date? { lastFetchTimeProvider() }
+
+    /// The fetch started at `startedAt`; a genuine network exchange advances the SDK's
+    /// `lastFetchTime` past it. Cached short-circuits leave it where it was.
+    func lastFetchAdvancedPast(_ startedAt: Date) -> Bool {
+        guard let last = lastFetchTimeProvider() else { return false }
+        return last > startedAt
     }
 
     /// Subscribes to sign-out/identity change so permission drops synchronously instead of

@@ -65,6 +65,9 @@ final class VoiceSharingPolicy {
     private let leaseSeconds: TimeInterval
     private let readRemoteSwitch: () -> RemoteSwitchValue
     private let isAccountEnrolled: () -> Bool
+    /// Monotonically increasing identity generation. Bumped by every real account transition so a
+    /// callback that began under an older generation can be recognised as stale at install time.
+    private var identityGenerationCounter: Int = 0
 
     private let lock = NSLock()
     private var installed: VoiceSharingSnapshot?
@@ -86,16 +89,40 @@ final class VoiceSharingPolicy {
     /// snapshot per successful activation. An invalid read CLEARS any previous
     /// snapshot, so a bad publication takes effect as OFF instead of keeping the
     /// last good value alive past its lease.
+    /// A fetch-start identity token, captured by the caller BEFORE the network round trip and
+    /// handed back at install time. The policy compares it against current identity atomically,
+    /// so a callback that completes after an account switch — or after the fence has been lifted
+    /// by a newer identity — cannot install under the new identity's authority.
+    struct FetchToken: Equatable {
+        let identityGeneration: Int
+        let enrolledAtFetchStart: Bool
+    }
+
+    /// Snapshot of identity for starting a fetch. Call this at FETCH START, not at completion.
+    func tokenForFetchStart() -> FetchToken {
+        lock.lock()
+        defer { lock.unlock() }
+        return FetchToken(identityGeneration: identityGenerationCounter, enrolledAtFetchStart: isAccountEnrolled())
+    }
+
     /// `freshActivationSucceeded` is the caller's evidence that THIS call follows a fetch
-    /// that actually succeeded and an activate that returned without error. It is required:
-    /// without it a cached/no-network outcome would renew the lease on stale values and keep
-    /// collection alive past the point where the server was last consulted.
+    /// that actually succeeded AND proved a fresh network exchange (see FirebaseManager: it
+    /// compares `lastFetchTime` before/after). It is required: without it a cached/no-network
+    /// outcome would renew the lease on stale values and keep collection alive past the point
+    /// where the server was last consulted.
     @discardableResult
-    func refreshAfterActivation(freshActivationSucceeded: Bool) -> VoiceSharingSnapshot? {
+    func refreshAfterActivation(
+        freshActivationSucceeded: Bool,
+        fetchToken: FetchToken
+    ) -> VoiceSharingSnapshot? {
         // A failed activation clears rather than renews, and does not extend any lease.
         guard freshActivationSucceeded else {
-            lock.lock(); installed = nil; lock.unlock()
-            invalidateForIdentityChange()
+            // Transient config failure: clear permission, but do NOT touch the identity fence.
+            // Fabricating an identity change here would latch the fence and prevent any later
+            // genuine success from ever installing again.
+            lock.lock()
+            installed = nil
+            lock.unlock()
             return nil
         }
         // The fence from an identity change blocks installs until the new identity is readable;
@@ -105,11 +132,27 @@ final class VoiceSharingPolicy {
             lock.unlock()
             return nil
         }
+        // Verify the token against CURRENT identity before reading config: a transition during
+        // the config read must still invalidate this install, so re-check after the read too.
+        let generationNowAtStart = identityGenerationCounter
         lock.unlock()
         let value = readRemoteSwitch()
         let now = clock.now()
         lock.lock()
         defer { lock.unlock() }
+        // The generation is the authority: any real account transition bumps it, so a token from
+        // before the transition can never install afterwards — including the case where the fence
+        // has already been lifted by the newer identity. Enrollment is re-read for the snapshot
+        // itself rather than trusted from the token.
+        // Enrollment is compared too: a transition that does NOT bump the generation (e.g. an
+        // in-account withdrawal) still changes this, so the read-time value cannot be trusted as
+        // "still the identity we started for".
+        guard pendingIdentityFence == 0,
+              fetchToken.identityGeneration == identityGenerationCounter,
+              generationNowAtStart == identityGenerationCounter,
+              fetchToken.enrolledAtFetchStart == isAccountEnrolled(),
+              fetchToken.enrolledAtFetchStart == isAccountEnrolled()
+        else { return nil }
         switch value {
         case .unavailable:
             installed = nil
@@ -136,6 +179,7 @@ final class VoiceSharingPolicy {
         defer { lock.unlock() }
         installed = nil
         pendingIdentityFence += 1
+        identityGenerationCounter += 1
     }
 
     /// Called by the identity provider once the new account state is readable. Later refreshes
