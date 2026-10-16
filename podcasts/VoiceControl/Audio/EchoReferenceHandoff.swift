@@ -152,6 +152,9 @@ final class EchoReferenceHandoff {
     private let lock = NSLock()
     private var pending: [Block] = []
     private var droppedBlocks = 0
+    /// Where the once-per-session drop notice goes. Invoked OFF the submitting thread (see
+    /// logDropOnce); injectable so the contract is observable without a log file.
+    private let dropLog: (String) -> Void
     /// Incremented by `reset`. A delivery records this when it dequeues and compares it
     /// before appending, so a block whose session ended while it was in flight is dropped
     /// instead of landing in the new session's reference.
@@ -171,15 +174,26 @@ final class EchoReferenceHandoff {
     init(
         reference: PlaybackEchoReference,
         capacity: Int,
-        queueLabel: String = "fm.auris.echo.reference.handoff"
+        queueLabel: String = "fm.auris.echo.reference.handoff",
+        dropLog: ((String) -> Void)? = nil
     ) {
         self.reference = reference
         self.capacity = max(1, capacity)
         self.queue = DispatchQueue(label: queueLabel, qos: .userInitiated)
+        // Injectable sink so the real-time contract can be pinned by a test. Default is
+        // FileLog; `addMessage` itself does not block on disk (it buffers in memory and
+        // dispatches writes off-thread), but it is third-party work on the caller — see
+        // logDropOnce.
+        self.dropLog = dropLog ?? { FileLog.shared.addMessage($0) }
     }
 
     /// Number of blocks dropped because the queue was full. A consumer that sees this
     /// climb is behind the producer, and the reference has gaps as a result.
+    ///
+    /// SESSION-SCOPED: `reset()` zeroes this with the rest of the session's state, so a
+    /// consumer reading it after a stop/restart sees the NEW session's drops, not a total
+    /// accumulated across sessions. The previous cumulative semantics made the accessor's
+    /// own doc ("a consumer that sees this climb") false across session boundaries.
     var droppedBlockCount: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -270,11 +284,15 @@ final class EchoReferenceHandoff {
     }
 
     /// Ends the session: pending blocks are discarded and later deliveries from before the
-    /// reset are refused.
+    /// reset are refused. The session's DROP DIAGNOSTICS go with it — the count and the
+    /// logged-once latch — so `droppedBlockCount` means "this session" and a new session
+    /// gets its own first notice rather than inheriting a latch that silences it.
     func reset() {
         lock.lock()
         generation += 1
         pending.removeAll()
+        droppedBlocks = 0
+        dropLogged = false
         lock.unlock()
     }
 
@@ -488,8 +506,17 @@ final class EchoReferenceHandoff {
 
     private var dropLogged = false
 
-    /// Logged once rather than per drop: a producer that is persistently behind would
-    /// otherwise flood the log from a queue that is already saturated.
+    /// Logged once per session rather than per drop: a producer that is persistently behind
+    /// would otherwise flood the log from a queue that is already saturated.
+    ///
+    /// The I/O is NOT performed on the submitting thread. `submit` documents that its caller
+    /// is the real-time audio thread and must not block; every step here up to the hand-off
+    /// is an O(1) lock section, but the sink itself is third-party work (FileLog buffers in
+    /// memory and dispatches disk writes off-thread — it does not block on disk — yet an
+    /// os.log call or a future synchronous destination would). So the notice is hopped onto
+    /// the handoff's OWN serial queue, which is explicitly the non-real-time side of the
+    /// boundary, and never onto the submitting caller. `dropLogged` is latched under the
+    /// lock BEFORE the hop, so concurrent overflows enqueue at most one notice per session.
     private func logDropOnce() {
         lock.lock()
         guard !dropLogged else {
@@ -498,8 +525,9 @@ final class EchoReferenceHandoff {
         }
         dropLogged = true
         lock.unlock()
-        FileLog.shared.addMessage(
-            "[VoicePipeline] Echo reference handoff is full (capacity \(capacity)); dropping emitted blocks. The reference will have gaps until the consumer catches up."
-        )
+        let message = "[VoicePipeline] Echo reference handoff is full (capacity \(capacity)); dropping emitted blocks. The reference will have gaps until the consumer catches up."
+        queue.async { [dropLog] in
+            dropLog(message)
+        }
     }
 }

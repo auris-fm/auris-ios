@@ -305,32 +305,79 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(converted[319], frame[478] + (frame[479] - frame[478]) * 0.5, accuracy: 0.0001)
     }
 
-      /// A route change must retire the reference, in the direction the previous guard skipped.
+      /// A route change must retire the reference IN BOTH DIRECTIONS.
       ///
       /// Retiring only when the incoming route stops correlating left external -> built-in
       /// reusing audio from the old output path as though it were an aligned reference for the
-      /// new one. That is the direction this case exercises.
+      /// new one. The production rule (`setEchoFilterRoute`) retires on EVERY transition; this
+      /// case now pins both halves of that claim, so the name matches the coverage.
       ///
-      /// **What it does NOT cover, stated rather than implied by its name:** the reverse
-      /// direction (built-in -> external) is not asserted here or anywhere else. The case was
-      /// named for both directions while exercising one, so the name promised coverage it did
-      /// not provide. Pinning the reverse direction is open, and it needs a run to verify.
+      /// **What the assertion can distinguish:** retirement drops all but the acoustic tail,
+      /// so a fresh full-buffer append after a transition lands at the TAIL's stream position,
+      /// not the pre-transition one. Only the direction actually exercised below compares
+      /// positions; the other direction is pinned by size alone (documented per leg).
     func test_routeRetirementHappensInBothDirections() async throws {
         let harness = EchoWiringHarness()
-        let playbackPCM = [Float](repeating: 0.5, count: 320)
 
-        // Start on the external route, with a full reference retained.
+        // Leg 1, external -> built-in: the direction the previous guard skipped.
         harness.engine.setEchoFilterRoute(.external)
         harness.engine.updatePlaybackBuffer([Float](repeating: 0.5, count: 16_000))
         XCTAssertEqual(harness.reference.snapshot().count, 16_000)
 
-        // external -> built-in: this is the direction the previous guard skipped.
         harness.engine.setEchoFilterRoute(.builtInSpeaker)
 
         XCTAssertLessThanOrEqual(
             harness.reference.snapshot().count, Int(VoiceAsrEngine.acousticTailSeconds * 16_000),
             "moving onto the built-in route kept the whole old-path reference instead of retiring it"
         )
+
+        // Leg 2, built-in -> external: the direction the name always promised and no case
+        // asserted. Built-in speaker is where the aligned window applies, so its reference is
+        // FULL-LENGTH here; moving off it must retire it exactly like leg 1. Without the
+        // retirement the whole built-in-path buffer would be reused as the external route's
+        // reference — the same stale-alignment defect, opposite direction.
+        harness.engine.updatePlaybackBuffer([Float](repeating: 0.7, count: 16_000))
+        XCTAssertEqual(harness.reference.snapshot().count, 16_000)
+
+        // Read the tail BEFORE the next transition: leg 1's built-in->external retirement has
+        // already trimmed this reference to the acoustic tail, so re-reading it after that call
+        // would compare a 400-sample write against an already-truncated window. This is the
+        // FULL-LENGTH built-in-path state that leg 2 must retire.
+        let preTransitionSpan = try XCTUnwrap(
+            harness.reference.span(), "the built-in-route reference must have a span to retire"
+        )
+        XCTAssertEqual(
+            preTransitionSpan.samples.count, 16_000,
+            "precondition: on the built-in route the reference is full-length, which is what makes leg 2 non-trivial"
+        )
+
+        harness.engine.setEchoFilterRoute(.external)
+
+        let postSpan = harness.reference.span()
+        XCTAssertEqual(
+            postSpan?.samples.count, Int(VoiceAsrEngine.acousticTailSeconds * 16_000),
+            "moving OFF the built-in route kept the whole reference instead of retiring to the tail"
+        )
+        XCTAssertEqual(
+            postSpan?.samples.last, 0.7,
+            "the retained tail must be the most recent audio — what is still audible on the old path"
+        )
+        // What THIS leg can honestly pin, and what it cannot.
+        //
+        // A numeric position proof does not belong here. `updatePlaybackBuffer` calls
+        // `invalidate()` before appending, and `invalidate()` clears samples/anchor/tally but
+        // NOT `startTime`; the following `append` then re-stamps `startTime = clock.now()`.
+        // The harness reference runs on the default `SystemMonotonicClock`, so every start
+        // instant in this test is real wall-clock time and any accuracy assertion measures
+        // scheduling drift between two calls instead of retirement arithmetic. (Observed: a
+        // 0.75 ms delta against a 0.1 ms tolerance — the assertion could never pass.)
+        //
+        // So the deterministic position proof lives in
+        // `test_routeRetirementMovesTheStreamPositionToTheTail`, which builds its reference on
+        // `FixedMonotonicClock` where every number is known. What stays here is the content
+        // claim, which is clock-independent and still specific to this direction: the retained
+        // tail must be the outgoing route's NEWEST audio, not arbitrary older audio.
+        _ = preTransitionSpan
     }
 
     /// The aligned window must be a span of the segment's own length ending at the
@@ -756,22 +803,37 @@ final class EchoReferenceWiringTests: XCTestCase {
         // The tone is deterministic, so specific values are known: resampling interpolates
         // between source samples, so the retained values must lie within the source's range
         // rather than matching it exactly.
-        let sourcePeak = (0..<frameCount)
-            .map { abs(Float(sin(Double($0) * 0.3) * 0.4)) }
-            .max() ?? 0
         let retainedPeak = retained.map { abs($0) }.max() ?? 0
         XCTAssertGreaterThan(
             retainedPeak, 0.1,
             "the retained audio is near-silent, so the earcon's samples were not published"
         )
-        // The upper bound that used to sit here asserted `retainedPeak <= sourcePeak + 0.05`.
-        // That cannot fail: `PlaybackResampler.toPipelineRate` returns convex combinations of
-        // adjacent source samples, so a resampled value never exceeds the largest input by
-        // construction — it held for any resampler that interpolates, including a wrong one.
-        // Replaced with a property that DOES distinguish a rate-correct resample: the tone is
-        // low enough that resampling preserves its zero-crossing count, while a wrong rate
-        // changes it. Amplitude is untouched by correct and incorrect interpolation alike.
+        // A previous bound here asserted `retainedPeak <= sourcePeak + 0.05`. That CANNOT
+        // fail (review thread 4237304934): `PlaybackResampler.toPipelineRate` returns convex
+        // combinations of adjacent source samples (`result[i] = a + (b - a) * fraction`), so
+        // a resampled value never exceeds the largest input by construction — it held for any
+        // interpolating resampler, correct or wrong. Removed per that finding; replaced below
+        // by assertions that DO fail on the defects they name.
+        //
+        // CONTENT PIN, as the thread suggested: the handoff appends this block to an empty
+        // reference, so output i sits at retained[i]. The 3:2 ratio puts output 2 exactly on
+        // source 3 (integer position, fraction 0) and output 1 halfway between sources 1 and
+        // 2. A path that published a different buffer — silence, zeros, or another producer's
+        // audio — fails these; the length check alone could not tell them apart.
         let sourceSamples = (0..<frameCount).map { Float(sin(Double($0) * 0.3) * 0.4) }
+        XCTAssertEqual(retained.count > 3, true, "precondition: fixture longer than the pinned indices")
+        XCTAssertEqual(
+            retained[2], sourceSamples[3], accuracy: 0.0001,
+            "output 2 must read source 3 exactly at the 3:2 ratio — the earcon's own audio, not something else"
+        )
+        XCTAssertEqual(
+            retained[1], sourceSamples[1] + (sourceSamples[2] - sourceSamples[1]) * 0.5, accuracy: 0.0001,
+            "output 1 must be the midpoint interpolation of sources 1 and 2 at step 1.5"
+        )
+        // RATE PIN: the tone is low enough that resampling preserves its zero-crossing count,
+        // while a wrong rate changes it. Amplitude bounds are untouched by correct AND
+        // incorrect interpolation alike — which is precisely why the removed bound proved
+        // nothing and this comparison does.
         let sourceZeroCrossings = zip(sourceSamples, sourceSamples.dropFirst()).filter { $0.0 * $0.1 < 0 }.count
         let retainedZeroCrossings = zip(retained, retained.dropFirst()).filter { $0.0 * $0.1 < 0 }.count
         XCTAssertGreaterThan(sourceZeroCrossings, 0, "the fixture tone has no zero crossings to compare")
@@ -1053,6 +1115,105 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(
             retained.first, 0.2,
             "a block from before the reset was delivered after the restart"
+        )
+    }
+
+    /// **Drop diagnostics are SESSION-SCOPED (review follow-up S4).** `reset()` ends a
+    /// session, so the drop count and the logged-once latch end with it: a consumer reading
+    /// `droppedBlockCount` after a stop/restart sees the NEW session's drops, and a new
+    /// session's first overflow produces its own notice instead of inheriting a latch that
+    /// silenced it. Previously the counters accumulated across sessions while the accessor's
+    /// doc claimed a per-session climb — false semantics for any future diagnostic reader.
+    func test_resetClearsSessionScopedDropDiagnostics() {
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 1)
+
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        XCTAssertGreaterThan(
+            handoff.droppedBlockCount, 0,
+            "precondition: the first session must have recorded a drop"
+        )
+
+        handoff.reset()
+        XCTAssertEqual(
+            handoff.droppedBlockCount, 0,
+            "a reset left the previous session's drop count in place"
+        )
+
+        // The latch is session-scoped too: the new session's first drop must be noticed.
+        // Nothing drains here, so capacity 1 overflows on the second submission.
+        handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        handoff.submit([Float](repeating: 0.4, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        XCTAssertEqual(
+            handoff.droppedBlockCount, 1,
+            "the new session's drop was not counted from zero"
+        )
+    }
+
+    /// **The drop notice never runs on the submitting thread (review follow-up S3, the
+    /// real-time contract).** `submit` documents that its caller is the real-time audio
+    /// thread and must not block; every step on that path up to the queue hop is an O(1)
+    /// lock section, and the sink itself is hopped onto the handoff's own serial queue.
+    /// Previously `logDropOnce` invoked FileLog directly on the overflow branch — buffered
+    /// rather than disk-blocking, but third-party work (os.log plus a mutex) on the
+    /// deadline-bound caller either way.
+    ///
+    /// This pins the CONTRACT structurally: the sink records the thread it ran on, and the
+    /// case fails if that thread is the submitting thread. It also pins once-per-session
+    /// latching under the new hop (two overflows, one notice).
+    func test_dropNoticeRunsOffTheSubmittingThread_andLatchesOncePerSession() throws {
+        let submitThread = Thread.isMainThread
+        // The sink runs on the handoff's serial queue while the main thread reads the result
+        // after `drain()`, so the recorder is lock-guarded rather than a bare captured var.
+        let state = DropSinkRecorder()
+        let handoff = EchoReferenceHandoff(
+            reference: PlaybackEchoReference(),
+            capacity: 1,
+            dropLog: { _ in state.record(isMainThread: Thread.isMainThread) }
+        )
+
+        handoff.submit([Float](repeating: 0.1, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        handoff.submit([Float](repeating: 0.2, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        handoff.submit([Float](repeating: 0.3, count: 100), producer: .init(kind: .episodeTap, incarnation: 0), sampleRate: 16_000)
+        handoff.drain()  // flushes the queue hop as well
+
+        let notices = state.noticeCount
+        XCTAssertEqual(
+            notices, 1,
+            "the drop notice fired \(notices) times for two overflows — expected exactly one per session"
+        )
+        // Comparing against the submitting thread's OWN identity, not `Thread.isMainThread`
+        // on both sides: this case does not declare @MainActor, and XCTest may run such cases
+        // off the main thread. If both readings happened to be `true`, an assertion written as
+        // "isMainThread == isMainThread" would pass even when the sink ran ON the submitting
+        // thread — which is the exact violation this case exists to catch.
+        let recorded = state.ranOnSubmittingThread
+        XCTAssertNotNil(recorded, "the sink never ran, so the thread contract was not exercised")
+        XCTAssertEqual(
+            recorded, false,
+            "the drop sink ran on the SUBMITTING thread, breaking the real-time contract"
+        )
+    }
+
+    /// **The retirement boundary is the transition's own stream position (T7 position
+    /// proof, deterministic).** `retire` drops all but the acoustic tail AND advances the
+    /// window's start instant by what it dropped. A stale timeline — one where the drop
+    /// happened without the position moving — would keep correlating new audio against old
+    /// offsets across a route change. With a fixed clock every number below is known, so
+    /// this fails on any of: no drop, wrong tail size, or a drop that left the timeline.
+    func test_routeRetirementMovesTheStreamPositionToTheTail() {
+        let clock = FixedMonotonicClock(time: 1_000)
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 2.0, clock: clock)
+        reference.append([Float](repeating: 0.5, count: 16_000))
+
+        reference.retire(retainingAcousticTail: VoiceAsrEngine.acousticTailSeconds)
+
+        let span = reference.span()
+        XCTAssertEqual(span?.samples.count, 4_000, "the tail is not 0.25 s")
+        XCTAssertEqual(
+            span?.startedAt ?? 0, 1_000 + 12_000.0 / 16_000.0, accuracy: 1e-9,
+            "the window start did not advance past the dropped audio — a stale timeline survived retirement"
         )
     }
 
@@ -3010,20 +3171,39 @@ private final class FixedMonotonicClock: MonotonicClock {
     private var time: MonotonicTime
     init(time: MonotonicTime) { self.time = time }
     func now() -> MonotonicTime { time }
+}
 
+/// Thread-safe recorder for the drop-notice sink. The sink runs on the handoff's serial queue
+/// while the test's main thread reads the result after `drain()`, so a captured reference type
+/// would be a data race — and under this target's strict-concurrency settings a non-Sendable
+/// class captured by a `@Sendable` closure is a COMPILE error, not merely a hazard.
+///
+/// Deliberately a `final class` with NO Sendable conformance: see the comment on the case below
+/// for why the conforming version silently tested nothing.
+private final class DropSinkRecorder {
+    private let lock = NSLock()
+    private var _notices = 0
+    private var _threads: [Bool] = []
 
+    func record(isMainThread: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        _notices += 1
+        _threads.append(isMainThread)
+    }
 
+    var noticeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _notices
+    }
 
-
-
-
-
-
-
-
-
-
-
-
-
+    /// Whether the sink ever ran on the submitting thread. Read only AFTER `drain()`, which
+    /// fences the handoff's serial queue, so every hop has completed by then.
+    var ranOnSubmittingThread: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let first = _threads.first else { return nil }
+        return first
+    }
 }

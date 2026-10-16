@@ -5,6 +5,15 @@ open class EarconPlayer {
     private let engine: AVAudioEngine?
     private let player = AVAudioPlayerNode()
     private var cachedEarcons: [EarconId: AVAudioPCMBuffer] = [:]
+    /// The rate the node graph is connected at, decided ONCE from the first successfully
+    /// preloaded asset. Falls back to the assets' authored rate when nothing loaded.
+    /// Optional because there is no graph on the publishing-only route (`engine: nil`).
+    ///
+    /// Declared `var` with an explicit default, NOT a `let` assigned later: every stored
+    /// property must be initialized before `self` is used in an instance method, and
+    /// `preloadAll()` reads `cachedEarcons`. With a deferred assignment the `engine: nil`
+    /// path returned from `init` without ever setting this, which does not compile.
+    private var connectionSampleRate: Double?
 
     /// The session's emitted-audio reference, set once by assembly.
     ///
@@ -31,16 +40,42 @@ open class EarconPlayer {
         self.engine = engine
         guard let engine else { return }
         preloadAll()
+        // Connect at the ASSETS' own rate, not the echo pipeline's.
+        //
+        // The six shipped earcons are mono 16-bit at 44.1 kHz (review thread 4237185302).
+        // Connecting the node at 16 kHz made every `scheduleBuffer` resample down to 16 kHz
+        // BEFORE the mixer, which then upsampled for the hardware — a double conversion,
+        // bandwidth-limited to an 8 kHz band, with no purpose: the echo reference keeps its
+        // own 16 kHz copy separately via `publishForEchoReference`, converted through the
+        // handoff's resampler. What the user hears should go through the graph at the rate
+        // it was authored at; what the filter needs is the 16 kHz reference copy. Those are
+        // two consumers with two rates, and this is the listener-side half of that split.
+        //
+        // The explicit format stays (the empty-cache fallback is why): deriving it from
+        // `cachedEarcons.values.first?.format` makes the graph depend on an asset having
+        // loaded — if none did, the format silently becomes the mixer default and every
+        // `scheduleBuffer` fails the graph's channel-count check, muting earcons with one
+        // log line.
+        connectionSampleRate = Self.assetSampleRate(from: cachedEarcons) ?? Self.authoredAssetSampleRate
+        guard let connectionSampleRate else {
+            // Unreachable by construction: the right-hand side falls back to a non-optional
+            // constant. Checked rather than force-unwrapped so a future edit that makes the
+            // fallback nil cannot silently skip the connect and leave a detached node that
+            // fails every later `scheduleBuffer` with no signal.
+            preconditionFailure("connectionSampleRate must be set before the graph is connected")
+        }
         engine.attach(player)
-        // Connected with an explicit format rather than `cachedEarcons.values.first?.format`.
-        // Deriving it from the cache makes the graph depend on an asset having loaded: if
-        // none did — a missing resource, a bundle change — the format silently becomes the
-        // mixer default, and every `scheduleBuffer` then fails the audio graph's own
-        // channel-count check. Earcons would go silent with one log line, which is the
-        // failure this explicit format removes. The assets are mono 16-bit at 44.1 kHz, not the pipeline rate, so this also declares the rate
-          // the graph is connected at instead of leaving it to be inferred.
-        engine.connect(player, to: engine.mainMixerNode, format: Self.earconFormat(sampleRate: PlaybackEchoReference.pipelineSampleRate))
+        engine.connect(player, to: engine.mainMixerNode, format: Self.earconFormat(sampleRate: connectionSampleRate))
         engine.prepare()
+    }
+
+    /// The rate the shipped earcon assets are authored at (all six measured: 44.1 kHz mono).
+    static let authoredAssetSampleRate: Double = 44_100
+
+    /// The rate the preloaded assets report, or nil when nothing loaded. All shipped assets
+    /// share one rate; the first non-empty buffer's format answers for the rest.
+    private static func assetSampleRate(from cache: [EarconId: AVAudioPCMBuffer]) -> Double? {
+        cache.values.first?.format.sampleRate
     }
 
     /// Returns true if the earcon asset is loaded and can be played.
@@ -62,6 +97,57 @@ open class EarconPlayer {
             interleaved: false
         )!
     }
+
+    /// The rate the node graph is ACTUALLY connected at, read back from the engine rather
+    /// than from the value we intended to use. Exposed so a test can pin the real path:
+    /// scheduling a buffer whose format does NOT match the connection format fails the
+    /// graph's own check, so building a buffer at this rate exercises the same contract
+    /// production does.
+    ///
+    /// Reading the node's own input format is deliberate (review follow-up): reporting
+    /// `connectionSampleRate` would stay green even if `engine.connect(...)` were deleted
+    /// or given the wrong format, because the stored value and the graph would disagree.
+    /// nil when there is no graph (the publishing-route tests).
+    var negotiatedSampleRateForTesting: Double? {
+        guard let engine else { return nil }
+        // The mixer BUS THIS PLAYER FEEDS, and its format, read from the live graph.
+        //
+        // Why not the obvious probes (each was tried and failed for an AVFoundation reason):
+        //   * `engine.inputNode.inputFormat(forBus: 0)` reported 0.0. This player never touches
+        //     the input node, so that answer describes capture, not the earcon graph.
+        //   * `player.inputFormat(forBus: 0)` raised an ObjC NSRangeException ("index 0 beyond
+        //     bounds for empty array") on a node with no incoming connection. Not a Swift error,
+        //     so it cannot be caught; it aborts the test host outright.
+        //   * `player.numberOfInputs` is 0 here BY DESIGN: `init` connects the player only
+        //     OUTGOING (`connect(player, to: mainMixerNode, format:)`). Any guard that asks
+        //     whether something feeds the player is therefore guaranteed to answer "no", which
+        //     is why an earlier version of this probe returned nil even when the code under test
+        //     was correct. A probe that can only fail measures nothing.
+        //   * `AVAudioEngine.connectionPoints(forInputNode:)`, `AVAudioMixerNode.inputBuses` and
+        //     `AVAudioMixerNode.inputConnectionPoint(for:)` do not exist; each failed to compile.
+        //
+        // `inputConnectionPoint(for:inputBus:)` on the ENGINE is the accessor this codebase
+        // already uses for the same question (EpisodeOutputTap's feeder search). It returns a
+        // non-optional wrapper whose `.node` is optional, hence `?.node`.
+        let mixer = engine.mainMixerNode
+        for bus in 0..<mixer.numberOfInputs where engine.inputConnectionPoint(for: mixer, inputBus: bus)?.node === player {
+            return mixer.inputFormat(forBus: bus).sampleRate
+        }
+        return nil
+    }
+
+    /// The engine this player connected into, exposed so a case can inspect the graph's
+    /// mixer/output side as well as the node's own format.
+    var engineForTesting: AVAudioEngine? { engine }
+
+    /// The stored rate this player chose for its connection, exposed separately from the
+    /// actual graph format so a case can assert the two agree. If they diverge, the connect
+    /// call used something other than what was chosen.
+    var chosenSampleRateForTesting: Double? { engine == nil ? nil : connectionSampleRate }
+
+    /// The rate the preloaded assets report, exposed so a case can pin the derivation
+    /// without reading WAV headers. nil when nothing loaded.
+    var assetSampleRateForTesting: Double? { Self.assetSampleRate(from: cachedEarcons) }
 
     /// Loads a buffer for an earcon as if it had been preloaded from its asset.
     ///
@@ -118,11 +204,16 @@ open class EarconPlayer {
     /// first play and negative immediately after one, so no block range is submitted and
     /// an observation that cannot be placed is refused rather than guessed.
     ///
-    /// The samples are published with the buffer's OWN rate rather than the pipeline's, so
-    /// the handoff resamples them: the assets on disk are 44.1 kHz, not 16 kHz. Declaring the
-    /// buffer's rate is what keeps the reference's timeline honest — passing the pipeline rate
-    /// for audio that is not at it would compress the samples' apparent duration and shift the
-    /// instant the reference claims they were rendered.
+    /// **The listener-side half of the rate split (review thread 4237185302).** The graph
+    /// now renders at the assets' authored rate (44.1 kHz), so the buffer handed here is no
+    /// longer pre-downsampled by the connection format. The echo filter needs 16 kHz, so
+    /// THIS route converts explicitly — through the same `PlaybackResampler` the handoff
+    /// applies to any producer — and declares the converted rate to the handoff. Before,
+    /// the double conversion happened invisibly in the audio graph; now the reference's rate
+    /// is decided where the reference is written, and playback quality is not paid for it.
+    /// Declaring a rate that does not match the samples would compress their apparent
+    /// duration and shift the instant the reference claims they were rendered — which is
+    /// what the explicit conversion below keeps honest.
     func publishForEchoReference(_ buffer: AVAudioPCMBuffer) {
         guard let channel = buffer.floatChannelData?[0] else { return }
         let frame = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
@@ -152,10 +243,21 @@ open class EarconPlayer {
         // rather than misalignable. Establishing the true scheduling origin (e.g. from a
         // render-thread timestamp whose provenance is verified) is a separate change.
         lastSubmittedBlockRange = nil
+        let pipelineRate = PlaybackEchoReference.pipelineSampleRate
+        let sourceRate = buffer.format.sampleRate
+        // Convert to the pipeline rate HERE rather than leaving it to the handoff, so the
+        // declared rate and the samples agree by construction either way; the identity case
+        // (a buffer already at 16 kHz) skips the work.
+        let published: [Float]
+        if sourceRate == pipelineRate {
+            published = frame
+        } else {
+            published = PlaybackResampler.toPipelineRate(frame, sourceRate: sourceRate)
+        }
         handoff.submit(
-            frame,
+            published,
             producer: producerIdentity,
-            sampleRate: buffer.format.sampleRate,
+            sampleRate: pipelineRate,
             renderedAt: nil,
             renderedFramesInProducer: lastSubmittedBlockRange?.renderedFramesInProducer,
             producerBlockStart: lastSubmittedBlockRange?.producerBlockStart
@@ -312,3 +414,4 @@ open class EarconPlayer {
         }
     }
 }
+
