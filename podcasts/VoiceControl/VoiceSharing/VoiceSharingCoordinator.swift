@@ -10,7 +10,14 @@ import FirebaseRemoteConfig
 /// singleton maze) means tests can build a coordinator with stubbed providers,
 /// exactly like the rest of the voice pipeline injects clocks and sources.
 final class VoiceSharingCoordinator {
-    static let shared = VoiceSharingCoordinator()
+    static var shared = VoiceSharingCoordinator()
+
+    /// Test-only seam so the app's own composition path can be exercised against an injected
+    /// coordinator. Production never calls these; they exist because `shared` is what
+    /// `AppDelegate.setupVoiceSharingIdentityInvalidation` reads by default, and a subscription test has
+    /// to observe the same object the transition will later invalidate.
+    static func setSharedForTesting(_ replacement: VoiceSharingCoordinator) { shared = replacement }
+    static func resetSharedForTesting() { shared = VoiceSharingCoordinator() }
 
     let policy: VoiceSharingPolicy
     private var identityObserver: NSObjectProtocol?

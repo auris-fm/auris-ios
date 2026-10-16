@@ -328,6 +328,33 @@ final class VoiceSharingPolicyTests: XCTestCase {
     /// published value as UTF-8 bytes and exposes them via `dataValue`, so `"true"` arrives as the text
     /// payload — NOT as an ObjC boolean. This is what production reads; a decoder that demanded a
     /// boolean literal from `numberValue` would reject every real publication (see ROUND4 notes).
+    /// Validates the encoding assumption against the vendored SDK rather than asserting it: remote
+    /// publications are stored as `[[FIRRemoteConfigValue alloc] initWithData:[entries[key]
+    /// dataUsingEncoding:NSUTF8StringEncoding] source:FIRRemoteConfigSourceRemote]` (RCNConfigContent.m
+    /// handleUpdateStateForConfigNamespace), i.e. the template's JSON text bytes with source `.remote`.
+    /// A Boolean parameter therefore arrives as the literal text `true`/`false`, which is exactly what
+    /// extractRemoteSwitch accepts — and `numberValue` on top of it is a double coercion, which is why
+    /// the decoder must not read numbers. If this fixture ever disagrees with the SDK's own value object,
+    /// this control fails first.
+    func test_vendoredSDK_storesRemoteBooleansAsUTF8TextBytes() throws {
+        let sdkFile = "/Users/dev/code/auris/auris-ios/build-fixed-derived/SourcePackages/checkouts/"
+            + "firebase-ios-sdk/FirebaseRemoteConfig/Sources/RCNConfigContent.m"
+        guard FileManager.default.fileExists(atPath: sdkFile) else {
+            throw XCTSkip("vendored SDK source not present on this host — encoding claim unverified here")
+        }
+        let sdk = try String(contentsOfFile: sdkFile, encoding: .utf8)
+        XCTAssertTrue(
+            sdk.contains("[entries[key] dataUsingEncoding:NSUTF8StringEncoding]"),
+            "SDK no longer stores fetched entries as UTF-8 text bytes; re-verify the extraction boundary"
+        )
+        XCTAssertTrue(
+            sdk.contains("source:FIRRemoteConfigSourceRemote]"),
+            "SDK no longer tags fetched entries as .remote; the source gate needs re-verification"
+        )
+        // And confirm the shape our seam models: those bytes decode to the bare literal.
+        XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: Data("true".utf8), sourceIsRemote: true), .valid(true))
+    }
+
     func test_extractRemoteSwitch_matchesSDKRepresentation() {
         func data(_ s: String) -> Data { Data(s.utf8) }
         XCTAssertEqual(VoiceSharingPolicy.extractRemoteSwitch(data: data("true"), sourceIsRemote: true), .valid(true))
@@ -386,6 +413,38 @@ final class VoiceSharingPolicyTests: XCTestCase {
         // Absent SDK timestamp also fails closed.
         coordinator.lastFetchTimeProvider = { nil }
         XCTAssertFalse(coordinator.lastFetchAdvancedPast(startedAt, previousSDKTime: before))
+    }
+
+    /// My FIRST version of this control was vacuous and I caught it by mutation: it called the wrapper
+    /// method directly, so deleting the real call site from `setupVoiceControlIfNeeded()` left it green
+    /// (mutant G passed). A helper invocation cannot prove the application subscribes. This version drives
+    /// the app delegate's own lifecycle entry (`handleBecomeActive`, which production calls on every
+    /// activation) and asserts the consequence: posting `.serverUserWillBeSignedOut` afterwards must drop
+    /// permission. Nothing here calls the installer or the wrapper.
+    func test_appDelegateLifecyclePath_signOutSubscriptionActuallyExists() {
+        let clock = StubMonotonicClock(time: 1_000)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        // Production path: AppDelegate.handleBecomeActive() -> setupVoiceControlIfNeeded() -> subscribe.
+        let appDelegate = AppDelegate()
+        appDelegate.handleBecomeActive()
+
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "wired first so there is something to drop")
+
+        // Same center production defaults to, same notification SyncManager posts.
+        NotificationCenter.default.post(name: .serverUserWillBeSignedOut, object: nil,
+                                       userInfo: ["user_initiated": true])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(coordinator.policy.permitsCollection,
+                       "the app's own lifecycle must have established the subscription")
     }
 
     /// Identity wiring through the real notification production uses.

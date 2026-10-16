@@ -193,7 +193,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         FileLog.shared.forceFlush()
     }
 
+    /// Voice Sharing's sign-out wiring happens HERE, at the app's own composition point, using the
+    /// notification center the rest of the app observes (SyncManager posts
+    /// `.serverUserWillBeSignedOut` to `.default`). Exposed as an internal method taking the center as a
+    /// parameter so a test can drive the transition through this production setup path rather than
+    /// calling the coordinator's installer directly — a manual installer call proves nothing about
+    /// whether the application actually subscribed.
+    func setupVoiceSharingIdentityInvalidation(
+        onNotificationCenter center: NotificationCenter = .default,
+        coordinator: VoiceSharingCoordinator = .shared
+    ) {
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+    }
+
     private func setupVoiceControlIfNeeded() {
+        setupVoiceSharingIdentityInvalidation()
         if voiceControlService == nil {
             if let service = VoiceControlAssembly().buildVoiceControlService() {
                 voiceControlService = service
