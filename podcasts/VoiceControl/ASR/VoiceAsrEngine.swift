@@ -12,8 +12,21 @@ class VoiceAsrEngine {
     private let wakeThreshold: Float
     private let translationStage: TranslationStage?
 
+    /// Observe-only contribution observer. Nil by default, so voice control behaves exactly as before until
+    /// the Voice Sharing feature wires it; every call site below is a guarded notification that cannot change
+    /// a recognition outcome.
+    var contributionCollector: VoiceSharingCollector?
+
     private var isExposedSpeakerRoute = false
     private var playbackBuffer: [Float] = []
+
+    /// Test seam: production fills `playbackBuffer` from the playback tap, which a unit test cannot drive
+    /// without an active audio session. Setting this makes the bleed branch reachable with real correlation
+    /// input instead of skipping the filter.
+    var playbackBufferForTesting: [Float]? {
+        get { playbackBuffer }
+        set { playbackBuffer = newValue ?? [] }
+    }
     var listeningMode: ListeningMode = .wakeWord
 
     /// Forwards the immutable routing envelope (source + English router text).
@@ -116,6 +129,18 @@ class VoiceAsrEngine {
         segmenter.onUtterance = { [weak self] utterance in
             Task { await self?.processUtterance(utterance) }
         }
+        // Contribution observation attaches to the SAME segmenter the pipeline already drives, so there is
+        // one segmentation truth and no second buffer. These are synchronous and observe-only: the collector
+        // does its own work off these signals and never returns anything that could alter recognition.
+        segmenter.onSpeechStarted = { [weak self] confirmationFrameSamples in
+            self?.contributionCollector?.speechStarted(confirmationFrameSamples: confirmationFrameSamples)
+        }
+        segmenter.onSpeechAccumulated = { [weak self] retainedSampleCount in
+            self?.contributionCollector?.speechAccumulated(retainedSampleCount: retainedSampleCount)
+        }
+        segmenter.onSpeechCancelled = { [weak self] in
+            self?.contributionCollector?.speechCancelled()
+        }
         capture.onSamples = { [weak self] samples in
             self?.segmenter.process(samples)
         }
@@ -139,14 +164,48 @@ class VoiceAsrEngine {
     func stop() {
         FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
+        // Closing listening ends the current partial contribution (spec: it releases collection buffers but
+        // does NOT withdraw enrollment or delete completed contributions). Routing this through the segmenter's
+        // own reset keeps ONE source of truth: onSpeechCancelled fires only when speech was actually open, so
+        // an idle stop is never reported as a discarded example, and a live one is released by the same hook
+        // that opened it rather than by a parallel bookkeeping path that could disagree.
+        let wasOpen = contributionCollector?.currentCaptureIDForTesting != nil
+        segmenter.reset()
+        if !wasOpen {
+            // The segmenter had nothing open, so its reset emitted nothing. Ask the collector directly as a
+            // no-op guard: it drops the request when it holds no capture either.
+            contributionCollector?.pipelineStopped()
+        }
     }
+
+    /// Test seam: the capture→segmenter closure installed by `start()`. Reading it proves the production
+    /// wiring exists without needing a live audio session; production callers use `start()` itself.
+    var captureCallbackForTesting: (([Float]) -> Void)? {
+        capture.onSamples
+    }
+
+    /// Test seam: the route condition the bleed branch reads. Production derives it from the audio route;
+    /// forcing it here lets the branch be exercised without a simulator-wide route change.
+    var isExposedSpeakerRouteForTesting: Bool {
+        get { effectiveExposedSpeakerRoute }
+        set { _forcedExposedRoute = newValue }
+    }
+
+    private var _forcedExposedRoute: Bool?
+
+    /// The value every bleed check actually consults: the forced override when a test set one, otherwise the
+    /// route the service reported.
+    private var effectiveExposedSpeakerRoute: Bool { _forcedExposedRoute ?? isExposedSpeakerRoute }
 
     /// Exposed for focused translate-drop tests (`@testable`).
     func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
 
-        if isExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
+        if effectiveExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
+            // Observed bleed decision, not a discard: the spec requires collecting bleed-rejected segments
+            // and retaining the decision rather than treating all rejects as playback-only ground truth.
+            contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count)
             return
         }
 
@@ -166,9 +225,13 @@ class VoiceAsrEngine {
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count)
             return
         case .dropUtterance:
             FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
+            // Wake-negative: collectable audio. Notifying here adds NO ASR/router/action work — the very
+            // next statement returns, and nothing downstream runs for this segment either way.
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count)
             return
         case .forward(let detected):
             if detected {
@@ -182,6 +245,9 @@ class VoiceAsrEngine {
                 FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → ASR (grace/continuous)")
             }
         }
+
+        // Segment accepted by wake gating: hand the completed capture to the collector before any ASR work.
+        contributionCollector?.speechCompleted(utterance)
 
         guard !utterance.isEmpty else { return }
         let ready: Result<Void, Error>
