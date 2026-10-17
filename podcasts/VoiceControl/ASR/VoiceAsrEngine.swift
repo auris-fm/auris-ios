@@ -138,7 +138,10 @@ class VoiceAsrEngine {
         segmenter.onSpeechAccumulated = { [weak self] newSamples, bufferCount in
             // Byte-for-byte handoff of the ACTUAL new PCM. No placeholder synthesis, no count-only path:
             // the collector's retained buffer grows by exactly the samples the segmenter produced.
-            self?.contributionCollector?.appendSamples(Array(newSamples), reportedTotal: bufferCount)
+            // The Array conversion happens only when a collector is attached — with the feature disabled
+            // this callback must not allocate per frame.
+            guard let collector = self?.contributionCollector else { return }
+            collector.appendSamples(Array(newSamples), reportedTotal: bufferCount)
         }
         segmenter.onSpeechCancelled = { [weak self] in
             self?.contributionCollector?.speechCancelled()
@@ -206,10 +209,15 @@ class VoiceAsrEngine {
     /// hand A's audio to B.
     /// `taskBodyGate`, when provided (tests only), runs as the Task body's first statement — AFTER the
     /// freeze, so tests can hold the body back and mutate collector state in between deterministically.
+    /// Test-only body gate used by the PRODUCTION closure path too, so the start()-installed
+    /// `onUtterance` closure can be held mid-flight deterministically (nil in production).
+    var utteranceBodyGateForTesting: (() -> Void)?
+
     func beginUtteranceProcessing(_ utterance: [Float], taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
         let frozenContext = contributionCollector?.currentCaptureContext()
+        let bodyGate = taskBodyGate ?? utteranceBodyGateForTesting
         return Task {
-            taskBodyGate?()
+            bodyGate?()
             await self.processUtterance(utterance, frozenContext: frozenContext)
         }
     }

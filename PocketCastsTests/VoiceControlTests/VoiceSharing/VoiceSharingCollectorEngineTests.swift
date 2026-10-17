@@ -125,6 +125,64 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertEqual(collector.currentCaptureContextForTesting?.id, ctxB.id, "B remains open")
     }
 
+    /// Discriminates the freeze mutant AT the production path: the onUtterance closure installed by
+    /// engine.start() (not a test-driven beginUtteranceProcessing call). A's body is held by the
+    /// engine-level gate while A closes and B opens; the freeze must already have happened synchronously
+    /// inside the closure — a mutant that moves the read into the Task body deterministically picks up B.
+    func test_startInstalledOnUtteranceClosure_freezesContextSynchronously() async {
+        let policy = openGate(enrolled: true)
+        let collector = makeCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        XCTAssertTrue(engine.start(), "premise: engine started with stubbed capture")
+
+        let bodyHeld = DispatchSemaphore(value: 0)
+        let releaseBody = DispatchSemaphore(value: 0)
+        engine.utteranceBodyGateForTesting = {
+            bodyHeld.signal()
+            releaseBody.wait()
+        }
+
+        // Segment A through the REAL capture callback: speech, then enough silence for the 60 ms timeout
+        // to emit the utterance through the start()-installed closure.
+        backend.emitSpeech(level: 0.6, totalSamples: 5 * 160)
+        backend.emitSilence(totalSamples: 20 * 160)
+        XCTAssertEqual(bodyHeld.wait(timeout: .now() + 2), .success,
+                       "premise: A's Task body is held by the engine gate")
+        guard let ctxA = collector.currentCaptureContextForTesting else {
+            releaseBody.signal()
+            return XCTFail("premise: A open when the closure ran")
+        }
+
+        // While A's body is parked: A closes, B opens. Whatever the body reads "now", it must not matter.
+        collector.speechCancelled()
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxB = collector.currentCaptureContextForTesting else {
+            releaseBody.signal()
+            return XCTFail("premise: B open")
+        }
+        XCTAssertNotEqual(ctxA.id, ctxB.id)
+
+        releaseBody.signal()
+        // Wait for A's body to finish reporting.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            let kinds = recordedKinds()
+            if kinds.contains(.rejectedWake) { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        engine.utteranceBodyGateForTesting = nil
+        engine.stop()
+
+        let got = snapshot()
+        let aRejects = got.filter { $0.kind == .rejectedWake && $0.captureID == ctxA.id }
+        XCTAssertEqual(aRejects.count, 1,
+                       "the start()-installed closure froze A synchronously; A's late body reports under A")
+        let bTouched = got.contains { $0.captureID == ctxB.id && $0.kind != .started }
+        let observed = got.map { "\($0.kind):\($0.captureID)" }
+        XCTAssertFalse(bTouched, "B untouched by A's late body; got \(observed)")
+    }
+
     // MARK: - Production path: start/stop own the subscription
 
     /// `start()` must attach the three observation hooks to the segmenter the pipeline already drives, and

@@ -58,6 +58,7 @@ final class VoiceSharingCoordinator {
             // Membership moves inside the current session must NOT raise the identity fence: a successful
             // enrollment has to be able to install on the very next activation, or opting in does nothing.
             self.policy.invalidateForIdentityChange(kind: .membershipChange)
+            self.consentGateLost()
         }
     }
 
@@ -69,6 +70,16 @@ final class VoiceSharingCoordinator {
     /// here. Without it one sign-out bumps the policy generation twice — the double-transition shape already
     /// caught once in this feature.
     private var applyingMembershipInvalidation: Bool
+
+    /// Production gate-loss fan-out. Assigned by the pipeline owner to route straight into
+    /// `VoiceSharingCollector.gateLost()`, so consent loss takes effect WITHOUT waiting for new
+    /// frames: queued and held audio is purged at the moment membership/identity loss or a confirmed
+    /// closed gate is observed. Idempotent — purging an already-purged collector is a no-op.
+    var onConsentGateLost: (() -> Void)?
+
+    private func consentGateLost() {
+        onConsentGateLost?()
+    }
 
     /// Called from the fetch→activate completion path with the caller's evidence about that
     /// specific callback pair plus the token captured at fetch start. A cached or no-network
@@ -82,6 +93,10 @@ final class VoiceSharingCoordinator {
             freshActivationSucceeded: freshActivationSucceeded,
             fetchToken: fetchToken
         )
+        // Lease-expiry trigger WITHOUT new frames: if the gate reads closed after a refresh attempt
+        // (switch off, lease lapsed, account not enrolled), any audio the collector still holds is
+        // consentless — purge it now rather than at the next segmentation signal.
+        if !policy.permitsCollection { consentGateLost() }
     }
 
     /// Freshness plumbing reads the SDK's own bookkeeping rather than trusting `.success`, which
@@ -157,6 +172,7 @@ final class VoiceSharingCoordinator {
             // bumps the generation once through its own observer, so no second invalidate here.
             self.enrollmentStore.transitionToAccount(signedIn: false)
             self.policy.raiseIdentityFence()
+            self.consentGateLost()
         }
         // Login changed is a STATE CHANGE, not proof of a login. Audited producers:
         //   AuthenticationHelper.handleSuccessfulSignIn, SyncSigninViewController, SyncSigninView,
@@ -198,6 +214,7 @@ final class VoiceSharingCoordinator {
         } else {
             VoiceSharingSessionGeneration.shared.clear()
             policy.invalidateForIdentityChange()
+            consentGateLost()
         }
     }
 

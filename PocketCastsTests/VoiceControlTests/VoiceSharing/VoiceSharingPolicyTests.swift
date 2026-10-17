@@ -214,6 +214,45 @@ final class VoiceSharingPolicyTests: XCTestCase {
         XCTAssertTrue(policy.permitsCollection)
     }
 
+    // MARK: - Gate-loss production triggers
+
+    /// The production gate-loss fan-out: consent loss observed by the coordinator (membership change,
+    /// refresh reading a closed gate) must trigger `gateLost` WITHOUT new frames — the collector purges
+    /// queued and held audio at the moment the loss is observed.
+    func test_membershipLoss_triggersGateLostPurge_withoutNewFrames() {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        // Install a live lease.
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: gate open")
+
+        var gateLostCount = 0
+        coordinator.onConsentGateLost = { gateLostCount += 1 }
+
+        // Membership withdrawal via the store observer path.
+        coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
+        XCTAssertEqual(gateLostCount, 1,
+                       "membership loss triggers the purge immediately, without waiting for frames")
+
+        // Refresh that reads the gate closed: the remote switch flipped off since the last fetch, so the
+        // refreshed snapshot installs DISABLED — and the purge fires at the refresh, without new frames.
+        box.value = .unavailable
+        let token2 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token2)
+        XCTAssertFalse(coordinator.policy.permitsCollection, "the refreshed snapshot is disabled")
+        XCTAssertEqual(gateLostCount, 2,
+                       "a refresh observing the gate closed also triggers the purge")
+    }
+
     // MARK: - Review round 3: real bridge (freshness proof, token fencing, transient failure)
 
     /// Finding 1: `.success` alone is NOT freshness. The SDK returns Success with nil error on its

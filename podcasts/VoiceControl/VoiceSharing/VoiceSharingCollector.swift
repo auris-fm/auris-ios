@@ -41,6 +41,16 @@ final class VoiceSharingCollector {
     /// per hop, so anything older than the live window cannot still be in flight; prune to half once exceeded.
     static let maxTerminalHistoryIDs = 512
 
+    /// ONE aggregate ceiling over every float the collector OWNS, across open capture, queued FIFO
+    /// events, and the terminal ring — enforced, not merely documented. At the compiled ceilings this
+    /// allows 4 × 960,000 samples = 3.84 M floats = **15.36 MB** (mono Float, 4 bytes): one slot for the
+    /// open capture, one for ring-held late-outcome audio, two for FIFO-held event audio (which includes
+    /// the one transient COW copy made when a completed capture's buffer is shared between the ring entry
+    /// and its event — arrays share storage until mutated, so accounting counts each owner, not raw
+    /// uniqueness). Exceeding it drops the NEWEST contribution work (same policy as the FIFO bound) and
+    /// counts the drop. Every release path — drain (delivered or dropped), cancel, gate loss — subtracts.
+    static let maxAggregateRetainedSamples = 4 * maxRetainedSamples
+
     /// Half-open sample interval `[start, end)` on the original segment timeline.
     struct DropSpan: Equatable {
         let start: Int
@@ -172,10 +182,23 @@ final class VoiceSharingCollector {
         let frozen = FrozenCapture(id: UUID(), epoch: epoch, session: sessionIdentity(),
                                    retained: [], sawStart: true, original: confirmationFrameSamples)
         lock.lock()
+        // The segmenter owns one capture at a time, so a confirmed start while a partial still lingers
+        // means the partial can never complete. Record it (bounded ring + cancellation record) instead of
+        // silently overwriting it — a silent overwrite would strand its audio with no terminal record.
+        var staleEvent: SegmentEvent?
+        if let stale = current, !stale.terminal {
+            var abandoned = stale
+            abandoned.terminal = true
+            current = nil
+            aggregateAudioSamples -= abandoned.retained.count
+            markTerminal(abandoned)
+            staleEvent = makeEvent(kind: .cancelled, from: abandoned)
+        }
         current = frozen
         let startEvent = makeEvent(kind: .started, from: frozen)
         let context = CaptureContext(id: frozen.id, epoch: epoch, session: frozen.session)
         lock.unlock()
+        if let staleEvent { submit(staleEvent) }
         submit(startEvent)
         return context
     }
@@ -199,6 +222,10 @@ final class VoiceSharingCollector {
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         guard stillPermitted(for: c) else { lock.unlock(); return }
+        // Release the `current` reference while mutating: with both `current` and `c` holding the array,
+        // every append would trigger a copy-on-write of the WHOLE buffer (O(n²) per segment). With `c`
+        // uniquely owned, `append` writes in place. Restored before unlock.
+        current = nil
         let room = Self.maxRetainedSamples - c.retained.count
         let take = min(samples.count, max(room, 0))
         if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
@@ -206,6 +233,7 @@ final class VoiceSharingCollector {
         if take < samples.count, c.droppedFrom == nil {
             c.droppedFrom = c.retained.count
         }
+        aggregateAudioSamples += take
         current = c
         lock.unlock()
     }
@@ -228,9 +256,12 @@ final class VoiceSharingCollector {
         // state the original duration.
         c.original = max(c.original ?? 0, samples.count)
         c.terminal = true
-        markTerminal(c)
+        current = nil                       // detach A's completed audio ownership HERE, synchronously,
+                                            // before any successor can start; the ring entry and the
+                                            // event share it via COW from this point
+        aggregateAudioSamples -= c.retained.count
+        markTerminal(c)                     // ring re-registers the (immutable, completed) capture
         let event = makeEvent(kind: .completed, from: c)
-        current = nil
         lock.unlock()
         submit(event)
     }
@@ -241,9 +272,10 @@ final class VoiceSharingCollector {
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         c.terminal = true
+        current = nil
+        aggregateAudioSamples -= c.retained.count
         markTerminal(c)
         let event = makeEvent(kind: .cancelled, from: c)
-        current = nil
         lock.unlock()
         submit(event)
     }
@@ -263,9 +295,10 @@ final class VoiceSharingCollector {
         c.original = max(c.original ?? 0, samples)
         if samples > c.retained.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
+        current = nil
+        aggregateAudioSamples -= c.retained.count
         markTerminal(c)
         let event = makeEvent(kind: kind, from: c)
-        current = nil
         lock.unlock()
         submit(event)
     }
@@ -281,19 +314,29 @@ final class VoiceSharingCollector {
     /// effect at the next segmentation signal, and a stalled sink could hold stale work for the whole wait.
     func gateLost() {
         lock.lock()
-        // Abandon the open partial, if any.
+        // WITHDRAWAL DISPOSAL. Every retained byte dies here, synchronously:
+        //   * queued events (each holds a full audio copy) — purged;
+        //   * the open partial — terminal, ring-remembered for identity only, audio emptied;
+        //   * terminal-ring history — audio emptied (no retained speech survives a withdrawal);
+        //   * the cancellation record itself is CONTENT-FREE: it states that consent ended (identity,
+        //     counts, truncation metadata) and carries NO audio. GATE-control events still bypass the
+        //     live dequeue check — their whole point is to report the loss — but they cannot carry old
+        //     speech, so the bypass cannot deliver withdrawn audio.
+        for i in pending.indices { aggregateAudioSamples -= pending[i].audio.count }
+        pending.removeAll()
+        disposeRingAudio()
+        for key in terminalRing.keys { terminalRing[key]?.consentRevoked = true }
+        var cancelEvent: SegmentEvent?
         if var c = current, !c.terminal {
             c.terminal = true
-            markTerminal(c)
             current = nil
-            let event = makeEvent(kind: .cancelled, from: c)
-            pending.removeAll()   // purge queued work: its consent died with the gate
-            lock.unlock()
-            submit(event)
-            return
+            aggregateAudioSamples -= c.retained.count
+            c.retained.removeAll()
+            markTerminal(c)
+            cancelEvent = makeEvent(kind: .cancelled, from: c)   // audio empty: withdrawal is content-free
         }
-        pending.removeAll()
         lock.unlock()
+        if let cancelEvent { submit(cancelEvent) }
     }
 
     /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
@@ -308,17 +351,39 @@ final class VoiceSharingCollector {
     /// rather than being dropped as foreign or, worse, adopted by B. Each entry records whether its terminal
     /// record was already emitted, so a duplicate late outcome emits nothing.
     private struct TerminalRecord {
-        let capture: FrozenCapture
+        var capture: FrozenCapture
         var emitted: Bool
+        /// A capture whose consent was revoked (gate loss) is remembered for identity bookkeeping only.
+        /// Its audio is disposed at revocation and its late outcomes are CONSUMED silently — never
+        /// resurrected as deliverable records.
+        var consentRevoked: Bool = false
     }
 
     private var terminalRing: [UUID: TerminalRecord] = [:]
-    private let terminalRingOrder = NSLock()
+
+    /// Live count of audio floats the collector owns right now (open + FIFO + ring). Mutated only under
+    /// `lock`. Enforced against `maxAggregateRetainedSamples` at every growth point.
+    private var aggregateAudioSamples = 0
 
     private func rememberTerminal(_ c: FrozenCapture) {
+        aggregateAudioSamples += c.retained.count
         terminalRing[c.id] = TerminalRecord(capture: c, emitted: false)
-        while terminalRing.count > 32 {
-            if let oldest = terminalRing.first?.key { terminalRing.removeValue(forKey: oldest) }
+        while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
+            guard let oldest = terminalRing.first else { break }
+            aggregateAudioSamples -= oldest.value.capture.retained.count
+            terminalRing.removeValue(forKey: oldest.key)
+        }
+    }
+
+    /// Disposes ALL retained audio in the ring (withdrawal path). Identity bookkeeping stays; bytes go.
+    private func disposeRingAudio() {
+        for key in terminalRing.keys {
+            guard var rec = terminalRing[key] else { continue }
+            aggregateAudioSamples -= rec.capture.retained.count
+            var disposed = rec.capture
+            disposed.retained.removeAll()
+            rec.capture = disposed
+            terminalRing[key] = rec
         }
     }
 
@@ -348,6 +413,14 @@ final class VoiceSharingCollector {
         guard let context, var rec = terminalRing[context.id], !rec.emitted else {
             lock.unlock()
             return false
+        }
+        // A revoked capture (withdrawal) is consumed, never resurrected: its audio was disposed at the
+        // revocation and no late callback may turn it back into a deliverable record.
+        if rec.consentRevoked {
+            rec.emitted = true
+            terminalRing[context.id] = rec
+            lock.unlock()
+            return true
         }
         // Late attribution honors the CURRENT gate: if identity moved on (account transition rotated the
         // epoch) the predecessor's completion stays dropped, exactly as before. The reviewer's case — A
@@ -418,11 +491,13 @@ final class VoiceSharingCollector {
             sink(event)
             return
         }
-        if pending.count >= Self.maxPendingSignals {
+        if pending.count >= Self.maxPendingSignals
+            || aggregateAudioSamples + event.audio.count > Self.maxAggregateRetainedSamples {
             overflowCount += 1
             lock.unlock()
             return
         }
+        aggregateAudioSamples += event.audio.count
         pending.append(event)
         lock.unlock()
         workQueue.async { [weak self] in self?.drainNext() }
@@ -436,6 +511,8 @@ final class VoiceSharingCollector {
         lock.lock()
         guard !pending.isEmpty else { lock.unlock(); return }
         let event = pending.removeFirst()
+        aggregateAudioSamples -= event.audio.count   // the collector's ownership ends here: delivered
+                                                     // or dropped, the bytes leave this budget either way
         // Live consent check at dequeue: identity AND the policy gate. Epoch/session equality alone would
         // deliver work queued before a switch-off or lease expiry, because a disable does not change either.
         let stillValid = event.isGateControl
@@ -451,6 +528,12 @@ final class VoiceSharingCollector {
     // MARK: - Test seams (production callers never use these)
 
     /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
+    /// Live aggregate owned-audio count (open + FIFO + ring) — the value the byte budget enforces.
+    var aggregateAudioSamplesForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return aggregateAudioSamples
+    }
+
     var retainedSampleCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return current?.retained.count ?? 0
