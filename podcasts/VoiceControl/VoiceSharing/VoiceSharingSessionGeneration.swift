@@ -1,69 +1,63 @@
 import Foundation
-import CryptoKit
 
-/// In-memory lifecycle generation that owns account-scoped work.
+/// Non-secret, in-memory lifecycle generation for account-scoped work.
 ///
-/// Why this exists instead of reusing a credential value:
-/// * A refresh rotates the credential WITHOUT ending the session, so "credential changed" would read a
-///   routine token rotation as a logout and wrongly refuse in-flight operations.
+/// Design (per @spec, DM f5a9275f): a fresh UUID minted when a session is established, rotated on real
+/// sign-in / sign-out / account switch, and deliberately STABLE across access- and refresh-token renewal.
+/// There is no credential-derived digest and nothing persisted: after a relaunch the process starts a new
+/// lifecycle, membership is re-read authoritatively, and an old account mutation is never auto-replayed.
+///
+/// Why operations need this at all:
 /// * A stable user id survives sign-out followed by signing back into the SAME account, so it cannot see
 ///   the one transition that must invalidate an outstanding mutation.
-/// * Credentials are secrets. They must never be retained inside operation bodies, queue metadata, logs or
-///   diagnostics — which is what storing a raw token as an identity marker would do.
-///
-/// So the generation is a NON-SECRET digest of session material: it changes when the authenticated session
-/// changes (sign-in, sign-out, account switch), stays stable across a refresh of the same session, and
-/// carries no recoverable credential content. Nothing but the digest is kept.
+/// * A rotating credential would read routine token maintenance as a logout and wrongly refuse work the
+///   user already started — so credentials are not used as identity here, and none of their content is
+///   ever retained in an operation body, queue metadata, logs, or diagnostics.
 final class VoiceSharingSessionGeneration {
     static let shared = VoiceSharingSessionGeneration()
 
     private let lock = NSLock()
     private var current: String?
 
-    /// Inputs whose change means "different authenticated session". Values are consumed to produce a
-    /// digest and are never stored or returned.
-    struct SessionMaterial {
-        let accountIdentifier: String
-        /// Opaque per-login factor: identical for every call within one login, different after a new
-        /// sign-in. Production supplies a runtime nonce; a rotating refresh token must NOT be used here,
-        /// because refresh rotation is not logout.
-        let loginFactor: String
-    }
-
     init() {}
 
-    /// The current non-secret generation label, or nil when there is no authenticated session.
+    /// The current lifecycle generation, or nil when there is no authenticated session to act under.
     func currentGeneration() -> String? {
         lock.lock()
         defer { lock.unlock() }
         return current
     }
 
-    /// Records session material and returns the resulting generation. Callers hold only the digest.
+    /// Establishes a NEW lifecycle (sign-in, account switch, first readable session after launch) and
+    /// returns its label. Anything begun under the previous label becomes stale immediately.
     @discardableResult
-    func update(with material: SessionMaterial?) -> String? {
-        guard let material,
-              !material.accountIdentifier.isEmpty,
-              !material.loginFactor.isEmpty else {
-            lock.lock(); current = nil; lock.unlock()
-            return nil
-        }
-        let digest = Self.digest(account: material.accountIdentifier, loginFactor: material.loginFactor)
+    func beginNewLifecycle() -> String {
+        let label = UUID().uuidString.lowercased()
         lock.lock()
-        current = digest
+        current = label
         lock.unlock()
-        return digest
+        return label
     }
 
-    /// Marks the session over (sign-out). Any operation begun under a previous generation becomes stale.
+    /// Ends the lifecycle (sign-out). Operations begun under any previous label can no longer run.
     func clear() {
-        lock.lock(); current = nil; lock.unlock()
+        lock.lock()
+        current = nil
+        lock.unlock()
     }
 
-    /// Stable, non-reversible label. Salted with a per-process constant so two processes that observe the
-    /// same account do not share labels, and so nothing about the inputs can be recovered from the output.
-    static func digest(account: String, loginFactor: String) -> String {
-        let input = Data("auris-voice-sharing-session-v1|\(account)|\(loginFactor)".utf8)
-        return SHA256.hash(data: input).prefix(16).map { String(format: "%02x", $0) }.joined()
+    /// Ensures a lifecycle exists without rotating an existing one. Returns the current or newly minted
+    /// label. Used where the app discovers it is signed in but has no generation yet (cold start).
+    @discardableResult
+    func ensureLifecycle() -> String {
+        lock.lock()
+        if let current {
+            lock.unlock()
+            return current
+        }
+        let label = UUID().uuidString.lowercased()
+        current = label
+        lock.unlock()
+        return label
     }
 }

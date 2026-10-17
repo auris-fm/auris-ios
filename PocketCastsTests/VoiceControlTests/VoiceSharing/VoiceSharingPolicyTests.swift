@@ -2,7 +2,7 @@ import XCTest
 @testable import podcasts
 
 /// A fixed clock so lease arithmetic is exact rather than scheduling-dependent.
-private final class StubMonotonicClock: MonotonicClock {
+final class StubMonotonicClock: MonotonicClock {
     private(set) var nowValue: MonotonicTime
     init(time: MonotonicTime) { nowValue = time }
     func advance(_ seconds: TimeInterval) { nowValue += seconds }

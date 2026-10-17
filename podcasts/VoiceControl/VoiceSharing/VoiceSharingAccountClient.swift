@@ -180,6 +180,9 @@ final class VoiceSharingAccountClient {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return .unavailableBackend }
+            // One guard before every status branch (see `mutate`): a deletion receipt, refusal, or 401
+            // belonging to a superseded session must not be reported under the current one.
+            guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
             switch http.statusCode {
             case 202:
                 // A receipt is only a receipt if it says so in the contracted shape: schema_version 1,
@@ -190,13 +193,8 @@ final class VoiceSharingAccountClient {
                       (object[Field.status] as? String) == "deletion_pending",
                       let id = Self.nonEmptyString(object[Field.deletionRequestId])
                 else { return .unavailableBackend }
-                // Deletion is scoped to the account that asked for it. If the user changed while this was in
-                // flight, applying the receipt would attribute one account's deletion to another.
-                guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
                 return .pending(deletionRequestId: id)
             case 401:
-                // Validate the captured generation BEFORE any side effect, then report the actual bearer.
-                guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
                 await tokenProvider.handleUnauthorized(rejectedToken: request.value(forHTTPHeaderField: "Authorization")?
                     .replacingOccurrences(of: "Bearer ", with: ""))
                 return .unauthorized
@@ -225,22 +223,24 @@ final class VoiceSharingAccountClient {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return .unavailableBackend }
+            // ONE guard, immediately after the transport returns and BEFORE any status branch. Every branch
+            // below produces an account-specific result — applied membership, a conflict projection, an
+            // ineligible/refused reason, or a token invalidation — so a reply from a superseded session must
+            // be dropped regardless of its code. Per-branch guards previously left 403 and 422 unguarded,
+            // which would have surfaced account A's refusal as account B's UI state.
+            guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
             switch http.statusCode {
             case 200:
                 guard let projection = Self.decodeProjection(data) else { return .unavailableBackend }
-                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
                 return .applied(projection)
             case 409:
                 // A conflict carries the current projection. Surfacing it is required so the caller can show
                 // the real state; auto-replaying against the newer revision is forbidden.
                 let current = Self.decodeProjection(data)
-                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
                 return .conflict(current: current)
             case 401:
-                // Order matters twice here. Validate the captured generation FIRST so a 401 that belongs to
-                // account A cannot invalidate account B's freshly-installed credential. Then report the
-                // bearer THIS request actually carried — passing nil would fail every other cached token.
-                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
+                // Report the bearer THIS request actually carried — passing nil would fail every other
+                // cached token rather than just the refused one. Staleness was settled above.
                 let rejected = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "")
                 await tokenProvider.handleUnauthorized(rejectedToken: rejected)
                 return .unauthorized

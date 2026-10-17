@@ -1,4 +1,5 @@
 import XCTest
+import PocketCastsServer
 @testable import podcasts
 
 /// Transport seam: the client builds REAL `URLRequest`s through a real `URLSession`; this stub answers them
@@ -17,17 +18,24 @@ final class VoiceSharingStubProtocol: URLProtocol {
     /// Hook invoked after the request is recorded but before the reply is delivered — lets a control flip
     /// account identity mid-flight and prove stale-session responses are dropped rather than applied.
     static var onRequest: (() -> Void)?
+    static let lock = NSLock()
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let url = request.url else { return }
+        // Snapshot the schedule at request time: reading `responseDelay` again inside the deferred block,
+        // or mutating shared arrays from a background queue, lets one test's held reply land inside the
+        // next test and makes ordering unreviewable.
+        let delay = VoiceSharingStubProtocol.responseDelay
+        VoiceSharingStubProtocol.lock.lock()
         VoiceSharingStubProtocol.seenRequests.append(request)
+        VoiceSharingStubProtocol.lock.unlock()
         VoiceSharingStubProtocol.onRequest?()
         let key = "\(request.httpMethod ?? "GET") \(url.path)"
         let reply = VoiceSharingStubProtocol.replies[key]
-        if VoiceSharingStubProtocol.responseDelay > 0 {
-            DispatchQueue.global().asyncAfter(deadline: .now() + VoiceSharingStubProtocol.responseDelay) {
+        if delay > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
                 self.deliver(reply, path: url.path)
             }
         } else {
@@ -135,14 +143,13 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     // MARK: - Production generation registry (the object the client actually reads by default)
 
-    /// A transition recorded on the real registry must be visible to a client built with production defaults.
-    /// This is the closure @spec asked for: not a test-local `identity` variable, but the same state the
-    /// app updates at sign-in and sign-out.
-    func test_productionRegistry_signOutThenSignIn_supersedesOperations() async {
+    /// The lifecycle object is the state production mutates at sign-in/sign-out. Driving it here (rather
+    /// than a test-local string) means the same transitions the app performs are what supersede an operation.
+    func test_lifecycleRegistry_signOutThenSignIn_supersedesOperations() async {
         VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
             Reply(status: 200, body: projection("r15", enrolled: true, epoch: "e15", withdrawal: "active"))
         let registry = VoiceSharingSessionGeneration()
-        registry.update(with: .init(accountIdentifier: "account-A", loginFactor: "login-1"))
+        registry.beginNewLifecycle()
         let client = VoiceSharingAccountClient(
             baseURLProvider: { "https://api.example.test" },
             tokenProvider: tokens,
@@ -153,29 +160,154 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
             return XCTFail("no session to begin under")
         }
-        // Sign-out clears the generation; signing back in creates a NEW one even for the same account.
+        // Sign-out ends the lifecycle; signing back in mints a NEW one.
         registry.clear()
-        registry.update(with: .init(accountIdentifier: "account-A", loginFactor: "login-2"))
+        registry.beginNewLifecycle()
         let outcome = await client.perform(op)
         XCTAssertEqual(outcome, .refusedStaleSession, "operations from the previous login must not run")
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and they must not reach the network")
     }
 
-    /// Credential rotation is not a session change: refreshing the bearer keeps the generation, so ordinary
-    /// token maintenance cannot silently drop work the user already started.
-    func test_productionRegistry_credentialRotationKeepsGeneration() {
+    /// A lifecycle label is stable until a real transition rotates it. Nothing about acquiring or refreshing
+    /// a bearer moves it — that property is what keeps routine token maintenance from dropping user intent.
+    func test_lifecycleRegistry_rotatesOnlyOnRealTransitions() {
         let registry = VoiceSharingSessionGeneration()
-        registry.update(with: .init(accountIdentifier: "account-A", loginFactor: "login-1"))
-        let before = registry.currentGeneration()
-        XCTAssertNotNil(before)
-        // A new access token for the SAME login must not move the generation.
-        registry.update(with: .init(accountIdentifier: "account-A", loginFactor: "login-1"))
-        XCTAssertEqual(registry.currentGeneration(), before, "token refresh must not look like logout")
-        // A different login does.
-        registry.update(with: .init(accountIdentifier: "account-A", loginFactor: "login-2"))
-        XCTAssertNotEqual(registry.currentGeneration(), before, "a new sign-in is a new session")
+        XCTAssertNil(registry.currentGeneration(), "a cold process has no session to act under")
+
+        let first = registry.ensureLifecycle()
+        XCTAssertEqual(registry.currentGeneration(), first)
+        XCTAssertEqual(registry.ensureLifecycle(), first, "ensure must not rotate an existing lifecycle")
+
+        let rotated = registry.beginNewLifecycle()
+        XCTAssertNotEqual(rotated, first, "sign-in / account switch establishes a new lifecycle")
+        XCTAssertNotEqual(rotated.count, 0, "a lifecycle label exists")
+
         registry.clear()
         XCTAssertNil(registry.currentGeneration(), "sign-out leaves no session to act under")
+    }
+
+
+    // MARK: - Round 9: production lifecycle writer (beginA -> real transition -> perform)
+
+    /// The closure @spec asked for (f5a9275f): the generation must have a REAL writer, and an operation
+    /// begun under one lifecycle must refuse after the app's own account transitions run.
+    ///
+    /// Nothing here posts a hand-made notification into a test center. It calls `SignOutHelper.signout()`
+    /// and `AuthenticationHelper.handleSuccessfulSignIn(...)`, i.e. the same code paths the UI runs, and
+    /// subscribes through `AppDelegate.setupVoiceSharingIdentityInvalidation` — the app's composition point.
+    func test_productionLifecycle_realSignOut_supersedesAnOperationBegunBeforeIt() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r20", enrolled: true, epoch: "e20", withdrawal: "active"))
+
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        // Production subscription: AppDelegate -> installIdentityInvalidation on the DEFAULT center,
+        // which is where SyncManager posts its account notifications.
+        let appDelegate = AppDelegate()
+        appDelegate.setupVoiceSharingIdentityInvalidation()
+
+        // A client built with PRODUCTION DEFAULTS — no injected identity closure at all.
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        // Hermetic start: whatever earlier tests left, this test establishes its own lifecycle first —
+        // exactly what a login does — and then lets the app's sign-out path end it.
+        VoiceSharingSessionGeneration.shared.clear()
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        guard VoiceSharingSessionGeneration.shared.currentGeneration() != nil else {
+            return XCTFail("control setup: login-change must leave a lifecycle to begin work under")
+        }
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session to begin under")
+        }
+        let begunUnder = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertEqual(op.originatingGeneration, begunUnder ?? "", "the operation records the live lifecycle")
+
+        // THE REAL TRANSITION: the app's sign-out entry point, not a synthesized notification.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let afterSignOut = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertNotEqual(afterSignOut, begunUnder ?? "",
+                       "the app's sign-out path must end the lifecycle the operation was begun under")
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession,
+                       "an operation begun before a real sign-out must refuse, not be sent under whatever session follows")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and it must refuse before transport")
+    }
+
+    /// Cold start into an already-signed-in account: the process has no lifecycle yet, so the first thing
+    /// the wiring does is establish one. Without this every `begin…()` would return nil on launch and
+    /// voice sharing could never be turned on until the user happened to log in again.
+    func test_productionLifecycle_coldStartIntoSignedInAccount_establishesLifecycle() {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: fresh process")
+
+        // Cold start means SIGNED IN: `SyncManager.isUserLoggedIn()` reads the email from the Keychain, so
+        // the precondition is supplied through the app's own setter rather than assumed. Restored after.
+        let priorEmail = ServerSettings.syncingEmail()
+        if priorEmail == nil || priorEmail!.isEmpty {
+            ServerSettings.setSyncingEmail(email: "cold-start-control@example.test")
+        }
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        XCTAssertTrue(SyncManager.isUserLoggedIn(), "control sanity: the app believes it is signed in")
+
+        // The app's composition point runs on activation.
+        let appDelegate = AppDelegate()
+        appDelegate.handleBecomeActive()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertNotNil(VoiceSharingSessionGeneration.shared.currentGeneration(),
+                        "activation must give a signed-in account a lifecycle to act under")
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                        "so work can be begun immediately after launch, not only after a manual re-login")
+    }
+
+    /// Sign-in establishes a NEW lifecycle, so work begun under the previous login cannot leak into it —
+    /// including signing back into the SAME account, which a stable user id cannot distinguish.
+    func test_productionLifecycle_realSignIn_establishesNewGeneration() {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        let appDelegate = AppDelegate()
+        appDelegate.setupVoiceSharingIdentityInvalidation()
+
+        // Start from signed-out: the point is that a login CREATES a lifecycle, not what preceded it.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        VoiceSharingSessionGeneration.shared.clear()
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: signed out")
+
+        // The app fires this after a successful sign-in / account switch.
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let established = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertNotNil(established, "login-change must establish a lifecycle an operation can be begun under")
+        guard let client = Optional(VoiceSharingAccountClient(tokenProvider: tokens, session: session)) else { return }
+        XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                        "after a login there IS a session to act under")
     }
 
     // MARK: - Review round 7 additions: same-account relogin, GET guarding, numeric bridging
@@ -334,23 +466,23 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         }
     }
 
-    /// Refresh rotation is NOT logout, and credentials are not operation identity. Two properties:
-    ///  * the generation label is a digest that never contains its inputs, so nothing credential-shaped can
-    ///    be recovered from an operation or a log line;
-    ///  * re-supplying the same login material yields the SAME label, i.e. ordinary token maintenance does
-    ///    not invalidate outstanding work — only a genuinely different session does.
-    func test_generationLabel_isNonSecretAndStablePerLogin() {
-        let first = VoiceSharingSessionGeneration.digest(account: "account-A", loginFactor: "login-1")
-        let again = VoiceSharingSessionGeneration.digest(account: "account-A", loginFactor: "login-1")
-        XCTAssertEqual(first, again, "same login must keep the same generation across refreshes")
+    /// Operation identity is a lifecycle label, never credential material. Two properties @spec asked for:
+    /// the label carries nothing recoverable about the account, and no operation body can contain a bearer.
+    func test_operationIdentity_isOpaqueAndCarriesNoCredentialMaterial() async {
+        let registry = VoiceSharingSessionGeneration()
+        let label = registry.beginNewLifecycle()
+        XCTAssertFalse(label.isEmpty, "a lifecycle label is opaque text with nothing to recover")
+        XCTAssertFalse(label.lowercased().contains("token"), "label must not describe credential material")
 
-        let otherLogin = VoiceSharingSessionGeneration.digest(account: "account-A", loginFactor: "login-2")
-        XCTAssertNotEqual(first, otherLogin, "a new sign-in into the SAME account is a new session")
-
-        for label in [first, otherLogin] {
-            XCTAssertEqual(label.count, 32, "truncated hash, not a readable composite")
-            XCTAssertFalse(label.contains("account-A"), "label must not embed the account id")
-            XCTAssertFalse(label.contains("login-1") || label.contains("login-2"), "label must not embed session material")
+        guard let enroll = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+              let withdraw = clientForTest.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session")
+        }
+        for body in [enroll.body, withdraw.body] {
+            let text = body.description.lowercased()
+            for forbidden in ["bearer", "credential", "token", "password"] {
+                XCTAssertFalse(text.contains(forbidden), "operation body leaks \(forbidden): \(text)")
+            }
         }
     }
 
@@ -451,6 +583,41 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             XCTAssertEqual(reason, label == "ineligible" ? .ineligible : .unsupportedDisclosure)
         }
     }
+
+    /// Round 9 (spec 3de3957f): 403 and 422 previously returned account-specific refusals with NO
+    /// post-transport generation check, so account A's "ineligible" could be shown as account B's state.
+    /// The guard now sits before every status branch, so both codes refuse on a superseded session.
+    /// Round 9 (spec 3de3957f): 403 previously returned an account-specific refusal with NO post-transport
+    /// generation check, so account A's "ineligible" could be shown as account B's state.
+    func test_staleSession_403refusal_isNotSurfaced() async {
+        await assertStaleRefusalIsDropped(status: 403, error: "ineligible_plan")
+    }
+
+    /// …and the same for 422, whose body is decoded into a reason before it is reported.
+    func test_staleSession_422refusal_isNotSurfaced() async {
+        await assertStaleRefusalIsDropped(status: 422, error: "unsupported_disclosure")
+    }
+
+    private func assertStaleRefusalIsDropped(status: Int, error: String) async {
+        VoiceSharingStubProtocol.reset()
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: status, body: ["error": error])
+        // Fresh client per case: identity starts at gen-A and moves to gen-B only after the request leaves.
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "x", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        XCTAssertEqual(clientForTestIdentity(), "gen-A", "control sanity: begins under gen-A")
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        VoiceSharingStubProtocol.onRequest = { [weak self] in self?.identity = "gen-B" }
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "\(status) must not surface a superseded session's refusal")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1,
+                       "control sanity: exactly one request was sent, so this exercised the post-transport guard")
+        VoiceSharingStubProtocol.responseDelay = 0
+    }
+
+    private func clientForTestIdentity() -> String? { identity }
 
     func test_unauthorized_reportsRatherThanRetrying() async {
         VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =

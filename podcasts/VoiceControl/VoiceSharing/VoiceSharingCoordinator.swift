@@ -20,8 +20,6 @@ final class VoiceSharingCoordinator {
     static func resetSharedForTesting() { shared = VoiceSharingCoordinator() }
 
     let policy: VoiceSharingPolicy
-    private var identityObserver: NSObjectProtocol?
-
     /// `isAccountEnrolled` must be re-readable at decision time, not sampled once: the policy
     /// consults it on every `permitsCollection`, so withdrawal or an account switch flips the
     /// answer without waiting for a lease to lapse. Production fails closed until the enrollment
@@ -94,6 +92,10 @@ final class VoiceSharingCoordinator {
         return now > startedAt
     }
 
+    /// Observers registered by the last install (sign-out + login-changed), so a repeat install removes
+    /// BOTH rather than leaking one of them.
+    private var identityObservers: [NSObjectProtocol] = []
+
     /// The center an installed observer was registered on. Removing an observer must be done through
     /// the SAME center that added it — `removeObserver(_:)` alone would not reach a non-default center.
     private var identityCenter: NotificationCenter?
@@ -108,20 +110,48 @@ final class VoiceSharingCoordinator {
     /// can call it directly rather than registering a duplicate.
     @discardableResult
     func installIdentityInvalidation(onNotificationCenter center: NotificationCenter = .default) -> () -> Void {
-        if let previous = identityObserver {
-            (identityCenter ?? center).removeObserver(previous)
-        }
+        removeAllIdentityObservers()
         let invalidate: () -> Void = { [weak self] in
             guard let self else { return }
             self.policy.invalidateForIdentityChange()
         }
-        identityObserver = center.addObserver(
+        // Sign-out: end the lifecycle so nothing begun under it can run, and fence policy installs until the
+        // new account state is readable.
+        let willSignOut = center.addObserver(
             forName: .serverUserWillBeSignedOut,
             object: nil,
             queue: .main
-        ) { _ in invalidate() }
+        ) { _ in
+            VoiceSharingSessionGeneration.shared.clear()
+            invalidate()
+        }
+        // Login changed: this is what SyncManager.postOnMainThread(.userLoginDidChange) fires after a
+        // successful sign-in, an account switch, and the deferred userId-repair path in
+        // AppDelegate+Analytics. Establishing a NEW lifecycle here is what makes an operation begun under
+        // the previous login refuse — including re-login into the SAME account, which a stable user id
+        // cannot distinguish.
+        let loginChanged = center.addObserver(
+            forName: .userLoginDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            VoiceSharingSessionGeneration.shared.beginNewLifecycle()
+            self?.identityBecameReadable()
+        }
+        identityObservers = [willSignOut, loginChanged]
         identityCenter = center
+        // Cold start into an already-signed-in account: there is no login notification for a session that
+        // predates this process, so installation itself must give the app a lifecycle to act under.
+        if SyncManager.isUserLoggedIn() {
+            VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        }
         return invalidate
+    }
+
+    private func removeAllIdentityObservers() {
+        guard !identityObservers.isEmpty, let center = identityCenter else { return }
+        for observer in identityObservers { center.removeObserver(observer) }
+        identityObservers = []
     }
 
     /// Called by the identity provider once the new account state is readable; lifts the fence
@@ -131,9 +161,7 @@ final class VoiceSharingCoordinator {
     }
 
     deinit {
-        if let identityObserver {
-            (identityCenter ?? .default).removeObserver(identityObserver)
-        }
+        removeAllIdentityObservers()
     }
 
     /// Default reader: routes the seam's raw fields through the production extraction function.
