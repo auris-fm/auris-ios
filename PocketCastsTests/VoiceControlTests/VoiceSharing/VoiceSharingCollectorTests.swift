@@ -557,8 +557,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(got.map(\.kind), [.started, .cancelled, .started],
                        "A's start, then the lingering partial recorded as cancelled before B's start")
         XCTAssertEqual(got[1].captureID, ctxA?.id)
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 640,
-                       "aggregate accounting: A's ring-held audio; B holds none yet")
+        // The stale partial is a DISCARD: B's start disposes A's bytes, so nothing ring-held remains.
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
+                       "the abandoned partial's audio is disposed at B's start, not ring-held")
     }
 
     /// Withdrawal is CONTENT-FREE: the cancellation record carries NO audio, the terminal ring's audio
@@ -834,11 +835,11 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples([Float](repeating: 1, count: 100_000), reportedTotal: 100_000)
         let breakdown = collector.actualRetainedAudioBreakdownForTesting
-        XCTAssertLessThanOrEqual(breakdown.open + breakdown.fifo + breakdown.ring, budget,
-                                 "actual retained bytes (open+FIFO+ring) never exceed the budget")
+        XCTAssertLessThanOrEqual(breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight, budget,
+                                 "actual retained bytes (open+FIFO+ring+in-flight) never exceed the budget")
         XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring,
-                       "the ledger matches the ACTUAL retained buffers, not just itself")
+                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
+                       "the ledger matches the ACTUAL retained buffers, in-flight included")
 
         stateLock.lock(); open = true; stateLock.unlock()
         hold.signal()
@@ -862,10 +863,108 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         let breakdown = collector.actualRetainedAudioBreakdownForTesting
         XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring,
-                       "ledger == open + FIFO + ring, exactly")
+                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
+                       "ledger == open + FIFO + ring + in-flight, exactly")
+        XCTAssertGreaterThanOrEqual(breakdown.inFlight, 0)
         XCTAssertEqual(breakdown.open, 128)
     }
+
+    /// The audit reconciles DURING a held sink call: in-flight bytes are owned from before the
+    /// sink runs until it returns, and every component stays nonnegative through the hold.
+    func test_inFlightAudit_reconcilesDuringHeldSinkDelivery() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let holdState = NSLock()
+        var alreadyHeld = false
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { event in
+                guard !event.audio.isEmpty else { return }   // zero-audio control events flow through
+                holdState.lock()
+                let first = !alreadyHeld
+                alreadyHeld = true
+                holdState.unlock()
+                if first {
+                    entered.signal()
+                    hold.wait()
+                }
+            }
+        )
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        // Delivered async: the drain holds inside the sink on this completion.
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink holds the completion")
+
+        let during = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(during.inFlight, 640, "the delivered audio is owned INSIDE the sink call")
+        XCTAssertGreaterThanOrEqual(during.open, 0)
+        XCTAssertGreaterThanOrEqual(during.fifo, 0)
+        XCTAssertGreaterThanOrEqual(during.ring, 0)
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
+                       during.open + during.fifo + during.ring + during.inFlight,
+                       "ledger reconciles with in-flight included, mid-hold")
+
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain())
+        let after = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(after.inFlight, 0, "ownership releases when the sink returns")
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
+                       after.open + after.fifo + after.ring + after.inFlight,
+                       "ledger reconciles after release")
+    }
+
+    /// A discarded terminal (genuine cancel, stale partial, gate-move abandonment) holds NO audio
+    /// in the ring: identity only, nothing to resurrect, nothing charged.
+    func test_discardedTerminals_holdNoRingAudio_andLedgerStaysReconciled() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        // Genuine cancel.
+        let collector = makeCollector()
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        collector.speechCancelled()
+        var breakdown = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(breakdown.ring, 0, "a cancelled partial holds no ring audio")
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
+                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight)
+
+        // Stale-partial abandonment (B starts while A is open).
+        let c2 = makeCollector()
+        c2.speechStarted(confirmationFrameSamples: 320)
+        let staleA = c2.currentCaptureContextForTesting
+        c2.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        c2.speechStarted(confirmationFrameSamples: 320)   // abandons A
+        breakdown = c2.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(breakdown.ring, 0, "the stale partial holds no ring audio")
+        XCTAssertEqual(c2.aggregateAudioSamplesForTesting,
+                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
+                       "the transfer does not strand or double-charge A's bytes")
+
+        // Gate-move abandonment.
+        let c3 = makeCollector()
+        c3.speechStarted(confirmationFrameSamples: 320)
+        c3.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        deactivateLease()   // gate moves under the partial
+        c3.speechCompleted([Float](repeating: 1, count: 640),
+                           context: c3.currentCaptureContextForTesting)
+        breakdown = c3.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(breakdown.ring, 0, "the gate-abandoned partial holds no ring audio")
+        XCTAssertEqual(c3.aggregateAudioSamplesForTesting,
+                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
+                       "gate-move ledger stays exactly reconciled")
+    }
+
 
     /// A STALE context — one frozen by an utterance Task before its capture was superseded — must be refused
     /// outright, even though the collector currently holds a different open capture. This is the

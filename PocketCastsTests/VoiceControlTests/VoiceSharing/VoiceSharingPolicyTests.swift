@@ -236,7 +236,8 @@ final class VoiceSharingPolicyTests: XCTestCase {
         XCTAssertTrue(coordinator.policy.permitsCollection, "premise: gate open")
 
         var gateLostCount = 0
-        coordinator.onConsentGateLost = { gateLostCount += 1 }
+        let gateLostSubscription = coordinator.registerGateLostHandler { gateLostCount += 1 }
+        _ = gateLostSubscription
 
         // Membership withdrawal via the store observer path.
         coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
@@ -268,7 +269,8 @@ final class VoiceSharingPolicyTests: XCTestCase {
             lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
         )
         var gateLostCount = 0
-        coordinator.onConsentGateLost = { gateLostCount += 1 }
+        let gateLostSubscription = coordinator.registerGateLostHandler { gateLostCount += 1 }
+        _ = gateLostSubscription
 
         // Capture the production schedule instead of running it.
         var scheduled: (delay: TimeInterval, body: () -> Void)?
@@ -677,4 +679,95 @@ final class VoiceSharingPolicyTests: XCTestCase {
         XCTAssertFalse(clip.contains(voiceControlID), "App Clip gained VoiceControl membership — the #if !APPCLIP guard premise changed; review before keeping it")
         XCTAssertFalse(tv.contains(voiceControlID), "TV App gained VoiceControl membership — same premise change")
     }
+
+    /// Rebuild control: a pipeline build REGISTERS its own subscription instead of overwriting the
+    /// shared handler. While the OLD collector still owns audio (open capture + FIFO), withdrawal
+    /// must purge BOTH collectors; and the expiry-trigger path reaches both as well.
+    func test_rebuildRegistersSeparateSubscriptions_withdrawalPurgesBothCollectors() {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        final class EnrollBox { var enrolled = true }
+        let enrollBox = EnrollBox()
+        var enrolledProjection: VoiceSharingEnrollmentStore.State {
+            var st = VoiceSharingEnrollmentStore.State()
+            st.localOptIn = true
+            st.hasAuthoritativeProjection = true
+            st.membership = VoiceSharingMembership(
+                membershipRevision: "r1", plan: .pro, voiceSharingEnrolled: enrollBox.enrolled,
+                enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active
+            )
+            return st
+        }
+        func makePipelineCollector(sink: @escaping (VoiceSharingCollector.SegmentEvent) -> Void)
+            -> VoiceSharingCollector {
+            VoiceSharingCollector(
+                policy: coordinator.policy,
+                membership: { enrolledProjection },
+                epochProvider: { "e1" },
+                sessionIdentity: { "gen-A" },
+                sink: sink
+            )
+        }
+        var oldEvents: [VoiceSharingCollector.SegmentEvent] = []
+        var newEvents: [VoiceSharingCollector.SegmentEvent] = []
+        let oldCollector = makePipelineCollector { oldEvents.append($0) }
+        let newCollector = makePipelineCollector { newEvents.append($0) }
+
+        // Premise: an enrolled user under an installed lease, so the old collector's audio is ACCEPTED.
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+
+        // OLD pipeline owns audio; the rebuild happens; the NEW subscription must not erase the old one.
+        let sub1 = coordinator.registerGateLostHandler { [weak oldCollector] in oldCollector?.gateLost() }
+        let sub2 = coordinator.registerGateLostHandler { [weak newCollector] in newCollector?.gateLost() }
+        _ = sub1
+
+        // An OPEN partial (plus queued work) at rebuild time: gate loss must cancel it and purge the queue.
+        oldCollector.speechStarted(confirmationFrameSamples: 320)
+        oldCollector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        XCTAssertGreaterThan(oldCollector.aggregateAudioSamplesForTesting, 0,
+                             "premise: the old collector still owns audio at rebuild time")
+        withExtendedLifetime(sub2) {}
+
+        // Withdrawal (identity move) fans out to BOTH live registrations. The store observer fires the
+        // coordinator's own gate-loss fan-out.
+        enrollBox.enrolled = false
+        coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
+        XCTAssertEqual(oldCollector.aggregateAudioSamplesForTesting, 0,
+                       "the OLD collector's audio is purged by the withdrawal")
+        XCTAssertTrue(oldCollector.waitForDrain(), "premise: the async drain completed")
+        XCTAssertTrue(oldEvents.contains { $0.isGateControl },
+                      "the old collector emitted its content-free cancellation record")
+        XCTAssertEqual(newCollector.aggregateAudioSamplesForTesting, 0,
+                       "the NEW collector is also purged")
+
+        // And the EXPIRY-TRIGGER path reaches both registrations too (lapse the lease, fire the schedule).
+        var scheduled: (delay: TimeInterval, body: () -> Void)?
+        coordinator.expiryScheduler = { delay, body in scheduled = (delay, body) }
+        let renewToken = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: renewToken)
+        guard let firstSchedule = scheduled, let staleBody = firstSchedule.body as (() -> Void)? else {
+            return XCTFail("expiry schedule installed")
+        }
+        clock.advance(firstSchedule.delay + 1)   // the lease lapses at its own deadline
+        XCTAssertFalse(coordinator.policy.permitsCollection, "premise: the lease has expired")
+        var oldPurges = 0, newPurges = 0
+        let oldProbe = coordinator.registerGateLostHandler { oldPurges += 1 }
+        let newProbe = coordinator.registerGateLostHandler { newPurges += 1 }
+        _ = oldProbe
+        withExtendedLifetime(newProbe) {
+            staleBody()
+            XCTAssertEqual(oldPurges, 1, "the expiry trigger notifies the OLD registration too")
+            XCTAssertEqual(newPurges, 1, "and the NEW one")
+        }
+    }
+
 }

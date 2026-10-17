@@ -99,14 +99,31 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    /// Production gate-loss fan-out. Assigned by the pipeline owner to route straight into
-    /// `VoiceSharingCollector.gateLost()`, so consent loss takes effect WITHOUT waiting for new
-    /// frames: queued and held audio is purged at the moment membership/identity loss or a confirmed
-    /// closed gate is observed. Idempotent — purging an already-purged collector is a no-op.
-    var onConsentGateLost: (() -> Void)?
+    /// One gate-loss registration. Destroying it UNREGISTERS its handler: a pipeline rebuild can
+    /// neither leave the previous collector un-notified nor notify a collector the new pipeline
+    /// already replaced. Each service build registers its own collector; handlers fan out together.
+    public final class GateLostSubscription {
+        private let unregister: () -> Void
+        fileprivate init(unregister: @escaping () -> Void) { self.unregister = unregister }
+        deinit { unregister() }
+    }
+
+    /// Production gate-loss fan-out. Every pipeline build registers its own collector (via
+    /// `registerGateLostHandler`) so consent loss — membership withdrawal, sign-out, refresh
+    /// observing the gate closed, or the scheduled lease-expiry trigger — purges EVERY collector
+    /// that is still alive and holding audio, and only those. Purging an already-purged collector
+    /// is a no-op.
+    private var gateLostHandlers: [UUID: () -> Void] = [:]
+
+    @discardableResult
+    func registerGateLostHandler(_ handler: @escaping () -> Void) -> GateLostSubscription {
+        let id = UUID()
+        gateLostHandlers[id] = handler
+        return GateLostSubscription { [weak self] in _ = self?.gateLostHandlers.removeValue(forKey: id) }
+    }
 
     private func consentGateLost() {
-        onConsentGateLost?()
+        for handler in gateLostHandlers.values { handler() }
     }
 
     /// Called from the fetch→activate completion path with the caller's evidence about that

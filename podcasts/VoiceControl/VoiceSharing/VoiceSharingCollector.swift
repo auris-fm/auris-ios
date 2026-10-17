@@ -361,7 +361,7 @@ final class VoiceSharingCollector {
             current = nil
             aggregateAudioSamples -= c.retained.count
             c.retained.removeAll()
-            markTerminal(c)
+            markTerminal(c, discarded: true)
             cancelEvent = makeEvent(kind: .cancelled, from: c)   // audio empty: withdrawal is content-free
         }
         lock.unlock()
@@ -473,9 +473,12 @@ final class VoiceSharingCollector {
         guard let c = current, c.id == context?.id, !c.terminal else { lock.unlock(); return }
         var abandoned = c
         abandoned.terminal = true
-        markTerminal(c)
-        let event = makeEvent(kind: .cancelled, from: abandoned)
         current = nil
+        // Correct the transfer: the open ownership is subtracted and the ring records identity
+        // ONLY (discarded), so the move neither double-charges nor strands the partial's bytes.
+        aggregateAudioSamples -= c.retained.count
+        markTerminal(abandoned, discarded: true)
+        let event = makeEvent(kind: .cancelled, from: abandoned)
         lock.unlock()
         submit(event)
     }
@@ -483,7 +486,16 @@ final class VoiceSharingCollector {
     private func markTerminal(_ c: FrozenCapture, discarded: Bool = false) {
         terminalIDs.insert(c.id)
         obsoleteCaptures.insert(c.id)
-        rememberTerminal(c, noContribution: discarded)
+        if discarded {
+            // A discarded terminal records IDENTITY ONLY: its audio left ownership at the dispose
+            // site (the caller subtracted), and the ring never holds it — there is nothing to
+            // resurrect and nothing to charge the budget for.
+            var identityOnly = c
+            identityOnly.retained = []
+            rememberTerminal(identityOnly, noContribution: true)
+        } else {
+            rememberTerminal(c)
+        }
         pruneTerminalHistoryIfNeeded()
     }
 
@@ -517,14 +529,16 @@ final class VoiceSharingCollector {
     /// Queues an event and schedules a drain. NEVER blocks the caller. When the bound is reached the NEWEST
     /// contribution work is dropped and counted — dropping the oldest would strand a capture whose later
     /// signals had already been delivered.
+    /// Audio bytes CURRENTLY owned inside an in-sink call: registered before the sink runs,
+    /// released when it returns. Part of actual ownership for the whole sink duration.
+    private var inFlightSinkAudioSamples = 0
+
     private func submit(_ event: SegmentEvent) {
         lock.lock()
         if deliversSynchronouslyForTesting {
             aggregateAudioSamples += event.audio.count
             lock.unlock()
-            sink(event)
-            // Ownership ends when the sink RETURNS, not when the enqueue happened.
-            lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
+            deliverUnderSinkOwnership(event)
             return
         }
         if pending.count >= Self.maxPendingSignals
@@ -561,9 +575,20 @@ final class VoiceSharingCollector {
             lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
             return   // drop silently: its consent moved on while it waited
         }
+        deliverUnderSinkOwnership(event)
+    }
+
+    /// Delivers one event with explicit in-sink ownership: counted from before the call until the
+    /// sink RETURNS, then released from the ledger. This is the ONLY place the sink is invoked.
+    private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
+        let n = event.audio.count
+        lock.lock(); inFlightSinkAudioSamples += n; lock.unlock()
         sink(event)
-        // The collector's ownership of the delivered bytes ends when the sink RETURNS.
-        lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
+        // Ownership ends when the sink RETURNS — not at enqueue.
+        lock.lock()
+        inFlightSinkAudioSamples -= n
+        aggregateAudioSamples -= n
+        lock.unlock()
     }
 
     // MARK: - Test seams (production callers never use these)
@@ -576,14 +601,15 @@ final class VoiceSharingCollector {
     }
 
     /// The ledger AUDITED against the live buffers: actually walks what is retained (open buffer,
-    /// every queued event's audio, every ring entry's audio). A budget that only trusts its own
-    /// counter could drift from reality; this is the control that catches that.
-    var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int) {
+    /// every queued event's audio, every ring entry's audio, plus the bytes of any event currently
+    /// INSIDE a sink call). A budget that only trusts its own counter could drift from reality;
+    /// this is the control that catches that.
+    var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int, inFlight: Int) {
         lock.lock(); defer { lock.unlock() }
         let openCount = current?.retained.count ?? 0
         let fifoCount = pending.reduce(0) { $0 + $1.audio.count }
         let ringCount = terminalRing.values.reduce(0) { $0 + $1.capture.retained.count }
-        return (openCount, fifoCount, ringCount)
+        return (openCount, fifoCount, ringCount, inFlightSinkAudioSamples)
     }
 
     var retainedSampleCountForTesting: Int {

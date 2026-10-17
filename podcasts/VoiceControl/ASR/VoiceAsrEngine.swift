@@ -16,6 +16,9 @@ class VoiceAsrEngine {
     /// the Voice Sharing feature wires it; every call site below is a guarded notification that cannot change
     /// a recognition outcome.
     var contributionCollector: VoiceSharingCollector?
+    /// Keeps this engine build's coordinator gate-loss registration alive exactly as long as the
+    /// collector it notifies; when the engine (and its collector) die, the registration unwinds.
+    var voiceSharingGateLostSubscription: AnyObject?
 
     private var isExposedSpeakerRoute = false
     private var playbackBuffer: [Float] = []

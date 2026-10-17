@@ -75,9 +75,12 @@ class VoiceControlAssembly {
             }
         )
         asrEngine.contributionCollector = contributionCollector
-        VoiceSharingCoordinator.shared.onConsentGateLost = { [weak contributionCollector] in
-            contributionCollector?.gateLost()
-        }
+        // Register (never overwrite): every build owns its subscription; destroying the engine
+        // destroys the token and unregisters exactly this collector.
+        asrEngine.voiceSharingGateLostSubscription =
+            VoiceSharingCoordinator.shared.registerGateLostHandler { [weak contributionCollector] in
+                contributionCollector?.gateLost()
+            }
 
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
