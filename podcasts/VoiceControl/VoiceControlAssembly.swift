@@ -75,9 +75,9 @@ class VoiceControlAssembly {
             }
         )
         asrEngine.contributionCollector = contributionCollector
-        // Register (never overwrite): every build owns its subscription; destroying the engine
-        // destroys the token and unregisters exactly this collector.
-        asrEngine.voiceSharingGateLostSubscription =
+        // The COLLECTOR owns its registration: a held sink or queued drain can keep the collector
+        // alive after the engine is gone, and that collector must still be purged at consent loss.
+        contributionCollector.gateLostSubscription =
             VoiceSharingCoordinator.shared.registerGateLostHandler { [weak contributionCollector] in
                 contributionCollector?.gateLost()
             }

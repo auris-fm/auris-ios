@@ -529,6 +529,12 @@ final class VoiceSharingCollector {
     /// Queues an event and schedules a drain. NEVER blocks the caller. When the bound is reached the NEWEST
     /// contribution work is dropped and counted — dropping the oldest would strand a capture whose later
     /// signals had already been delivered.
+    /// The collector OWNS its coordinator gate-loss registration: the token lives exactly as long as
+    /// the collector, which — not the engine — is the object a held sink or queued drain can keep
+    /// alive. Releasing the engine therefore cannot unregister a collector that still owns audio;
+    /// its registration purges it at the next consent loss.
+    var gateLostSubscription: AnyObject?
+
     /// Audio bytes CURRENTLY owned inside an in-sink call: registered before the sink runs,
     /// released when it returns. Part of actual ownership for the whole sink duration.
     private var inFlightSinkAudioSamples = 0
@@ -594,6 +600,12 @@ final class VoiceSharingCollector {
     // MARK: - Test seams (production callers never use these)
 
     /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
+    /// Number of events currently queued in the FIFO.
+    var pendingCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pending.count
+    }
+
     /// Live aggregate owned-audio count (open + FIFO + ring) — the value the byte budget enforces.
     var aggregateAudioSamplesForTesting: Int {
         lock.lock(); defer { lock.unlock() }
@@ -627,12 +639,6 @@ final class VoiceSharingCollector {
     var currentCaptureIDForTesting: UUID? {
         lock.lock(); defer { lock.unlock() }
         return current?.id
-    }
-
-    /// Events accepted into the queue but not yet delivered.
-    var pendingCountForTesting: Int {
-        lock.lock(); defer { lock.unlock() }
-        return pending.count
     }
 
     /// Total identity state: open capture, queued events, refusal sets. The aggregate the ceiling applies to.

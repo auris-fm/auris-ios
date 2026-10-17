@@ -770,4 +770,184 @@ final class VoiceSharingPolicyTests: XCTestCase {
         }
     }
 
+
+    /// Token-ownership control: the COLLECTOR owns its registration, so releasing the old ENGINE
+    /// during a held delivery does not unregister it — a later consent loss still purges the
+    /// collector that the held drain keeps alive. (One engine attached, then released: retaining
+    /// two engines would not exercise this.)
+    func test_engineReleasedDuringHeldDelivery_collectorStillPurgedAtConsentLoss() {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+
+        final class EnrollBox { var enrolled = true }
+        let enrollBox = EnrollBox()
+        func enrolledState() -> VoiceSharingEnrollmentStore.State {
+            var st = VoiceSharingEnrollmentStore.State()
+            st.localOptIn = true
+            st.hasAuthoritativeProjection = true
+            st.membership = VoiceSharingMembership(
+                membershipRevision: "r1", plan: .pro, voiceSharingEnrolled: enrollBox.enrolled,
+                enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active
+            )
+            return st
+        }
+
+        // Parking sink: the FIRST audio-carrying event parks its drain hop, holding the collector.
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let holdState = NSLock()
+        var alreadyHeld = false
+        var deliveredAfterLoss: [VoiceSharingCollector.SegmentEvent] = []
+        let afterLossLock = NSLock()
+        let collector = VoiceSharingCollector(
+            policy: coordinator.policy,
+            membership: { enrolledState() },
+            epochProvider: { "e1" },
+            sessionIdentity: { "gen-A" },
+            sink: { event in
+                if !enrollBox.enrolled {
+                    afterLossLock.lock(); deliveredAfterLoss.append(event); afterLossLock.unlock()
+                }
+                guard !event.audio.isEmpty else { return }
+                holdState.lock()
+                let first = !alreadyHeld
+                alreadyHeld = true
+                holdState.unlock()
+                if first {
+                    entered.signal()
+                    hold.wait()
+                }
+            }
+        )
+        // THE FIX UNDER TEST: the collector owns its registration token (not the engine).
+        var fanoutCount = 0
+        let probe = coordinator.registerGateLostHandler { fanoutCount += 1 }
+        _ = probe
+        collector.gateLostSubscription =
+            coordinator.registerGateLostHandler { [weak collector] in collector?.gateLost() }
+
+        // An engine pipeline holds the collector; the collector owns audio queued for delivery.
+        let backend = EngineStubBackend()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
+            backend: backend,
+            signalFilter: SignalFilter(),
+            wakeWordDetector: NotDetectedWakeForR19(),
+            gracePeriodSignal: GracePeriodSignal(),
+            translationStage: nil
+        )
+        engine.contributionCollector = collector
+        var engineBox: VoiceAsrEngine? = engine
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: drain parked in the sink")
+
+        // More audio queued BEHIND the parked hop, plus an OPEN partial: at consent loss the FIFO
+        // must purge, the open partial must become a content-free cancellation, and the parked
+        // in-flight bytes remain owned until the sink returns.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxB = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
+        collector.speechCompleted([Float](repeating: 1, count: 320), context: ctxB)
+        collector.speechStarted(confirmationFrameSamples: 320)   // open partial C
+        collector.appendSamples([Float](repeating: 1, count: 128), reportedTotal: 128)
+        XCTAssertGreaterThan(collector.pendingCountForTesting, 0, "premise: FIFO holds work behind the parked hop")
+
+        withExtendedLifetime(collector) {
+            // RELEASE THE ENGINE while the collector still owns audio and its drain is parked.
+            engineBox = nil
+            XCTAssertNil(engineBox)
+
+            // Consent loss reaches the collector even though the engine is gone.
+            enrollBox.enrolled = false
+            coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
+            XCTAssertEqual(fanoutCount, 1, "the withdrawal reached the coordinator's fan-out")
+            // The FIFO's audio work (B) was purged; what remains queued is the open partial's
+            // content-free cancellation record only.
+            afterLossLock.lock(); let during = deliveredAfterLoss; afterLossLock.unlock()
+            XCTAssertTrue(during.isEmpty, "the purged FIFO work is never delivered")
+
+            // The PARKED event's bytes are still in-flight (owned until the sink returns) — release
+            // it, then only the content-free gate record may follow.
+            hold.signal()
+            XCTAssertTrue(collector.waitForDrain())
+            XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
+                           "after the held sink returns, nothing is owned")
+            afterLossLock.lock(); let late = deliveredAfterLoss; afterLossLock.unlock()
+            XCTAssertEqual(late.count, 1, "the cancellation record followed the held delivery")
+            XCTAssertTrue(late.allSatisfy { $0.isGateControl },
+                          "nothing but the content-free gate record reaches the sink after the loss")
+        }
+    }
+
+    /// Concurrency control: registration, teardown and fan-out from many threads do not race the
+    /// registry; a handler that tears ITSELF down reentrantly must not deadlock the fan-out, and
+    /// surviving registrations must still be reached.
+    func test_gateLostRegistry_concurrentRegistrationTeardownAndReentrantSelfTeardown() {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        let chaosQueue = DispatchQueue(label: "chaos", attributes: .concurrent)
+        let group = DispatchGroup()
+        var subs: [VoiceSharingCoordinator.GateLostSubscription] = []
+        let subsLock = NSLock()
+        var fired = 0
+        let firedLock = NSLock()
+
+        for _ in 0..<16 {
+            group.enter()
+            chaosQueue.async {
+                for _ in 0..<50 {
+                    let sub = coordinator.registerGateLostHandler { firedLock.lock(); fired += 1; firedLock.unlock() }
+                    subsLock.lock(); subs.append(sub); subsLock.unlock()
+                    if Bool.random() { sub.unregisterNow() }
+                }
+                group.leave()
+            }
+        }
+        // Fan out WHILE the chaos runs: snapshots must stay consistent, no crash, no deadlock.
+        for _ in 0..<20 {
+            coordinator.registerGateLostHandler { firedLock.lock(); fired += 1; firedLock.unlock() }.unregisterNow()
+            _ = coordinator.registerGateLostHandlerForTestingCount
+        }
+        group.wait()
+
+        // Reentrant SELF-teardown during fan-out: the handler removes itself mid-invocation.
+        var survivingFired = 0
+        let survivor: VoiceSharingCoordinator.GateLostSubscription =
+            coordinator.registerGateLostHandler { survivingFired += 1 }
+        var selfRemovingRef: VoiceSharingCoordinator.GateLostSubscription?
+        let selfRemoving = coordinator.registerGateLostHandler {
+            selfRemovingRef?.unregisterNow()   // re-enters the registry from inside a handler
+        }
+        selfRemovingRef = selfRemoving
+        coordinator.consentGateLostForTesting()
+        XCTAssertEqual(survivingFired, 1, "the surviving registration is reached despite the reentrant teardown")
+        coordinator.consentGateLostForTesting()
+        XCTAssertEqual(survivingFired, 2, "and again on the next fan-out; the self-removed one is not invoked")
+        _ = survivor
+    }
+
+private final class NotDetectedWakeForR19: WakeWordDetectorProtocol {
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult { .notDetected(confidence: 0.05) }
+    func release() {}
+}
+
 }

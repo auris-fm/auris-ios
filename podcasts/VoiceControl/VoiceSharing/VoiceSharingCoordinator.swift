@@ -105,6 +105,9 @@ final class VoiceSharingCoordinator {
     public final class GateLostSubscription {
         private let unregister: () -> Void
         fileprivate init(unregister: @escaping () -> Void) { self.unregister = unregister }
+        /// Explicit teardown, for a handler that must remove ITSELF during fan-out (reentrant
+        /// teardown): same path as deinit, safe to call from inside a handler invocation.
+        func unregisterNow() { unregister() }
         deinit { unregister() }
     }
 
@@ -113,17 +116,37 @@ final class VoiceSharingCoordinator {
     /// observing the gate closed, or the scheduled lease-expiry trigger — purges EVERY collector
     /// that is still alive and holding audio, and only those. Purging an already-purged collector
     /// is a no-op.
+    /// Registry state is mutated from MANY threads: registration on pipeline builds, token deinit
+    /// teardown on whatever thread drops the last reference (a drain queue, a sink holder), and the
+    /// expiry trigger on the main queue. Every access is therefore lock-guarded.
     private var gateLostHandlers: [UUID: () -> Void] = [:]
+    private let gateLostHandlersLock = NSLock()
 
     @discardableResult
     func registerGateLostHandler(_ handler: @escaping () -> Void) -> GateLostSubscription {
         let id = UUID()
-        gateLostHandlers[id] = handler
-        return GateLostSubscription { [weak self] in _ = self?.gateLostHandlers.removeValue(forKey: id) }
+        gateLostHandlersLock.lock(); gateLostHandlers[id] = handler; gateLostHandlersLock.unlock()
+        return GateLostSubscription { [weak self] in self?.removeGateLostHandler(id) }
+    }
+
+    // MARK: - Test seams
+    var registerGateLostHandlerForTestingCount: Int {
+        gateLostHandlersLock.lock(); let n = gateLostHandlers.count; gateLostHandlersLock.unlock()
+        return n
+    }
+    func consentGateLostForTesting() { consentGateLost() }
+
+    private func removeGateLostHandler(_ id: UUID) {
+        gateLostHandlersLock.lock(); gateLostHandlers.removeValue(forKey: id); gateLostHandlersLock.unlock()
     }
 
     private func consentGateLost() {
-        for handler in gateLostHandlers.values { handler() }
+        // SNAPSHOT under the lock, INVOKE outside it: a handler may tear itself (or another
+        // registration) down reentrantly, which re-enters this registry; invoking under the lock
+        // would deadlock that. Snapshot semantics are the contract: a fan-out reaches every
+        // registration alive at the moment the loss was observed.
+        gateLostHandlersLock.lock(); let snapshot = Array(gateLostHandlers.values); gateLostHandlersLock.unlock()
+        for handler in snapshot { handler() }
     }
 
     /// Called from the fetch→activate completion path with the caller's evidence about that

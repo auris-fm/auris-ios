@@ -338,6 +338,9 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
             collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
             collector.speechCompleted([Float](repeating: 1, count: 640),
                                       context: collector.currentCaptureContextForTesting)
+            // libdispatch pools pthreads: this thread's marker must not leak into a later
+            // workQueue hop running on the same pooled pthread.
+            Thread.current.threadDictionary.removeObject(forKey: "producer-marker")
             sem.signal()
         }
         XCTAssertEqual(sem.wait(timeout: .now() + 5), .success, "producer should finish")
@@ -371,7 +374,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
 /// Backend stand-in that also gives the test a handle on the engine's capture callback and the bleed verdict,
 /// neither of which is otherwise reachable without a real audio session or playback tap.
-private final class EngineStubBackend: AsrBackend {
+final class EngineStubBackend: AsrBackend {
     weak var engine: VoiceAsrEngine?
     private(set) var transcribeCalls = 0
 
