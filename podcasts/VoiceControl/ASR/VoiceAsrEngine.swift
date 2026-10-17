@@ -127,7 +127,13 @@ class VoiceAsrEngine {
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         segmenter.onUtterance = { [weak self] utterance in
-            self?.beginUtteranceProcessing(utterance)
+            guard let self else { return }
+            // Freeze, then DETACH, both synchronously before the outcome Task exists: the completed
+            // segment's audio leaves `current` here, so a successor starting first cannot turn it
+            // into an audio-carrying cancel, and the async outcome emits exactly once from the ring.
+            let frozen = self.contributionCollector?.currentCaptureContext()
+            self.contributionCollector?.segmentationEnded(frozen)
+            self.beginUtteranceProcessing(utterance, preFrozenContext: frozen)
         }
         // Contribution observation attaches to the SAME segmenter the pipeline already drives, so there is
         // one segmentation truth and no second buffer. These are synchronous and observe-only: the collector
@@ -215,10 +221,15 @@ class VoiceAsrEngine {
 
     func beginUtteranceProcessing(_ utterance: [Float], taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
         let frozenContext = contributionCollector?.currentCaptureContext()
+        return beginUtteranceProcessing(utterance, preFrozenContext: frozenContext, taskBodyGate: taskBodyGate)
+    }
+
+    /// Outcome launch for a context ALREADY frozen synchronously (production onUtterance path).
+    func beginUtteranceProcessing(_ utterance: [Float], preFrozenContext: VoiceSharingCollector.CaptureContext?, taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
         let bodyGate = taskBodyGate ?? utteranceBodyGateForTesting
         return Task {
             bodyGate?()
-            await self.processUtterance(utterance, frozenContext: frozenContext)
+            await self.processUtterance(utterance, frozenContext: preFrozenContext)
         }
     }
 

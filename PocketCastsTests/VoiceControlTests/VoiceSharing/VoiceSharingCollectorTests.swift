@@ -404,10 +404,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let ctxA = collector.currentCaptureContextForTesting
         guard let ctxA else { return XCTFail("A should be open") }
 
-        // A completes BEFORE any Task runs, freezing the audio decision; then B starts.
-        // (Ordering stand-in for "A queued, B started": A's Task holds ctxA regardless.)
+        // A ENDS through the synchronous endpoint before any Task runs (as the production closure
+        // performs); then B starts. A is completed-awaiting-outcome, not cancelled.
         collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
-        collector.speechCancelled()          // segmenter closed A before A's Task ran
+        collector.segmentationEnded(ctxA)
         collector.speechStarted(confirmationFrameSamples: 320)   // B is now the open capture
         clearEvents(collector)
 
@@ -730,6 +730,143 @@ final class VoiceSharingCollectorTests: XCTestCase {
                        "the budget releases only when the sink has returned")
     }
 
+    /// THE segmentation-endpoint control: the engine detaches completed A synchronously (via
+    /// `segmentationEnded`, before the outcome Task), so B's start does NOT emit an audio-carrying
+    /// cancel for A, and A's outcome later emits exactly ONCE from the ring.
+    func test_segmentationEndpoint_detachesCompletedA_andOutcomeEmitsOnce() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let collector = makeCollector()
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+
+        // The synchronous endpoint the production onUtterance closure calls.
+        collector.segmentationEnded(ctxA)
+        XCTAssertEqual(collector.currentCaptureContextForTesting, nil,
+                       "A's audio is detached at the endpoint, before any Task or successor")
+        clearEvents(collector)
+
+        collector.speechStarted(confirmationFrameSamples: 320)   // B starts after the detach
+        XCTAssertEqual(snapshot().map(\.kind), [.started],
+                       "B's start is NOT an audio cancel for completed-awaiting-outcome A")
+
+        // A's outcome arrives late: exactly one record under A, with A's audio.
+        collector.segmentRejected(kind: .rejectedWake, samples: 640, context: ctxA)
+        var got = snapshot().filter { $0.kind != .started }
+        XCTAssertEqual(got.map(\.kind), [.rejectedWake])
+        XCTAssertEqual(got.last?.captureID, ctxA?.id)
+        XCTAssertEqual(got.last?.audio.count, 640)
+
+        // A SECOND late outcome for A is consumed — emitted-once, no duplicates.
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
+        got = snapshot().filter { $0.kind != .started }
+        XCTAssertEqual(got.map(\.kind), [.rejectedWake], "no duplicate record for A")
+    }
+
+    /// A genuine cancel DISCARDS the partial: content-free record, and a late outcome can never
+    /// turn the cancelled audio into a contribution.
+    func test_genuineCancel_discardsPartial_neverContributes() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let collector = makeCollector()
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        collector.speechCancelled()
+
+        let got = snapshot()
+        XCTAssertEqual(got.map(\.kind), [.started, .cancelled])
+        XCTAssertEqual(got.last?.audio.count, 0, "the cancel record is content-free")
+        clearEvents(collector)
+
+        // A late outcome for the discarded partial must NOT contribute — not even as a rejection.
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
+        collector.segmentRejected(kind: .rejectedWake, samples: 640, context: ctxA)
+        XCTAssertEqual(snapshot().count, 0, "a discarded partial never becomes a contribution record")
+    }
+
+    /// Open growth RESERVES against the aggregate BEFORE appending: with the FIFO saturated, the
+    /// open capture cannot push total ownership over budget even though its per-capture cap has room.
+    func test_appendSamples_reservesAgainstAggregateBudget() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        var open = false
+        var enteredSignalled = false
+        let stateLock = NSLock()
+        let enteredWaitLock = NSLock()
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { _ in
+                stateLock.lock(); let g = open; stateLock.unlock()
+                let first = enteredWaitLock.withLock { () -> Bool in
+                    if enteredSignalled { return false }
+                    enteredSignalled = true
+                    return true
+                }
+                if first { entered.signal() }
+                if !g { hold.wait() }
+            }
+        )
+        collector.speechStarted(confirmationFrameSamples: 320)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked")
+
+        // Saturate the FIFO with near-ceiling segments (audio rides on completions).
+        let big = [Float](repeating: 1, count: 500_000)
+        for _ in 0..<10 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(big, reportedTotal: big.count)
+            collector.speechCompleted(big, context: collector.currentCaptureContextForTesting)
+        }
+        let budget = VoiceSharingCollector.maxAggregateRetainedSamples
+        // Now open a NEW capture and try to append: aggregate room is what limits take.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 100_000), reportedTotal: 100_000)
+        let breakdown = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertLessThanOrEqual(breakdown.open + breakdown.fifo + breakdown.ring, budget,
+                                 "actual retained bytes (open+FIFO+ring) never exceed the budget")
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
+                       breakdown.open + breakdown.fifo + breakdown.ring,
+                       "the ledger matches the ACTUAL retained buffers, not just itself")
+
+        stateLock.lock(); open = true; stateLock.unlock()
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain())
+    }
+
+    /// The budget ledger is audited against the ACTUAL buffers (open + FIFO + ring + in-flight sink
+    /// bytes), not trusted from its own counter.
+    func test_ledgerMatchesActuallyRetainedBytes() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let collector = makeCollector()   // sync delivery: events leave the ledger at sink return
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 128), reportedTotal: 128)
+
+        let breakdown = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
+                       breakdown.open + breakdown.fifo + breakdown.ring,
+                       "ledger == open + FIFO + ring, exactly")
+        XCTAssertEqual(breakdown.open, 128)
+    }
+
     /// A STALE context — one frozen by an utterance Task before its capture was superseded — must be refused
     /// outright, even though the collector currently holds a different open capture. This is the
     /// collector-side half of "B starting before A's reject arrives cannot consume B".
@@ -817,11 +954,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         clearEvents(collector)
         collector.segmentRejected(kind: .rejectedWake, samples: 8_000, context: ctxA)
-        // A was superseded while open (recorded cancelled at B's start), so A's late rejection resolves
-        // A from the ring — one record under A, never adopted by B.
-        let lateGot = snapshot()
-        XCTAssertEqual(lateGot.map(\.kind), [.rejectedWake], "A's late rejection resolves A, it is not dropped")
-        XCTAssertEqual(lateGot.last?.captureID, firstID, "attributed to A, exactly")
+        // A was superseded while OPEN — a genuine cancel discarded it, and a discarded partial NEVER
+        // contributes: no record at all, and certainly none attributed to B.
+        XCTAssertEqual(snapshot(), [], "a discarded partial's late rejection contributes nothing")
         XCTAssertEqual(collector.currentCaptureIDForTesting, secondID, "and must not disturb B's state")
 
         // B's own context is legitimate for the live capture.

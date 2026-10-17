@@ -58,6 +58,27 @@ class VoiceControlAssembly {
             wakeThreshold: threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // Voice-sharing composition (production). The collector observes the engine with production
+        // defaults for membership/epoch/session; consent loss on the coordinator's gate — membership
+        // withdrawal, sign-out, refresh observing the switch off, and the SCHEDULED LEASE-EXPIRY
+        // TRIGGER — routes straight into the collector's purge. The feature itself stays disabled
+        // until the owner approves activation; wiring exists so consent loss acts on real audio the
+        // moment anything upstream produces it.
+        let contributionCollector = VoiceSharingCollector(
+            policy: VoiceSharingCoordinator.shared.policy,
+            sink: { event in
+                // Upload queue is a later task; until it exists the receipt is logged, never dropped
+                // silently. The collector's own bounds decide what reaches here.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] segment event kind=\(event.kind) capture=\(event.captureID) samples=\(event.retainedSamples)"
+                )
+            }
+        )
+        asrEngine.contributionCollector = contributionCollector
+        VoiceSharingCoordinator.shared.onConsentGateLost = { [weak contributionCollector] in
+            contributionCollector?.gateLost()
+        }
+
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).

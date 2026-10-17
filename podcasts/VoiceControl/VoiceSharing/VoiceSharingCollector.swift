@@ -196,7 +196,7 @@ final class VoiceSharingCollector {
             abandoned.terminal = true
             current = nil
             aggregateAudioSamples -= abandoned.retained.count
-            markTerminal(abandoned)
+            markTerminal(abandoned, discarded: true)
             staleEvent = makeEvent(kind: .cancelled, from: abandoned)
         }
         current = frozen
@@ -206,6 +206,26 @@ final class VoiceSharingCollector {
         if let staleEvent { submit(staleEvent) }
         submit(startEvent)
         return context
+    }
+
+    /// SYNCHRONOUS segmentation endpoint, called by the engine's onUtterance closure BEFORE it creates
+    /// the outcome Task: the segmenter has finished THIS segment, so its audio is frozen and detached
+    /// HERE — before any successor can start and before any await. Without this, a completed capture
+    /// still sitting in `current` would be turned into an audio-carrying cancel by B's start, and the
+    /// late outcome would emit a SECOND record. Emits NO event: the accept/reject decision arrives
+    /// later via the frozen context and emits exactly once from the ring.
+    func segmentationEnded(_ context: CaptureContext?) {
+        lock.lock()
+        guard let context, let c = current, c.id == context.id, !c.terminal else {
+            lock.unlock()
+            return
+        }
+        var done = c
+        done.terminal = true
+        current = nil
+        aggregateAudioSamples -= done.retained.count
+        markTerminal(done)
+        lock.unlock()
     }
 
     /// The context of the capture currently open, for the engine to freeze into its utterance Task. Nil when
@@ -231,8 +251,12 @@ final class VoiceSharingCollector {
         // every append would trigger a copy-on-write of the WHOLE buffer (O(n²) per segment). With `c`
         // uniquely owned, `append` writes in place. Restored before unlock.
         current = nil
-        let room = Self.maxRetainedSamples - c.retained.count
-        let take = min(samples.count, max(room, 0))
+        // Reserve BEFORE growth: the open capture may not push the aggregate over budget even though
+        // its own per-capture cap still has room — otherwise open growth could exceed the budget and
+        // wait for a later submit/evict to notice.
+        let perCaptureRoom = Self.maxRetainedSamples - c.retained.count
+        let aggregateRoom = Self.maxAggregateRetainedSamples - aggregateAudioSamples
+        let take = min(samples.count, max(perCaptureRoom, 0), max(aggregateRoom, 0))
         if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
         c.original = max(c.original ?? 0, reportedTotal ?? c.retained.count)
         if take < samples.count, c.droppedFrom == nil {
@@ -279,7 +303,7 @@ final class VoiceSharingCollector {
         c.terminal = true
         current = nil
         aggregateAudioSamples -= c.retained.count
-        markTerminal(c)
+        markTerminal(c, discarded: true)   // a genuine cancel discards the partial FOREVER
         let event = makeEvent(kind: .cancelled, from: c)
         lock.unlock()
         submit(event)
@@ -330,7 +354,7 @@ final class VoiceSharingCollector {
         for i in pending.indices { aggregateAudioSamples -= pending[i].audio.count }
         pending.removeAll()
         disposeRingAudio()
-        for key in terminalRing.keys { terminalRing[key]?.consentRevoked = true }
+        for key in terminalRing.keys { terminalRing[key]?.noContribution = true }
         var cancelEvent: SegmentEvent?
         if var c = current, !c.terminal {
             c.terminal = true
@@ -358,10 +382,11 @@ final class VoiceSharingCollector {
     private struct TerminalRecord {
         var capture: FrozenCapture
         var emitted: Bool
-        /// A capture whose consent was revoked (gate loss) is remembered for identity bookkeeping only.
-        /// Its audio is disposed at revocation and its late outcomes are CONSUMED silently — never
-        /// resurrected as deliverable records.
-        var consentRevoked: Bool = false
+        /// A capture that can never become a contribution — genuinely cancelled partials AND
+        /// consent-revoked (gate-loss) captures — is remembered for identity bookkeeping only. Its
+        /// late outcomes are CONSUMED silently: never resurrected as deliverable records, never
+        /// emitted twice.
+        var noContribution: Bool = false
     }
 
     private var terminalRing: [UUID: TerminalRecord] = [:]
@@ -370,9 +395,9 @@ final class VoiceSharingCollector {
     /// `lock`. Enforced against `maxAggregateRetainedSamples` at every growth point.
     private var aggregateAudioSamples = 0
 
-    private func rememberTerminal(_ c: FrozenCapture) {
+    private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         aggregateAudioSamples += c.retained.count
-        terminalRing[c.id] = TerminalRecord(capture: c, emitted: false)
+        terminalRing[c.id] = TerminalRecord(capture: c, emitted: false, noContribution: noContribution)
         while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
             guard let oldest = terminalRing.first else { break }
             aggregateAudioSamples -= oldest.value.capture.retained.count
@@ -419,9 +444,9 @@ final class VoiceSharingCollector {
             lock.unlock()
             return false
         }
-        // A revoked capture (withdrawal) is consumed, never resurrected: its audio was disposed at the
-        // revocation and no late callback may turn it back into a deliverable record.
-        if rec.consentRevoked {
+        // A capture that can never contribute (genuine cancel, withdrawal) is consumed, never
+        // resurrected: no late callback may turn it back into a deliverable record.
+        if rec.noContribution {
             rec.emitted = true
             terminalRing[context.id] = rec
             lock.unlock()
@@ -455,10 +480,10 @@ final class VoiceSharingCollector {
         submit(event)
     }
 
-    private func markTerminal(_ c: FrozenCapture) {
+    private func markTerminal(_ c: FrozenCapture, discarded: Bool = false) {
         terminalIDs.insert(c.id)
         obsoleteCaptures.insert(c.id)
-        rememberTerminal(c)
+        rememberTerminal(c, noContribution: discarded)
         pruneTerminalHistoryIfNeeded()
     }
 
@@ -477,10 +502,13 @@ final class VoiceSharingCollector {
         if let from = c.droppedFrom, let original = c.original, original > from {
             dropped = [DropSpan(start: from, end: original)]
         } else { dropped = [] }
+        // A cancellation is a content-free DISPOSAL record in every case: a genuinely cancelled partial
+        // can never become a contribution, so its record states identity + counts and carries no audio.
+        let audio = kind == .cancelled ? [] : c.retained
         return SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
                             authorizationSession: c.session, retainedSamples: c.retained.count,
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
-                            originalSampleCount: c.original, audio: c.retained,
+                            originalSampleCount: c.original, audio: audio,
                             isGateControl: kind == .cancelled)
     }
 
@@ -545,6 +573,17 @@ final class VoiceSharingCollector {
     var aggregateAudioSamplesForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return aggregateAudioSamples
+    }
+
+    /// The ledger AUDITED against the live buffers: actually walks what is retained (open buffer,
+    /// every queued event's audio, every ring entry's audio). A budget that only trusts its own
+    /// counter could drift from reality; this is the control that catches that.
+    var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let openCount = current?.retained.count ?? 0
+        let fifoCount = pending.reduce(0) { $0 + $1.audio.count }
+        let ringCount = terminalRing.values.reduce(0) { $0 + $1.capture.retained.count }
+        return (openCount, fifoCount, ringCount)
     }
 
     var retainedSampleCountForTesting: Int {

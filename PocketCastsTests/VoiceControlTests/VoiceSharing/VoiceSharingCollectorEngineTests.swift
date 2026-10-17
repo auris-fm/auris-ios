@@ -103,7 +103,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         // The body is parked; meanwhile A's segment closes and B opens. Whatever "current" means now, it
         // is B — A's fate must already have been sealed.
         XCTAssertEqual(bodyHeld.wait(timeout: .now() + 2), .success, "premise: A's body is held")
-        collector.speechCancelled()
+        collector.segmentationEnded(ctxA)
         collector.speechStarted(confirmationFrameSamples: 320)
         guard let ctxB = collector.currentCaptureContextForTesting else {
             return XCTFail("premise: B open")
@@ -149,19 +149,21 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         backend.emitSilence(totalSamples: 20 * 160)
         XCTAssertEqual(bodyHeld.wait(timeout: .now() + 2), .success,
                        "premise: A's Task body is held by the engine gate")
-        guard let ctxA = collector.currentCaptureContextForTesting else {
+        // The closure already DETACHED A at the synchronous endpoint — read A's identity from the
+        // recorded start event instead of the (now nil) current capture.
+        let starts = snapshot().filter { $0.kind == .started }
+        guard let ctxAID = starts.first?.captureID else {
             releaseBody.signal()
-            return XCTFail("premise: A open when the closure ran")
+            return XCTFail("premise: A's start recorded")
         }
 
-        // While A's body is parked: A closes, B opens. Whatever the body reads "now", it must not matter.
-        collector.speechCancelled()
+        // While A's body is parked: B opens. A stays completed-awaiting-outcome.
         collector.speechStarted(confirmationFrameSamples: 320)
         guard let ctxB = collector.currentCaptureContextForTesting else {
             releaseBody.signal()
             return XCTFail("premise: B open")
         }
-        XCTAssertNotEqual(ctxA.id, ctxB.id)
+        XCTAssertNotEqual(ctxAID, ctxB.id)
 
         releaseBody.signal()
         // Wait for A's body to finish reporting.
@@ -174,11 +176,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         engine.utteranceBodyGateForTesting = nil
         engine.stop()
 
-        let got = snapshot()
-        let aRejects = got.filter { $0.kind == .rejectedWake && $0.captureID == ctxA.id }
+        let got = snapshot().filter { $0.kind != .started && $0.kind != .cancelled }
+        let aRejects = got.filter { $0.kind == .rejectedWake && $0.captureID == ctxAID }
         XCTAssertEqual(aRejects.count, 1,
                        "the start()-installed closure froze A synchronously; A's late body reports under A")
-        let bTouched = got.contains { $0.captureID == ctxB.id && $0.kind != .started }
+        let bTouched = got.contains { $0.captureID == ctxB.id }
         let observed = got.map { "\($0.kind):\($0.captureID)" }
         XCTAssertFalse(bTouched, "B untouched by A's late body; got \(observed)")
     }
