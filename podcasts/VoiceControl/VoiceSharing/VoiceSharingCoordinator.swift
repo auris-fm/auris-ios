@@ -34,6 +34,7 @@ final class VoiceSharingCoordinator {
         enrollmentStore: VoiceSharingEnrollmentStore? = nil
     ) {
         self.nowProvider = now
+        self.monotonicClock = clock
         self.lastFetchTimeProvider = lastFetchTime
         self.valueSource = valueSource ?? Self.readSDKValue
         let store = enrollmentStore ?? VoiceSharingEnrollmentStore.shared
@@ -71,6 +72,33 @@ final class VoiceSharingCoordinator {
     /// caught once in this feature.
     private var applyingMembershipInvalidation: Bool
 
+    /// Schedules the lease-expiry purge. Injectable so tests drive the exact deadline; production
+    /// uses `defaultExpiryScheduler` (wall-clock delay computed from the monotonic deadline).
+    /// Each refresh REPLACES the pending schedule (newest token wins), so a renewed lease never
+    /// fires the previous deadline's purge.
+    var expiryScheduler: ((_ delay: TimeInterval, _ body: @escaping () -> Void) -> Void)?
+    private var expiryScheduleToken = UUID()
+
+    static let defaultExpiryScheduler: (_ delay: TimeInterval, @escaping () -> Void) -> Void = { delay, body in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
+    }
+
+    /// THE expiry trigger: fires at the LEASE DEADLINE itself, without waiting for a refresh, new
+    /// frames, or any other event. At fire time the gate is re-read — if the lease lapsed (or the
+    /// gate is closed for any other reason), consent is gone and the collector must purge NOW.
+    /// A lease renewed in between re-reads open, so a stale schedule is harmless.
+    private func scheduleLeaseExpiryTrigger() {
+        guard let deadline = policy.installedLeaseExpiry else { return }
+        let delay = max(0, deadline - monotonicClock.now())
+        let token = UUID()
+        expiryScheduleToken = token
+        let schedule = expiryScheduler ?? Self.defaultExpiryScheduler
+        schedule(delay) { [weak self] in
+            guard let self, self.expiryScheduleToken == token else { return }
+            if !self.policy.permitsCollection { self.consentGateLost() }
+        }
+    }
+
     /// Production gate-loss fan-out. Assigned by the pipeline owner to route straight into
     /// `VoiceSharingCollector.gateLost()`, so consent loss takes effect WITHOUT waiting for new
     /// frames: queued and held audio is purged at the moment membership/identity loss or a confirmed
@@ -93,16 +121,18 @@ final class VoiceSharingCoordinator {
             freshActivationSucceeded: freshActivationSucceeded,
             fetchToken: fetchToken
         )
-        // Lease-expiry trigger WITHOUT new frames: if the gate reads closed after a refresh attempt
-        // (switch off, lease lapsed, account not enrolled), any audio the collector still holds is
-        // consentless — purge it now rather than at the next segmentation signal.
+        // If the refresh observed the gate closed (switch off, account not enrolled, install
+        // refused), any audio the collector still holds is consentless — purge now.
         if !policy.permitsCollection { consentGateLost() }
+        // And schedule the purge at the NEW lease's deadline, so expiry is triggered by time itself.
+        scheduleLeaseExpiryTrigger()
     }
 
     /// Freshness plumbing reads the SDK's own bookkeeping rather than trusting `.success`, which
     /// the SDK also reports for cached returns. Injectable so tests drive the real decision
     /// function without a live Firebase instance.
     private let nowProvider: () -> Date
+    private let monotonicClock: MonotonicClock
     var lastFetchTimeProvider: () -> Date?   // settable so tests drive the real decision function
 
     /// The SDK-facing seam: exactly the two fields production reads off a config value. Isolated so

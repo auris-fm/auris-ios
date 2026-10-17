@@ -41,14 +41,19 @@ final class VoiceSharingCollector {
     /// per hop, so anything older than the live window cannot still be in flight; prune to half once exceeded.
     static let maxTerminalHistoryIDs = 512
 
-    /// ONE aggregate ceiling over every float the collector OWNS, across open capture, queued FIFO
-    /// events, and the terminal ring — enforced, not merely documented. At the compiled ceilings this
-    /// allows 4 × 960,000 samples = 3.84 M floats = **15.36 MB** (mono Float, 4 bytes): one slot for the
-    /// open capture, one for ring-held late-outcome audio, two for FIFO-held event audio (which includes
-    /// the one transient COW copy made when a completed capture's buffer is shared between the ring entry
+    /// ONE aggregate ceiling over every float the collector OWNS, across open capture, FIFO events
+    /// (INCLUDING the one currently in the sink, counted until the sink call RETURNS — a release at
+    /// dequeue would declare still-retained bytes free while the sink is mid-delivery), and the
+    /// terminal ring — enforced, not merely documented. At the compiled ceilings this allows
+    /// 4 × 960,000 samples = 3.84 M floats = **15.36 MB** (mono Float, 4 bytes): one slot for the open
+    /// capture, one for ring-held late-outcome audio, two for FIFO-held event audio (which includes the
+    /// one transient COW copy made when a completed capture's buffer is shared between the ring entry
     /// and its event — arrays share storage until mutated, so accounting counts each owner, not raw
-    /// uniqueness). Exceeding it drops the NEWEST contribution work (same policy as the FIFO bound) and
-    /// counts the drop. Every release path — drain (delivered or dropped), cancel, gate loss — subtracts.
+    /// uniqueness). EXACT OWNERSHIP BOUNDARIES: a delivered event's bytes leave this budget when the
+    /// sink returns — from that point the sink/uploader is the owner and the budget cannot see it;
+    /// a dropped event's bytes leave immediately; ring-held bytes stay counted until eviction or
+    /// disposal. Exceeding the ceiling drops the NEWEST contribution work (same policy as the FIFO
+    /// bound) and counts the drop.
     static let maxAggregateRetainedSamples = 4 * maxRetainedSamples
 
     /// Half-open sample interval `[start, end)` on the original segment timeline.
@@ -487,8 +492,11 @@ final class VoiceSharingCollector {
     private func submit(_ event: SegmentEvent) {
         lock.lock()
         if deliversSynchronouslyForTesting {
+            aggregateAudioSamples += event.audio.count
             lock.unlock()
             sink(event)
+            // Ownership ends when the sink RETURNS, not when the enqueue happened.
+            lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
             return
         }
         if pending.count >= Self.maxPendingSignals
@@ -511,8 +519,8 @@ final class VoiceSharingCollector {
         lock.lock()
         guard !pending.isEmpty else { lock.unlock(); return }
         let event = pending.removeFirst()
-        aggregateAudioSamples -= event.audio.count   // the collector's ownership ends here: delivered
-                                                     // or dropped, the bytes leave this budget either way
+        // Dropped HERE (before the sink) means the bytes leave the budget immediately; delivered means
+        // they stay counted IN FLIGHT until the sink returns (subtract after the call below).
         // Live consent check at dequeue: identity AND the policy gate. Epoch/session equality alone would
         // deliver work queued before a switch-off or lease expiry, because a disable does not change either.
         let stillValid = event.isGateControl
@@ -521,8 +529,13 @@ final class VoiceSharingCollector {
                 && policy.permitsCollection
                 && membership().effectiveEnrolled)
         lock.unlock()
-        guard stillValid else { return }   // drop silently: its consent moved on while it waited
+        guard stillValid else {
+            lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
+            return   // drop silently: its consent moved on while it waited
+        }
         sink(event)
+        // The collector's ownership of the delivered bytes ends when the sink RETURNS.
+        lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
     }
 
     // MARK: - Test seams (production callers never use these)

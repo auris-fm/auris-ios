@@ -244,6 +244,16 @@ final class VoiceSharingPolicy {
         pendingIdentityFence = 0
     }
 
+    /// The installed lease's expiry DEADLINE, for a scheduler that must fire exactly at expiry.
+    /// Nil when no snapshot is installed — an expiry schedule only makes sense against a live lease.
+    /// Read-only bookkeeping: expiry itself is still enforced by `permitsCollection`; this only lets
+    /// composition trigger the purge at the deadline rather than at the next unrelated event.
+    var installedLeaseExpiry: MonotonicTime? {
+        lock.lock()
+        defer { lock.unlock() }
+        return installed.map { $0.leaseExpiresAt }
+    }
+
     /// Current effective permission. Expired leases report false without mutating
     /// state; a fresh `refreshAfterActivation()` is the only path back to enabled.
     var permitsCollection: Bool {

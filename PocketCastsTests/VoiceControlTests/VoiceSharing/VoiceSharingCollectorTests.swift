@@ -695,6 +695,41 @@ final class VoiceSharingCollectorTests: XCTestCase {
                        "drain releases the FIFO copy; only the ring-held capture audio remains")
     }
 
+    /// In-flight sink audio stays IN the budget until the sink call RETURNS: a release at dequeue
+    /// would declare still-retained bytes free while the sink is mid-delivery.
+    func test_aggregateCountsInFlightSinkAudio_untilSinkReturns() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { e in
+                if e.kind == .completed { entered.signal(); hold.wait() }
+            }
+        )
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        let openOnly = collector.aggregateAudioSamplesForTesting
+
+        collector.speechCompleted([Float](repeating: 1, count: 640),
+                                  context: collector.currentCaptureContextForTesting)
+        // The event was dequeued and handed to the sink, which is parked INSIDE delivery.
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked mid-delivery")
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, openOnly + 640,
+                       "the in-flight event's audio is still owned and still counted")
+
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain())
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, openOnly,
+                       "the budget releases only when the sink has returned")
+    }
+
     /// A STALE context — one frozen by an utterance Task before its capture was superseded — must be refused
     /// outright, even though the collector currently holds a different open capture. This is the
     /// collector-side half of "B starting before A's reject arrives cannot consume B".

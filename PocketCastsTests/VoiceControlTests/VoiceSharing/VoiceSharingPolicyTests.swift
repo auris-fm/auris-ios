@@ -253,6 +253,57 @@ final class VoiceSharingPolicyTests: XCTestCase {
                        "a refresh observing the gate closed also triggers the purge")
     }
 
+    /// THE expiry control: the purge fires at the LEASE DEADLINE itself — via the scheduled monotonic
+    /// trigger, not a refresh, not new frames. The production composition subscriber is the coordinator's
+    /// own `scheduleLeaseExpiryTrigger` (default scheduler: asyncAfter on the computed delay).
+    func test_leaseExpiryAtDeadline_triggersGateLostPurge_withoutRefreshOrFrames() {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        var gateLostCount = 0
+        coordinator.onConsentGateLost = { gateLostCount += 1 }
+
+        // Capture the production schedule instead of running it.
+        var scheduled: (delay: TimeInterval, body: () -> Void)?
+        coordinator.expiryScheduler = { delay, body in scheduled = (delay, body) }
+
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: lease installed")
+        guard let firstSchedule = scheduled else { return XCTFail("an expiry schedule was installed with the lease") }
+        let staleBody = firstSchedule.body
+        XCTAssertGreaterThan(firstSchedule.delay, 0, "the schedule targets the lease deadline, not now")
+        XCTAssertEqual(firstSchedule.delay, VoiceSharingPolicy.leaseSecondsDefault,
+                       "deadline = install time + lease duration")
+
+        // The deadline arrives WITHOUT any refresh or frames. The gate re-read at fire time closes.
+        clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+        firstSchedule.body()
+        XCTAssertFalse(coordinator.policy.permitsCollection, "the lease has lapsed")
+        XCTAssertEqual(gateLostCount, 1, "expiry itself triggered the purge")
+
+        // A renewed lease replaces the schedule: firing the STALE schedule must NOT purge.
+        box.value = .valid(true)
+        let token2 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token2)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: lease renewed")
+        XCTAssertEqual(gateLostCount, 1)
+        // The NEW lease also lapses before the STALE schedule fires: with the token check, the stale
+        // body is a no-op even though the gate now reads closed. (Firing while the gate is open would
+        // not discriminate — the gate re-read alone would suppress the purge.)
+        clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+        staleBody()
+        XCTAssertEqual(gateLostCount, 1, "a stale expiry schedule cannot purge, even with the gate closed")
+        XCTAssertFalse(coordinator.policy.permitsCollection, "the new lease has now lapsed (premise)")
+    }
+
     // MARK: - Review round 3: real bridge (freshness proof, token fencing, transient failure)
 
     /// Finding 1: `.success` alone is NOT freshness. The SDK returns Success with nil error on its
