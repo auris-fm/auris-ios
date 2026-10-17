@@ -9,9 +9,12 @@ import PocketCastsServer
 ///
 ///   * `effectiveEnrolled` is **server state AND the user's local intent**, never either alone. A remote
 ///     switch or a UI gesture cannot enable collection by itself; the backend epoch must back it.
-///   * Transitions are ordered by the server's `membership_revision`. A reply from an older revision than
-///     what we already hold is dropped rather than applied, which is what makes a delayed first-delivery
-///     opt-in unable to resurrect membership after a withdrawal.
+///   * NOTHING orders or compares `membership_revision`: the contract makes it opaque, so any local
+///     comparison would be a guess that fails toward re-enabling a user who already withdrew. Instead every
+///     read and mutation is stamped with a `ProjectionToken` captured BEFORE the request — the account/session
+///     lifecycle plus a membership-operation counter — and a reply may only be applied while BOTH still match
+///     the live session. The counter bumps on each local membership move, so a delayed opt-in cannot
+///     resurrect membership after a withdrawal however its revision is spelled.
 ///   * Withdrawal takes effect LOCALLY and immediately — new collection stops without waiting for the
 ///     network — because "the user said stop" must not depend on a round trip. The server call still runs,
 ///     and its result only reconciles; it is never what stops collection.

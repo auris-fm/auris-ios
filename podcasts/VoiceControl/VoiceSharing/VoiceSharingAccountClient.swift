@@ -123,12 +123,20 @@ final class VoiceSharingAccountClient {
         /// `perform` under a different current generation refuses before touching the transport, so account
         /// A's enrollment/withdrawal/deletion intent can never be sent while account B is signed in.
         let originatingGeneration: SessionIdentity
+        /// The STORE fence value captured at BEGIN, retained unchanged across retries. Lifecycle identity
+        /// alone is not enough: a mutation issued before a local withdrawal can still succeed on the server
+        /// (the server has not moved yet), and its projection would then look applicable to a caller holding
+        /// a fresh token. Carrying the issuing fence on the operation means the outcome itself declares which
+        /// instant it belongs to, and the store refuses it after that instant passed.
+        let issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     }
 
     /// One enrollment operation. Retry by calling `perform(_:)` again with the SAME operation (bounded
     /// backoff), never by beginning another.
     func beginEnrollment(acceptedDisclosureVersion: String, expectedMembershipRevision: String) -> MutationOperation? {
-        guard let generation = sessionIdentity() else { return nil }
+        // Both fence halves are captured HERE, before any await, and travel with the operation forever.
+        guard let issuedUnder = membershipStore.projectionToken() else { return nil }
+        let generation = issuedUnder.lifecycleGeneration
         let id = requestIDFactory()
         return MutationOperation(
             requestID: id,
@@ -138,7 +146,8 @@ final class VoiceSharingAccountClient {
                 Field.expectedRevision: expectedMembershipRevision,
                 Field.acceptedDisclosure: acceptedDisclosureVersion,
             ],
-            originatingGeneration: generation
+            originatingGeneration: generation,
+            issuedUnder: issuedUnder
         )
     }
 
@@ -146,7 +155,8 @@ final class VoiceSharingAccountClient {
     /// epoch, which is what lets an opt-out invalidate an outstanding opt-in. Neither form may withdraw a
     /// later enrollment — that ordering is enforced server-side by the revision check.
     func beginWithdrawal(enrollmentEpoch: String?, expectedMembershipRevision: String) -> MutationOperation? {
-        guard let generation = sessionIdentity() else { return nil }
+        guard let issuedUnder = membershipStore.projectionToken() else { return nil }
+        let generation = issuedUnder.lifecycleGeneration
         let id = requestIDFactory()
         var body: [String: Any] = [
             Field.requestId: id,
@@ -154,7 +164,8 @@ final class VoiceSharingAccountClient {
         ]
         // Explicit null on the wire when absent, so "no active epoch" is stated rather than omitted.
         body[Field.epoch] = enrollmentEpoch ?? NSNull()
-        return MutationOperation(requestID: id, path: Self.withdrawalPath, body: body, originatingGeneration: generation)
+        return MutationOperation(requestID: id, path: Self.withdrawalPath, body: body,
+                                 originatingGeneration: generation, issuedUnder: issuedUnder)
     }
 
     /// Performs an operation. Safe to call again with the SAME operation to retry a lost response: the
@@ -168,7 +179,12 @@ final class VoiceSharingAccountClient {
             // Defensive: an operation body must never carry secret material in the first place.
             return .unavailableBackend
         }
-        return await mutate(path: operation.path, body: operation.body, originatingGeneration: operation.originatingGeneration)
+        return await mutate(
+            path: operation.path,
+            body: operation.body,
+            originatingGeneration: operation.originatingGeneration,
+            issuedUnder: operation.issuedUnder
+        )
     }
 
 
@@ -232,7 +248,12 @@ final class VoiceSharingAccountClient {
 
     // MARK: - Shared mutation path
 
-    private func mutate(path: String, body: [String: Any], originatingGeneration: SessionIdentity) async -> VoiceSharingMutationOutcome {
+    private func mutate(
+        path: String,
+        body: [String: Any],
+        originatingGeneration: SessionIdentity,
+        issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
+    ) async -> VoiceSharingMutationOutcome {
         // The operation's own generation is the authority; `identityAtStart` is only the value observed right
         // now, and both must agree before anything is sent.
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
@@ -255,12 +276,16 @@ final class VoiceSharingAccountClient {
             switch http.statusCode {
             case 200:
                 guard let projection = Self.decodeProjection(data) else { return .unavailableBackend }
-                return .applied(projection)
+                // The outcome declares the instant it was issued at, so a caller CANNOT reconstruct a fresh
+                // fence after the reply lands. Without this, a delayed enrollment success arriving after a
+                // withdrawal would be applied under a token taken afterwards and re-enable collection.
+                return .applied(membership: projection, issuedUnder: issuedUnder)
             case 409:
                 // A conflict carries the current projection. Surfacing it is required so the caller can show
-                // the real state; auto-replaying against the newer revision is forbidden.
+                // the real state; auto-replaying against the newer revision is forbidden. Reconciling with a
+                // NEW GET (whose own token decides applicability) is the only way to adopt newer state.
                 let current = Self.decodeProjection(data)
-                return .conflict(current: current)
+                return .conflict(current: current, issuedUnder: issuedUnder)
             case 401:
                 // Report the bearer THIS request actually carried — passing nil would fail every other
                 // cached token rather than just the refused one. Staleness was settled above.

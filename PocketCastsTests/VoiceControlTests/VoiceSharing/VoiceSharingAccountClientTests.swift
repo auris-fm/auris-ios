@@ -169,12 +169,20 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 200, body: projection("r15", enrolled: true, epoch: "e15", withdrawal: "active"))
         let registry = VoiceSharingSessionGeneration()
         registry.beginNewLifecycle()
+        // This control drives the REAL lifecycle object, so its store reads the same generation; otherwise
+        // the store has no lifecycle to stamp a token with and `begin` correctly refuses.
+        let registryStore = VoiceSharingEnrollmentStore(
+            defaults: UserDefaults(suiteName: clientSuiteName!)!,
+            accountScopeProvider: { "client-test-account" },
+            sessionIdentityProvider: { registry.currentGeneration() }
+        )
         let client = VoiceSharingAccountClient(
             baseURLProvider: { "https://api.example.test" },
             tokenProvider: tokens,
             session: session,
             requestIDFactory: { UUID().uuidString.lowercased() },
-            sessionIdentity: { registry.currentGeneration() }
+            sessionIdentity: { registry.currentGeneration() },
+            membershipStore: registryStore
         )
         guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
             return XCTFail("no session to begin under")
@@ -674,7 +682,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session to begin under") }
         let outcome = await clientForTest.perform(op)
         switch outcome {
-        case .conflict(let current):
+        case .conflict(current: let current, issuedUnder: _):
             XCTAssertEqual(current?.membershipRevision, "r9")
             XCTAssertEqual(current?.voiceSharingEnrolled, false)
         default:
@@ -750,7 +758,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 409, body: projection("r9", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session") }
         let late = await clientForTest.perform(op)
-        guard case .conflict(let current) = late else { return XCTFail("late first delivery must conflict") }
+        guard case .conflict(current: let current, issuedUnder: _) = late else { return XCTFail("late first delivery must conflict") }
         XCTAssertEqual(current?.withdrawalState, .withdrawn)
         XCTAssertFalse(current?.voiceSharingEnrolled == true, "a delayed opt-in may not undo a later opt-out")
     }
@@ -762,7 +770,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 200, body: projection("r10", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let op = clientForTest.beginWithdrawal(enrollmentEpoch: nil, expectedMembershipRevision: "r9") else { return XCTFail("no session") }
         let outcome = await clientForTest.perform(op)
-        guard case .applied(let m) = outcome else { return XCTFail("withdrawal from inactive must apply") }
+        guard case .applied(membership: let m, issuedUnder: _) = outcome else { return XCTFail("withdrawal from inactive must apply") }
         XCTAssertEqual(m.membershipRevision, "r10", "revision must advance even when already inactive")
         XCTAssertEqual(m.withdrawalState, .withdrawn)
     }
@@ -783,10 +791,10 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         // lost response carries the same request_id and body — calling begin… again would mint new intent.
         guard let operation = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session") }
         let first = await client.perform(operation)
-        guard case .applied(let m1) = first else { return XCTFail("first enroll should apply") }
+        guard case .applied(membership: let m1, issuedUnder: _) = first else { return XCTFail("first enroll should apply") }
 
         let retry = await client.perform(operation)
-        guard case .applied(let m2) = retry else { return XCTFail("identical retry should replay original") }
+        guard case .applied(membership: let m2, issuedUnder: _) = retry else { return XCTFail("identical retry should replay original") }
         XCTAssertEqual(m1.membershipRevision, m2.membershipRevision, "a retry must not report different state")
         XCTAssertEqual(issued.count, 1, "begin… runs once; perform… must not mint a new request_id")
         let bodies = VoiceSharingStubProtocol.seenRequests.compactMap(requestBodyDictionary(of:))
@@ -836,7 +844,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let opB = clientForTest.beginWithdrawal(enrollmentEpoch: nil, expectedMembershipRevision: "r5") else { return XCTFail("no session") }
         let b = await clientForTest.perform(opB)
-        guard case .applied(let m) = b else { return XCTFail("null epoch withdrawal should apply when nothing is active") }
+        guard case .applied(membership: let m, issuedUnder: _) = b else { return XCTFail("null epoch withdrawal should apply when nothing is active") }
         XCTAssertEqual(m.withdrawalState, .withdrawn)
     }
 
@@ -951,6 +959,114 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     private func projectionData(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> Data {
         try! JSONSerialization.data(withJSONObject: projection(revision, enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
     }
+
+    // MARK: - Mutation outcomes carry their issuing fence (reviewer 79427fe7)
+
+    /// A GET is not the only projection-bearing reply. An enrollment POST issued BEFORE a withdrawal can
+    /// SUCCEED afterwards — the server has not moved yet, so nothing about its answer marks it stale. If the
+    /// outcome carried only a bare projection, a caller could apply it under a token taken after the reply
+    /// and re-enable a user who just opted out. The operation carries the store fence from BEGIN, and the
+    /// outcome hands that same value back.
+    func test_delayedEnrollSuccess_afterWithdrawal_cannotBeAppliedWithItsOwnToken() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("opaque-ENROLL-7", enrolled: true, epoch: "e7", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        XCTAssertEqual(op.issuedUnder.lifecycleGeneration, "gen-A", "the operation records the lifecycle it began under")
+
+        // Withdraw locally WHILE the enrollment request is in flight.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+
+        let outcome = await client.perform(op)
+        guard case .applied(membership: let projection, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected a successful enrollment reply, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder, "the outcome reports the BEGIN fence, never a post-reply value")
+
+        // Applying through the production path is refused on the recorded fence...
+        XCTAssertFalse(testStore.apply(authoritative: projection, readUnder: issued),
+                       "a mutation issued before the withdrawal may not be applied after it")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled, "and must not re-enable collection")
+
+        // ...while the very same bytes WOULD be accepted under a current token. That asymmetry is the whole
+        // reason outcomes must carry their issuing fence: if a caller could substitute a fresh one, the data
+        // itself offers no way to tell it came from a departed instant.
+        XCTAssertTrue(testStore.apply(authoritative: projection, readUnder: testStore.projectionToken()!),
+                      "control: the projection is well-formed and acceptable NOW — only its origin disqualifies it")
+    }
+
+    /// A 409 conflict also bears a projection, and reconciling it must go through a NEW GET rather than
+    /// adopting the conflict payload under a token minted after the reply.
+    func test_delayedConflict_afterNewIntent_isRefusedAndNeverAutoReplayed() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 409, body: projection("opaque-CONFLICT-Z", enrolled: true, epoch: "eZ", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+
+        // New local intent lands while the request is in flight.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+
+        let outcome = await client.perform(op)
+        guard case .conflict(current: let current, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected conflict, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder, "the conflict reports the BEGIN fence too")
+        guard let current else { return XCTFail("a conflict must surface the server's current projection") }
+
+        XCTAssertFalse(testStore.apply(authoritative: current, readUnder: issued),
+                       "a pre-withdrawal conflict payload must not be applied after the withdrawal")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, 1,
+                       "a conflicted opt-in is never retried automatically")
+    }
+
+    /// Retries keep the operation identity AND its issuing fence immutable, so a delayed first delivery and a
+    /// retry are both judged against the instant the user actually acted.
+    func test_retryKeepsTheSameIssuingFence() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("opaque-RETRY-1", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        let before = op.issuedUnder
+        _ = await client.perform(op)
+        let again = await client.perform(op)   // same operation object, as a retry must be
+        guard case .applied(_, issuedUnder: let issued) = again else { return XCTFail("expected applied") }
+        XCTAssertEqual(issued, before, "a retry must not silently re-stamp the fence after the fact")
+    }
+
+    /// Withdrawal's own success reply is likewise fenced by its BEGIN instant: an opt-out that lands after a
+    /// later opt-in gesture must not overwrite the newer intent with the older answer.
+    func test_withdrawalReply_afterLaterOptIn_usesItsOwnIssuingFence() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("opaque-W-1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+        guard let op = client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        // User changes their mind and opts back in while the withdrawal is in flight.
+        testStore.setLocalOptIn(true)
+        let outcome = await client.perform(op)
+        guard case .applied(let projection, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected applied, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder)
+        XCTAssertFalse(testStore.apply(authoritative: projection, readUnder: issued),
+                       "the withdrawal answer belongs to an earlier instant than the new opt-in")
+    }
 }
 
 extension Data {
@@ -977,7 +1093,5 @@ func requestBodyDictionary(of request: URLRequest) -> [String: Any]? {
         collected.append(pointer, count: read)
     }
     guard !collected.isEmpty else { return nil }
-    return collected.jsonDictionary
-
     return collected.jsonDictionary
 }

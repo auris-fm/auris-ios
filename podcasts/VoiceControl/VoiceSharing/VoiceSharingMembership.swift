@@ -34,12 +34,16 @@ struct VoiceSharingMembership: Equatable {
 
 /// Outcome of one account mutation, distinguishing what the caller must do next.
 enum VoiceSharingMutationOutcome: Equatable {
-    /// `200` with a projection — apply it.
-    case applied(VoiceSharingMembership)
+    /// `200` with a projection, plus the store fence value the mutation was ISSUED under. Application goes
+    /// through the store with that token, which refuses if a withdrawal or account transition landed in the
+    /// meantime. A bare projection would let any caller apply a late success under a token it grabbed after
+    /// the reply, which is exactly how an opted-out user gets re-enabled.
+    case applied(membership: VoiceSharingMembership, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
     /// `409`: either `membership_conflict` (stale expected revision) or an idempotent-retry replay that
     /// returned the original result. The client MUST NOT auto-replay a conflicted opt-in against the newer
     /// revision; renewed opt-in requires fresh user intent.
-    case conflict(current: VoiceSharingMembership?)
+    /// `409` with the server's current projection, again carrying the ISSUING fence for the same reason.
+    case conflict(current: VoiceSharingMembership?, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
     /// `403` ineligible / `422` unsupported disclosure or invalid fields. Never silently enrolled.
     case refused(reason: RefusalReason)
     /// `401` — credential rejected; caller refreshes and does not retry blindly.
