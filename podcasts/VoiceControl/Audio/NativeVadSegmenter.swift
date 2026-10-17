@@ -88,14 +88,18 @@ class NativeVadSegmenter {
                 // the callback cannot affect anything downstream.
                 onSpeechStarted?(samples.count)
             }
-            if speechActive && !wasActive {
-                // The CONFIRMING frame's PCM belongs to the segment, so it must be delivered in THIS call —
-                // otherwise the contribution copy silently loses the frame that crossed the confirmation
-                // threshold and diverges from the segmenter's own buffer byte-for-byte. The ordinary
-                // accumulation delivery below covers every later frame.
-                onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
-            } else if speechActive {
-                onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
+            if speechActive {
+                if !wasActive {
+                    // CONFIRMATION DELIVERS THE WHOLE CONFIRMED PREFIX — every buffered frame INCLUDING the
+                    // pre-confirmation ones and the confirming frame itself — exactly once. The frames that
+                    // merely accumulated toward minSpeechFrames are part of the segment (the segmenter kept
+                    // them in its buffer), so a delta-only scheme would silently drop that prefix and the
+                    // contribution copy could never match the emitted audio. Later calls deliver only their
+                    // own delta, so nothing is duplicated.
+                    onSpeechAccumulated?(buffer[...], buffer.count)
+                } else {
+                    onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
+                }
             }
             silenceStart = nil
             // Max duration: force utterance end when buffer exceeds limit

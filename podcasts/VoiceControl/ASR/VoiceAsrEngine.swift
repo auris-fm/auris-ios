@@ -127,7 +127,7 @@ class VoiceAsrEngine {
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         segmenter.onUtterance = { [weak self] utterance in
-            Task { await self?.processUtterance(utterance) }
+            self?.beginUtteranceProcessing(utterance)
         }
         // Contribution observation attaches to the SAME segmenter the pipeline already drives, so there is
         // one segmentation truth and no second buffer. These are synchronous and observe-only: the collector
@@ -200,13 +200,26 @@ class VoiceAsrEngine {
     private var effectiveExposedSpeakerRoute: Bool { _forcedExposedRoute ?? isExposedSpeakerRoute }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float]) async {
+    /// Entry point for one segmented utterance. The capture identity is frozen SYNCHRONOUSLY here — before
+    /// the Task exists — so a queued-but-not-yet-running utterance A keeps A's identity even if B starts and
+    /// opens its own capture before A's body ever runs. Reading "what is current" inside the async body would
+    /// hand A's audio to B.
+    /// `taskBodyGate`, when provided (tests only), runs as the Task body's first statement — AFTER the
+    /// freeze, so tests can hold the body back and mutate collector state in between deterministically.
+    func beginUtteranceProcessing(_ utterance: [Float], taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
+        let frozenContext = contributionCollector?.currentCaptureContext()
+        return Task {
+            taskBodyGate?()
+            await self.processUtterance(utterance, frozenContext: frozenContext)
+        }
+    }
+
+    /// `frozenContext` is captured by the synchronous `onUtterance` closure BEFORE this Task was created.
+    /// `processUtterance` itself must not read "current" state: by the time an async body runs, a successor
+    /// may have started.
+    func processUtterance(_ utterance: [Float], frozenContext: VoiceSharingCollector.CaptureContext? = nil) async {
         stageTimer.mark() // VAD segment ready
-        // Immutable identity for THIS utterance, read once before any await. Everything below — bleed, wake,
-        // completion — reports against THIS context even if a successor utterance starts first, because each
-        // Task captured its own. Frozen-inside-the-collector is association by side effect; this is
-        // association by argument.
-        let utteranceContext = contributionCollector?.currentCaptureContext()
+        let utteranceContext = frozenContext
 
         if effectiveExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")

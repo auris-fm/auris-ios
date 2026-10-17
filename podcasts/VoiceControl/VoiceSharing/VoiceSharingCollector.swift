@@ -75,6 +75,14 @@ final class VoiceSharingCollector {
         let droppedSpans: [DropSpan]
         /// Original duration when known; nil means "unknown", recorded explicitly rather than fabricated.
         let originalSampleCount: Int?
+        /// The retained contribution audio itself, delivered WITH the event. A handoff that carries counts
+        /// and forces the uploader to come back for bytes is a second channel to keep consistent; the audio
+        /// rides with the record that describes it.
+        let audio: [Float]
+        /// True for gate-control records (e.g. the cancellation synthesized by gate loss). These BYPASS the
+        /// live dequeue check: their whole purpose is to report that consent ended, so gating them on the
+        /// (now-closed) gate would drop the evidence of the drop.
+        let isGateControl: Bool
     }
 
     private struct FrozenCapture {
@@ -205,6 +213,7 @@ final class VoiceSharingCollector {
     /// Completion matched against the CONTEXT THE ENGINE CAPTURED, not current state. A nil/unknown context
     /// (no capture was open when the utterance Task launched) refuses outright.
     func speechCompleted(_ samples: [Float], context: CaptureContext?) {
+        if emitLateOutcomeIfTerminal(kind: .completed, context: context) { return }
         lock.lock()
         guard var c = resolve(context) else { lock.unlock(); return }
         guard !c.terminal, c.sawStart else { lock.unlock(); return }
@@ -213,13 +222,13 @@ final class VoiceSharingCollector {
             abandonForGateMove(context: context)
             return
         }
-        let room = Self.maxRetainedSamples - c.retained.count
-        let take = min(samples.count, max(room, 0))
-        if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
+        // FINALIZE ONLY. Every sample of the segment was already delivered by the segmenter's deltas —
+        // the confirmation prefix plus one delta per later call. Appending the utterance again would
+        // duplicate (and, with an in-flight successor, reorder) the audio. `samples` is used solely to
+        // state the original duration.
         c.original = max(c.original ?? 0, samples.count)
-        if take < samples.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
-        markTerminal(c.id)
+        markTerminal(c)
         let event = makeEvent(kind: .completed, from: c)
         current = nil
         lock.unlock()
@@ -232,7 +241,7 @@ final class VoiceSharingCollector {
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         c.terminal = true
-        markTerminal(c.id)
+        markTerminal(c)
         let event = makeEvent(kind: .cancelled, from: c)
         current = nil
         lock.unlock()
@@ -242,6 +251,7 @@ final class VoiceSharingCollector {
     /// Rejection resolved by CONTEXT. The engine's Task captured identity at utterance launch; this call
     /// matches that, so B starting before A's reject arrives cannot make A consume B.
     func segmentRejected(kind: SignalKind, samples: Int, context: CaptureContext?) {
+        if emitLateOutcomeIfTerminal(kind: kind, context: context) { return }
         lock.lock()
         guard var c = resolve(context) else { lock.unlock(); return }
         guard !c.terminal, c.sawStart else { lock.unlock(); return }
@@ -253,7 +263,7 @@ final class VoiceSharingCollector {
         c.original = max(c.original ?? 0, samples)
         if samples > c.retained.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
-        markTerminal(c.id)
+        markTerminal(c)
         let event = makeEvent(kind: kind, from: c)
         current = nil
         lock.unlock()
@@ -264,11 +274,52 @@ final class VoiceSharingCollector {
     /// contributions are untouched: closing listening is not implicit withdrawal.
     func pipelineStopped() { speechCancelled() }
 
+    /// Explicit gate-loss: remote switch off, lease expired, or permission withdrawn, with identity UNCHANGED
+    /// (so the dequeue-time epoch/session check alone would wave the queued work through). Cancels any open
+    /// partial IMMEDIATELY — without waiting for the next signal — and purges every queued event: consent is
+    /// gone, so nothing already in the FIFO may reach the sink either. Without this, "disable" only took
+    /// effect at the next segmentation signal, and a stalled sink could hold stale work for the whole wait.
+    func gateLost() {
+        lock.lock()
+        // Abandon the open partial, if any.
+        if var c = current, !c.terminal {
+            c.terminal = true
+            markTerminal(c)
+            current = nil
+            let event = makeEvent(kind: .cancelled, from: c)
+            pending.removeAll()   // purge queued work: its consent died with the gate
+            lock.unlock()
+            submit(event)
+            return
+        }
+        pending.removeAll()
+        lock.unlock()
+    }
+
     /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
     /// A's late completion would be finalized under B's identity.
     func invalidateForAccountTransition(expectedSession: String?) {
         speechCancelled()
         _ = expectedSession
+    }
+
+    /// Recently-terminal captures, bounded. A late outcome (A's Task finally runs after A was cancelled and
+    /// B is open) must still complete UNDER A — attributed to A's frozen identity and A's frozen audio —
+    /// rather than being dropped as foreign or, worse, adopted by B. Each entry records whether its terminal
+    /// record was already emitted, so a duplicate late outcome emits nothing.
+    private struct TerminalRecord {
+        let capture: FrozenCapture
+        var emitted: Bool
+    }
+
+    private var terminalRing: [UUID: TerminalRecord] = [:]
+    private let terminalRingOrder = NSLock()
+
+    private func rememberTerminal(_ c: FrozenCapture) {
+        terminalRing[c.id] = TerminalRecord(capture: c, emitted: false)
+        while terminalRing.count > 32 {
+            if let oldest = terminalRing.first?.key { terminalRing.removeValue(forKey: oldest) }
+        }
     }
 
     /// Whether a capture id is still owned by this collector.
@@ -280,11 +331,38 @@ final class VoiceSharingCollector {
 
     // MARK: - Internals
 
-    /// Matches an engine-captured context against the open capture. Unknown or mismatched = refused.
+    /// Matches an engine-captured context against the open capture — or, for a capture that already reached
+    /// a terminal state while its Task was still queued, against the terminal ring so the late outcome is
+    /// attributed under its OWN identity. Unknown or mismatched = refused.
     private func resolve(_ context: CaptureContext?) -> FrozenCapture? {
         guard let context else { return nil }
-        guard let c = current, c.id == context.id else { return nil }
-        return c
+        if let c = current, c.id == context.id { return c }
+        if let rec = terminalRing[context.id], !rec.emitted { return rec.capture }
+        return nil
+    }
+
+    /// A late outcome for an already-terminal capture: emit its record ONCE under its own identity, without
+    /// touching current state. Returns true when handled.
+    private func emitLateOutcomeIfTerminal(kind: SignalKind, context: CaptureContext?) -> Bool {
+        lock.lock()
+        guard let context, var rec = terminalRing[context.id], !rec.emitted else {
+            lock.unlock()
+            return false
+        }
+        // Late attribution honors the CURRENT gate: if identity moved on (account transition rotated the
+        // epoch) the predecessor's completion stays dropped, exactly as before. The reviewer's case — A
+        // queued-not-executed while B starts under the SAME consent — is what this path exists for.
+        let sameConsent = (rec.capture.epoch == epochProvider())
+            && (rec.capture.session == sessionIdentity())
+            && policy.permitsCollection
+            && membership().effectiveEnrolled
+        guard sameConsent else { lock.unlock(); return false }
+        rec.emitted = true
+        terminalRing[context.id] = rec
+        let event = makeEvent(kind: kind, from: rec.capture)
+        lock.unlock()
+        submit(event)
+        return true
     }
 
     private func abandonForGateMove(context: CaptureContext?) {
@@ -292,16 +370,17 @@ final class VoiceSharingCollector {
         guard let c = current, c.id == context?.id, !c.terminal else { lock.unlock(); return }
         var abandoned = c
         abandoned.terminal = true
-        markTerminal(c.id)
+        markTerminal(c)
         let event = makeEvent(kind: .cancelled, from: abandoned)
         current = nil
         lock.unlock()
         submit(event)
     }
 
-    private func markTerminal(_ id: UUID) {
-        terminalIDs.insert(id)
-        obsoleteCaptures.insert(id)
+    private func markTerminal(_ c: FrozenCapture) {
+        terminalIDs.insert(c.id)
+        obsoleteCaptures.insert(c.id)
+        rememberTerminal(c)
         pruneTerminalHistoryIfNeeded()
     }
 
@@ -323,7 +402,8 @@ final class VoiceSharingCollector {
         return SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
                             authorizationSession: c.session, retainedSamples: c.retained.count,
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
-                            originalSampleCount: c.original)
+                            originalSampleCount: c.original, audio: c.retained,
+                            isGateControl: kind == .cancelled)
     }
 
     // MARK: - Bounded non-blocking handoff
@@ -356,8 +436,13 @@ final class VoiceSharingCollector {
         lock.lock()
         guard !pending.isEmpty else { lock.unlock(); return }
         let event = pending.removeFirst()
-        let stillValid = (event.enrollmentEpoch == epochProvider())
-            && (event.authorizationSession == sessionIdentity())
+        // Live consent check at dequeue: identity AND the policy gate. Epoch/session equality alone would
+        // deliver work queued before a switch-off or lease expiry, because a disable does not change either.
+        let stillValid = event.isGateControl
+            || ((event.enrollmentEpoch == epochProvider())
+                && (event.authorizationSession == sessionIdentity())
+                && policy.permitsCollection
+                && membership().effectiveEnrolled)
         lock.unlock()
         guard stillValid else { return }   // drop silently: its consent moved on while it waited
         sink(event)
@@ -392,7 +477,8 @@ final class VoiceSharingCollector {
     /// Total identity state: open capture, queued events, refusal sets. The aggregate the ceiling applies to.
     var aggregateIdentityStateForTesting: (openCaptures: Int, queuedEvents: Int, terminalHistory: Int) {
         lock.lock(); defer { lock.unlock() }
-        return (current == nil ? 0 : 1, pending.count, terminalIDs.count + obsoleteCaptures.count)
+        return (current == nil ? 0 : 1, pending.count,
+                terminalIDs.count + obsoleteCaptures.count + terminalRing.count)
     }
 
     /// Test seam: waits until every queued event has been delivered.

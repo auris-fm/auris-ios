@@ -79,14 +79,17 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         segmenter.process(c)
 
         XCTAssertEqual(slices.count, 2, "only post-confirmation calls carry PCM")
-        XCTAssertEqual(slices[0], b, "first delivery is the confirming frame's samples, exactly")
-        XCTAssertEqual(slices[1], c, "second delivery is that call's new samples, exactly")
+        // CONFIRMATION DELIVERS THE WHOLE CONFIRMED PREFIX (a + b) exactly once; later calls deliver only
+        // their own delta. Pre-confirmation frames are part of the segment (the segmenter kept them), so
+        // losing them would make the contribution copy permanently shorter than the emitted audio.
+        XCTAssertEqual(slices[0], a + b, "confirmation delivers the buffered prefix exactly once")
+        XCTAssertEqual(slices[1], c, "later calls deliver only their own delta")
 
-        // Reconstructing from the delivered slices equals the segmenter's retained audio.
+        // Reconstructing from the delivered slices equals the segmenter's retained audio — no duplication.
         var reconstructed: [Float] = []
         reconstructed.append(contentsOf: slices[0])
         reconstructed.append(contentsOf: slices[1])
-        XCTAssertEqual(reconstructed, b + c)
+        XCTAssertEqual(reconstructed, a + b + c)
     }
 
     /// Reset while ACTIVE must be distinguishable from a natural end, because the collector cancels the

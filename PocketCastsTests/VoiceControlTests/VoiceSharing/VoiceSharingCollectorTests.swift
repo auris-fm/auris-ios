@@ -89,6 +89,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         )
     }
 
+    /// Closes the policy lease the way a remote switch-off or lease expiry does, without touching identity.
+    private func deactivateLease() {
+        // Same primitive a remote switch-off / lease expiry path uses; raises the fence so
+        // permitsCollection goes false while identity stays unchanged.
+        policy.invalidateForIdentityChange(kind: .membershipChange)
+    }
+
     private func assertPremisesOpen(file: StaticString = #file, line: UInt = #line) {
         XCTAssertTrue(policy.permitsCollection, "premise: policy lease open", file: file, line: line)
         XCTAssertTrue(storeState.effectiveEnrolled, "premise: membership enrolled", file: file, line: line)
@@ -382,6 +389,129 @@ final class VoiceSharingCollectorTests: XCTestCase {
                       "pruning must not break new segments")
     }
 
+    /// THE reviewer's scheduling control: A is QUEUED but not yet executed when B starts, then A finally
+    /// runs. A must complete under A. With the context read inside the async body ("what is current"), A
+    /// would find B and be refused — or worse, adopted B. The engine now freezes context synchronously in
+    /// `onUtterance` BEFORE creating the Task; this drives that exact ordering.
+    func test_queuedUtteranceStartingLate_keepsItsOwnFrozenContext() {
+        activateLease()
+        let collector = makeCollector()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        // A opens a capture; its context is frozen at that moment (as onUtterance does).
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        guard let ctxA else { return XCTFail("A should be open") }
+
+        // A completes BEFORE any Task runs, freezing the audio decision; then B starts.
+        // (Ordering stand-in for "A queued, B started": A's Task holds ctxA regardless.)
+        collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
+        collector.speechCancelled()          // segmenter closed A before A's Task ran
+        collector.speechStarted(confirmationFrameSamples: 320)   // B is now the open capture
+        clearEvents(collector)
+
+        // A's Task finally runs, carrying A's OWN frozen context.
+        collector.segmentRejected(kind: .rejectedWake, samples: 8_000, context: ctxA)
+        XCTAssertEqual(snapshot().map(\.kind), [.rejectedWake],
+                       "A's late Task completes under A's identity, not refused as foreign and not adopted to B")
+        XCTAssertEqual(snapshot().last!.captureID, ctxA.id, "attributed to A, exactly")
+        XCTAssertNotNil(collector.currentCaptureContextForTesting, "B remains open and untouched")
+    }
+
+    /// Switch-off / lease expiry with identity UNCHANGED must take effect IMMEDIATELY: cancel the open
+    /// partial, purge every queued event, and refuse work at dequeue via the LIVE policy check — not only at
+    /// the next segmentation signal.
+    func test_gateLost_cancelsOpenAndPurgesQueued_immediately() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        var delivered: [VoiceSharingCollector.SegmentEvent] = []
+        let deliverLock = NSLock()
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { e in
+                deliverLock.lock(); delivered.append(e); deliverLock.unlock()
+                if e.kind == .started { entered.signal(); hold.wait() }
+            }
+        )
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked on A's start event")
+
+        // A completes (queued behind the parked sink), then B OPENS — so at gate-loss time there is a real
+        // open partial AND queued work, which is the state the immediate-cancel requirement is about.
+        collector.speechCompleted([Float](repeating: 1, count: 640),
+                                  context: collector.currentCaptureContextForTesting)
+        XCTAssertEqual(collector.pendingCountForTesting, 1, "premise: completion queued")
+        collector.speechStarted(confirmationFrameSamples: 320)
+        XCTAssertEqual(collector.pendingCountForTesting, 2, "premise: B's start also queued; B is open")
+        XCTAssertNotNil(collector.currentCaptureContextForTesting, "premise: B is the open partial")
+
+        // Remote switch flips OFF with identity unchanged. The identity-based dequeue check alone would pass
+        // this queued work; gateLost must purge it NOW.
+        deactivateLease()
+        collector.gateLost()
+        XCTAssertNil(collector.currentCaptureContextForTesting,
+                     "the open partial B is abandoned immediately, without waiting for a signal")
+        // Only the gate-control cancellation record itself may remain queued — it IS the message that
+        // consent ended, and it must reach the sink so the uploader can act on the loss.
+        XCTAssertEqual(collector.pendingCountForTesting, 1,
+                       "only the cancellation record remains: A's completion AND B's start are purged")
+
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain())
+        deliverLock.lock(); let got = delivered; deliverLock.unlock()
+        XCTAssertTrue(got.contains { $0.kind == .cancelled },
+                      "the open partial is cancelled immediately, without waiting for a signal")
+        XCTAssertFalse(got.contains { $0.kind == .completed },
+                       "the queued completion is purged — its consent died with the gate")
+    }
+
+    /// And the LIVE dequeue check as a second line of defense: if gateLost was not called (e.g. the signal
+    /// raced), a queued event still must not be delivered after the lease died, because drainNext consults
+    /// the policy, not just identity.
+    func test_dequeueChecksLivePolicy_notOnlyIdentity() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        var delivered: [VoiceSharingCollector.SegmentEvent] = []
+        let deliverLock = NSLock()
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { e in
+                deliverLock.lock(); delivered.append(e); deliverLock.unlock()
+                if e.kind == .started { entered.signal(); hold.wait() }
+            }
+        )
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        collector.speechCompleted([Float](repeating: 1, count: 640),
+                                  context: collector.currentCaptureContextForTesting)
+        XCTAssertEqual(collector.pendingCountForTesting, 1)
+
+        // Lease expires (identity unchanged) WITHOUT an explicit gateLost call.
+        deactivateLease()
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain())
+        deliverLock.lock(); let got = delivered; deliverLock.unlock()
+        XCTAssertFalse(got.contains { $0.kind == .completed },
+                       "the live policy check at dequeue refuses work whose lease has expired")
+    }
+
     /// A STALE context — one frozen by an utterance Task before its capture was superseded — must be refused
     /// outright, even though the collector currently holds a different open capture. This is the
     /// collector-side half of "B starting before A's reject arrives cannot consume B".
@@ -525,12 +655,16 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
-        collector.speechCompleted([Float](repeating: 1, count: 320), context: collector.currentCaptureContextForTesting)
+        collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 640)
+        // Completion carries NO audio — deltas already delivered every sample. It finalizes only.
+        collector.speechCompleted([Float](repeating: 1, count: 0), context: collector.currentCaptureContextForTesting)
 
         let got = snapshot()
         XCTAssertEqual(got.map(\.kind), [.started, .completed])
         XCTAssertEqual(got[0].captureID, got[1].captureID, "one segment keeps one capture id")
-        XCTAssertEqual(got[1].retainedSamples, 640)   // 320 appended + 320 from completion
+        XCTAssertEqual(got[1].retainedSamples, 640, "both deltas were retained")
+        XCTAssertEqual(got[1].audio.count, 640, "and the event carries the audio itself")
+        XCTAssertEqual(got[1].originalSampleCount, 640)
         XCTAssertFalse(got[1].truncated)
         XCTAssertNil(collector.currentCaptureIDForTesting, "the capture is released at completion")
     }

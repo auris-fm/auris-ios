@@ -75,6 +75,56 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         return engine
     }
 
+    /// THE scheduling control for the synchronous freeze: utterance A's Task is created but its body is
+    /// HELD BACK by a gate; while it is parked, A closes and B opens. When A's body finally runs it must
+    /// complete under A's frozen identity — attributed to A, never refused as foreign and never adopted
+    /// by B. The freeze happens in `beginUtteranceProcessing` BEFORE Task creation, so holding the body
+    /// back cannot change what A carries; a mutant that moves the read inside the body deterministically
+    /// picks up B instead.
+    func test_queuedUtteranceBodyRunningLate_completesUnderItsOwnFrozenContext() async {
+        let policy = openGate(enrolled: true)
+        let collector = makeCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+
+        // A is the open capture when its utterance processing begins.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxA = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: A open")
+        }
+
+        let bodyHeld = DispatchSemaphore(value: 0)
+        let releaseBody = DispatchSemaphore(value: 0)
+        let task = engine.beginUtteranceProcessing([Float](repeating: 0.01, count: 40 * 16)) {
+            bodyHeld.signal()
+            releaseBody.wait()
+        }
+
+        // The body is parked; meanwhile A's segment closes and B opens. Whatever "current" means now, it
+        // is B — A's fate must already have been sealed.
+        XCTAssertEqual(bodyHeld.wait(timeout: .now() + 2), .success, "premise: A's body is held")
+        collector.speechCancelled()
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxB = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: B open")
+        }
+        XCTAssertNotEqual(ctxA.id, ctxB.id)
+
+        releaseBody.signal()
+        _ = await task.value
+
+        let got = snapshot()
+        // Wake-negative utterance → A's late body reports rejectedWake. Under A, not under B.
+        let aRejects = got.filter { $0.kind == .rejectedWake && $0.captureID == ctxA.id }
+        let observed = got.map { "\($0.kind):\($0.captureID)" }
+        XCTAssertEqual(aRejects.count, 1,
+                       "A's late body completes under A's frozen identity; got \(observed)")
+        let bTouchedByA = got.contains { $0.captureID == ctxB.id && $0.kind != .started }
+        XCTAssertFalse(bTouchedByA,
+                       "B must be untouched by A's late body (B's own .started aside); got \(observed)")
+        XCTAssertEqual(collector.currentCaptureContextForTesting?.id, ctxB.id, "B remains open")
+    }
+
     // MARK: - Production path: start/stop own the subscription
 
     /// `start()` must attach the three observation hooks to the segmenter the pipeline already drives, and
@@ -162,9 +212,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         engine.playbackBufferForTesting = playback
         utteranceUnderTest = Array(repeating: 0, count: 8) + playback
 
-        // Open a capture first so the rejection has a frozen identity to attach its decision to.
+        // Open a capture first so the rejection has a frozen identity to attach its decision to — captured
+        // SYNCHRONOUSLY, exactly as the production onUtterance closure does before creating its Task.
         backend.emitSpeech(level: 0.6, totalSamples: 5 * 160)
-        await engine.processUtterance(utteranceUnderTest)
+        let frozen = collector.currentCaptureContextForTesting
+        await engine.processUtterance(utteranceUnderTest, frozenContext: frozen)
 
         let kinds = recordedKinds()
         XCTAssertTrue(kinds.contains(.rejectedBleed),
@@ -187,7 +239,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertTrue(engine.start())
 
         backend.emitSpeech(level: 0.6, totalSamples: 5 * 160)
-        await engine.processUtterance([Float](repeating: 0.6, count: 40 * 16))
+        let frozen = collector.currentCaptureContextForTesting
+        await engine.processUtterance([Float](repeating: 0.6, count: 40 * 16), frozenContext: frozen)
         engine.stop()
 
         XCTAssertEqual(recordedKinds(), [], "no contribution work may be produced while the gate is closed")
@@ -238,6 +291,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func snapshot() -> [VoiceSharingCollector.SegmentEvent] {
+        recordLock.lock(); defer { recordLock.unlock() }
+        return events
+    }
 
     private func recordedKinds() -> [VoiceSharingCollector.SignalKind] {
         recordLock.lock(); defer { recordLock.unlock() }
