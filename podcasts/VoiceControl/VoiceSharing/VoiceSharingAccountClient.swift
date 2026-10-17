@@ -42,6 +42,11 @@ final class VoiceSharingAccountClient {
     /// matches is stale: its response is dropped and its operation refuses to send at all.
     private let sessionIdentity: () -> SessionIdentity?
 
+    /// Supplies the membership-operation fence value that every read is stamped with. Injected so the client
+    /// and the store agree on ONE counter; a second local counter would let them drift and silently accept a
+    /// reply the store would have refused.
+    private let membershipStore: VoiceSharingEnrollmentStore
+
     init(
         baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
         tokenProvider: CloudTokenProviding,
@@ -49,23 +54,32 @@ final class VoiceSharingAccountClient {
         requestIDFactory: @escaping () -> String = { UUID().uuidString.lowercased() },
         // Default reads the in-memory lifecycle generation. NOTE: this deliberately does NOT read a
         // credential — refresh rotation would look like logout, and credentials are not operation identity.
-        sessionIdentity: @escaping () -> SessionIdentity? = { VoiceSharingSessionGeneration.shared.currentGeneration() }
+        sessionIdentity: @escaping () -> SessionIdentity? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+        membershipStore: VoiceSharingEnrollmentStore = .shared
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
         self.session = session
         self.requestIDFactory = requestIDFactory
         self.sessionIdentity = sessionIdentity
+        self.membershipStore = membershipStore
     }
 
     // MARK: - GET projection
 
-    func fetchProjection() async -> VoiceSharingMembership? {
+    /// Reads the current projection. Returns it together with the membership-operation fence value captured
+    /// BEFORE the request was issued, because the caller cannot reconstruct that instant afterwards: by the
+    /// time this returns, a withdrawal or account switch may already have bumped the fence, and applying such
+    /// a reply would re-enable a user who just opted out. `token` is nil when no lifecycle existed to read
+    /// under, which the caller must treat as "do not apply".
+    func fetchProjection() async -> FetchedProjection? {
         // Identity is taken FIRST and must be non-nil: an unauthenticated session cannot be attributed, so
         // it gets no request at all. The same value is re-checked after the credential await and after the
         // response — otherwise a sign-out that lands while we are fetching would apply the previous
         // account's projection.
-        guard let identityAtStart = sessionIdentity() else { return nil }
+        // Captured at the same instant as the lifecycle: the fence value this read is issued under.
+        guard let readToken = membershipStore.projectionToken() else { return nil }
+        let identityAtStart = readToken.lifecycleGeneration
         guard let request = await makeRequest(path: Self.projectionPath, method: "GET", body: nil) else { return nil }
         guard sessionIdentity() == identityAtStart else { return nil }
         do {
@@ -79,10 +93,19 @@ final class VoiceSharingAccountClient {
                 await tokenProvider.handleUnauthorized(rejectedToken: rejected)
             }
             guard http.statusCode == 200 else { return nil }
-            return Self.decodeProjection(data)
+            guard let projection = Self.decodeProjection(data) else { return nil }
+            return FetchedProjection(membership: projection, issuedUnder: readToken)
         } catch {
             return nil
         }
+    }
+
+    /// A projection plus the exact fence value it was read under. Application goes through the store, which
+    /// refuses unless both halves still match the live session — so an old GET cannot land after a
+    /// withdrawal or an account switch, whatever its revision string looks like.
+    struct FetchedProjection {
+        let membership: VoiceSharingMembership
+        let issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     }
 
     // MARK: - POST enrollment / withdrawal

@@ -55,7 +55,9 @@ final class VoiceSharingCoordinator {
             guard let self, !self.applyingMembershipInvalidation else { return }
             self.applyingMembershipInvalidation = true
             defer { self.applyingMembershipInvalidation = false }
-            self.policy.invalidateForIdentityChange()
+            // Membership moves inside the current session must NOT raise the identity fence: a successful
+            // enrollment has to be able to install on the very next activation, or opting in does nothing.
+            self.policy.invalidateForIdentityChange(kind: .membershipChange)
         }
     }
 
@@ -149,9 +151,12 @@ final class VoiceSharingCoordinator {
             queue: .main
         ) { [weak self] _ in
             VoiceSharingSessionGeneration.shared.clear()
-            // NOT `invalidate()` here: the store's membership observer already bumps the policy generation,
-            // and calling both would advance it twice per sign-out.
-            self?.enrollmentStore.transitionToAccount(signedIn: false)
+            guard let self else { return }
+            // Sign-out is an IDENTITY transition, not merely a membership change: the new account state is
+            // unreadable, so installs are fenced until a login re-establishes them. The store call also
+            // bumps the generation once through its own observer, so no second invalidate here.
+            self.enrollmentStore.transitionToAccount(signedIn: false)
+            self.policy.raiseIdentityFence()
         }
         // Login changed is a STATE CHANGE, not proof of a login. Audited producers:
         //   AuthenticationHelper.handleSuccessfulSignIn, SyncSigninViewController, SyncSigninView,

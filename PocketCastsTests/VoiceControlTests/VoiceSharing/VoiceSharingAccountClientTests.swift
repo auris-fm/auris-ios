@@ -116,9 +116,22 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         tokens = AccountStubTokenProvider()
         identity = "gen-A"
         requestIDs = []
+        let suite = "VoiceSharingClientStore-\(UUID().uuidString)"
+        clientSuiteName = suite
+        testStore = VoiceSharingEnrollmentStore(
+            defaults: UserDefaults(suiteName: suite)!,
+            accountScopeProvider: { "client-test-account" },
+            sessionIdentityProvider: { [weak self] in self?.identity }
+        )
     }
 
+    private var clientSuiteName: String?
+
     override func tearDown() {
+        if let clientSuiteName, let d = UserDefaults(suiteName: clientSuiteName) {
+            d.removePersistentDomain(forName: clientSuiteName)
+        }
+        testStore = nil
         VoiceSharingStubProtocol.reset()
         super.tearDown()
     }
@@ -126,6 +139,11 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// A single client instance shared by `begin…` and `perform…` in one test, so an operation's immutable
     /// request identity is carried across calls exactly as production must.
     private lazy var clientForTest: VoiceSharingAccountClient = makeClient()
+
+    /// Store used by every client built here. Sharing one instance is the point: the client stamps reads
+    /// with THIS store's fence and the tests apply through it, so a control can move the fence between the
+    /// two moments exactly as production does.
+    private var testStore: VoiceSharingEnrollmentStore!
 
     private func makeClient(factory: (() -> String)? = nil) -> VoiceSharingAccountClient {
         VoiceSharingAccountClient(
@@ -137,7 +155,8 @@ final class VoiceSharingAccountClientTests: XCTestCase {
                 self?.requestIDs.append(id)
                 return id
             },
-            sessionIdentity: { [weak self] in self?.identity }
+            sessionIdentity: { [weak self] in self?.identity },
+            membershipStore: testStore!
         )
     }
 
@@ -477,14 +496,14 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingStubProtocol.onRequest = { [weak self] in
             self?.identity = "gen-B"
         }
-        let membership = await client.fetchProjection()
-        XCTAssertNil(membership, "a projection read across an account change must not be returned")
+        let fetched = await client.fetchProjection()
+        XCTAssertNil(fetched, "a projection read across an account change must not be returned")
     }
 
     func test_noSessionIdentity_makesNoRequest() async {
         identity = nil
-        let membership = await makeClient().fetchProjection()
-        XCTAssertNil(membership)
+        let fetched = await makeClient().fetchProjection()
+        XCTAssertNil(fetched)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no session means no call, not an anonymous probe")
     }
 
@@ -600,11 +619,14 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     func test_getProjection_decodesAuthoritativeFields() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
-        let membership = await makeClient().fetchProjection()
+        let fetched = await makeClient().fetchProjection()
+        let membership = fetched?.membership
         XCTAssertEqual(membership?.membershipRevision, "r7")
         XCTAssertEqual(membership?.enrollmentEpoch, "e1")
         XCTAssertTrue(membership?.voiceSharingEnrolled == true)
         XCTAssertEqual(membership?.withdrawalState, .active)
+        // The reply carries the fence value it was issued under so the store can refuse it later.
+        XCTAssertEqual(fetched?.issuedUnder.lifecycleGeneration, identity)
     }
 
     /// Fail-closed parsing: unknown schema, missing fields, or an impossible combination must not read as
@@ -623,8 +645,8 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     func test_noCredential_makesNoRequest() async {
         tokens.tokenValue = nil
-        let membership = await makeClient().fetchProjection()
-        XCTAssertNil(membership)
+        let fetched = await makeClient().fetchProjection()
+        XCTAssertNil(fetched)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no bearer means no call at all")
     }
 
@@ -864,6 +886,71 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         let outcome = await clientForTest.perform(op)
         XCTAssertEqual(outcome, .unavailableBackend)
     }
+    // MARK: - Delayed read applying through the real store (reviewer 4599fb63 / 7897cd94)
+
+    /// A GET issued BEFORE a withdrawal whose reply arrives AFTER it. The response is well-formed and says
+    /// "enrolled"; only the fence stops it. This drives the whole production path — client stamps the token,
+    /// store refuses application — so nothing here depends on how `membership_revision` is spelled.
+    func test_delayedGETReply_cannotReEnableThroughTheStore() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("opaque-token-AAA", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+
+        // Read is issued while enrolled-looking state is current.
+        guard let first = await client.fetchProjection() else { return XCTFail("expected a projection") }
+        XCTAssertTrue(testStore.apply(authoritative: first.membership, readUnder: first.issuedUnder))
+        XCTAssertTrue(testStore.currentEffectiveEnrolled, "local gesture plus a confirmed projection enables")
+
+        // User opts out locally. Every read issued before this instant is now inapplicable.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+
+        // The OLD reply finally arrives — replayed against the store exactly as its caller would apply it.
+        XCTAssertFalse(testStore.apply(authoritative: first.membership, readUnder: first.issuedUnder),
+                       "a projection issued before the withdrawal must not be applied")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled, "and it must not re-enable collection")
+
+        // A read issued AFTER the withdrawal is still usable, so this is staleness, not a dead store.
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("opaque-token-ZZZ", enrolled: true, epoch: "e9", withdrawal: "active"))
+        let fresh = await client.fetchProjection()!
+        testStore.setLocalOptIn(true)
+        let afterOptIn = testStore.projectionToken()!
+        XCTAssertTrue(testStore.apply(authoritative: fresh.membership, readUnder: afterOptIn),
+                      "the same mechanism accepts a current read")
+        XCTAssertTrue(testStore.currentEffectiveEnrolled)
+    }
+
+    /// An account switch mid-read: the client already drops the reply, and even if a caller handed the store
+    /// an old token anyway, the lifecycle half of the fence refuses it.
+    func test_accountSwitchDuringRead_leavesStoreUnapplied() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        // Token taken BEFORE the request, as every caller must.
+        let stale = testStore.projectionToken()!
+        XCTAssertEqual(stale.lifecycleGeneration, "gen-A")
+
+        // The switch lands while the GET is in flight.
+        VoiceSharingStubProtocol.onRequest = { [weak self] in
+            self?.identity = "gen-B"
+            self?.testStore.transitionToAccount(signedIn: true)
+        }
+
+        let fetched = await client.fetchProjection()
+        VoiceSharingStubProtocol.onRequest = nil
+        XCTAssertNil(fetched, "the client does not return a reply that crossed an account change")
+        let handRolled = VoiceSharingAccountClient.decodeProjection(
+            projectionData("r1", enrolled: true, epoch: "e1", withdrawal: "active"))!
+        XCTAssertFalse(testStore.apply(authoritative: handRolled, readUnder: stale),
+                       "nor may a pre-switch token apply one by hand")
+    }
+
+    private func projectionData(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: projection(revision, enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
+    }
 }
 
 extension Data {
@@ -890,5 +977,7 @@ func requestBodyDictionary(of request: URLRequest) -> [String: Any]? {
         collected.append(pointer, count: read)
     }
     guard !collected.isEmpty else { return nil }
+    return collected.jsonDictionary
+
     return collected.jsonDictionary
 }

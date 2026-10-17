@@ -31,8 +31,11 @@ final class VoiceSharingEnrollmentStore {
         /// The user's own opt-in gesture, persisted so a launch does not silently re-enable something they
         /// turned off. Never sufficient on its own — see `effectiveEnrolled`.
         var localOptIn = false
-        /// True once a projection has actually been read from the server this session. Before that,
-        /// `membership` is `.unavailable`, which must not be confused with "confirmed not enrolled".
+        /// True only once a projection has been ACCEPTED FROM THE SERVER IN THIS SESSION. Loading disk can
+        /// never set it: a remembered active epoch plus a remembered opt-in is not permission, because the
+        /// account may have withdrawn on another device, been disabled server-side, or the process may simply
+        /// have restarted into a state the server no longer recognises. Until a current-session reply lands,
+        /// `effectiveEnrolled` is false and collection stays off.
         var hasAuthoritativeProjection = false
 
         /// Enrollment requires BOTH halves. This is the property the plan states as
@@ -64,12 +67,19 @@ final class VoiceSharingEnrollmentStore {
         static let plan = "VoiceSharing.plan"
     }
 
+    /// Reads the CURRENT account/session lifecycle generation. A projection is applicable only while the
+    /// lifecycle it was read under is still live — the half no local revision comparison can supply, because
+    /// an opaque revision says nothing about which session produced it.
+    private let sessionIdentityProvider: () -> String?
+
     init(
         defaults: UserDefaults = .standard,
-        accountScopeProvider: @escaping () -> String = VoiceSharingEnrollmentStore.currentAccountScope
+        accountScopeProvider: @escaping () -> String = VoiceSharingEnrollmentStore.currentAccountScope,
+        sessionIdentityProvider: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() }
     ) {
         self.defaults = defaults
         self.accountScopeProvider = accountScopeProvider
+        self.sessionIdentityProvider = sessionIdentityProvider
         loadForCurrentAccount()
     }
 
@@ -141,6 +151,7 @@ final class VoiceSharingEnrollmentStore {
     /// permission to collect.
     func setLocalOptIn(_ value: Bool) {
         lock.lock()
+        bumpOperationGenerationLocked()
         state.localOptIn = value
         defaults.set(value, forKey: Key.scoped(Key.optIn, scope))
         lock.unlock()
@@ -149,15 +160,20 @@ final class VoiceSharingEnrollmentStore {
 
     // MARK: - Authoritative projection
 
-    /// Applies a server projection, honouring revision ordering.
+    /// Applies a server projection issued under `token`.
     ///
-    /// Rejects a projection whose revision is one we have already applied: replaying an older revision would
-    /// let a delayed first-delivery opt-in land AFTER a withdrawal and flip membership back on. Returns false
-    /// when the update was refused so callers can surface a conflict instead of showing stale state.
+    /// NO REVISION ORDERING. `membership_revision` is opaque by contract, so any local comparison would be a
+    /// guess — and this guess fails in the dangerous direction: treating a late reply as "not older" and
+    /// accepting it can restore permission a user already withdrew. A projection is applied only if the
+    /// account/session lifecycle AND the membership-operation generation it was read under are both still
+    /// current, so anything fenced since is refused regardless of how its revision is spelled.
+    ///
+    /// Returns false when refused so callers reconcile with a fresh GET rather than show stale state.
     @discardableResult
-    func apply(authoritative projection: VoiceSharingMembership) -> Bool {
+    func apply(authoritative projection: VoiceSharingMembership, readUnder token: ProjectionToken) -> Bool {
         lock.lock()
-        guard shouldAccept(projection) else {
+        guard token.lifecycleGeneration == sessionIdentityProvider(),
+              token.operationGeneration == operationGeneration else {
             lock.unlock()
             return false
         }
@@ -171,37 +187,36 @@ final class VoiceSharingEnrollmentStore {
         return true
     }
 
-    /// Revision ordering, enforced locally because the server's revision is the only sequence available.
-    /// `membership_revision` is opaque, but it advances monotonically per applied mutation, so any reply we
-    /// have already moved past is stale by construction — that is precisely what makes a delayed
-    /// first-delivery opt-in unable to reactivate a user who withdrew in the meantime.
-    private func shouldAccept(_ incoming: VoiceSharingMembership) -> Bool {
-        guard state.hasAuthoritativeProjection else { return true }
-        let held = state.membership.membershipRevision
-        guard !held.isEmpty, !incoming.membershipRevision.isEmpty else { return true }
-        if held == incoming.membershipRevision { return true }   // idempotent replay of the same state
-        guard let incomingOrder = Self.revisionOrder(incoming.membershipRevision),
-              let heldOrder = Self.revisionOrder(held) else {
-            return true   // unorderable tokens: accept rather than silently dropping a real projection
-        }
-        return incomingOrder >= heldOrder
+    /// Identifies the exact instant a projection or mutation was issued. Carried by every request made on
+    /// this feature's behalf and checked when its reply lands.
+    struct ProjectionToken: Equatable {
+        let lifecycleGeneration: String
+        let operationGeneration: Int
     }
 
-    /// Numeric ordering over an opaque revision string. The contract publishes revisions as short tokens
-    /// whose trailing integer increases (`r1`, `r2`, …); anything without a trailing number cannot be
-    /// ordered, and is accepted rather than guessed at — refusing unorderable revisions would drop valid
-    /// projections, which fails worse than accepting one extra update.
-    static func revisionOrder(_ revision: String) -> Int? {
-        guard let split = revision.split(whereSeparator: { !$0.isNumber }).last,
-              let value = Int(split) else { return nil }
-        return value
+    /// Current fence value. Call this BEFORE issuing a request, never after the reply.
+    func projectionToken() -> ProjectionToken? {
+        lock.lock()
+        let operation = operationGeneration
+        lock.unlock()
+        guard let lifecycle = sessionIdentityProvider() else { return nil }
+        return ProjectionToken(lifecycleGeneration: lifecycle, operationGeneration: operation)
     }
+
+    /// Bumped by every LOCAL membership change (opt-in, withdrawal, account transition), so a reply to a
+    /// request issued before the bump is refused even if the server has advanced nothing yet. That is what
+    /// makes "user opts out, then a slow old GET arrives" impossible to honour.
+    private var operationGeneration: Int = 0
+
+    private func bumpOperationGenerationLocked() { operationGeneration += 1 }
 
     /// Replaces the projection from a 409 conflict payload. Surfacing the real state is required; the caller
     /// must NOT auto-replay the opt-in against the newer revision.
-    func applyConflict(current projection: VoiceSharingMembership?) {
+    /// A 409 carries the server's current projection. Surfacing it is required; auto-replaying the opt-in
+    /// against the newer revision is forbidden, and reconciling happens through a NEW GET under a NEW token.
+    func applyConflict(current projection: VoiceSharingMembership?, readUnder token: ProjectionToken) {
         guard let projection else { return }
-        apply(authoritative: projection)
+        apply(authoritative: projection, readUnder: token)
     }
 
     // MARK: - Withdrawal
@@ -214,6 +229,10 @@ final class VoiceSharingEnrollmentStore {
     /// contributing while a request is in flight or fails.
     func withdrawLocally(acceptedServerProjectionAfterward: Bool) -> VoiceSharingMembership {
         lock.lock()
+        // FENCE FIRST: everything issued before this instant becomes inapplicable the moment the user opts
+        // out. Ordering matters — bumping after the change would leave a window where a late old reply still
+        // matches the old fence value.
+        bumpOperationGenerationLocked()
         state.localOptIn = false
         var projected = state.membership
         projected = VoiceSharingMembership(
@@ -240,6 +259,7 @@ final class VoiceSharingEnrollmentStore {
     /// again — a different account's enrollment never carries over, and neither does its epoch.
     func transitionToAccount(signedIn: Bool) {
         lock.lock()
+        bumpOperationGenerationLocked()
         state = State()
         if signedIn {
             // Restore THIS account's remembered intent from disk (never another account's).
@@ -259,12 +279,16 @@ final class VoiceSharingEnrollmentStore {
         loadForCurrentAccountLocked()
     }
 
+    /// Cold start restores the user's OWN INTENT and the last known display state, and nothing more.
+    /// `hasAuthoritativeProjection` stays false, so permission cannot come from disk — only from a reply
+    /// received in this session. Keeping the fields loaded (rather than resetting them) means the settings UI
+    /// can still show what the server last said while collection remains off until a GET confirms it.
     private func loadForCurrentAccountLocked() {
         let s = scope
         state.localOptIn = defaults.bool(forKey: Key.scoped(Key.optIn, s))
+        state.hasAuthoritativeProjection = false
         guard let revision = defaults.string(forKey: Key.scoped(Key.revision, s)), !revision.isEmpty else {
             state.membership = .unavailable
-            state.hasAuthoritativeProjection = false
             return
         }
         let withdrawal = VoiceSharingMembership.WithdrawalState(
@@ -281,7 +305,6 @@ final class VoiceSharingEnrollmentStore {
             acceptedDisclosureVersion: defaults.string(forKey: Key.scoped(Key.disclosure, s)),
             withdrawalState: withdrawal
         )
-        state.hasAuthoritativeProjection = true
     }
 
     private func persist(_ m: VoiceSharingMembership) {

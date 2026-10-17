@@ -196,12 +196,43 @@ final class VoiceSharingPolicy {
     /// snapshot would otherwise keep a departed account's permission true until its lease
     /// lapsed (hours). Also fences a late refresh belonging to the previous identity: while a
     /// generation is pending, installs are refused rather than restoring stale permission.
-    func invalidateForIdentityChange() {
+    /// Two DIFFERENT things bump identity, and conflating them broke the feature:
+    ///
+    ///  * an unresolved IDENTITY transition (sign-out, account switch) — there is no readable account state
+    ///    yet, so installs must be refused until one exists. That raises the fence.
+    ///  * a MEMBERSHIP change inside the CURRENT session (a withdrawal, or a successful enrollment landing) —
+    ///    the account is perfectly readable; only the previous answer is wrong. This invalidates the
+    ///    snapshot and advances the generation WITHOUT fencing.
+    ///
+    /// Previously every membership notification raised `pendingIdentityFence`, and only a later login
+    /// cleared it. So after a successful enroll the projection could never install again until the user
+    /// signed out and back in — opt-in would appear to do nothing, permanently.
+    enum InvalidationKind {
+        /// Account/session changed and the new state is not readable yet: fence installs.
+        case identityTransition
+        /// Membership moved within the current session: drop the snapshot, do NOT fence.
+        case membershipChange
+
+        var fences: Bool { self == .identityTransition }
+    }
+
+    func invalidateForIdentityChange(kind: InvalidationKind = .identityTransition) {
         lock.lock()
         defer { lock.unlock() }
         installed = nil
-        pendingIdentityFence += 1
+        if kind.fences {
+            pendingIdentityFence += 1
+        }
         identityGenerationCounter += 1
+    }
+
+    /// Raises the install fence without touching the snapshot, for callers that know the account state is
+    /// unreadable (sign-out). Kept separate from `invalidateForIdentityChange` so a membership move can
+    /// never accidentally fence the feature.
+    func raiseIdentityFence() {
+        lock.lock()
+        defer { lock.unlock() }
+        pendingIdentityFence += 1
     }
 
     /// Called by the identity provider once the new account state is readable. Later refreshes
