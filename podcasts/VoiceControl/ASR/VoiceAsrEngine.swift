@@ -135,8 +135,10 @@ class VoiceAsrEngine {
         segmenter.onSpeechStarted = { [weak self] confirmationFrameSamples in
             self?.contributionCollector?.speechStarted(confirmationFrameSamples: confirmationFrameSamples)
         }
-        segmenter.onSpeechAccumulated = { [weak self] retainedSampleCount in
-            self?.contributionCollector?.speechAccumulated(retainedSampleCount: retainedSampleCount)
+        segmenter.onSpeechAccumulated = { [weak self] newSamples, bufferCount in
+            // Byte-for-byte handoff of the ACTUAL new PCM. No placeholder synthesis, no count-only path:
+            // the collector's retained buffer grows by exactly the samples the segmenter produced.
+            self?.contributionCollector?.appendSamples(Array(newSamples), reportedTotal: bufferCount)
         }
         segmenter.onSpeechCancelled = { [weak self] in
             self?.contributionCollector?.speechCancelled()
@@ -200,12 +202,17 @@ class VoiceAsrEngine {
     /// Exposed for focused translate-drop tests (`@testable`).
     func processUtterance(_ utterance: [Float]) async {
         stageTimer.mark() // VAD segment ready
+        // Immutable identity for THIS utterance, read once before any await. Everything below — bleed, wake,
+        // completion — reports against THIS context even if a successor utterance starts first, because each
+        // Task captured its own. Frozen-inside-the-collector is association by side effect; this is
+        // association by argument.
+        let utteranceContext = contributionCollector?.currentCaptureContext()
 
         if effectiveExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             // Observed bleed decision, not a discard: the spec requires collecting bleed-rejected segments
             // and retaining the decision rather than treating all rejects as playback-only ground truth.
-            contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count)
+            contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
             return
         }
 
@@ -225,13 +232,13 @@ class VoiceAsrEngine {
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
-            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count)
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .dropUtterance:
             FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
             // Wake-negative: collectable audio. Notifying here adds NO ASR/router/action work — the very
             // next statement returns, and nothing downstream runs for this segment either way.
-            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count)
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
             if detected {
@@ -246,8 +253,10 @@ class VoiceAsrEngine {
             }
         }
 
-        // Segment accepted by wake gating: hand the completed capture to the collector before any ASR work.
-        contributionCollector?.speechCompleted(utterance)
+        // Segment accepted by wake gating: hand the completed capture AND its immutable context to the
+        // collector before any ASR work. The context — not whatever is current inside the collector — decides
+        // whether this completion belongs.
+        contributionCollector?.speechCompleted(utterance, context: utteranceContext)
 
         guard !utterance.isEmpty else { return }
         let ready: Result<Void, Error>

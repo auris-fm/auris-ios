@@ -44,7 +44,11 @@ class NativeVadSegmenter {
 
     /// Fires per retained frame while a segment is active, reporting the total samples retained so far. Lets a
     /// consumer enforce a ceiling during the utterance instead of discovering overshoot after it ends.
-    var onSpeechAccumulated: ((_ retainedSampleCount: Int) -> Void)?
+    /// Carries the REAL new PCM since the previous call (not a copy of the whole buffer, not a count).
+    /// The contribution consumer appends exactly these bytes to its own bounded copy, so what it claims to
+    /// hold is what actually arrived. Kept separate from `onUtterance` so in-progress bounds hold even if
+    /// the utterance is never emitted.
+    var onSpeechAccumulated: ((_ newSamples: ArraySlice<Float>, _ bufferCount: Int) -> Void)?
 
     /// Fires when `reset()` interrupts ACTIVE speech. Not fired on a natural end or on a reset with nothing
     /// open, so a cancelled partial is never confused with a completed utterance.
@@ -77,15 +81,21 @@ class NativeVadSegmenter {
         if energy >= threshold {
             buffer.append(contentsOf: samples)
             speechFrameCount += 1
+            let wasActive = speechActive
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
                 // Edge-triggered at confirmation only; the argument is this frame's size for provenance, and
                 // the callback cannot affect anything downstream.
                 onSpeechStarted?(samples.count)
             }
-            if speechActive {
-                // Report the retained total so admission can be bounded incrementally. Read-only.
-                onSpeechAccumulated?(buffer.count)
+            if speechActive && !wasActive {
+                // The CONFIRMING frame's PCM belongs to the segment, so it must be delivered in THIS call —
+                // otherwise the contribution copy silently loses the frame that crossed the confirmation
+                // threshold and diverges from the segmenter's own buffer byte-for-byte. The ordinary
+                // accumulation delivery below covers every later frame.
+                onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
+            } else if speechActive {
+                onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
             }
             silenceStart = nil
             // Max duration: force utterance end when buffer exceeds limit
@@ -99,7 +109,7 @@ class NativeVadSegmenter {
             }
             buffer.append(contentsOf: samples)
             if speechActive {
-                onSpeechAccumulated?(buffer.count)
+                onSpeechAccumulated?(buffer[buffer.count - samples.count ..< buffer.count], buffer.count)
             }
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
@@ -115,7 +125,7 @@ class NativeVadSegmenter {
     }
 
     private func emitUtterance() {
-        let utterance = buffer
+        let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
         FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
         buffer.removeAll()

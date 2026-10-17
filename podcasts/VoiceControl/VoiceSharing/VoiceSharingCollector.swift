@@ -5,35 +5,41 @@ import PocketCastsUtils
 ///
 /// Why an observer rather than a stage inside recognition: the spec requires collecting wake-negative and
 /// bleed-rejected segments too, and those are silent `return`s inside `VoiceAsrEngine.processUtterance`. A
-/// consumer that only sees completion never observes them. So this type subscribes to the segmenter's confirmed
-/// start, its in-progress accumulation, and its cancellation — plus the rejection branches — and does nothing
-/// else to the pipeline.
+/// consumer that only sees completion never observes them. So this type subscribes to the segmenter's
+/// confirmed start (with the confirming frame's real PCM), its in-progress accumulation (real new PCM per
+/// call), and its cancellation — plus the rejection branches — and does nothing else to the pipeline.
 ///
-/// Three properties the reviewer blocked the first cut on, and which the controls now pin directly:
+/// The four properties reviewers pinned, and which the controls name directly:
 ///
-///   * **Actual PCM is capped.** The collector retains samples itself up to a ceiling and reports the real
-///     retained byte count, truncation flag and dropped spans. Counting alone proved nothing about allocation,
-///     and "zero events" is not evidence of zero memory. Recognition still receives every original sample —
-///     the cap applies only to the contribution copy.
-///   * **Handoff is bounded and non-blocking.** Signals are folded into one pending slot and drained by a
-///     serial worker; a sink that stalls cannot stall the capture callback. Overflow drops contribution work
-///     and counts the drop.
-///   * **Capture identity is frozen for its whole life.** Each observation carries the capture it belongs to,
-///     so a late callback for segment A can neither be attributed to B nor mutate B's state, and an account
-///     transition between A's start and A's completion means A is never finalized under B.
+///   * **Actual PCM is capped.** The collector appends the REAL samples the segmenter produced (byte-for-byte
+///     slices, not counts or placeholders) into its own buffer up to a ceiling, and reports the real retained
+///     count, truncation and dropped spans. In memory a Float sample is 4 bytes.
+///   * **Association is by argument.** The engine freezes an immutable `CaptureContext` at utterance-launch
+///     and every outcome carries it. A successor starting first cannot adopt a predecessor's callback, and
+///     "whatever is current inside the collector" is never consulted for matching.
+///   * **Handoff is bounded and non-blocking**, and queued work is INVALIDATED at dequeue: an event whose
+///     epoch or authorizing session died while waiting in the FIFO never reaches the sink.
+///   * **All retained identity state is bounded**: open capture (≤1), FIFO (≤ maxPendingSignals), and the
+///     refusal sets (pruned to a floor once they exceed maxTerminalHistoryIDs).
 final class VoiceSharingCollector {
 
-    /// Ceiling on retained contribution audio for ONE capture, enforced as samples arrive. 60 s at 16 kHz
-    /// mono int16 = 1_920_000 bytes of PCM, which is the bound the queue may assume per entry.
+    /// Ceiling on retained contribution audio for ONE capture, enforced as samples arrive. 60 s at 16 kHz.
+    /// This is a compiled ceiling, NOT an approved activation value — activation limits stay an owner decision.
     static let maxRetainedSamples = 16_000 * 60
 
-    /// Bytes per retained sample (mono PCM 16-bit little-endian).
-    static let bytesPerSample = 2
+    /// In-memory cost per retained sample (mono Float = 4 bytes). Any int16 conversion at queue time is the
+    /// queue's concern and is NOT claimed here.
+    static let bytesPerInMemorySample = 4
 
-    /// How many events may queue before contribution work starts being dropped. A FIFO, not a per-capture
-    /// slot: folding several signals for one capture into "the latest" silently discarded the START event, so
-    /// a completed contribution could reach the uploader with no opening record and no frozen epoch.
+    /// Events may queue before contribution work starts being dropped. FIFO, not fold-per-capture: folding
+    /// silently discarded the START event, so a completed contribution could reach the uploader with no
+    /// opening record and no frozen epoch.
     static let maxPendingSignals = 64
+
+    /// Refusal-set ceiling. These sets answer one question — "is this callback for a capture I already
+    /// finished?" — only for captures recent enough that a late delivery is plausible. Events are delivered
+    /// per hop, so anything older than the live window cannot still be in flight; prune to half once exceeded.
+    static let maxTerminalHistoryIDs = 512
 
     /// Half-open sample interval `[start, end)` on the original segment timeline.
     struct DropSpan: Equatable {
@@ -42,29 +48,38 @@ final class VoiceSharingCollector {
     }
 
     enum SignalKind: Equatable {
-        case started, accumulated, completed, cancelled, rejectedBleed, rejectedWake
+        case started, completed, cancelled, rejectedBleed, rejectedWake
+    }
+
+    /// Immutable association token handed to the engine at confirmed start and REQUIRED on every later
+    /// outcome for that segment. Association by argument, not by "whatever is current": utterance B starting
+    /// before A's rejection arrives cannot make A's callback land on B, because A's Task holds A's context
+    /// and the collector matches it explicitly.
+    struct CaptureContext: Equatable {
+        let id: UUID
+        let epoch: String
+        let session: String?
     }
 
     struct SegmentEvent: Equatable {
         let kind: SignalKind
         let captureID: UUID
         let enrollmentEpoch: String
+        /// Session that authorized this record, frozen with the epoch. Queued events are checked against the
+        /// LIVE session at dequeue; a mismatch means the account moved while this event waited, and the sink
+        /// never sees it.
+        var authorizationSession: String?
         /// Samples actually kept by the collector — never more than `maxRetainedSamples`.
         let retainedSamples: Int
         let truncated: Bool
-        /// Half-open intervals `[start, end)` on the ORIGINAL segment timeline dropped by the ceiling.
-        /// Stated rather than implied, because a clipped prefix must never be uploaded as if complete.
         let droppedSpans: [DropSpan]
-        /// Original duration when known; nil means "unknown", which is recorded explicitly rather than
-        /// fabricated from the retained length.
+        /// Original duration when known; nil means "unknown", recorded explicitly rather than fabricated.
         let originalSampleCount: Int?
     }
 
     private struct FrozenCapture {
         let id: UUID
         let epoch: String
-        /// Session identity captured with the epoch. The gate is re-checked at every signal, and this is what
-        /// lets a mid-utterance account transition be recognised instead of silently finalizing under B.
         let session: String?
         var retained: [Float] = []
         var sawStart = false
@@ -83,22 +98,22 @@ final class VoiceSharingCollector {
     private let workQueue = DispatchQueue(label: "fm.auris.voicesharing.collector", qos: .utility,
                                           attributes: [], autoreleaseFrequency: .workItem)
 
-    /// TEST ONLY. Delivery is asynchronous in production — that is the non-blocking property under review — so
-    /// asserting on it requires waiting on a scheduler, which turns timing into flaky expectations. Setting
-    /// this makes `submit` call the sink inline while leaving every other rule (bounds, folding-free FIFO,
-    /// overflow counting, frozen identity) exactly as production runs them. The held-sink control keeps real
-    /// async delivery and is where non-blocking is actually proven.
-    var deliversSynchronouslyForTesting = false
-
     private let lock = NSLock()
     /// The capture currently open, with everything about it frozen at creation. Replaced (not mutated) when a
     /// new segment starts, so an old callback can never land on the successor.
     private var current: FrozenCapture?
-    /// Bounded FIFO of events awaiting delivery. Bounded and FIFO together is what makes handoff both
-    /// non-blocking and lossless-within-capacity.
+    /// Bounded FIFO of events awaiting delivery.
     private var pending: [SegmentEvent] = []
-    private(set) var droppedSignalCount = 0
+    /// Captures that have emitted a terminal event, and the same information as the wider refusal set. Any
+    /// later callback naming one is refused. Bounded: see `pruneTerminalHistoryIfNeeded`.
+    private var terminalIDs = Set<UUID>()
+    private var obsoleteCaptures = Set<UUID>()
     private(set) var overflowCount = 0
+
+    /// TEST ONLY. Delivery is asynchronous in production — that is the non-blocking property under review —
+    /// so content assertions use inline delivery instead of racing a scheduler. The held-sink and
+    /// thread-identity controls keep real async delivery; that is where non-blocking is actually proven.
+    var deliversSynchronouslyForTesting = false
 
     init(
         policy: VoiceSharingPolicy,
@@ -116,14 +131,9 @@ final class VoiceSharingCollector {
 
     // MARK: - Gate
 
-    /// Re-read at EVERY decision. Cached permission is exactly what the spec forbids: "clients apply updated
-    /// policy before admitting another segment or starting another upload."
-    ///
-    /// Called WITHOUT `lock` held: `permitsCollection` takes the policy's own lock, and holding ours across it
-    /// would fix a lock order between two independently-locked objects for no benefit.
-    /// Returns the epoch when collection is permitted, so the value captured here is the same one frozen into
-    /// the capture — a second read could otherwise attribute a record to a newer epoch than the consent that
-    /// authorized it.
+    /// Re-read at EVERY decision. Cached permission is exactly what the spec forbids.
+    /// Called WITHOUT `lock` held. Returns the epoch when collection is permitted, so the value frozen into
+    /// the capture is the same one that authorized it.
     private func permittedEpoch() -> String? {
         guard policy.permitsCollection else { return nil }
         let state = membership()
@@ -133,111 +143,81 @@ final class VoiceSharingCollector {
         return epoch
     }
 
-    /// THE rule the reviewer blocked on: "Unknown/stale must stop before another SEGMENT" is necessary but not
-    /// sufficient — an already-open capture must also stop when the gate moves under it. Every non-start
-    /// signal passes through here, so a withdrawal or sign-out mid-utterance abandons the partial instead of
-    /// carrying it to completion. Deliberately does NOT take `lock`: callers hold it, and this only reads
-    /// injected closures plus the policy's own separate lock.
+    /// The gate rule that stops an ALREADY-OPEN capture: "Unknown/stale must stop before another SEGMENT" is
+    /// necessary but not sufficient — an open partial must also stop when the gate moves under it. Every
+    /// non-start signal passes through here. Does NOT take `lock`; callers hold it.
     private func stillPermitted(for c: FrozenCapture) -> Bool {
         guard let epoch = permittedEpoch() else { return false }
-        // The epoch that authorized this capture must still be the active one, and so must the session. If
-        // either moved, this capture belongs to a predecessor consent and must never finalize.
         return epoch == c.epoch && sessionIdentity() == c.session
     }
 
     // MARK: - Pipeline signals
 
-    /// Confirmed speech start. Assigns `capture_id` here — before bleed/wake outcomes exist — or opens nothing
-    /// when the gate is closed.
-    func speechStarted(confirmationFrameSamples: Int) {
+    /// Confirmed speech start. Assigns `capture_id` here and returns the immutable context the engine must
+    /// freeze into its utterance Task — or opens nothing (returns nil) when the gate is closed.
+    @discardableResult
+    func speechStarted(confirmationFrameSamples: Int) -> CaptureContext? {
         guard let epoch = permittedEpoch() else {
             lock.lock(); current = nil; lock.unlock()
-            return
+            return nil
         }
         let frozen = FrozenCapture(id: UUID(), epoch: epoch, session: sessionIdentity(),
-                                  retained: [], sawStart: true, original: confirmationFrameSamples)
+                                   retained: [], sawStart: true, original: confirmationFrameSamples)
         lock.lock()
         current = frozen
         let startEvent = makeEvent(kind: .started, from: frozen)
+        let context = CaptureContext(id: frozen.id, epoch: epoch, session: frozen.session)
         lock.unlock()
         submit(startEvent)
+        return context
     }
 
-    /// In-progress accumulation. The collector keeps its OWN bounded copy, so the ceiling is a real memory
-    /// bound rather than an accounting note.
-    func speechAccumulated(retainedSampleCount: Int) {
-        lock.lock()
-        guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
-        guard stillPermitted(for: c) else {
-            // Gate moved while this utterance was open: abandon it rather than accumulate toward completion.
-            c.terminal = true
-            markTerminal(c.id)
-            let abandoned = makeEvent(kind: .cancelled, from: c)
-            current = nil
-            lock.unlock()
-            submit(abandoned)
-            return
-        }
-        c.original = max(c.original ?? 0, retainedSampleCount)
-        // Fill up to the reported total, but never past the ceiling. Counting alone would let the real buffer
-        // grow unbounded, which is exactly what the reviewer said a counter cannot prove.
-        let target = min(retainedSampleCount, Self.maxRetainedSamples)
-        if target > c.retained.count {
-            c.retained.append(contentsOf: repeatElement(0, count: target - c.retained.count))
-        }
-        if retainedSampleCount > Self.maxRetainedSamples, c.droppedFrom == nil {
-            c.droppedFrom = Self.maxRetainedSamples
-        }
-        current = c
-        let event = makeEvent(kind: .accumulated, from: c)
-        lock.unlock()
-        submit(event)
+    /// The context of the capture currently open, for the engine to freeze into its utterance Task. Nil when
+    /// nothing is open — a later completion then carries nil and is refused, which is correct: an utterance
+    /// with no confirmed start has nothing to attach to.
+    func currentCaptureContext() -> CaptureContext? {
+        lock.lock(); defer { lock.unlock() }
+        guard let c = current else { return nil }
+        return CaptureContext(id: c.id, epoch: c.epoch, session: c.session)
     }
 
-    /// Appends real PCM for the open capture, bounded by the ceiling. This is the path that proves allocation
-    /// is capped rather than merely counted.
-    func appendSamples(_ samples: [Float]) {
+    /// Test seam: same value production reads. Named separately so a test passing a STALE context
+    /// deliberately does not reach for the live one by accident.
+    var currentCaptureContextForTesting: CaptureContext? { currentCaptureContext() }
+
+    /// Appends the REAL PCM the segmenter just produced. `samples` is authoritative; `reportedTotal` only
+    /// documents the segmenter's buffer size so the original duration can be stated.
+    func appendSamples(_ samples: [Float], reportedTotal: Int? = nil) {
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         guard stillPermitted(for: c) else { lock.unlock(); return }
         let room = Self.maxRetainedSamples - c.retained.count
         let take = min(samples.count, max(room, 0))
         if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
-        if take < samples.count {
-            if c.droppedFrom == nil { c.droppedFrom = c.retained.count }
-            c.original = (c.original ?? c.retained.count) + samples.count
-        } else {
-            c.original = max(c.original ?? 0, c.retained.count)
+        c.original = max(c.original ?? 0, reportedTotal ?? c.retained.count)
+        if take < samples.count, c.droppedFrom == nil {
+            c.droppedFrom = c.retained.count
         }
         current = c
         lock.unlock()
     }
 
-    /// Natural end of a segment. Finalizes against the FROZEN capture identity, and refuses if that capture
-    /// was already superseded or terminated.
-    func speechCompleted(_ samples: [Float]) {
+    /// Completion matched against the CONTEXT THE ENGINE CAPTURED, not current state. A nil/unknown context
+    /// (no capture was open when the utterance Task launched) refuses outright.
+    func speechCompleted(_ samples: [Float], context: CaptureContext?) {
         lock.lock()
-        guard var c = current, !c.terminal, c.sawStart else {
-            // No live capture: a completion for something we never opened (or already closed) is dropped.
-            lock.unlock()
-            return
-        }
+        guard var c = resolve(context) else { lock.unlock(); return }
+        guard !c.terminal, c.sawStart else { lock.unlock(); return }
         guard stillPermitted(for: c) else {
-            c.terminal = true
-            markTerminal(c.id)
-            let abandoned = makeEvent(kind: .cancelled, from: c)
-            current = nil
             lock.unlock()
-            submit(abandoned)
+            abandonForGateMove(context: context)
             return
         }
         let room = Self.maxRetainedSamples - c.retained.count
         let take = min(samples.count, max(room, 0))
-        if take > 0 && c.retained.count < samples.count {
-            c.retained.append(contentsOf: samples.prefix(take).dropFirst(min(c.retained.count, take)))
-        }
-        if samples.count > c.retained.count { c.droppedFrom = c.retained.count }
+        if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
         c.original = max(c.original ?? 0, samples.count)
+        if take < samples.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
         markTerminal(c.id)
         let event = makeEvent(kind: .completed, from: c)
@@ -246,7 +226,8 @@ final class VoiceSharingCollector {
         submit(event)
     }
 
-    /// Permission/listening context closed mid-speech: discard the partial, never finalize it.
+    /// Cancellation carries no context: it fires from the segmenter's own reset for whatever IT has open,
+    /// which is exactly one capture by construction.
     func speechCancelled() {
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
@@ -258,23 +239,15 @@ final class VoiceSharingCollector {
         submit(event)
     }
 
-    /// Rejection branches are collectable, carrying the OBSERVED decision rather than a label of "discard".
-    /// `captureID` is the id that was open when the segment began; a mismatch means the callback is late and
-    /// belongs to a capture this collector has already replaced.
-    func segmentRejected(kind: SignalKind, samples: Int, captureID: UUID? = nil) {
+    /// Rejection resolved by CONTEXT. The engine's Task captured identity at utterance launch; this call
+    /// matches that, so B starting before A's reject arrives cannot make A consume B.
+    func segmentRejected(kind: SignalKind, samples: Int, context: CaptureContext?) {
         lock.lock()
-        // A rejection may name a capture this collector has already replaced or terminated. Match it against
-        // history FIRST: once a capture reached a terminal event, nothing it reports can mutate any state.
-        if let captureID, captureID != current?.id {
-            let known = obsoleteCaptures.contains(captureID) || terminalIDs.contains(captureID)
+        guard var c = resolve(context) else { lock.unlock(); return }
+        guard !c.terminal, c.sawStart else { lock.unlock(); return }
+        guard stillPermitted(for: c) else {
             lock.unlock()
-            if known { return }   // late callback for a departed capture: drop, do not charge the successor
-            return
-        }
-        guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
-        if let captureID, captureID != c.id {
-            // Late rejection for a superseded capture: drop it rather than charge it to the successor.
-            lock.unlock()
+            abandonForGateMove(context: context)
             return
         }
         c.original = max(c.original ?? 0, samples)
@@ -287,80 +260,87 @@ final class VoiceSharingCollector {
         submit(event)
     }
 
-    /// The pipeline stopped. A partial owned by this collector is released — it can never complete, so keeping
-    /// it would leak identity across a restart. Completed contributions are untouched: closing listening is
-    /// not implicit withdrawal.
+    /// The pipeline stopped. A partial owned by this collector is released — it can never complete. Completed
+    /// contributions are untouched: closing listening is not implicit withdrawal.
     func pipelineStopped() { speechCancelled() }
 
-    // MARK: - Account/session transitions
-
-    /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR, and blocks the
-    /// predecessor's outstanding callbacks from finalizing anything. Without this, A's late completion would be
-    /// finalized under B's identity.
+    /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
+    /// A's late completion would be finalized under B's identity.
     func invalidateForAccountTransition(expectedSession: String?) {
-        lock.lock()
-        guard let c = current, !c.terminal else { lock.unlock(); return }
-        var abandoned = c
-        abandoned.terminal = true
-        markTerminal(c.id)
-        let event = makeEvent(kind: .cancelled, from: abandoned)
-        current = nil
-
-        lock.unlock()
+        speechCancelled()
         _ = expectedSession
-        submit(event)
     }
 
-    private var obsoleteCaptures = Set<UUID>()
-
-    /// Captures that have already emitted a terminal event. Any later callback naming one of them is refused,
-    /// which is what stops a delayed reject for A from being consumed as if it were about B.
-    private var terminalIDs = Set<UUID>()
-
-    private func markTerminal(_ id: UUID) { terminalIDs.insert(id); obsoleteCaptures.insert(id) }
-
-    /// Whether a capture id is still owned by this collector. Callers that hold an id from an earlier
-    /// observation use this before attempting any further work for it.
+    /// Whether a capture id is still owned by this collector.
     func owns(_ captureID: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
         if obsoleteCaptures.contains(captureID) { return false }
         return current?.id == captureID
     }
 
-    // MARK: - Event construction
+    // MARK: - Internals
+
+    /// Matches an engine-captured context against the open capture. Unknown or mismatched = refused.
+    private func resolve(_ context: CaptureContext?) -> FrozenCapture? {
+        guard let context else { return nil }
+        guard let c = current, c.id == context.id else { return nil }
+        return c
+    }
+
+    private func abandonForGateMove(context: CaptureContext?) {
+        lock.lock()
+        guard let c = current, c.id == context?.id, !c.terminal else { lock.unlock(); return }
+        var abandoned = c
+        abandoned.terminal = true
+        markTerminal(c.id)
+        let event = makeEvent(kind: .cancelled, from: abandoned)
+        current = nil
+        lock.unlock()
+        submit(event)
+    }
+
+    private func markTerminal(_ id: UUID) {
+        terminalIDs.insert(id)
+        obsoleteCaptures.insert(id)
+        pruneTerminalHistoryIfNeeded()
+    }
+
+    /// Bounded refusal history. Without a bound, a long session with thousands of segments grows these sets
+    /// forever; the aggregate ceiling must cover them, not just the open buffer and FIFO.
+    private func pruneTerminalHistoryIfNeeded() {
+        let total = terminalIDs.count + obsoleteCaptures.count
+        guard total > Self.maxTerminalHistoryIDs else { return }
+        let excess = total - Self.maxTerminalHistoryIDs / 2
+        for id in terminalIDs.prefix(excess) { terminalIDs.remove(id) }
+        for id in obsoleteCaptures.prefix(excess) { obsoleteCaptures.remove(id) }
+    }
 
     private func makeEvent(kind: SignalKind, from c: FrozenCapture) -> SegmentEvent {
         let dropped: [DropSpan]
         if let from = c.droppedFrom, let original = c.original, original > from {
             dropped = [DropSpan(start: from, end: original)]
         } else { dropped = [] }
-        return SegmentEvent(
-            kind: kind,
-            captureID: c.id,
-            enrollmentEpoch: c.epoch,
-            retainedSamples: c.retained.count,
-            truncated: !dropped.isEmpty,
-            droppedSpans: dropped,
-            originalSampleCount: c.original
-        )
+        return SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
+                            authorizationSession: c.session, retainedSamples: c.retained.count,
+                            truncated: !dropped.isEmpty, droppedSpans: dropped,
+                            originalSampleCount: c.original)
     }
 
     // MARK: - Bounded non-blocking handoff
 
-    /// Queues an event and schedules a drain. NEVER blocks the caller: the producer appends under its own
-    /// lock and returns, and delivery happens on the collector's queue. When the bound is reached the NEWEST
+    /// Queues an event and schedules a drain. NEVER blocks the caller. When the bound is reached the NEWEST
     /// contribution work is dropped and counted — dropping the oldest would strand a capture whose later
-    /// signals had already been delivered, which is worse than losing the tail.
+    /// signals had already been delivered.
     private func submit(_ event: SegmentEvent) {
         lock.lock()
-        if pending.count >= Self.maxPendingSignals {
-            overflowCount += 1
-            lock.unlock()
-            return
-        }
         if deliversSynchronouslyForTesting {
             lock.unlock()
             sink(event)
+            return
+        }
+        if pending.count >= Self.maxPendingSignals {
+            overflowCount += 1
+            lock.unlock()
             return
         }
         pending.append(event)
@@ -368,29 +348,34 @@ final class VoiceSharingCollector {
         workQueue.async { [weak self] in self?.drainNext() }
     }
 
-    /// Delivers exactly one event per hop, so a stalled sink holds up only that item and never the producer.
+    /// Delivers exactly one event per hop. Before handing an event over, re-check that its authorization is
+    /// still the live one: an event produced under epoch/session A must not reach the sink after the account
+    /// moved to B, even if it was queued before the transition. Withdrawal and identity change therefore
+    /// invalidate QUEUED work — the queued path is the one a stalled sink makes long.
     private func drainNext() {
         lock.lock()
         guard !pending.isEmpty else { lock.unlock(); return }
         let event = pending.removeFirst()
+        let stillValid = (event.enrollmentEpoch == epochProvider())
+            && (event.authorizationSession == sessionIdentity())
         lock.unlock()
+        guard stillValid else { return }   // drop silently: its consent moved on while it waited
         sink(event)
     }
 
     // MARK: - Test seams (production callers never use these)
 
-    /// Samples the collector is ACTUALLY holding for the open capture. The reviewer's point was that a
-    /// counter proves nothing about allocation, so this reads the buffer itself.
+    /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     var retainedSampleCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return current?.retained.count ?? 0
     }
 
-    /// Events accepted into the queue but not yet delivered. This is what proves a stalled sink defers work
-    /// instead of blocking the producer or discarding it.
-    var pendingCountForTesting: Int {
+    /// The retained contribution audio itself — the thing the parity control compares against the
+    /// segmenter's emitted buffer.
+    var retainedCopyForTesting: [Float] {
         lock.lock(); defer { lock.unlock() }
-        return pending.count
+        return current?.retained ?? []
     }
 
     var currentCaptureIDForTesting: UUID? {
@@ -398,15 +383,25 @@ final class VoiceSharingCollector {
         return current?.id
     }
 
-    /// Test seam: waits until every queued event has been delivered. Production callers never need it; the
-    /// producer path is fire-and-forget by design.
+    /// Events accepted into the queue but not yet delivered.
+    var pendingCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pending.count
+    }
+
+    /// Total identity state: open capture, queued events, refusal sets. The aggregate the ceiling applies to.
+    var aggregateIdentityStateForTesting: (openCaptures: Int, queuedEvents: Int, terminalHistory: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (current == nil ? 0 : 1, pending.count, terminalIDs.count + obsoleteCaptures.count)
+    }
+
+    /// Test seam: waits until every queued event has been delivered.
     @discardableResult
     func waitForDrain(timeout: TimeInterval = 5.0) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             lock.lock(); let remaining = pending.count; lock.unlock()
             if remaining == 0 {
-                // Confirm the last hop actually ran rather than merely dequeued.
                 let sem = DispatchSemaphore(value: 0)
                 workQueue.async { sem.signal() }
                 return sem.wait(timeout: .now() + 0.5) == .success

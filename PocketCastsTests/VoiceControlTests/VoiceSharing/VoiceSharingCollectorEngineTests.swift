@@ -222,8 +222,9 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
             Thread.current.threadDictionary["producer-marker"] = true
             XCTAssertTrue(policy.permitsCollection, "premise: gate open")
             collector.speechStarted(confirmationFrameSamples: 320)
-            collector.speechAccumulated(retainedSampleCount: 640)
-            collector.speechCompleted([Float](repeating: 1, count: 640))
+            collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+            collector.speechCompleted([Float](repeating: 1, count: 640),
+                                      context: collector.currentCaptureContextForTesting)
             sem.signal()
         }
         XCTAssertEqual(sem.wait(timeout: .now() + 5), .success, "producer should finish")

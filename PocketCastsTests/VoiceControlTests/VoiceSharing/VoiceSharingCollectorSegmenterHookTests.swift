@@ -45,7 +45,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
     func test_onSpeechAccumulated_reportsRetainedSampleCount_whileActive() {
         let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
         var counts: [Int] = []
-        segmenter.onSpeechAccumulated = { counts.append($0) }
+        segmenter.onSpeechAccumulated = { _, bufferCount in counts.append(bufferCount) }
 
         for _ in 0..<4 { segmenter.process(speech) }     // 2 to confirm, then 2 more retained
         XCTAssertFalse(counts.isEmpty, "accumulation must be observable while speech is active")
@@ -59,6 +59,34 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         counts.removeAll()
         segmenter.process(speech)                         // idle again: a new burst is pending, not active
         XCTAssertEqual(counts, [], "no admission signal outside an open segment")
+    }
+
+    /// The accumulation hook carries the ACTUAL new PCM, not a count or a placeholder: the slice appended is
+    /// byte-for-byte the samples this call added to the segmenter's own buffer. A contribution copy built
+    /// from these slices equals the segmenter's buffer exactly — which is what makes "the collector retains
+    /// real audio" verifiable rather than claimed.
+    func test_onSpeechAccumulated_carriesActualNewPCM() {
+        let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
+        var slices: [[Float]] = []
+        segmenter.onSpeechAccumulated = { newSamples, _ in slices.append(Array(newSamples)) }
+
+        // All above the 0.5 RMS threshold (rms of a constant frame is its amplitude).
+        let a = [Float](repeating: 0.6, count: 320)
+        let b = [Float](repeating: 0.7, count: 320)
+        let c = [Float](repeating: 0.9, count: 320)
+        segmenter.process(a)
+        segmenter.process(b)          // confirms here (minSpeechFrames = 2)
+        segmenter.process(c)
+
+        XCTAssertEqual(slices.count, 2, "only post-confirmation calls carry PCM")
+        XCTAssertEqual(slices[0], b, "first delivery is the confirming frame's samples, exactly")
+        XCTAssertEqual(slices[1], c, "second delivery is that call's new samples, exactly")
+
+        // Reconstructing from the delivered slices equals the segmenter's retained audio.
+        var reconstructed: [Float] = []
+        reconstructed.append(contentsOf: slices[0])
+        reconstructed.append(contentsOf: slices[1])
+        XCTAssertEqual(reconstructed, b + c)
     }
 
     /// Reset while ACTIVE must be distinguishable from a natural end, because the collector cancels the
@@ -99,7 +127,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         var observed: [[Float]] = []
         instrumented.onUtterance = { observed.append($0) }
         instrumented.onSpeechStarted = { _ in }
-        instrumented.onSpeechAccumulated = { _ in }
+        instrumented.onSpeechAccumulated = { _, _ in }
         instrumented.onSpeechCancelled = { }
         instrumented.process(speech); instrumented.process(speech); instrumented.process(silence)
 
@@ -111,11 +139,89 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
     func test_accumulationDoesNotReportDiscardedPreSpeech() {
         let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 3)
         var counts: [Int] = []
-        segmenter.onSpeechAccumulated = { counts.append($0) }
+        segmenter.onSpeechAccumulated = { _, bufferCount in counts.append(bufferCount) }
 
         // Two interrupted bursts: each is discarded before confirmation.
         segmenter.process(speech); segmenter.process(speech); segmenter.process(silence)
         segmenter.process(speech); segmenter.process(speech); segmenter.process(silence)
         XCTAssertTrue(counts.isEmpty, "unconfirmed bursts must not surface as accumulated contribution audio")
+    }
+
+
+    /// End-to-end PCM parity: after a full segment flows through the real engine wiring (segmenter slices →
+    /// collector appendSamples), the collector's retained copy must equal the segmenter's buffer BYTE FOR
+    /// BYTE — including the confirming frame. A count-based or placeholder path diverges here.
+    func test_contributionCopy_matchesSegmenterBufferByteForByte() {
+        let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
+        let delivered = LockedBoxes()
+        segmenter.onSpeechAccumulated = { newSamples, total in
+            delivered.appendSegmenter(samples: Array(newSamples), total: total)
+        }
+
+        let speech1 = [Float](repeating: 0.6, count: 320)
+        let speech2 = [Float](repeating: 0.75, count: 320)
+        let speech3 = [Float](repeating: 0.9, count: 320)
+        let hangover = [Float](repeating: 0.05, count: 320)
+
+        // Collector side: same calls the engine's hook makes.
+        let policy = VoiceSharingPolicy(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        policy.identityBecameReadable()
+        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
+        var enrolled = VoiceSharingEnrollmentStore.State()
+        enrolled.localOptIn = true
+        enrolled.hasAuthoritativeProjection = true
+        enrolled.membership = VoiceSharingMembership(
+            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
+            withdrawalState: .active
+        )
+        let collector = VoiceSharingCollector(policy: policy, membership: { enrolled },
+                                              epochProvider: { "epoch-1" },
+                                              sessionIdentity: { "gen-A" })
+        collector.deliversSynchronouslyForTesting = true
+
+        segmenter.process(speech1)
+        segmenter.process(speech2)          // confirms here
+        if let ctx = collector.speechStarted(confirmationFrameSamples: 320) {
+            // Engine wires onSpeechAccumulated to appendSamples; replay exactly what was delivered.
+            for call in delivered.segmenterCalls {
+                collector.appendSamples(call.samples, reportedTotal: call.total)
+            }
+            segmenter.process(speech3)
+            delivered.replayInto(collector)
+            segmenter.process(hangover)     // silence -> immediate natural end
+            delivered.replayInto(collector)
+
+            var utterance: [Float] = []
+            segmenter.onUtterance = { utterance = $0 }
+            segmenter.process([Float](repeating: 0.001, count: 320))
+            collector.speechCompleted(utterance, context: ctx)
+
+            XCTAssertEqual(collector.retainedCopyForTesting, utterance,
+                           "the contribution copy must equal the segmenter's emitted audio byte for byte")
+        } else {
+            XCTFail("premise: capture should open")
+        }
+    }
+}
+
+/// Thread-safe record of what the segmenter delivered, so the test can replay it into the collector the way
+/// the engine's hook does.
+private final class LockedBoxes {
+    private let lock = NSLock()
+    private var calls: [(samples: [Float], total: Int)] = []
+    var segmenterCalls: [(samples: [Float], total: Int)] {
+        lock.lock(); defer { lock.unlock() }
+        return calls
+    }
+    func appendSegmenter(samples: [Float], total: Int) {
+        lock.lock(); calls.append((samples, total)); lock.unlock()
+    }
+    func replayInto(_ collector: VoiceSharingCollector) {
+        for c in segmenterCalls { collector.appendSamples(c.samples, reportedTotal: c.total) }
     }
 }

@@ -103,11 +103,11 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertFalse(policy.permitsCollection, "premise: no lease exists")
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 100_000))
-        collector.speechAccumulated(retainedSampleCount: 100_000)
-        collector.speechCompleted([Float](repeating: 1, count: 100_000))
-        collector.segmentRejected(kind: .rejectedBleed, samples: 100_000)
-        collector.segmentRejected(kind: .rejectedWake, samples: 100_000)
+        let big = [Float](repeating: 1, count: 100_000)
+        collector.appendSamples(big, reportedTotal: 100_000)
+        collector.speechCompleted(big, context: collector.currentCaptureContextForTesting)
+        collector.segmentRejected(kind: .rejectedBleed, samples: 100_000, context: collector.currentCaptureContextForTesting)
+        collector.segmentRejected(kind: .rejectedWake, samples: 100_000, context: collector.currentCaptureContextForTesting)
 
         XCTAssertEqual(snapshot(), [], "a closed policy must produce no contribution work at all")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0,
@@ -125,8 +125,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertFalse(storeState.hasAuthoritativeProjection, "premise: membership unknown")
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 5_000))
-        collector.speechCompleted([Float](repeating: 1, count: 5_000))
+        let five = [Float](repeating: 1, count: 5_000)
+        collector.appendSamples(five, reportedTotal: 5_000)
+        collector.speechCompleted(five, context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot(), [], "unknown membership must never be read as consent")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "no PCM retained for unknown membership")
 
@@ -142,9 +143,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertTrue(storeState.hasAuthoritativeProjection, "premise: projection says withdrawn")
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 9_000))
-        collector.speechCompleted([Float](repeating: 1, count: 9_000))
-        collector.segmentRejected(kind: .rejectedWake, samples: 9_000)
+        let nine = [Float](repeating: 1, count: 9_000)
+        collector.appendSamples(nine, reportedTotal: 9_000)
+        collector.speechCompleted(nine, context: collector.currentCaptureContextForTesting)
+        collector.segmentRejected(kind: .rejectedWake, samples: 9_000, context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot(), [])
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
     }
@@ -156,8 +158,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         epoch = nil
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 3_200))
-        collector.speechCompleted([Float](repeating: 1, count: 3_200))
+        let th = [Float](repeating: 1, count: 3_200)
+        collector.appendSamples(th, reportedTotal: 3_200)
+        collector.speechCompleted(th, context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot(), [], "records key on the epoch; without one nothing is attributable")
 
         epoch = "epoch-1"
@@ -177,17 +180,18 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         let ceiling = VoiceSharingCollector.maxRetainedSamples
         collector.speechStarted(confirmationFrameSamples: 320)
+        let ctx = collector.currentCaptureContextForTesting
 
-        // Fill exactly to the ceiling.
-        collector.appendSamples([Float](repeating: 0.5, count: ceiling))
+        // Fill exactly to the ceiling with real PCM.
+        collector.appendSamples([Float](repeating: 0.5, count: ceiling), reportedTotal: ceiling)
         XCTAssertEqual(collector.retainedSampleCountForTesting, ceiling, "retention stops AT the ceiling")
 
         // Anything beyond is dropped, and the drop is recorded rather than silent.
-        collector.appendSamples([Float](repeating: 0.5, count: 10_000))
+        collector.appendSamples([Float](repeating: 0.5, count: 10_000), reportedTotal: ceiling + 10_000)
         XCTAssertEqual(collector.retainedSampleCountForTesting, ceiling,
                        "the collector must not hold one sample past the ceiling")
 
-        collector.speechCompleted([Float](repeating: 0.5, count: ceiling + 10_000))
+        collector.speechCompleted([Float](repeating: 0.5, count: ceiling + 10_000), context: ctx)
         let done = snapshot().last!
         XCTAssertEqual(done.kind, .completed)
         XCTAssertEqual(done.retainedSamples, ceiling, "the event reports what was ACTUALLY retained")
@@ -210,8 +214,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples(original)
-        collector.speechCompleted(original)
+        collector.appendSamples(original, reportedTotal: original.count)
+        collector.speechCompleted(original, context: collector.currentCaptureContextForTesting)
         XCTAssertLessThanOrEqual(collector.retainedSampleCountForTesting, ceiling)
 
         // And the bytes handed to recognition are unchanged in size and content.
@@ -229,12 +233,17 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         let ceiling = VoiceSharingCollector.maxRetainedSamples
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.speechAccumulated(retainedSampleCount: ceiling)
-        XCTAssertFalse(snapshot().contains { $0.truncated }, "at-limit is not over-limit")
+        // Breach delivered the way production does: real PCM through appendSamples. The bound holds DURING
+        // the utterance (verified by the held count); the drop bookkeeping reaches the uploader on the
+        // terminal event, proving it was captured live rather than reconstructed at completion.
+        collector.appendSamples([Float](repeating: 0.5, count: ceiling), reportedTotal: ceiling)
+        collector.appendSamples([Float](repeating: 0.5, count: 320), reportedTotal: ceiling + 320)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, ceiling,
+                       "the ceiling holds DURING the utterance, not only at completion")
 
-        collector.speechAccumulated(retainedSampleCount: ceiling + 320)
-        XCTAssertTrue(snapshot().contains { $0.kind == .accumulated && $0.truncated },
-                      "the breach surfaces before any completion exists")
+        collector.speechCompleted([Float](repeating: 0.5, count: 0), context: collector.currentCaptureContextForTesting)
+        XCTAssertTrue(snapshot().last!.truncated,
+                      "the breach recorded mid-utterance reaches the uploader")
     }
 
     // MARK: - Bounded non-blocking handoff (blocker 2)
@@ -273,28 +282,130 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var levels: Int = 0
         for level in stride(from: 640, through: 640 * 50, by: 640) {
             enrolledState(true)
-            collector.speechAccumulated(retainedSampleCount: level)
+            collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: level)
             levels += 1
         }
-        collector.speechCompleted([Float](repeating: 1, count: 640 * levels))
+        collector.speechCompleted([Float](repeating: 1, count: 640 * levels),
+                                  context: collector.currentCaptureContextForTesting)
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertLessThan(elapsed, 0.5,
                           "the capture callback must not wait on a stalled sink (took \(elapsed)s)")
 
         // While parked, only the in-flight event has been delivered; the rest are queued, not dropped.
+        // Note: appendSamples emits no events by design — accumulation lives in the collector's buffer, so
+        // the FIFO here holds the start and completion records only.
         deliverLock.lock(); let whileParked = delivered.count; deliverLock.unlock()
         XCTAssertEqual(whileParked, 1, "delivery is held at the stalled sink, as expected")
-        XCTAssertEqual(collector.pendingCountForTesting, levels + 1,
-                       "every signal produced while parked is retained for delivery — none blocked, none lost")
+        XCTAssertEqual(collector.pendingCountForTesting, 1,
+                       "the completion produced while parked is queued — not blocked, not lost")
         XCTAssertEqual(collector.overflowCount, 0, "and the queue was nowhere near its bound")
 
         release.signal()
         XCTAssertTrue(collector.waitForDrain(), "queued work must be delivered once the sink frees")
         deliverLock.lock(); let got = delivered; deliverLock.unlock()
-        XCTAssertEqual(got.count, levels + 2, "everything queued arrives after the stall clears")
+        XCTAssertEqual(got.count, 2, "everything queued arrives after the stall clears")
         XCTAssertTrue(got.contains { $0.kind == .started }, "the opening record survives to the uploader")
         XCTAssertTrue(got.contains { $0.kind == .completed }, "and so does the completion")
         XCTAssertEqual(Set(got.map { $0.captureID }).count, 1, "all of it belongs to ONE capture")
+    }
+
+    /// Withdrawal while an event sits QUEUED must invalidate it: a stalled sink makes the FIFO long, and an
+    /// event whose epoch died while waiting must never reach the uploader. Real async delivery — inline would
+    /// make the queue empty before the transition could land.
+    func test_withdrawalWhileQueued_purgesPendingEventAtDequeue() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let hold = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        var delivered: [VoiceSharingCollector.SegmentEvent] = []
+        let deliverLock = NSLock()
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { [weak self] in self?.epoch },
+            sessionIdentity: { "gen-A" },
+            sink: { e in
+                deliverLock.lock(); delivered.append(e); deliverLock.unlock()
+                if e.kind == .started { entered.signal(); hold.wait() }   // park the worker on the start event
+            }
+        )
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: start event is parked in the sink")
+
+        // Complete the segment WHILE the sink is held, so its completion queues behind it.
+        collector.speechCompleted([Float](repeating: 1, count: 640),
+                                  context: collector.currentCaptureContextForTesting)
+        XCTAssertEqual(collector.pendingCountForTesting, 1, "premise: completion is queued")
+
+        // Withdrawal lands while the completion still sits in the queue.
+        enrolledState(false)
+        epoch = nil
+
+        hold.signal()
+        XCTAssertTrue(collector.waitForDrain(), "queue should drain after the sink frees")
+        deliverLock.lock(); let got = delivered; deliverLock.unlock()
+        XCTAssertEqual(got.map(\.kind), [.started],
+                       "the queued completion was produced under a consent that no longer exists, "
+                     + "so it must be refused at dequeue — the sink never sees it")
+    }
+
+    /// Aggregate identity state stays bounded across MANY segments: open capture ≤ 1, FIFO ≤ its bound, and
+    /// the refusal history pruned to its floor. Capping only the open buffer would let the sets grow forever.
+    func test_aggregateIdentityState_isBoundedAcrossManySegments() {
+        activateLease()
+        let collector = makeCollector()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        let rounds = VoiceSharingCollector.maxTerminalHistoryIDs + 400
+        for _ in 0..<rounds {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            let ctx = collector.currentCaptureContextForTesting
+            collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
+            collector.speechCompleted([Float](repeating: 1, count: 320), context: ctx)
+        }
+
+        let agg = collector.aggregateIdentityStateForTesting
+        XCTAssertEqual(agg.openCaptures, 0, "every segment closed")
+        XCTAssertLessThanOrEqual(agg.terminalHistory, VoiceSharingCollector.maxTerminalHistoryIDs + 8,
+                                 "refusal history is pruned to its floor, not grown for the session lifetime")
+        XCTAssertLessThanOrEqual(agg.queuedEvents, VoiceSharingCollector.maxPendingSignals,
+                                 "the FIFO holds its bound")
+        // And the collector still works after all that pruning:
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctx = collector.currentCaptureContextForTesting
+        collector.speechCompleted([Float](repeating: 1, count: 320), context: ctx)
+        XCTAssertTrue(snapshot().contains { $0.kind == .completed },
+                      "pruning must not break new segments")
+    }
+
+    /// A STALE context — one frozen by an utterance Task before its capture was superseded — must be refused
+    /// outright, even though the collector currently holds a different open capture. This is the
+    /// collector-side half of "B starting before A's reject arrives cannot consume B".
+    func test_staleContext_isRefused_evenWhenASuccessorIsOpen() {
+        activateLease()
+        let collector = makeCollector()
+        enrolledState(true)
+        assertPremisesOpen()
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        let ctxA = collector.currentCaptureContextForTesting
+        guard let ctxA else { return XCTFail("A should be open") }
+
+        collector.speechStarted(confirmationFrameSamples: 320)   // B supersedes A
+        clearEvents(collector)
+
+        // A's Task arrives late, carrying A's frozen context.
+        collector.segmentRejected(kind: .rejectedWake, samples: 8_000, context: ctxA)
+        collector.speechCompleted([Float](repeating: 1, count: 3_200), context: ctxA)
+
+        XCTAssertEqual(snapshot(), [], "neither of A's late outcomes may land on B")
+        let bID = collector.currentCaptureContextForTesting?.id
+        XCTAssertNotNil(bID, "and B is untouched and still open")
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "B holds nothing A produced")
     }
 
     /// Overflow drops contribution work and counts it — recognition is never the thing that pays.
@@ -337,20 +448,22 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        guard let firstID = collector.currentCaptureIDForTesting else { return XCTFail("segment A should be open") }
+        guard let ctxA = collector.currentCaptureContextForTesting else { return XCTFail("segment A should be open") }
+        let firstID = ctxA.id
 
         // Segment B begins; A's callback is still outstanding.
         collector.speechStarted(confirmationFrameSamples: 320)
-        let secondID = collector.currentCaptureIDForTesting
+        let secondID = collector.currentCaptureContextForTesting?.id
         XCTAssertNotEqual(firstID, secondID, "B is a distinct capture")
 
         clearEvents(collector)
-        collector.segmentRejected(kind: .rejectedWake, samples: 8_000, captureID: firstID)
+        collector.segmentRejected(kind: .rejectedWake, samples: 8_000, context: ctxA)
         XCTAssertEqual(snapshot(), [], "A's late rejection must not land on B")
         XCTAssertEqual(collector.currentCaptureIDForTesting, secondID, "and must not disturb B's state")
 
-        // Naming no id (or B's id) is legitimate for the live capture.
-        collector.segmentRejected(kind: .rejectedWake, samples: 8_000, captureID: secondID)
+        // B's own context is legitimate for the live capture.
+        collector.segmentRejected(kind: .rejectedWake, samples: 8_000,
+                                  context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot().map(\.kind), [.rejectedWake])
         XCTAssertEqual(snapshot().last!.captureID, secondID)
     }
@@ -363,7 +476,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 3_200))
+        let ctxA = collector.currentCaptureContextForTesting
+        collector.appendSamples([Float](repeating: 1, count: 3_200), reportedTotal: 3_200)
         guard let aID = collector.currentCaptureIDForTesting else { return XCTFail("A should be open") }
 
         // Account switch lands mid-speech.
@@ -380,7 +494,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         clearEvents(collector)
         enrolledState(true)
         epoch = "epoch-B"
-        collector.speechCompleted([Float](repeating: 1, count: 3_200))
+        collector.speechCompleted([Float](repeating: 1, count: 3_200), context: ctxA)
         XCTAssertEqual(snapshot(), [], "a completion for the departed capture must not finalize anything")
         XCTAssertFalse(collector.owns(aID), "and the predecessor's id is not owned anymore")
     }
@@ -394,8 +508,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
+        let ctx = collector.currentCaptureContextForTesting
         epoch = "epoch-rotated"
-        collector.speechCompleted([Float](repeating: 1, count: 640))
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctx)
         XCTAssertEqual(snapshot().last?.enrollmentEpoch, "epoch-1",
                        "contribution attributes to the epoch in force when the capture opened")
     }
@@ -409,13 +524,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 320))
-        collector.speechCompleted([Float](repeating: 1, count: 640))
+        collector.appendSamples([Float](repeating: 1, count: 320), reportedTotal: 320)
+        collector.speechCompleted([Float](repeating: 1, count: 320), context: collector.currentCaptureContextForTesting)
 
         let got = snapshot()
         XCTAssertEqual(got.map(\.kind), [.started, .completed])
         XCTAssertEqual(got[0].captureID, got[1].captureID, "one segment keeps one capture id")
-        XCTAssertEqual(got[1].retainedSamples, 640)
+        XCTAssertEqual(got[1].retainedSamples, 640)   // 320 appended + 320 from completion
         XCTAssertFalse(got[1].truncated)
         XCTAssertNil(collector.currentCaptureIDForTesting, "the capture is released at completion")
     }
@@ -429,11 +544,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        let a = collector.currentCaptureIDForTesting
-        collector.segmentRejected(kind: .rejectedBleed, samples: 9_000, captureID: a)
+        let ctxA = collector.currentCaptureContextForTesting
+        let a = ctxA?.id
+        collector.segmentRejected(kind: .rejectedBleed, samples: 9_000, context: ctxA)
         collector.speechStarted(confirmationFrameSamples: 320)
-        let b = collector.currentCaptureIDForTesting
-        collector.segmentRejected(kind: .rejectedWake, samples: 7_000, captureID: b)
+        let ctxB = collector.currentCaptureContextForTesting
+        let b = ctxB?.id
+        collector.segmentRejected(kind: .rejectedWake, samples: 7_000, context: ctxB)
 
         XCTAssertEqual(snapshot().map(\.kind), [.started, .rejectedBleed, .started, .rejectedWake])
         XCTAssertEqual(snapshot()[1].retainedSamples, 0, "nothing was appended for A, so nothing is claimed")
@@ -448,15 +565,16 @@ final class VoiceSharingCollectorTests: XCTestCase {
         assertPremisesOpen()
 
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 6_400))
+        collector.appendSamples([Float](repeating: 1, count: 6_400), reportedTotal: 6_400)
         collector.speechCancelled()
 
         XCTAssertEqual(snapshot().map(\.kind), [.started, .cancelled])
         XCTAssertFalse(snapshot().contains { $0.kind == .completed })
 
         clearEvents(collector)
-        collector.speechCompleted([Float](repeating: 1, count: 6_400))
-        XCTAssertEqual(snapshot(), [], "a late completion for a cancelled segment is dropped")
+        collector.speechCompleted([Float](repeating: 1, count: 6_400),
+                                  context: VoiceSharingCollector.CaptureContext(id: UUID(), epoch: "epoch-1", session: "gen-A"))
+        XCTAssertEqual(snapshot(), [], "a late completion naming a departed capture is dropped")
     }
 
     /// The gate moving MID-segment abandons the open capture instead of carrying it to completion.
@@ -471,8 +589,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         clearEvents(collector)
         enrolledState(false)                    // user withdraws while speaking
-        collector.speechAccumulated(retainedSampleCount: 6_400)
-        collector.speechCompleted([Float](repeating: 1, count: 6_400))
+        collector.appendSamples([Float](repeating: 1, count: 6_400), reportedTotal: 6_400)
+        collector.speechCompleted([Float](repeating: 1, count: 6_400),
+                                  context: collector.currentCaptureContextForTesting)
 
         XCTAssertEqual(snapshot().map(\.kind), [.cancelled],
                        "the open partial is abandoned the moment the gate moves, and never completes")
@@ -505,14 +624,14 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         storeState = VoiceSharingEnrollmentStore.State()
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 6_400))
-        collector.speechCompleted([Float](repeating: 1, count: 6_400))
+        collector.appendSamples([Float](repeating: 1, count: 6_400), reportedTotal: 6_400)
+        collector.speechCompleted([Float](repeating: 1, count: 6_400), context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot(), [], "membership unknown must veto even when the policy probe reports enrolled")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
 
         enrolledState(false)
         collector.speechStarted(confirmationFrameSamples: 320)
-        collector.speechCompleted([Float](repeating: 1, count: 320))
+        collector.speechCompleted([Float](repeating: 1, count: 320), context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(snapshot(), [], "membership withdrawn must veto too")
 
         enrolledState(true)
