@@ -46,8 +46,10 @@ enum VoiceSharingMutationOutcome: Equatable {
     case unauthorized
     /// `503` or transport failure — retryable, and explicitly not a state change.
     case unavailableBackend
-    /// Response belonged to an obsolete account/session and was dropped without applying.
-    case droppedStaleSession
+    /// The operation's originating session no longer exists: the request is refused BEFORE transport (for
+    /// mutations) or the reply is dropped without applying (for reads), so one account's intent can never be
+    /// sent or consumed under another account's credential.
+    case refusedStaleSession
 
     enum RefusalReason: String { case ineligible, unsupportedDisclosure, invalidRequest }
 }

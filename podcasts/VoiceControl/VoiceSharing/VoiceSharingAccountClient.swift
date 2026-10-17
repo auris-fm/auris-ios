@@ -35,24 +35,11 @@ final class VoiceSharingAccountClient {
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
     private let requestIDFactory: () -> String
-    /// Account + session generation, compared as one value. `userId` alone cannot distinguish sign-out
-    /// followed by signing back into the SAME account, which is precisely the logout/login case that must
-    /// invalidate an in-flight mutation; only the generation changes across that boundary.
-    struct SessionIdentity: Equatable {
-        let account: String
-        /// Rotating session material (credential value), not a counter: it changes across logout/login even
-        /// when the account identifier stays the same, and is absent entirely once signed out.
-        let generationKey: String
+    /// Non-secret originating-session label. Compared, never dereferenced into anything credential-shaped.
+    typealias SessionIdentity = String
 
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.account == rhs.account && lhs.generationKey == rhs.generationKey
-        }
-    }
-
-    /// Identity of the current account/session. A response whose captured identity no longer matches is
-    /// dropped rather than applied — a late reply from a previous account must not resurrect membership.
-    /// Nil means "no authenticated session", which now blocks the request entirely rather than letting an
-    /// unattributable call proceed and be compared later.
+    /// Current session generation, or nil when nothing is authenticated. A captured value that no longer
+    /// matches is stale: its response is dropped and its operation refuses to send at all.
     private let sessionIdentity: () -> SessionIdentity?
 
     init(
@@ -60,18 +47,9 @@ final class VoiceSharingAccountClient {
         tokenProvider: CloudTokenProviding,
         session: URLSession = URLSession(configuration: .default),
         requestIDFactory: @escaping () -> String = { UUID().uuidString.lowercased() },
-        // The stable cloud user id is the account half. It alone cannot distinguish sign-out followed by
-        // signing back into the same account, so the credential value forms the session half: it rotates on
-        // login/refresh and disappears on logout, which is exactly the boundary that must invalidate an
-        // in-flight mutation. Read cheaply and synchronously; no network work happens here.
-        sessionIdentity: @escaping () -> SessionIdentity? = {
-            let account = CloudIdentity.shared.userId
-            guard !account.isEmpty else { return nil }
-            let credential = (try? ServerSettings.refreshToken()) ?? nil
-            let session = credential ?? ServerSettings.syncingV2Token ?? ""
-            guard !session.isEmpty else { return nil }
-            return SessionIdentity(account: account, generationKey: session)
-        }
+        // Default reads the in-memory lifecycle generation. NOTE: this deliberately does NOT read a
+        // credential — refresh rotation would look like logout, and credentials are not operation identity.
+        sessionIdentity: @escaping () -> SessionIdentity? = { VoiceSharingSessionGeneration.shared.currentGeneration() }
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
@@ -95,9 +73,10 @@ final class VoiceSharingAccountClient {
             guard sessionIdentity() == identityAtStart else { return nil }
             guard let http = response as? HTTPURLResponse else { return nil }
             if http.statusCode == 401 || http.statusCode == 403 {
-                await tokenProvider.handleUnauthorized(rejectedToken: nil)
-                // Reporting a rejection is not a state change; still never apply across a transition.
+                // Validate BEFORE the side effect, then report the bearer this request carried.
                 guard sessionIdentity() == identityAtStart else { return nil }
+                let rejected = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "")
+                await tokenProvider.handleUnauthorized(rejectedToken: rejected)
             }
             guard http.statusCode == 200 else { return nil }
             return Self.decodeProjection(data)
@@ -115,12 +94,18 @@ final class VoiceSharingAccountClient {
     struct MutationOperation {
         let requestID: String
         let path: String
+        /// Body must never contain credential material; it carries only contract fields.
         let body: [String: Any]
+        /// Non-secret generation of the session that BEGAN this operation, retained across retries. A
+        /// `perform` under a different current generation refuses before touching the transport, so account
+        /// A's enrollment/withdrawal/deletion intent can never be sent while account B is signed in.
+        let originatingGeneration: SessionIdentity
     }
 
     /// One enrollment operation. Retry by calling `perform(_:)` again with the SAME operation (bounded
     /// backoff), never by beginning another.
-    func beginEnrollment(acceptedDisclosureVersion: String, expectedMembershipRevision: String) -> MutationOperation {
+    func beginEnrollment(acceptedDisclosureVersion: String, expectedMembershipRevision: String) -> MutationOperation? {
+        guard let generation = sessionIdentity() else { return nil }
         let id = requestIDFactory()
         return MutationOperation(
             requestID: id,
@@ -129,14 +114,16 @@ final class VoiceSharingAccountClient {
                 Field.requestId: id,
                 Field.expectedRevision: expectedMembershipRevision,
                 Field.acceptedDisclosure: acceptedDisclosureVersion,
-            ]
+            ],
+            originatingGeneration: generation
         )
     }
 
     /// `epoch` is nullable BY CONTRACT: null is valid only when the expected projection has no active
     /// epoch, which is what lets an opt-out invalidate an outstanding opt-in. Neither form may withdraw a
     /// later enrollment — that ordering is enforced server-side by the revision check.
-    func beginWithdrawal(enrollmentEpoch: String?, expectedMembershipRevision: String) -> MutationOperation {
+    func beginWithdrawal(enrollmentEpoch: String?, expectedMembershipRevision: String) -> MutationOperation? {
+        guard let generation = sessionIdentity() else { return nil }
         let id = requestIDFactory()
         var body: [String: Any] = [
             Field.requestId: id,
@@ -144,14 +131,21 @@ final class VoiceSharingAccountClient {
         ]
         // Explicit null on the wire when absent, so "no active epoch" is stated rather than omitted.
         body[Field.epoch] = enrollmentEpoch ?? NSNull()
-        return MutationOperation(requestID: id, path: Self.withdrawalPath, body: body)
+        return MutationOperation(requestID: id, path: Self.withdrawalPath, body: body, originatingGeneration: generation)
     }
 
     /// Performs an operation. Safe to call again with the SAME operation to retry a lost response: the
     /// request_id and body are unchanged, so the server's idempotency rule applies instead of a second
     /// mutation being recorded.
     func perform(_ operation: MutationOperation) async -> VoiceSharingMutationOutcome {
-        await mutate(path: operation.path, body: operation.body)
+        // Refusal happens BEFORE any transport work: sending A's intent under B's credential would attribute
+        // one account's mutation to another, and the server cannot tell the difference.
+        guard sessionIdentity() == operation.originatingGeneration else { return .refusedStaleSession }
+        guard !operation.body.keys.contains(where: { $0.lowercased().contains("token") || $0.lowercased().contains("credential") }) else {
+            // Defensive: an operation body must never carry secret material in the first place.
+            return .unavailableBackend
+        }
+        return await mutate(path: operation.path, body: operation.body, originatingGeneration: operation.originatingGeneration)
     }
 
 
@@ -162,21 +156,27 @@ final class VoiceSharingAccountClient {
     struct DeletionOperation {
         let requestID: String
         let body: [String: Any]
+        let originatingGeneration: SessionIdentity
     }
 
-    func beginDeletion() -> DeletionOperation {
+    func beginDeletion() -> DeletionOperation? {
+        guard let generation = sessionIdentity() else { return nil }
         let id = requestIDFactory()
-        return DeletionOperation(requestID: id, body: [Field.requestId: id])
+        return DeletionOperation(requestID: id, body: [Field.requestId: id], originatingGeneration: generation)
     }
 
-    func performDeletion(_ operation: DeletionOperation? = nil) async -> VoiceSharingDeletionOutcome {
-        let op = operation ?? beginDeletion()
+    /// Requires an explicit operation: there is no implicit "begin + send" form, because an unknown outcome
+    /// must be retried with the SAME identity and cutoff rather than re-minted here.
+    func performDeletion(_ operation: DeletionOperation) async -> VoiceSharingDeletionOutcome {
+        // Identity fence FIRST, before the credential await inside makeRequest — otherwise a transition that
+        // lands during token acquisition would go unnoticed by this path.
+        guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
         guard let request = await makeRequest(
             path: Self.dataPath,
             method: "DELETE",
-            body: op.body
+            body: op_body(of: operation)
         ) else { return .unavailableBackend }
-        guard let startedForIdentity = sessionIdentity() else { return .unauthorized }
+        guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return .unavailableBackend }
@@ -186,17 +186,20 @@ final class VoiceSharingAccountClient {
                 // status exactly `deletion_pending`, and a non-empty opaque identifier. Anything else is an
                 // unknown outcome (retryable with the SAME operation), never a success to display.
                 guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let rawVersion = object[Field.schemaVersion] as? NSNumber,
-                      CFGetTypeID(rawVersion) != CFBooleanGetTypeID(),
-                      rawVersion.intValue == 1,
+                      Self.isExactInteger(object[Field.schemaVersion], 1),
                       (object[Field.status] as? String) == "deletion_pending",
                       let id = Self.nonEmptyString(object[Field.deletionRequestId])
                 else { return .unavailableBackend }
                 // Deletion is scoped to the account that asked for it. If the user changed while this was in
                 // flight, applying the receipt would attribute one account's deletion to another.
-                guard sessionIdentity() == startedForIdentity else { return .unavailableBackend }
+                guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
                 return .pending(deletionRequestId: id)
-            case 401: return .unauthorized
+            case 401:
+                // Validate the captured generation BEFORE any side effect, then report the actual bearer.
+                guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
+                await tokenProvider.handleUnauthorized(rejectedToken: request.value(forHTTPHeaderField: "Authorization")?
+                    .replacingOccurrences(of: "Bearer ", with: ""))
+                return .unauthorized
             case 403: return .refused(reason: .ineligible)
             case 422: return .refused(reason: .invalidRequest)
             default: return .unavailableBackend
@@ -208,14 +211,14 @@ final class VoiceSharingAccountClient {
 
     // MARK: - Shared mutation path
 
-    private func mutate(path: String, body: [String: Any]) async -> VoiceSharingMutationOutcome {
-        // Identity must exist BEFORE any await (including the credential fetch) and be re-checked after each
-        // suspension point, or a transition during the network work would go unnoticed.
-        guard let identityAtStart = sessionIdentity() else { return .unauthorized }
+    private func mutate(path: String, body: [String: Any], originatingGeneration: SessionIdentity) async -> VoiceSharingMutationOutcome {
+        // The operation's own generation is the authority; `identityAtStart` is only the value observed right
+        // now, and both must agree before anything is sent.
+        guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
         guard let request = await makeRequest(path: path, method: "POST", body: body) else {
             return .unavailableBackend
         }
-        guard sessionIdentity() == identityAtStart else { return .droppedStaleSession }
+        guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
         // NOTE: `mutate` is entered only after makeRequest() succeeded, which already required a non-nil
         // identity; callers capture it before the credential await and pass it in so every comparison uses
         // the same pre-await value rather than one read after network work began.
@@ -225,17 +228,21 @@ final class VoiceSharingAccountClient {
             switch http.statusCode {
             case 200:
                 guard let projection = Self.decodeProjection(data) else { return .unavailableBackend }
-                guard sessionIdentity() == identityAtStart else { return .droppedStaleSession }
+                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
                 return .applied(projection)
             case 409:
                 // A conflict carries the current projection. Surfacing it is required so the caller can show
                 // the real state; auto-replaying against the newer revision is forbidden.
                 let current = Self.decodeProjection(data)
-                guard sessionIdentity() == identityAtStart else { return .droppedStaleSession }
+                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
                 return .conflict(current: current)
             case 401:
-                await tokenProvider.handleUnauthorized(rejectedToken: nil)
-                guard sessionIdentity() == identityAtStart else { return .droppedStaleSession }
+                // Order matters twice here. Validate the captured generation FIRST so a 401 that belongs to
+                // account A cannot invalidate account B's freshly-installed credential. Then report the
+                // bearer THIS request actually carried — passing nil would fail every other cached token.
+                guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
+                let rejected = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "")
+                await tokenProvider.handleUnauthorized(rejectedToken: rejected)
                 return .unauthorized
             case 403:
                 return .refused(reason: .ineligible)
@@ -253,6 +260,8 @@ final class VoiceSharingAccountClient {
     /// Builds the request. Callers capture session identity BEFORE awaiting here, because the credential
     /// fetch is a suspension point where an account transition can land; this function never reads identity
     /// itself, so there is exactly one pre-await capture per operation.
+    private func op_body(of operation: DeletionOperation) -> [String: Any] { operation.body }
+
     private func makeRequest(path: String, method: String, body: [String: Any]?) async -> URLRequest? {
         let base = baseURLProvider()
         guard !base.isEmpty, let url = URL(string: base + path) else { return nil }
@@ -285,10 +294,7 @@ final class VoiceSharingAccountClient {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
 
         // schema_version must be exactly the integer 1 — not "1", not 1.0, not absent.
-        guard let rawVersion = object[Field.schemaVersion] as? NSNumber,
-              CFGetTypeID(rawVersion) != CFBooleanGetTypeID(),
-              rawVersion.intValue == 1,
-              Double(exactly: rawVersion.doubleValue) == 1 else { return nil }
+        guard Self.isExactInteger(object[Field.schemaVersion], 1) else { return nil }
 
         guard let revision = nonEmptyString(object[Field.membershipRevision]) else { return nil }
         guard let planRaw = nonEmptyString(object[Field.plan]), let plan = VoiceSharingMembership.Plan(rawValue: planRaw) else { return nil }
@@ -329,6 +335,14 @@ final class VoiceSharingAccountClient {
             acceptedDisclosureVersion: disclosure,
             withdrawalState: withdrawal
         )
+    }
+
+    /// Exact integer match. `intValue` truncates (1.5 → 1) and `as? Int` bridges a Bool, so both are
+    /// rejected: the value must be a real number whose value is exactly the expected integer.
+    static func isExactInteger(_ value: Any?, _ expected: Int) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+        return number.compare(NSNumber(value: expected)) == .orderedSame
     }
 
     /// Non-empty trimmed string or nil; whitespace-only never counts as present.
