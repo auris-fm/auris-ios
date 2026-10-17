@@ -30,17 +30,43 @@ final class VoiceSharingCoordinator {
         isAccountEnrolled: (() -> Bool)? = nil,
         now: @escaping () -> Date = Date.init,
         lastFetchTime: @escaping () -> Date? = { RemoteConfig.remoteConfig().lastFetchTime },
-        valueSource: (() -> RemoteValueSource)? = nil
+        valueSource: (() -> RemoteValueSource)? = nil,
+        enrollmentStore: VoiceSharingEnrollmentStore? = nil
     ) {
         self.nowProvider = now
         self.lastFetchTimeProvider = lastFetchTime
         self.valueSource = valueSource ?? Self.readSDKValue
+        let store = enrollmentStore ?? VoiceSharingEnrollmentStore.shared
+        self.enrollmentStore = store
+        self.applyingMembershipInvalidation = false
         self.policy = VoiceSharingPolicy(
             clock: clock,
             readRemoteSwitch: readRemoteSwitch ?? Self.defaultReadRemoteSwitch(valueSource: self.valueSource),
-            isAccountEnrolled: isAccountEnrolled ?? { false }
+            // The store is the only honest source of "is this account enrolled": it requires BOTH the
+            // user's own opt-in gesture AND a server projection carrying an epoch + accepted disclosure.
+            // Production previously hard-coded `{ false }` because nothing fed membership yet.
+            isAccountEnrolled: isAccountEnrolled ?? { store.currentEffectiveEnrolled }
         )
+        // Membership moves must invalidate an in-flight refresh immediately, not at lease expiry: a
+        // withdrawal or account switch that lands while a fetch is running would otherwise install the
+        // departed state's permission when that fetch returns. Registered for ANY store this coordinator
+        // was handed — gating it on ownership left injected stores with no invalidation at all.
+        membershipObserverToken = store.addObserver { [weak self] _ in
+            guard let self, !self.applyingMembershipInvalidation else { return }
+            self.applyingMembershipInvalidation = true
+            defer { self.applyingMembershipInvalidation = false }
+            self.policy.invalidateForIdentityChange()
+        }
     }
+
+    /// The authoritative membership state, read by the settings UI and the mutation caller alike so no
+    /// component keeps its own idea of enrollment.
+    let enrollmentStore: VoiceSharingEnrollmentStore
+    private var membershipObserverToken: UUID?
+    /// Re-entrancy latch: the coordinator's lifecycle handlers call the store, whose observer calls back
+    /// here. Without it one sign-out bumps the policy generation twice — the double-transition shape already
+    /// caught once in this feature.
+    private var applyingMembershipInvalidation: Bool
 
     /// Called from the fetch→activate completion path with the caller's evidence about that
     /// specific callback pair plus the token captured at fetch start. A cached or no-network
@@ -121,22 +147,29 @@ final class VoiceSharingCoordinator {
             forName: .serverUserWillBeSignedOut,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             VoiceSharingSessionGeneration.shared.clear()
-            invalidate()
+            // NOT `invalidate()` here: the store's membership observer already bumps the policy generation,
+            // and calling both would advance it twice per sign-out.
+            self?.enrollmentStore.transitionToAccount(signedIn: false)
         }
-        // Login changed: this is what SyncManager.postOnMainThread(.userLoginDidChange) fires after a
-        // successful sign-in, an account switch, and the deferred userId-repair path in
-        // AppDelegate+Analytics. Establishing a NEW lifecycle here is what makes an operation begun under
-        // the previous login refuse — including re-login into the SAME account, which a stable user id
-        // cannot distinguish.
+        // Login changed is a STATE CHANGE, not proof of a login. Audited producers:
+        //   AuthenticationHelper.handleSuccessfulSignIn, SyncSigninViewController, SyncSigninView,
+        //   NewEmailViewController  -> all set ServerSettings.setSyncingEmail(...) FIRST, so the app is
+        //                               genuinely signed in by the time this fires: new lifecycle.
+        //   AppDelegate+Analytics   -> repairs a missing ServerSettings.userId; signed in: new lifecycle.
+        //   SignOutHelper.signout   -> posts this AFTER SyncManager.signout() cleared email + userId, i.e.
+        //                              while SIGNED OUT. Treating it as a login would mint a fresh lifecycle
+        //                              and lift the fence with nobody authenticated, letting work begin under
+        //                              a session that does not exist.
+        // So the notification only says "re-derive": establish when auth state says signed in, otherwise end
+        // the lifecycle and KEEP the fence raised.
         let loginChanged = center.addObserver(
             forName: .userLoginDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            VoiceSharingSessionGeneration.shared.beginNewLifecycle()
-            self?.identityBecameReadable()
+            self?.handleLoginStateDidChange()
         }
         identityObservers = [willSignOut, loginChanged]
         identityCenter = center
@@ -146,6 +179,21 @@ final class VoiceSharingCoordinator {
             VoiceSharingSessionGeneration.shared.ensureLifecycle()
         }
         return invalidate
+    }
+
+
+    /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
+    /// prompted it. Split out so a composition test can drive the real producer sequence and still assert
+    /// the decision, and so `SignOutHelper`'s trailing post cannot be mistaken for a sign-in.
+    func handleLoginStateDidChange(signedIn: Bool = SyncManager.isUserLoggedIn()) {
+        enrollmentStore.transitionToAccount(signedIn: signedIn)
+        if signedIn {
+            VoiceSharingSessionGeneration.shared.beginNewLifecycle()
+            identityBecameReadable()
+        } else {
+            VoiceSharingSessionGeneration.shared.clear()
+            policy.invalidateForIdentityChange()
+        }
     }
 
     private func removeAllIdentityObservers() {
@@ -162,6 +210,9 @@ final class VoiceSharingCoordinator {
 
     deinit {
         removeAllIdentityObservers()
+        if let membershipObserverToken {
+            enrollmentStore.removeObserver(membershipObserverToken)
+        }
     }
 
     /// Default reader: routes the seam's raw fields through the production extraction function.

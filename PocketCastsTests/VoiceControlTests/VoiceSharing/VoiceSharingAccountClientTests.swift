@@ -217,6 +217,13 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         // Hermetic start: whatever earlier tests left, this test establishes its own lifecycle first —
         // exactly what a login does — and then lets the app's sign-out path end it.
         VoiceSharingSessionGeneration.shared.clear()
+        // Establish honestly: signed-in state + the notification a login produces.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "supersede-control@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
         NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         guard VoiceSharingSessionGeneration.shared.currentGeneration() != nil else {
@@ -239,6 +246,82 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertEqual(outcome, .refusedStaleSession,
                        "an operation begun before a real sign-out must refuse, not be sent under whatever session follows")
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and it must refuse before transport")
+    }
+
+    /// Round 10 (reviewer 3c118e11): `SignOutHelper.signout()` posts `.userLoginDidChange` AFTER
+    /// `SyncManager.signout()` has cleared the credential, i.e. while SIGNED OUT. That notification is a
+    /// state change, not proof of a login. Driving the real producer sequence must leave NO lifecycle at
+    /// all — asserting only "the label differs from before" would pass on a freshly minted signed-out label.
+    func test_realSignOutSequence_leavesNoLifecycleAndRefusesEveryBegin() async {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        AppDelegate().setupVoiceSharingIdentityInvalidation()
+
+        // Signed in for real, through the app's own setter, then establish a lifecycle via the same
+        // notification a sign-in produces.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "signout-sequence@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        guard let signedIn = VoiceSharingSessionGeneration.shared.currentGeneration() else {
+            return XCTFail("control sanity: a real sign-in state must establish a lifecycle")
+        }
+
+        // THE REAL PRODUCER SEQUENCE: SignOutHelper clears credentials, then posts userLoginDidChange.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertFalse(SyncManager.isUserLoggedIn(), "control sanity: the app really is signed out now")
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(),
+                     "a trailing login-change while signed out must NOT mint a replacement lifecycle")
+
+        // Every operation entry point must refuse to produce work with no session behind it.
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        XCTAssertNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                     "no enrollment may be begun while signed out")
+        XCTAssertNil(client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r7"),
+                     "no withdrawal may be begun while signed out")
+        XCTAssertNil(client.beginDeletion(), "no deletion may be begun while signed out")
+        XCTAssertNotEqual(VoiceSharingSessionGeneration.shared.currentGeneration(), signedIn,
+                          "and nothing may still carry the departed session")
+    }
+
+    /// The fence must stay raised after that sequence: a refresh belonging to the departed account cannot
+    /// install permission merely because a notification ran.
+    func test_realSignOutSequence_policyStaysFencedAfterTrailingLoginChange() {
+        let center = NotificationCenter()
+        // Enrollment flips to false when sign-out runs, which is what makes `permitsCollection` go dark
+        // through the SAME production path a real withdrawal takes.
+        var enrolledForControl = true
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { enrolledForControl }
+        )
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "wired first so there is something to lose")
+
+        // Sign out, then the trailing login-change while signed out.
+        enrolledForControl = false
+        center.post(name: .serverUserWillBeSignedOut, object: nil, userInfo: ["user_initiated": true])
+        center.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertFalse(coordinator.policy.permitsCollection,
+                       "a signed-out trailing notification must not lift the fence")
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertFalse(coordinator.policy.permitsCollection, "still fenced against the departed identity")
     }
 
     /// Cold start into an already-signed-in account: the process has no lifecycle yet, so the first thing
@@ -299,12 +382,19 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingSessionGeneration.shared.clear()
         XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: signed out")
 
-        // The app fires this after a successful sign-in / account switch.
+        // A real sign-in sets the credential BEFORE posting, which is exactly what makes this case differ
+        // from SignOutHelper's trailing post.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "signin-establish@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
         NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
 
         let established = VoiceSharingSessionGeneration.shared.currentGeneration()
-        XCTAssertNotNil(established, "login-change must establish a lifecycle an operation can be begun under")
+        XCTAssertNotNil(established, "a login-change WHILE SIGNED IN must establish a lifecycle")
         guard let client = Optional(VoiceSharingAccountClient(tokenProvider: tokens, session: session)) else { return }
         XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
                         "after a login there IS a session to act under")
