@@ -838,7 +838,8 @@ final class VoiceSharingPolicyTests: XCTestCase {
 
         // An engine pipeline holds the collector; the collector owns audio queued for delivery.
         let backend = EngineStubBackend()
-        let engine = VoiceAsrEngine(
+        // The OPTIONAL is the ONLY strong owner: nil-ing it must actually deallocate.
+        var engineBox: VoiceAsrEngine? = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
             backend: backend,
@@ -847,8 +848,9 @@ final class VoiceSharingPolicyTests: XCTestCase {
             gracePeriodSignal: GracePeriodSignal(),
             translationStage: nil
         )
-        engine.contributionCollector = collector
-        var engineBox: VoiceAsrEngine? = engine
+        engineBox?.contributionCollector = collector
+        weak var weakEngine = engineBox
+        XCTAssertNotNil(weakEngine, "premise: the weak reference tracks the engine")
         collector.speechStarted(confirmationFrameSamples: 320)
         let ctxA = collector.currentCaptureContextForTesting
         collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
@@ -867,22 +869,26 @@ final class VoiceSharingPolicyTests: XCTestCase {
         XCTAssertGreaterThan(collector.pendingCountForTesting, 0, "premise: FIFO holds work behind the parked hop")
 
         withExtendedLifetime(collector) {
-            // RELEASE THE ENGINE while the collector still owns audio and its drain is parked.
-            engineBox = nil
-            XCTAssertNil(engineBox)
+            do {
+                // Released on EVERY failure path out of this block (finally semantics), but BEFORE
+                // the post-release assertions below.
+                defer { hold.signal() }
+                // RELEASE THE ENGINE while the collector still owns audio and its drain is parked.
+                engineBox = nil
+                XCTAssertNil(weakEngine,
+                             "premise: the engine really deallocated — the collector's registration outlives it")
 
-            // Consent loss reaches the collector even though the engine is gone.
-            enrollBox.enrolled = false
-            coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
-            XCTAssertEqual(fanoutCount, 1, "the withdrawal reached the coordinator's fan-out")
-            // The FIFO's audio work (B) was purged; what remains queued is the open partial's
-            // content-free cancellation record only.
-            afterLossLock.lock(); let during = deliveredAfterLoss; afterLossLock.unlock()
-            XCTAssertTrue(during.isEmpty, "the purged FIFO work is never delivered")
-
-            // The PARKED event's bytes are still in-flight (owned until the sink returns) — release
-            // it, then only the content-free gate record may follow.
-            hold.signal()
+                // Consent loss reaches the collector even though the engine is gone.
+                enrollBox.enrolled = false
+                coordinator.enrollmentStore.withdrawLocally(acceptedServerProjectionAfterward: true)
+                XCTAssertEqual(fanoutCount, 1, "the withdrawal reached the coordinator's fan-out")
+                // The FIFO's audio work (B) was purged; what remains queued is the open partial's
+                // content-free cancellation record only.
+                afterLossLock.lock(); let during = deliveredAfterLoss; afterLossLock.unlock()
+                XCTAssertTrue(during.isEmpty, "the purged FIFO work is never delivered")
+            }
+            // The PARKED event's bytes were still in-flight (owned until the sink returned) — now
+            // released, only the content-free gate record may have followed.
             XCTAssertTrue(collector.waitForDrain())
             XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
                            "after the held sink returns, nothing is owned")
@@ -910,24 +916,35 @@ final class VoiceSharingPolicyTests: XCTestCase {
         let subsLock = NSLock()
         var fired = 0
         let firedLock = NSLock()
+        let handler = { firedLock.lock(); fired += 1; firedLock.unlock() }
 
-        for _ in 0..<16 {
+        // Mutation threads: register and tear down WHILE fan-outs run against the same registry.
+        for _ in 0..<8 {
             group.enter()
             chaosQueue.async {
                 for _ in 0..<50 {
-                    let sub = coordinator.registerGateLostHandler { firedLock.lock(); fired += 1; firedLock.unlock() }
+                    let sub = coordinator.registerGateLostHandler(handler)
                     subsLock.lock(); subs.append(sub); subsLock.unlock()
-                    if Bool.random() { sub.unregisterNow() }
+                    if arc4random_uniform(2) == 0 { sub.unregisterNow() }
                 }
                 group.leave()
             }
         }
-        // Fan out WHILE the chaos runs: snapshots must stay consistent, no crash, no deadlock.
-        for _ in 0..<20 {
-            coordinator.registerGateLostHandler { firedLock.lock(); fired += 1; firedLock.unlock() }.unregisterNow()
-            _ = coordinator.registerGateLostHandlerForTestingCount
+        // REAL concurrent fan-outs: invoked on other threads while the mutation threads mutate.
+        for _ in 0..<4 {
+            group.enter()
+            chaosQueue.async {
+                for _ in 0..<100 { coordinator.consentGateLostForTesting() }
+                group.leave()
+            }
         }
-        group.wait()
+        // BOUNDED: the churn must terminate; a registry deadlock fails the test instead of hanging CI.
+        XCTAssertEqual(group.wait(timeout: .now() + 30), .success,
+                       "concurrent registration/teardown/fan-out must terminate")
+        XCTAssertGreaterThan(fired, 0, "premise: fan-outs actually invoked handlers during the churn")
+        // Drain the accumulated subscriptions so their deinits do not fire mid-teardown of the test.
+        subsLock.lock(); let all = subs; subs.removeAll(); subsLock.unlock()
+        for sub in all { sub.unregisterNow() }
 
         // Reentrant SELF-teardown during fan-out: the handler removes itself mid-invocation.
         var survivingFired = 0
