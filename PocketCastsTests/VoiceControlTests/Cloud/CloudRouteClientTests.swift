@@ -177,12 +177,17 @@ final class CloudRouteClientTests: XCTestCase {
             "the frame rode the successor's socket"
         )
         // LATE PREDECESSOR result: A's handle is retired; the result must NOT route onto B.
+        // Snapshot B's count BEFORE the late send and assert UNCHANGED after.
+        let framesOnBBefore = taskB.sentTextFrames.count
         let lateReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedA.resultSocket)
         XCTAssertEqual(
             lateReport, .undelivered,
             "a late result from the retired predecessor is undelivered, never routed onto the successor's socket"
         )
-        XCTAssertEqual(taskB.sentTextFrames.count - 1, taskB.sentTextFrames.dropLast().count - 0, "no extra frame landed on B")
+        XCTAssertEqual(
+            taskB.sentTextFrames.count, framesOnBBefore,
+            "no extra frame landed on B from the late predecessor send"
+        )
         gateB.release()
         _ = await readerB.value
     }

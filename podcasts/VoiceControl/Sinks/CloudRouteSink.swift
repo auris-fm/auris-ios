@@ -180,6 +180,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter: DiscoveryResultsPresenting? = nil,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
         operationResultConsumer: CloudOperationResultConsuming? = nil,
+        operationJournal: OperationJournal? = nil,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
@@ -200,6 +201,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
         self.operationResultConsumer = operationResultConsumer
+        self.operationJournal = operationJournal
         self.spokenTemplates = spokenTemplates
         // Assigned last, and its delegate is set after every stored property is
         // initialized: `audioPlayer.delegate = self` reads `self` to make the
@@ -315,7 +317,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
 
-        turnLoop: for await event in client.route(request: request, context: routeContext, turn: turn) {
+        let routed = client.routeWithResultSocket(request: request, context: routeContext, turn: turn)
+        // The turn's own result socket: sends bind to THIS registration, so a superseded turn's
+        // late results can never ride a successor's socket.
+        activeResultSocket = routed.resultSocket
+        resultSendClient = client
+        turnLoop: for await event in routed.stream {
             // Superseded mid-stream: stop consuming so this turn cannot execute
             // late actions or overwrite the new turn's state. The stream's own
             // termination closes the transport. (`break turnLoop` — a bare
@@ -329,7 +336,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
             case let .action(tool, action, params, operationId, capabilityVersion):
-                executeAction(tool: tool, action: action, params: params)
+                executeAction(
+                    tool: tool, action: action, params: params,
+                    operationId: operationId, capabilityVersion: capabilityVersion
+                )
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").
             case .token:
@@ -414,9 +424,60 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Seek positions are intentionally not rolled back.
     }
 
-    private func executeAction(tool: String, action: String, params: [String: CloudRouteJSONValue]) {
+    private func executeAction(
+        tool: String,
+        action: String,
+        params: [String: CloudRouteJSONValue],
+        operationId: String?,
+        capabilityVersion: String?
+    ) {
         guard tool == "playback" else { return }
+        executeCloudMutation(action: action, params: params, operationId: operationId, capabilityVersion: capabilityVersion)
+    }
 
+    /// The wire contract's runtime gate (rev da327e624 §1): every cloud app operation carries
+    /// `operation_id` and `capability_version`; an identity-less app operation does NOT execute
+    /// as a legacy fallback — it is refused (no mutation) and the refusal is reported.
+    private func executeCloudMutation(
+        action: String,
+        params: [String: CloudRouteJSONValue],
+        operationId: String?,
+        capabilityVersion: String?
+    ) {
+        guard let operationId, !operationId.isEmpty, capabilityVersion != nil else {
+            let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
+            recordSeekRejection(refused)
+            reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+            return
+        }
+        // Exactly-once: the durable claim happens BEFORE the effect, so an interruption leaves a
+        // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run.
+        switch operationJournal?.claim(operationId) ?? .claimed {
+        case .alreadyRun(let recorded):
+            reportResult(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
+            return
+        case .inProgress:
+            return
+        case .interrupted(let result):
+            // The effect is not knowable: answer `unknown`, never re-execute.
+            reportResult(result, operationId: operationId, capabilityVersion: capabilityVersion)
+            return
+        case .claimed:
+            break
+        }
+        let refusal = performMutation(action: action, params: params)
+        if let refusal {
+            operationJournal?.complete(operationId, result: refusal)
+            reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion)
+        } else {
+            let succeeded = OperationResult.succeeded
+            operationJournal?.complete(operationId, result: succeeded)
+            reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
+        }
+    }
+
+    /// Runs the mutation. Returns the refusal to record (nil = executed).
+    private func performMutation(action: String, params: [String: CloudRouteJSONValue]) -> OperationResult? {
         switch action {
         case "seek_to":
             // Two forms, per the wire contract's schema (app_operation_schema_map 11993ca):
@@ -428,23 +489,27 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             switch (sinkSeconds, referenceMs) {
             case (let seconds?, nil):
                 seekToSinkSeconds(seconds)
+                return nil
             case (nil, let reference?):
                 capturePreActionPosition(referenceMs: reference)
                 seekToReference(reference)
+                return nil
             default:
-                recordSeekRejection(.nonSuccess(.refused, reason: OperationReason.malformedSeekTarget))
+                return .nonSuccess(.refused, reason: OperationReason.malformedSeekTarget)
             }
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return nil }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
+            return nil
         case "stop_quote":
-            guard let restoreMs = preQuotePositionMs else { return }
+            guard let restoreMs = preQuotePositionMs else { return nil }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
+            return nil
         case "seek_relative":
             // Per the recovery contract (PR 59, cloud-seek-relative):
             // Capture previous position so "go back to where I was" works
@@ -459,14 +524,55 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // next call site that passes the wrapper where a string is wanted.
             let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
+            return nil
         case "pause":
             _ = playbackSink.pause()
             didAutoPause = false
+            return nil
         case "resume":
             _ = playbackSink.resume()
             didAutoPause = false
+            return nil
         default:
-            break // unknown action ignored (forward compatibility)
+            return nil // unknown action ignored (forward compatibility)
+        }
+    }
+
+    /// Reports an outcome through the turn's bound transport, keyed to the server-issued identity.
+    /// The consumer surface also fires (generic, transport-less contexts).
+    private func reportResult(
+        _ result: OperationResult,
+        operationId: String?,
+        capabilityVersion: String?
+    ) {
+        guard let operationId, let socket = activeResultSocket else { return }
+        guard let frame = AppOperationResultFrame(
+            operationId: operationId,
+            outcome: result.outcome,
+            reason: result.reason
+        ) else { return }
+        _ = capabilityVersion // validated at the gate; rides the action frame, not the result
+        Task { [weak self] in
+            guard let client = self?.resultSendClient else { return }
+            _ = await client.sendOperationResult(frame, via: socket)
+        }
+    }
+
+    /// Success carries the ACTUAL resulting state, typed per the owning family (wire contract §3):
+    /// playback seeks state position and playing; identity-less successes cannot occur (the gate).
+    private func reportSuccess(operationId: String, capabilityVersion: String?) {
+        guard let socket = activeResultSocket,
+              let frame = AppOperationResultFrame(
+                operationId: operationId, outcome: .succeeded,
+                state: [
+                    "position_seconds": .int(playbackPositionMs() / 1000),
+                    "playing": .bool(playbackSink.isPlaying),
+                ]
+              ) else { return }
+        _ = capabilityVersion
+        Task { [weak self] in
+            guard let client = self?.resultSendClient else { return }
+            _ = await client.sendOperationResult(frame, via: socket)
         }
     }
 
@@ -498,6 +604,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Production surface for every recorded non-success outcome (see
     /// `CloudOperationResultConsuming`). Optional: a sink without a transport still records.
     private var operationResultConsumer: CloudOperationResultConsuming?
+
+    /// This turn's bound result socket (nil between turns). Sends via it are bound to the
+    /// original registration — late results from a superseded turn never ride a successor.
+    private var activeResultSocket: AppOperationResultSocket?
+
+    /// Exactly-once records for server-identified operations (wire contract rev da327e624).
+    /// Nil = this sink has no journal (assembly wires the durable store).
+    private var operationJournal: OperationJournal?
+
+    /// The client this turn routed on — result sends ride the SAME client/socket.
+    private var resultSendClient: CloudRouteClient?
 
     /// Capture the current playback position before a relative seek so that a
     /// subsequent "go back to where I was" restores the correct place. The

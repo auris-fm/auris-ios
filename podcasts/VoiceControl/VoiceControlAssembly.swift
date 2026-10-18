@@ -113,6 +113,12 @@ class VoiceControlAssembly {
         // capacity is in blocks: at this size a saturated handoff drops rather than blocks,
         // which leaves a visible gap in the reference instead of stalling the producer.
         let echoHandoff = EchoReferenceHandoff(reference: echoReference, capacity: 8)
+        // The cloud player's render positions travel through the SAME mapping as every other
+        // producer's. Its samples are appended directly — it is not on a deadline callback —
+        // but an anchor must still be matched to the block that contains it, or queue lead puts
+        // second-turn audio at a position its own earlier blocks occupy (PR #49 review comment
+        // 4305981528). Set here because the assembly holds both sides.
+        cloudAudioPlayer.echoReferenceHandoff = echoHandoff
         // The episode renderer publishes what it emits into this handoff. Set from here
         // because the assembly holds both sides: the reference belongs to the voice layer and
         // the renderer to playback. The renderer reads it inside `#if !APPCLIP`, since the
@@ -162,6 +168,16 @@ class VoiceControlAssembly {
                 analytics: voiceAnalytics,
                 // The live origin is the grace window's generation: a turn dispatched under
                 // an older window is refused rather than given a replacement conversation.
+                // Exactly-once records for server-identified operations (wire contract rev
+                // da327e624): durable before effect. A nil store (no Application Support) simply
+                // leaves the sink without a journal — refusals still report through the transport.
+                operationJournal: {
+                    let store = FileOperationRecordStore(
+                        url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                            .appendingPathComponent("cloud-operation-journal.json")
+                    )
+                    return OperationJournal(store: store)
+                }(),
                 conversationManager: conversationManager,
                 conversationSelectionProvider: { [weak gracePeriodSignal] in
                     // A wake opens a window; a recognised command continues the current one.

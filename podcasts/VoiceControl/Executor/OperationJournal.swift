@@ -342,3 +342,8 @@ final class FileOperationRecordStore: OperationRecordStore {
         try? data.write(to: url, options: .atomic)
     }
 }
+
+
+/// Durable backing: one JSON file in Application Support. Whole-file rewrite per save — record
+/// counts are bounded by resolved operations, and the write happens inside the journal's critical
+/// section, so last-writer consistency is sufficient for the exactly-once contract.
