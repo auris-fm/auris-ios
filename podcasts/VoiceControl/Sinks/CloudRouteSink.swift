@@ -497,9 +497,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         let refusal = performMutation(action: action, params: params)
         if let refusal {
-            operationJournal?.complete(operationId, result: refusal)
+            // Observe refusal settlement too: a failed refusal-persist leaves the durable
+            // record in progress, so the honest report is unknown, never a replayable refusal.
+            let settled = operationJournal?.complete(operationId, result: refusal) ?? true
             recordSeekRejection(refusal)
-            await reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion)
+            if settled {
+                await reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion)
+            } else {
+                let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
+                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+            }
         } else {
             // Persist the settlement FIRST and observe it: a failed settlement write must not
             // be reported as success — the durable record is still in progress, so the honest

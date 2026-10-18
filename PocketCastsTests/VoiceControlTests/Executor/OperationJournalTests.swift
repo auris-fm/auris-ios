@@ -259,3 +259,26 @@ final class OperationJournalTests: XCTestCase {
         )
     }
 }
+
+
+extension OperationJournalTests {
+    /// A real file at an unreadable location must refuse through the ACTUAL Data read error
+    /// path, not a presence heuristic: a directory URL makes Data(contentsOf:) fail with
+    /// is-a-directory — that is unreadable, never fresh history.
+    func test_realFilesystemReadFailure_refusesRatherThanFreshHistory() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("journal-dir-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let journal = OperationJournal(store: FileOperationRecordStore(url: dir))
+        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable, "a real read error must fail closed")
+    }
+
+    /// A stored nonsuccess WITHOUT its reason is corrupt: never fabricate interrupted_in_flight.
+    func test_storedNonsuccessMissingReason_isUnreadableNotReconstructed() {
+        let url = makeFileURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try? Data("{\"op-r\":{\"state\":\"finished\",\"outcome\":\"refused\"}}".utf8).write(to: url)
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(journal.claim("op-r"), .persistenceUnavailable)
+    }
+}

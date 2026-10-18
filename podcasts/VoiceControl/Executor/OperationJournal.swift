@@ -360,11 +360,19 @@ final class FileOperationRecordStore: OperationRecordStore {
     }
 
     func loadResult() -> OperationRecordLoadResult {
-        guard let data = try? Data(contentsOf: url) else {
-            // Only a genuinely absent file is fresh history. Any other read failure
-            // (permissions, I/O) must fail closed, never silently become empty.
-            return FileManager.default.fileExists(atPath: url.path) ? .unreadable : .loaded([:])
+        // Classify the ACTUAL read error: only genuine not-found is fresh history. Presence
+        // heuristics (fileExists) cannot establish absence — permissions/I/O failures refuse.
+        do {
+            let data = try Data(contentsOf: url)
+            return try Self.decodeFile(data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return .loaded([:])
+        } catch {
+            return .unreadable
         }
+    }
+
+    private static func decodeFile(_ data: Data) throws -> OperationRecordLoadResult {
         guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
             return .unreadable // present but undecodable: fail closed, never silently empty
         }
@@ -377,10 +385,15 @@ final class FileOperationRecordStore: OperationRecordStore {
                 guard let outcome = fields["outcome"].flatMap(OperationOutcome.init(rawValue:)) else {
                     return .unreadable // a bogus outcome is corruption, not absence
                 }
+                if outcome != .succeeded && fields["reason"]?.isEmpty != false {
+                    // A stored nonsuccess without its reason is corrupt: never fabricate
+                    // interrupted_in_flight for a reason the file did not carry.
+                    return .unreadable
+                }
                 records[operationID] = .finished(
                     outcome == .succeeded
                         ? .succeeded
-                        : .nonSuccess(outcome, reason: fields["reason"] ?? OperationReason.interruptedInFlight)
+                        : .nonSuccess(outcome, reason: fields["reason"]!)
                 )
             default:
                 // An unknown state is semantically corrupt: the whole history is unreadable,
