@@ -880,10 +880,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// DETERMINISTIC owning-Task cancellation boundary: operation-specific effect counter
-    /// (seek_relative has no lifecycle lookalike), claimed-before-cancel asserted via the
-    /// journal's public interrupted list, durable store recreated to verify recovery.
-    func testOwnerTaskCancellationHeldBoundaryEffectOnceAndReconstructedUnknown() async throws {
+    /// NOT a held-cancellation proof: this control cannot cancel provably mid-effect (claim →
+    /// effect → complete run inline), so it makes no retirement claim. It pins effect-once for
+    /// the owner-task cancel that lands during an identified operation, with recovery decided
+    /// by the recreated record's actual state. Held-work proof remains separately assigned.
+    func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordState() async throws {
         self.pendingFixture = """
             event: action
             data: {"operation_id":"op-held-cancel","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
@@ -899,13 +900,21 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         }
-        // Deterministic premise: the operation is CLAIMED before cancellation (poll the public
-        // interrupted list — never created by a verification-side claim).
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && journal.interruptedOperationIDs().isEmpty {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-cancel"], "operation must be claimed before cancellation")
+        // Deterministic premise WITHOUT a verification-side claim: wait until the durable store
+        // itself shows the operation's record (in progress or already finished), so the cancel
+        // always lands at a known-observed point. The recreated record's state decides the
+        // expectation below; a mid-effect retirement claim is NOT made here (held-work control
+        // is separately assigned).
+        let durable = FileOperationRecordStore(url: url)
+        let observed = await Task.detached {
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                if !durable.load().isEmpty { return true }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return false
+        }.value
+        XCTAssertTrue(observed, "operation record never became durable within 5s")
         owner.cancel()
         _ = await owner.value
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -944,6 +953,51 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(restarted.reconstructInterrupted("op-died")?.outcome, .unknown)
         if case .alreadyRun = restarted.claim("op-died") {} else {
             XCTFail("reconstructed record must settle")
+        }
+        // THIRD store+journal: the settlement itself must be durable, not just in the second
+        // journal's memory.
+        let third = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertTrue(third.interruptedOperationIDs().isEmpty, "no in-progress id may survive settlement")
+        XCTAssertEqual(
+            third.claim("op-died"),
+            OperationClaim.alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight))
+        )
+    }
+
+    /// A store whose writes fail: claim persistence failure must prevent the effect fail-closed.
+    func testFailingClaimPersistenceRefusesEffectWithoutExecution() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-no-persist","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let journal = OperationJournal(store: AlwaysFailingOperationRecordStore())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let effectCount = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
+        XCTAssertEqual(effectCount, 0, "a failed claim write must prevent the effect entirely")
+    }
+
+    /// A settlement write that fails after the effect ran: the operation must not be replayable —
+    /// it reports unknown and never re-executes.
+    func testFailingSettlementWriteNeverReplaysTheOperation() async {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("journal-\(UUID().uuidString).json")
+        let real = FileOperationRecordStore(url: url)
+        let journal = OperationJournal(store: real)
+        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
+        // Simulate the effect having run, then persistence failing at settlement time:
+        journal.complete("op-settle-fail", result: .succeeded, storeOverride: AlwaysFailingOperationRecordStore())
+        // A fresh journal over the SAME durable store still holds the in-progress claim — the
+        // failed settlement must not have downgraded it to executable:
+        let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-settle-fail"])
+        XCTAssertEqual(recreated.reconstructInterrupted("op-settle-fail")?.outcome, .unknown)
+        if case .alreadyRun = recreated.claim("op-settle-fail") {} else {
+            XCTFail("must settle as unknown, never replay")
         }
     }
 
@@ -2339,4 +2393,13 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
+}
+
+
+/// Store that fails every write and reports unreadable history — fail-closed fixtures.
+final class AlwaysFailingOperationRecordStore: OperationRecordStore {
+    private var records: [String: StoredRecord] = [:]
+    func load() -> [String: StoredRecord] { records }
+    func save(_ records: [String: StoredRecord]) -> Bool { false }
+    func loadResult() -> OperationRecordLoadResult { .loaded([:]) }
 }

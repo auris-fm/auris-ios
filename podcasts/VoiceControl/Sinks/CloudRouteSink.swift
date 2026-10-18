@@ -485,6 +485,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // The effect is not knowable: answer `unknown`, never re-execute.
             await reportResult(result, operationId: operationId, capabilityVersion: capabilityVersion)
             return
+        case .persistenceUnavailable:
+            // Fail closed: the exactly-once record could not be durably persisted (or durable
+            // history is unreadable). Refuse before any effect — never execute unrecorded.
+            let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.persistenceUnavailable)
+            recordSeekRejection(refused)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+            return
         case .claimed:
             break
         }

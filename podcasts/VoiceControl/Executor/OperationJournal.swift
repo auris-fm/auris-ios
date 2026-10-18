@@ -104,6 +104,10 @@ enum OperationReason {
     /// The sink does not support this operation at all, as opposed to supporting it and
     /// refusing for a policy reason.
     static let unsupportedOperation = "unsupported_operation"
+    /// The exactly-once record could not be durably persisted (or existing history is
+    /// unreadable): the mutation is refused before any effect rather than risking an
+    /// unrecorded execution.
+    static let persistenceUnavailable = "persistence_unavailable"
     /// The account or device is not entitled to the operation.
     static let missingEntitlement = "missing_entitlement"
     /// A required audio session was **refused**. **Unsupported on this client, deliberately.**
@@ -159,6 +163,9 @@ enum OperationClaim: Equatable {
     case claimed
     /// Another caller holds the claim and is still executing: do not run the operation.
     case inProgress
+    /// The exactly-once record could not be durably persisted (or history is unreadable):
+    /// the mutation is refused fail-closed, never executed unrecorded.
+    case persistenceUnavailable
     /// The operation already ran, and this is what happened.
     case alreadyRun(OperationResult)
     /// A previous process claimed the operation and did not record an outcome — the app was
@@ -171,7 +178,19 @@ enum OperationClaim: Equatable {
 /// real file, and so the durable backing can change without changing those rules.
 protocol OperationRecordStore {
     func load() -> [String: StoredRecord]
-    func save(_ records: [String: StoredRecord])
+    /// Persists the whole record map. Returns false when persistence FAILED — the journal
+    /// treats a failed claim write as fail-closed (refuse the effect), never silent.
+    @discardableResult
+    func save(_ records: [String: StoredRecord]) -> Bool
+
+    /// Distinguishes "no history yet" from "history present but unreadable": corrupt history
+    /// must fail closed, never silently become empty.
+    func loadResult() -> OperationRecordLoadResult
+}
+
+enum OperationRecordLoadResult {
+    case loaded([String: StoredRecord])
+    case unreadable
 }
 
 /// One operation's persisted state.
@@ -215,8 +234,18 @@ final class OperationJournal {
 
     init(store: OperationRecordStore) {
         self.store = store
-        self.records = store.load()
+        switch store.loadResult() {
+        case .loaded(let loaded): self.records = loaded
+        case .unreadable:
+            // Corrupt/unreadable durable history fails CLOSED: every claim is refused rather
+            // than running mutations that could not be exactly-once recorded.
+            self.records = [:]
+            self.persistenceUnavailable = true
+        }
     }
+
+    /// True when durable history was unreadable at load or a claim/settlement write failed.
+    private var persistenceUnavailable = false
 
     /// Atomically claims the operation for execution.
     ///
@@ -234,8 +263,15 @@ final class OperationJournal {
             // boundary exists to prevent.
             return .inProgress
         case nil:
+            if persistenceUnavailable { return .persistenceUnavailable }
             records[operationID] = .inProgress
-            store.save(records)
+            guard store.save(records) else {
+                // Fail closed: an unrecorded claim must never reach the effect. Revert and
+                // refuse every further claim until persistence is healthy again.
+                records.removeValue(forKey: operationID)
+                persistenceUnavailable = true
+                return .persistenceUnavailable
+            }
             return .claimed
         }
     }
@@ -250,16 +286,16 @@ final class OperationJournal {
         guard case .inProgress? = records[operationID] else { return nil }
         let result = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
         records[operationID] = .finished(result)
-        store.save(records)
+        if !store.save(records) { persistenceUnavailable = true }
         return result
     }
 
     /// Records the outcome of a claimed operation.
-    func complete(_ operationID: String, result: OperationResult) {
+    func complete(_ operationID: String, result: OperationResult, storeOverride: OperationRecordStore? = nil) {
         lock.lock()
         defer { lock.unlock() }
         records[operationID] = .finished(result)
-        store.save(records)
+        if !(storeOverride ?? store).save(records) { persistenceUnavailable = true }
     }
 
     /// The recorded result, or nil when the operation never ran or is still in progress.
@@ -283,7 +319,9 @@ final class InMemoryOperationRecordStore: OperationRecordStore {
     private var records: [String: StoredRecord]
     init(records: [String: StoredRecord] = [:]) { self.records = records }
     func load() -> [String: StoredRecord] { records }
-    func save(_ records: [String: StoredRecord]) { self.records = records }
+    @discardableResult
+    func save(_ records: [String: StoredRecord]) -> Bool { self.records = records; return true }
+    func loadResult() -> OperationRecordLoadResult { .loaded(records) }
 }
 
 /// A file-backed store, so the claim survives a process restart.
@@ -298,9 +336,23 @@ final class FileOperationRecordStore: OperationRecordStore {
     init(url: URL) { self.url = url }
 
     func load() -> [String: StoredRecord] {
-        guard let data = try? Data(contentsOf: url),
-              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]]
-        else { return [:] }
+        switch loadResult() {
+        case .loaded(let records): return records
+        case .unreadable: return [:]
+        }
+    }
+
+    func loadResult() -> OperationRecordLoadResult {
+        guard let data = try? Data(contentsOf: url) else {
+            return .loaded([:]) // no file yet is genuinely empty history, not corruption
+        }
+        guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
+            return .unreadable // present but undecodable: fail closed, never silently empty
+        }
+        return .loaded(decode(raw))
+    }
+
+    private func decode(_ raw: [String: [String: String]]) -> [String: StoredRecord] {
 
         var records: [String: StoredRecord] = [:]
         for (operationID, fields) in raw {
@@ -323,7 +375,8 @@ final class FileOperationRecordStore: OperationRecordStore {
         return records
     }
 
-    func save(_ records: [String: StoredRecord]) {
+    @discardableResult
+    func save(_ records: [String: StoredRecord]) -> Bool {
         var raw: [String: [String: String]] = [:]
         for (operationID, record) in records {
             switch record {
@@ -338,8 +391,10 @@ final class FileOperationRecordStore: OperationRecordStore {
                 raw[operationID] = fields
             }
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONSerialization.data(withJSONObject: raw),
+              (try? data.write(to: url, options: .atomic)) != nil
+        else { return false }
+        return true
     }
 }
 

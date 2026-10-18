@@ -217,14 +217,15 @@ final class OperationJournalTests: XCTestCase {
     }
 
     func test_theFileBackedStore_recoversFromUnreadableContent() {
-        // A truncated or foreign file must not be read as "everything is interrupted", which
-        // would refuse operations that never ran.
+        // Unreadable durable history now FAILS CLOSED (PR #49 review): every claim is refused
+        // with .persistenceUnavailable instead of silently starting from empty history — an
+        // operation that could not be exactly-once recorded must never reach its effect.
         let url = makeFileURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try? Data("not json".utf8).write(to: url)
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertTrue(journal.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
+        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable)
     }
 
     // MARK: - concurrency
