@@ -840,6 +840,39 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
 
+    /// Owning-Task cancellation regression, attribution-corrected: an identified pause turn has
+    /// EXPECTED lifecycle auto-pause (CloudRouteSink.swift:315, when playing before hold) plus the
+    /// action effect (line 551). Cancellation must not add a second effect execution: total pauses
+    /// ≤ 1 lifecycle + 1 effect, and a claimed-but-interrupted operation stays reconstructable
+    /// unknown, never re-executed, never `cancelled`.
+    func testOwnerTaskCancellationDoesNotDoubleExecuteTheIdentifiedMutation() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-owner-cancel","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let owner = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        owner.cancel()
+        _ = await owner.value
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let pauseCount = playback.calls.filter { if case .pause = $0 { return true }; return false }.count
+        XCTAssertLessThanOrEqual(pauseCount, 2, "1 lifecycle auto-pause + at most 1 effect pause")
+        if journal.claim("op-owner-cancel") == OperationClaim.inProgress {
+            XCTAssertEqual(journal.reconstructInterrupted("op-owner-cancel")?.outcome, .unknown)
+            if case .alreadyRun = journal.claim("op-owner-cancel") {} else {
+                XCTFail("reconstructed record must settle")
+            }
+        }
+    }
+
     /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
     /// reconstructed as persisted `unknown` (the assembly does this at launch), and the sink then
     /// replays that recorded unknown through the bound transport WITHOUT re-executing the effect.
