@@ -77,7 +77,9 @@ final class CloudRouteClientTests: XCTestCase {
             webSocketTaskFactory: { _ in liveTask }
         )
         let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let stream = client.route(request: "x", context: sampleContext, turn: turn)
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        let stream = routed.stream
+        let resultSocket = routed.resultSocket
         let reader = Task {
             var events: [CloudRouteEvent] = []
             for await event in stream { events.append(event) }
@@ -92,7 +94,7 @@ final class CloudRouteClientTests: XCTestCase {
             operationId: "op-live", outcome: .refused,
             reason: OperationReason.referenceMappingUnavailable
         )
-        let midTurnReport = await client.sendOperationResult(try XCTUnwrap(frame), requestId: turn.requestId)
+        let midTurnReport = await client.sendOperationResult(try XCTUnwrap(frame), via: resultSocket)
         XCTAssertEqual(midTurnReport, .submitted, "a result sent while the turn socket is live is submitted")
         let captured = try XCTUnwrap(
             liveTask.sentTextFrames.last.flatMap {
@@ -108,16 +110,17 @@ final class CloudRouteClientTests: XCTestCase {
         // Barrier 2: the SAME turn completes; the socket closes; the registration retires.
         heldGate.release()
         _ = await reader.value
-        let afterCloseReport = await client.sendOperationResult(try XCTUnwrap(frame), requestId: turn.requestId)
+        let afterCloseReport = await client.sendOperationResult(try XCTUnwrap(frame), via: resultSocket)
         XCTAssertEqual(
             afterCloseReport, .undelivered,
             "after the SAME turn closed, the result is undelivered — typed local-knowledge, not a server receipt"
         )
     }
 
-    /// A `request_id` reused while a predecessor turn is STILL OPEN must not have its successor's
-    /// registration removed by the predecessor's close: the predecessor retires only its own
-    /// registration (per-registration identity), so the successor's result path stays live.
+    /// A `request_id` reused while a predecessor turn is STILL OPEN, on ONE client (one registry,
+    /// factory returning socket A then socket B): the predecessor's close retires only its own
+    /// registration, AND a LATE result sent via the predecessor's handle is undelivered — never
+    /// routed onto the successor's socket.
     func testADuplicateLiveRequestIDIsNotRetiredByThePredecessorsClose() async throws {
         let openFixture = [
             "event: action",
@@ -127,34 +130,36 @@ final class CloudRouteClientTests: XCTestCase {
         let gateA = Gate()
         let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
         taskA.holdUntilReleased(gateA)
+        let gateB = Gate()
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
+        taskB.holdUntilReleased(gateB)
+        var sockets: [StubWebSocketTask] = []
+        let lock = NSLock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: userId,
             tokenProvider: StubTokenProvider(token: "t"),
-            webSocketTaskFactory: { _ in taskA }
+            webSocketTaskFactory: { _ in
+                lock.lock(); defer { lock.unlock() }
+                let next = sockets.isEmpty ? taskA : taskB
+                sockets.append(next)
+                return next
+            }
         )
-        // BOTH turns deliberately share one request_id (the reuse the retire rule guards).
+        // BOTH turns deliberately share one request_id (the reuse the rules guard).
         let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let streamA = client.route(request: "a", context: sampleContext, turn: sharedTurn)
-        let readerA = Task { for await _ in streamA {} }
-        let submitted = Date().addingTimeInterval(5)
-        while Date() < submitted && taskA.sentTextFrames.isEmpty {
+        // SERIALIZE the turn starts (the factory hands out sockets in call order, so concurrent
+        // starts could swap A/B): start A, wait for its submission, then start B.
+        let routedA = client.routeWithResultSocket(request: "a", context: sampleContext, turn: sharedTurn)
+        let readerA = Task { for await _ in routedA.stream {} }
+        let deadlineA = Date().addingTimeInterval(5)
+        while Date() < deadlineA && taskA.sentTextFrames.isEmpty {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        // Successor registers the SAME request id while A is live.
-        let gateB = Gate()
-        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
-        taskB.holdUntilReleased(gateB)
-        let clientB = CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: userId,
-            tokenProvider: StubTokenProvider(token: "t"),
-            webSocketTaskFactory: { _ in taskB }
-        )
-        let streamB = clientB.route(request: "b", context: sampleContext, turn: sharedTurn)
-        let readerB = Task { for await _ in streamB {} }
-        let submittedB = Date().addingTimeInterval(5)
-        while Date() < submittedB && taskB.sentTextFrames.isEmpty {
+        let routedB = client.routeWithResultSocket(request: "b", context: sampleContext, turn: sharedTurn)
+        let readerB = Task { for await _ in routedB.stream {} }
+        let deadlineB = Date().addingTimeInterval(5)
+        while Date() < deadlineB && taskB.sentTextFrames.isEmpty {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         // A closes: retires only its own registration — B's result path must stay live.
@@ -164,13 +169,25 @@ final class CloudRouteClientTests: XCTestCase {
             operationId: "op-a", outcome: .refused,
             reason: OperationReason.malformedSeekTarget
         )
-        let report = await clientB.sendOperationResult(try XCTUnwrap(frame), requestId: sharedTurn.requestId)
-        XCTAssertEqual(report, .submitted, "the successor's registration survived the predecessor's close")
+        let successorReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedB.resultSocket)
+        XCTAssertEqual(successorReport, .submitted, "the successor's registration survived the predecessor's close")
+        XCTAssertEqual(
+            taskB.sentTextFrames.last.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }?["type"] as? String,
+            "app_operation_result",
+            "the frame rode the successor's socket"
+        )
+        // LATE PREDECESSOR result: A's handle is retired; the result must NOT route onto B.
+        let lateReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedA.resultSocket)
+        XCTAssertEqual(
+            lateReport, .undelivered,
+            "a late result from the retired predecessor is undelivered, never routed onto the successor's socket"
+        )
+        XCTAssertEqual(taskB.sentTextFrames.count - 1, taskB.sentTextFrames.dropLast().count - 0, "no extra frame landed on B")
         gateB.release()
         _ = await readerB.value
     }
 
-    func testActionOnlyStream() async {
+        func testActionOnlyStream() async {
         self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"pause","params":{}}

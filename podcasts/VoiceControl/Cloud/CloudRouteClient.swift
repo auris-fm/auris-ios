@@ -114,9 +114,31 @@ final class CloudRouteClient {
         context: CloudRouteContext,
         turn: CloudTurnEnvelope
     ) -> AsyncStream<CloudRouteEvent> {
+        route(request: request, context: context, turn: turn, resultSocket: nil)
+    }
+
+    /// Routes a turn AND hands back the handle its `app_operation_result` sends must travel by:
+    /// the handle binds to the ORIGINAL socket registration, so late results from a retired turn
+    /// are undelivered rather than routed onto a successor that reused the request id.
+    func routeWithResultSocket(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
+        let socket = AppOperationResultSocket(requestId: turn.requestId)
+        let stream = route(request: request, context: context, turn: turn, resultSocket: socket)
+        return (stream, socket)
+    }
+
+    private func route(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
+        resultSocket: AppOperationResultSocket?
+    ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket)
             }
             continuation.onTermination = { _ in
                 task.cancel()
@@ -204,12 +226,13 @@ final class CloudRouteClient {
     private let liveSocketsLock = NSLock()
     private var liveSockets: [String: SocketRegistration] = [:]
 
-    /// Registers a turn's socket. Returns the registration identity the turn retires with.
-    private func registerSocket(_ task: WebSocketTasking, requestId: String) -> UUID {
+    /// Registers a turn's socket and binds its identity into the turn's result socket handle.
+    private func registerSocket(_ task: WebSocketTasking, requestId: String, resultSocket: AppOperationResultSocket?) -> UUID {
         liveSocketsLock.lock()
         defer { liveSocketsLock.unlock() }
         let registration = SocketRegistration(task: task)
         liveSockets[requestId] = registration
+        resultSocket?.boundIdentity = registration.identity
         return registration.identity
     }
 
@@ -233,23 +256,30 @@ final class CloudRouteClient {
         case undelivered
     }
 
-    /// Sends an `app_operation_result` on the turn socket that carried the operation.
+    /// Sends an `app_operation_result` on the turn socket that carried the operation — bound to
+    /// the ORIGINAL registration via the handle, so a late result from a retired turn can never
+    /// route onto a successor's socket that reused the request id.
     @discardableResult
-    func sendOperationResult(_ frame: AppOperationResultFrame, requestId: String) async -> AppOperationResultSendReport {
+    func sendOperationResult(_ frame: AppOperationResultFrame, via socket: AppOperationResultSocket) async -> AppOperationResultSendReport {
         liveSocketsLock.lock()
-        let socket = liveSockets[requestId]?.task
+        let entry = liveSockets[socket.requestId]
+        let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
         liveSocketsLock.unlock()
-        guard let socket else {
+        guard let boundTask else {
             FileLog.shared.addMessage(
-                "[CloudRoute] app_operation_result undelivered: no live socket for turn \(requestId)"
+                "[CloudRoute] app_operation_result undelivered: registration retired for turn \(socket.requestId)"
             )
             return .undelivered
         }
+        return await Self.dispatch(frame, on: boundTask, requestId: socket.requestId)
+    }
+
+    private static func dispatch(_ frame: AppOperationResultFrame, on socketTask: WebSocketTasking, requestId: String) async -> AppOperationResultSendReport {
         let json = frame.jsonFrame()
         do {
             let data = try JSONSerialization.data(withJSONObject: json)
             guard let text = String(data: data, encoding: .utf8) else { return .undelivered }
-            try await socket.send(.string(text))
+            try await socketTask.send(.string(text))
             return .submitted
         } catch {
             // A send may TRANSMIT and then throw (the transport's own submission rule): the
@@ -268,7 +298,8 @@ final class CloudRouteClient {
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
-        continuation: AsyncStream<CloudRouteEvent>.Continuation
+        continuation: AsyncStream<CloudRouteEvent>.Continuation,
+        resultSocket: AppOperationResultSocket?
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
@@ -320,7 +351,7 @@ final class CloudRouteClient {
         // `app_operation_result` sends ride the SAME socket the operation arrived on. The
         // registration identity is retired conditionally at close (a duplicate live id keeps
         // its own registration).
-        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId)
+        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
 
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so

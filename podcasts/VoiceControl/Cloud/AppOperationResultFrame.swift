@@ -57,3 +57,17 @@ struct AppOperationResultFrame: Equatable {
         return frame
     }
 }
+
+/// The turn-bound handle a result send must travel by. Created with the turn (before the socket
+/// opens); the client binds the registration identity at socket registration, and a send is only
+/// delivered while THAT registration is still the live one for the request id — a late result
+/// from a retired turn is `undelivered`, never routed onto a successor's socket.
+final class AppOperationResultSocket: @unchecked Sendable {
+    let requestId: String
+    /// Bound by the client at socket registration; read by the send path.
+    var boundIdentity: UUID?
+
+    init(requestId: String) {
+        self.requestId = requestId
+    }
+}
