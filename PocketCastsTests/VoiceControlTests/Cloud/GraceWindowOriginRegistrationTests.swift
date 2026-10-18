@@ -60,6 +60,41 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         )
     }
 
+    /// A CLOSED window admits nothing (PR #49 review comment 4305981418).
+    ///
+    /// The link registered the origin only on `active == true`, so after the 30 s timeout — or
+    /// any close with no successor wake — `liveOrigin` still named the ended generation. A turn
+    /// that captured that generation passed the `origin == liveOrigin` guard and was dialled
+    /// after the window ended, creating or resuming a conversation the type's own contract says
+    /// must be refused. This drives the REAL close path (`onAppBackgrounded`, the privacy close)
+    /// through the link and asserts both modes are refused for the closed window's generation.
+    func testClosedWindowAdmitsNothingForItsOwnGeneration() {
+        let signal = GracePeriodSignal()
+        let manager = CloudConversationManager()
+        let link = CloudConversationManager.bindLiveOrigin(to: signal, on: manager)
+        defer { link.cancel() }
+
+        signal.onWakeWordDetected()
+        let generation = signal.currentGeneration()
+        // Premise: while open, its own generation is admitted.
+        XCTAssertNotNil(
+            manager.prepare(selection: .wakeWord, origin: generation),
+            "harness: the open window must admit its own generation before the close"
+        )
+
+        // The window CLOSES (privacy fail-closed) with no successor wake.
+        signal.onAppBackgrounded()
+
+        XCTAssertNil(
+            manager.prepare(selection: .wakeWord, origin: generation),
+            "a closed window must not CREATE a conversation under its ended generation"
+        )
+        XCTAssertNil(
+            manager.prepare(selection: .followUp, origin: generation),
+            "a closed window must not RESUME a conversation under its ended generation"
+        )
+    }
+
     /// An unstamped dispatch belongs to no window and must never create a conversation.
     func testAnUnstampedDispatchIsRefused() {
         let signal = GracePeriodSignal()

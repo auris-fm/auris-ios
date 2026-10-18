@@ -117,14 +117,22 @@ final class CloudConversationManager {
     @discardableResult
     static func bindLiveOrigin(to signal: GracePeriodSignal, on manager: CloudConversationManager) -> AnyCancellable {
         signal.$isActive.sink { active in
-            if active { manager.registerLiveOrigin(signal.currentGeneration()) }
+            // Registration follows the WINDOW, not merely its opening. When the signal closes,
+            // no generation is live at all, so the origin must be cleared rather than left
+            // naming the ended generation (PR #49 review comment 4305981418): otherwise a turn
+            // dispatched while the window was open still matches `origin == liveOrigin` after
+            // the window ends and creates or resumes a conversation the contract above refuses.
+            // Closing always bumps the generation first, so a successor wake re-registers here
+            // with the new value; a close with no successor registers nil.
+            manager.registerLiveOrigin(active ? signal.currentGeneration() : nil)
         }
     }
 
-    /// Records the origin currently in force. A turn may only create or continue a
-    /// conversation inside the window that is live *now*; an origin that was live when a
-    /// request was dispatched but has since been replaced cannot.
-    func registerLiveOrigin(_ origin: Int) {
+    /// Records the origin currently in force, or clears it when `origin` is nil. A turn may only
+    /// create or continue a conversation inside the window that is live *now*; an origin that was
+    /// live when a request was dispatched but has since been replaced — or whose window has
+    /// closed — cannot.
+    func registerLiveOrigin(_ origin: Int?) {
         liveOrigin = origin
     }
 
