@@ -99,8 +99,10 @@ enum CloudRouteEvent: Equatable {
     case connected(codec: CloudAudioCodec)
     /// Binary audio frame from the server's speech synthesiser.
     case audioFrame(CloudAudioFrame)
-    /// Server-directed local action (seek, pause, etc.).
-    case action(tool: String, action: String, params: [String: CloudRouteJSONValue])
+    /// Server-directed action. App operations carry `operationId`/`capabilityVersion` (wire
+    /// contract rev da327e624); existing local-path holds carry neither and parse as nils.
+    case action(tool: String, action: String, params: [String: CloudRouteJSONValue],
+                operationId: String?, capabilityVersion: String?)
     /// Text token the Worker sends on the socket. It rides the live transport
     /// rather than a retired one; the sink plays answers as audio instead of
     /// accumulating text, so this is parsed and then intentionally unused.

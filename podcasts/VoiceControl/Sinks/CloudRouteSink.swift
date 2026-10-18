@@ -328,7 +328,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 audioPlayer.setNegotiatedCodec(codec)
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
-            case let .action(tool, action, params):
+            case let .action(tool, action, params, operationId, capabilityVersion):
                 executeAction(tool: tool, action: action, params: params)
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").

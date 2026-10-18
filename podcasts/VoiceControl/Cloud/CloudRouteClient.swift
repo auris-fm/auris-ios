@@ -463,7 +463,9 @@ final class CloudRouteClient {
             else { return [] }
             let params = (json["params"] as? [String: Any])
                 .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
-            return [.action(tool: tool, action: action, params: params)]
+            return [.action(tool: tool, action: action, params: params,
+                            operationId: json["operation_id"] as? String,
+                            capabilityVersion: json["capability_version"] as? String)]
 
         case "token":
             // `token` rides the **socket**: the Worker's `lifecycle.ts` calls

@@ -11,7 +11,7 @@ final class CloudAcceptanceRecordTests: XCTestCase {
         recorder.observe(.connected(codec: CloudAudioCodec(name: "pcm_s16le@24k")!))
         recorder.observe(.token("the "))
         recorder.observe(.token("nonce is NONCE-42"))
-        recorder.observe(.action(tool: "player", action: "pause", params: [:]))
+        recorder.observe(.action(tool: "player", action: "pause", params: [:], operationId: nil, capabilityVersion: nil))
         recorder.observe(.done(usage: CloudTurnUsage(inputTokens: 1, outputTokens: 2, speech: nil)))
 
         let record = recorder.record()

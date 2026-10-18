@@ -41,7 +41,9 @@ final class CloudRouteClientTests: XCTestCase {
                 .action(
                     tool: "playback",
                     action: "seek_to",
-                    params: ["reference_position_ms": .int(1_130_000)]
+                    params: ["reference_position_ms": .int(1_130_000)],
+                    operationId: nil,
+                    capabilityVersion: nil
                 ),
                 .token("She"),
                 .token(" is arguing."),
@@ -65,7 +67,7 @@ final class CloudRouteClientTests: XCTestCase {
         XCTAssertEqual(
             events,
             [
-                .action(tool: "playback", action: "pause", params: [:]),
+                .action(tool: "playback", action: "pause", params: [:], operationId: nil, capabilityVersion: nil),
                 .done(usage: CloudTurnUsage(inputTokens: 10, outputTokens: 0)),
             ]
         )
