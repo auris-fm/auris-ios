@@ -863,8 +863,15 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         owner.cancel()
         _ = await owner.value
         try await Task.sleep(nanoseconds: 150_000_000)
-        let pauseCount = playback.calls.filter { if case .pause = $0 { return true }; return false }.count
-        XCTAssertLessThanOrEqual(pauseCount, 2, "1 lifecycle auto-pause + at most 1 effect pause")
+        // Distinguish lifecycle from effect by ORDER: the lifecycle auto-pause always precedes
+        // action handling, so pauses[0] is the lifecycle call and the rest are effect executions.
+        let pauses = playback.calls.filter { if case .pause = $0 { return true }; return false }
+        let effectPauses = pauses.dropFirst()
+        XCTAssertLessThanOrEqual(effectPauses.count, 1, "the identified effect executes at most once")
+        if case .alreadyRun = journal.claim("op-owner-cancel") {
+            // The turn completed before cancellation: the effect MUST have executed exactly once.
+            XCTAssertEqual(effectPauses.count, 1, "a completed operation's effect ran exactly once")
+        }
         if journal.claim("op-owner-cancel") == OperationClaim.inProgress {
             XCTAssertEqual(journal.reconstructInterrupted("op-owner-cancel")?.outcome, .unknown)
             if case .alreadyRun = journal.claim("op-owner-cancel") {} else {
