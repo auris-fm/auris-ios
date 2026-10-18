@@ -325,6 +325,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
+        // Cancellation cleanup is bound to THIS turn's token — the cancellation state of the
+        // task that owns consumer execution — not to AsyncStream termination (which never fires
+        // on task cancellation). If the turn is cancelled while suspended in action or result
+        // handling, the watcher retires the registration within one poll tick, idempotently and
+        // tied to the original registration identity. The journal is deliberately untouched: a
+        // claimed-but-unfinished operation stays `.in_progress` on disk, so a restart
+        // reconstructs `unknown` — never a fabricated `cancelled`.
+        let resultSocket = routed.resultSocket
+        let cancelWatch = Task { [weak resultSocket] in
+            while !turnToken.isCancelled && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            resultSocket?.finishTurn()
+        }
         turnLoop: for await event in routed.stream {
             // Superseded mid-stream: stop consuming so this turn cannot execute
             // late actions or overwrite the new turn's state. The stream's own
@@ -402,6 +416,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
             }
         }
+        cancelWatch.cancel()
 
         if turnToken.isCancelled {
             // The superseding turn owns pause/restore and analytics. Superseded is not a

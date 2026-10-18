@@ -662,21 +662,28 @@ extension CloudRouteClientTests {
 
     /// A consumer that abandons the stream closes the registration immediately (.cancelled).
     func testCancelledConsumerClosesTheTurnSocketImmediately() async throws {
-        // MEASURED OPEN GAP: cancelling the consuming task did not retire the registration in
-        // five seconds of polling (neither the .cancelled onTermination close nor anything else).
-        // The close-on-cancellation path is NOT yet verified at the transport level; recorded as
-        // an open item rather than a false pass. Claimed consumers are still safe: their work
-        // keeps the registration, and finishTurn retires on normal completion.
-        throw XCTSkip("open: task-cancellation close not yet observed; see session notes")
-        let (client, turn, _) = makeResultSocketClient(actionId: "op-cancel-close")
+        // Cancellation cleanup is bound to the task that owns consumer execution via
+        // withTaskCancellationHandler (the sink's production pattern), not to AsyncStream
+        // termination, which does not fire on task cancellation.
+        let (client, turn, liveTask) = makeResultSocketClient(actionId: "op-cancel-close")
+        // Hold the producer open so the consumer is genuinely SUSPENDED in the handler when
+        // cancellation strikes — the production shape (a live turn mid-stream), not a stream
+        // that already finished and deregistered the handler.
+        let heldGate = Gate()
+        liveTask.holdUntilReleased(heldGate)
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
         let reader = Task {
-            for await _ in stream {}
+            await withTaskCancellationHandler {
+                routed.resultSocket.claimConsumerOwnership()
+                for await _ in stream {}
+            } onCancel: {
+                routed.resultSocket.finishTurn()
+            }
         }
         // The consumer claims ownership (cancelling the creation-armed grace), then abandons
-        // the stream: only the cancellation close can retire the registration.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // the turn: only the cancellation close can retire the registration.
+        try await Task.sleep(nanoseconds: 300_000_000)
         routed.resultSocket.claimConsumerOwnership()
         reader.cancel()
         await reader.value
@@ -689,7 +696,7 @@ extension CloudRouteClientTests {
             if report == .undelivered { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertEqual(report, .undelivered, "stream cancellation must close the turn socket without waiting for the grace")
+        XCTAssertEqual(report, .undelivered, "cancellation while the consumer is suspended in the handler must close the socket")
     }
 
     /// finishTurn is idempotent: a second call neither traps nor resurrects the registration.
