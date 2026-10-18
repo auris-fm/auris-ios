@@ -179,6 +179,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
         resultsPresenter: DiscoveryResultsPresenting? = nil,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
+        operationResultConsumer: CloudOperationResultConsuming? = nil,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord }
@@ -198,6 +199,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.routeHintProvider = routeHintProvider
         self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
+        self.operationResultConsumer = operationResultConsumer
         self.spokenTemplates = spokenTemplates
         // Assigned last, and its delegate is set after every stored property is
         // initialized: `audioPlayer.delegate = self` reads `self` to make the
@@ -487,10 +489,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             .refused,
             reason: OperationReason.referenceMappingUnavailable
         )
+        operationResultConsumer?.consume(unavailableReferenceSeek!, context: "seek_to/reference_position_ms")
     }
 
     /// The most recent unavailable-reference-seek outcome, consumed by the executor.
     private(set) var unavailableReferenceSeek: OperationResult?
+
+    /// Production surface for every recorded non-success outcome (see
+    /// `CloudOperationResultConsuming`). Optional: a sink without a transport still records.
+    private var operationResultConsumer: CloudOperationResultConsuming?
 
     /// Capture the current playback position before a relative seek so that a
     /// subsequent "go back to where I was" restores the correct place. The
@@ -526,6 +533,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     private func recordSeekRejection(_ result: OperationResult) {
         lastSeekRejection = result
+        operationResultConsumer?.consume(result, context: "seek/parameters")
     }
 
     /// The most recent malformed-seek rejection, consumed by the executor.

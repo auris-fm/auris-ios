@@ -403,6 +403,79 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
     }
 
+    // MARK: Seek-refusal surfacing (PR #49 review 4305981598)
+
+    /// A recording consumer injected as the sink's result consumer. The wire contract
+    /// (`app_operation_result`, rev da327e624) names this the production surface: a refusal the
+    /// server can reason about must reach a consumer, not die in a stored field only tests read.
+    private final class RecordingResultConsumer: CloudOperationResultConsuming {
+        var consumed: [(result: OperationResult, context: String)] = []
+        func consume(_ result: OperationResult, context: String) {
+            consumed.append((result, context))
+        }
+    }
+
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                let fixture = self.pendingFixture
+                self.pendingFixture = nil
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl, fixture: fixture ?? "", audioPayloads: []
+                )
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            analytics: VoiceAnalytics(analytics: analytics),
+            operationResultConsumer: consumer,
+            conversationManager: conversationManager ?? testConversationManager()
+        )
+    }
+
+    /// An unmapped reference seek must reach the injected consumer with the refused outcome and
+    /// the mapping-unavailable reason — the production read of the outcome that previously only
+    /// landed in a test-only stored field.
+    func testUnmappedReferenceSeekReachesTheOperationResultConsumer() async {
+        self.pendingFixture = """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.count, 1, "exactly one refused app_operation_result for one unmapped seek; got \(consumer.consumed)")
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// A malformed seek (both target forms) reaches the consumer too.
+    func testMalformedSeekReachesTheOperationResultConsumer() async {
+        self.pendingFixture = """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.malformedSeekTarget)
+    }
+
     /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
     /// value. A mapping that returned its input would satisfy an equality check by accident, so
     /// the offset is deliberate.

@@ -1,5 +1,16 @@
 import Foundation
 
+/// Production surface for an operation outcome the server must be able to reason about.
+///
+/// The wire contract (`app_operation_result`, core-app-tools rev da327e624) makes the refusal a
+/// frame the server reads. A stored field only tests read is not a surface (PR #49 review
+/// 4305981598): sinks report every non-success outcome here, and the assembly owns the transport
+/// wiring. `context` names what was refused in machine terms (action/reason origin), kept free of
+/// user-visible prose.
+protocol CloudOperationResultConsuming: AnyObject {
+    func consume(_ result: OperationResult, context: String)
+}
+
 /// The outcome of an app operation the server asked this client to perform.
 ///
 /// `unknown` is the honest answer whenever the effect is not knowable from the client's
