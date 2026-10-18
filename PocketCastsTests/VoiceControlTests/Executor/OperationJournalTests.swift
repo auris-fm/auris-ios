@@ -282,3 +282,16 @@ extension OperationJournalTests {
         XCTAssertEqual(journal.claim("op-r"), .persistenceUnavailable)
     }
 }
+
+extension OperationJournalTests {
+    /// REAL filesystem failed-WRITE control (distinct from replacement-store stubs): the journal
+    /// URL sits under a path whose parent is a plain FILE, so the actual atomic Data.write fails.
+    /// The claim must refuse fail-closed through that real error path.
+    func test_realFilesystemWriteFailure_refusesTheClaimThroughTheActualWritePath() {
+        let parentFile = FileManager.default.temporaryDirectory.appendingPathComponent("journal-parent-\(UUID().uuidString)")
+        try? Data("not a directory".utf8).write(to: parentFile)
+        defer { try? FileManager.default.removeItem(at: parentFile) }
+        let journal = OperationJournal(store: FileOperationRecordStore(url: parentFile.appendingPathComponent("child.json")))
+        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable, "a real write failure must fail closed")
+    }
+}
