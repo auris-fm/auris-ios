@@ -139,6 +139,19 @@ enum CloudRouteJSONValue: Equatable {
         return nil
     }
 
+    /// Plain Foundation JSON for outbound frame encoding (`app_operation_result` state).
+    func toJSONSerializable() -> Any {
+        switch self {
+        case .string(let v): return v
+        case .int(let v): return v
+        case .double(let v): return v
+        case .bool(let v): return v
+        case .null: return NSNull()
+        case .object(let dict): return dict.mapValues { $0.toJSONSerializable() }
+        case .array(let arr): return arr.map { $0.toJSONSerializable() }
+        }
+    }
+
     var int64Value: Int64? {
         switch self {
         case .int(let value): return value

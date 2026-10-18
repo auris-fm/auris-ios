@@ -53,6 +53,125 @@ final class CloudRouteClientTests: XCTestCase {
         assertRouteBody(capturedTask?.sentTextFrames.first)
     }
 
+    /// The `app_operation_result` frame rides the SAME socket as its turn (wire contract rev
+    /// da327e624): a send while the turn is live is delivered as a text frame with the contract's
+    /// exact field set; a send after the turn closed reports undelivered (typed false), which the
+    /// server reads as `unknown` — no retry, no fabricated success.
+    func testOperationResultRidesTheLiveTurnSocketAndReportsUndeliveredAfterClose() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let built = CloudRouteClient.stubbed(fixture: nextFixture())
+        // Keep the turn in flight until the result send has been attempted: hold the task's
+        // receive on a gate, release after the assertions.
+        let gate = Gate()
+        // Route a HELD turn via a dedicated stub so the socket stays open during the send.
+        let heldTask = StubWebSocketTask(textFrames: StubWebSocketTask.frames(
+            fromFixture: """
+            event: action
+            data: {"operation_id":"op-1","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+
+            """
+        ))
+        var heldRequest: URLRequest?
+        let heldClient = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { req in heldRequest = req; return heldTask }
+        )
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let stream = heldClient.route(request: "x", context: sampleContext, turn: turn)
+
+        // LIVE-SOCKET DELIVERY: hold the turn's receive on a gate so the socket stays open, send
+        // the result mid-turn, and assert the frame left on that same socket.
+        let heldGate = Gate()
+        let liveFixture = [
+            "event: action",
+            "data: {\"operation_id\":\"op-live\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "",
+            "event: done",
+            "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}",
+            "",
+        ].joined(separator: "\n")
+        let liveTask = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: liveFixture))
+        liveTask.holdUntilReleased(heldGate)
+        let liveClient = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in liveTask }
+        )
+        let liveTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let liveStream = liveClient.route(request: "x", context: sampleContext, turn: liveTurn)
+        let reader = Task {
+            var events: [CloudRouteEvent] = []
+            for await event in liveStream { events.append(event) }
+            return events
+        }
+        // Wait for the turn's submission (the auth frame is the first send).
+        let submitted = Date().addingTimeInterval(5)
+        while Date() < submitted && liveTask.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let liveDelivered = await liveClient.sendOperationResult(
+            AppOperationResultFrame(
+                operationId: "op-live", outcome: .refused,
+                reason: OperationReason.referenceMappingUnavailable
+            ),
+            requestId: liveTurn.requestId
+        )
+        XCTAssertTrue(liveDelivered, "a result sent while the turn socket is live is delivered")
+        let resultFrame = try XCTUnwrap(
+            liveTask.sentTextFrames.last.flatMap {
+                try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            },
+            "the result left as a text frame on the turn's own socket"
+        )
+        XCTAssertEqual(resultFrame["type"] as? String, "app_operation_result")
+        XCTAssertEqual(resultFrame["operation_id"] as? String, "op-live")
+        XCTAssertEqual(resultFrame["outcome"] as? String, "refused")
+        XCTAssertEqual(resultFrame["reason"] as? String, "reference_mapping_unavailable")
+        heldGate.release()
+        _ = await reader.value
+
+        // UNDELIVERED case: a send AFTER the turn closed finds no live socket.
+        _ = gate
+        let delivered = await heldClient.sendOperationResult(
+            AppOperationResultFrame(
+                operationId: "op-1", outcome: .refused,
+                reason: OperationReason.referenceMappingUnavailable
+            ),
+            requestId: turn.requestId
+        )
+        XCTAssertFalse(
+            delivered,
+            "after the turn closed, the result is undelivered — typed, not an error, not a success"
+        )
+
+        // Frame-JSON contract pins, independent of transport state.
+        let frame = AppOperationResultFrame(
+            operationId: "op-1", outcome: .refused,
+            reason: OperationReason.referenceMappingUnavailable
+        ).jsonFrame()
+        XCTAssertEqual(frame["type"] as? String, "app_operation_result")
+        XCTAssertEqual(frame["operation_id"] as? String, "op-1")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, "reference_mapping_unavailable")
+        XCTAssertNil(frame["state"])
+        let success = AppOperationResultFrame(
+            operationId: "op-2", outcome: .succeeded,
+            state: ["playing": .bool(false)]
+        ).jsonFrame()
+        XCTAssertNil(success["reason"], "a success carries NO reason — a client bug the contract names")
+        XCTAssertEqual(success["state"] as? [String: Any] as? [String: Bool], ["playing": false])
+    }
+
     func testActionOnlyStream() async {
         self.pendingFixture = """
             event: action

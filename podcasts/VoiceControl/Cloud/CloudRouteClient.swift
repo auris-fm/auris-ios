@@ -188,6 +188,49 @@ final class CloudRouteClient {
 
     // MARK: - WebSocket implementation
 
+    // MARK: App-operation result transport (wire contract rev da327e624)
+
+    /// Live turn sockets by `request_id`, so an `app_operation_result` can ride the SAME socket
+    /// its operation arrived on. Ownership: the registering turn removes its own entry when its
+    /// socket closes (the defer in `performWebSocket`), so a late send after turn end finds
+    /// nothing and reports undelivered instead of racing a closed task.
+    private let liveSocketsLock = NSLock()
+    private var liveSockets: [String: WebSocketTasking] = [:]
+
+    /// Sends an `app_operation_result` on the turn socket that carried the operation.
+    ///
+    /// Returns `false` when no socket for `requestId` is live: the turn has already closed, and
+    /// the result is UNDELIVERED — the server's only honest reading of a lost result is
+    /// `unknown`, so callers must not retry-mutate on this answer; they surface it. This is not
+    /// an error path: delivery failure is an expected late-callback case, kept typed.
+    @discardableResult
+    func sendOperationResult(_ frame: AppOperationResultFrame, requestId: String) async -> Bool {
+        liveSocketsLock.lock()
+        let socket = liveSockets[requestId]
+        liveSocketsLock.unlock()
+        guard let socket else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] app_operation_result undelivered: no live socket for turn \(requestId)"
+            )
+            return false
+        }
+        let json = frame.jsonFrame()
+        do {
+            let data = try JSONSerialization.data(withJSONObject: json)
+            guard let text = String(data: data, encoding: .utf8) else { return false }
+            try await socket.send(.string(text))
+            return true
+        } catch {
+            // A send may TRANSMIT and then throw (the transport's own submission rule): the
+            // outcome of the operation is unchanged either way — only the server's knowledge is
+            // in question, which the undelivered report covers.
+            FileLog.shared.addMessage(
+                "[CloudRoute] app_operation_result send failed for turn \(requestId): \(error)"
+            )
+            return false
+        }
+    }
+
     /// Drives the turn over the WebSocket and always terminates the stream —
     /// either with the turn's events or with a delivered error. The return value
     /// is always `true`; it is kept for the caller's shape.
@@ -243,12 +286,23 @@ final class CloudRouteClient {
             wsTask = task
         }
 
+        // Register the live socket under this turn's request id so mid-turn
+        // `app_operation_result` sends ride the SAME socket the operation arrived on.
+        liveSocketsLock.lock()
+        liveSockets[turn.requestId] = wsTask
+        liveSocketsLock.unlock()
+
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so
         // without this a superseded turn leaves the socket open and the server
         // generating and streaming an answer the user abandoned (billed, and
         // the connection held until the server's own idle timeout).
-        defer { wsTask.cancel(with: .goingAway, reason: nil) }
+        defer {
+            wsTask.cancel(with: .goingAway, reason: nil)
+            liveSocketsLock.lock()
+            liveSockets.removeValue(forKey: turn.requestId)
+            liveSocketsLock.unlock()
+        }
 
         // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
         // plainly rather than leave a dead branch implying otherwise.
