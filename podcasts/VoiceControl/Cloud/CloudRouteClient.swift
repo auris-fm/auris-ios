@@ -167,6 +167,20 @@ final class CloudRouteClient {
             return closed
         }
 
+        /// Single synchronized bind/close transition: publishes the binding fields and returns
+        /// whether the bind was ACCEPTED. A lifetime that already closed rejects the bind under
+        /// the same lock that closed it — no publish-then-check window.
+        fileprivate func bind(requestId: String, identity: UUID, client: CloudRouteClient, wsTask: WebSocketTasking) -> Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            if closed { return false }
+            self.requestId = requestId
+            self.identity = identity
+            self.client = client
+            self.wsTask = wsTask
+            return true
+        }
+
         /// Idempotent: whichever of consumer close (`finishTurn`) or bounded cleanup wins, the
         /// cancel+retire runs exactly once.
         fileprivate func close() {
@@ -461,18 +475,11 @@ final class CloudRouteClient {
         // its own registration).
         let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
         if let lifetime {
-            // Deferred-close mode: the CALLER closes on consumer completion.
-            lifetime.requestId = turn.requestId
-            lifetime.identity = socketRegistration
-            lifetime.client = self
-            lifetime.wsTask = wsTask
-            // Close-before-bind: if the lifetime already closed (early cancel, slow credentials
-            // past the grace), retire THIS registration immediately — a later close() would
-            // no-op against the closed flag and leak the socket.
-            if lifetime.isClosed {
-                // Atomic bind acceptance: the lifetime closed before this transport registered.
-                // REJECT the bind — retire the registration AND cancel the task so no auth/turn
-                // frame is ever submitted on a socket whose lifetime is already settled.
+            // Deferred-close mode: the CALLER closes on consumer completion. Bind acceptance is
+            // ONE synchronized transition: a lifetime that closed before registration REJECTS the
+            // bind — retire the registration AND cancel the task so no auth/turn frame is ever
+            // submitted on a socket whose lifetime is already settled.
+            if !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: wsTask) {
                 retireSocket(requestId: turn.requestId, identity: socketRegistration)
                 wsTask.cancel(with: .goingAway, reason: nil)
                 continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
