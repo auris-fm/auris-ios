@@ -191,43 +191,73 @@ final class CloudRouteClient {
     // MARK: App-operation result transport (wire contract rev da327e624)
 
     /// Live turn sockets by `request_id`, so an `app_operation_result` can ride the SAME socket
-    /// its operation arrived on. Ownership: the registering turn removes its own entry when its
-    /// socket closes (the defer in `performWebSocket`), so a late send after turn end finds
-    /// nothing and reports undelivered instead of racing a closed task.
+    /// its operation arrived on.
+    ///
+    /// Ownership is PER REGISTRATION: each registration carries a unique identity, and a turn's
+    /// close retires ONLY its own registration. A `request_id` reused while a predecessor socket
+    /// is still open therefore cannot have its registration removed by the predecessor's finishing
+    /// defer — the successor keeps its own entry.
+    private struct SocketRegistration {
+        let task: WebSocketTasking
+        let identity = UUID()
+    }
     private let liveSocketsLock = NSLock()
-    private var liveSockets: [String: WebSocketTasking] = [:]
+    private var liveSockets: [String: SocketRegistration] = [:]
+
+    /// Registers a turn's socket. Returns the registration identity the turn retires with.
+    private func registerSocket(_ task: WebSocketTasking, requestId: String) -> UUID {
+        liveSocketsLock.lock()
+        defer { liveSocketsLock.unlock() }
+        let registration = SocketRegistration(task: task)
+        liveSockets[requestId] = registration
+        return registration.identity
+    }
+
+    /// Retires ONLY the registration made by this turn (identity-checked), so a duplicate live
+    /// `request_id` is never un-registered by a predecessor's close.
+    private func retireSocket(requestId: String, identity: UUID) {
+        liveSocketsLock.lock()
+        defer { liveSocketsLock.unlock() }
+        if liveSockets[requestId]?.identity == identity {
+            liveSockets.removeValue(forKey: requestId)
+        }
+    }
+
+    /// What a result send established — LOCAL SUBMISSION KNOWLEDGE ONLY. `submitted` means the
+    /// frame was handed to the socket without error; it is NOT a server receipt, and a send may
+    /// transmit and still lose the connection after. `undelivered` means no live socket existed
+    /// (or the send failed): the server's only honest reading is `unknown` — never a retry
+    /// signal, never a fabricated success.
+    enum AppOperationResultSendReport: Equatable {
+        case submitted
+        case undelivered
+    }
 
     /// Sends an `app_operation_result` on the turn socket that carried the operation.
-    ///
-    /// Returns `false` when no socket for `requestId` is live: the turn has already closed, and
-    /// the result is UNDELIVERED — the server's only honest reading of a lost result is
-    /// `unknown`, so callers must not retry-mutate on this answer; they surface it. This is not
-    /// an error path: delivery failure is an expected late-callback case, kept typed.
     @discardableResult
-    func sendOperationResult(_ frame: AppOperationResultFrame, requestId: String) async -> Bool {
+    func sendOperationResult(_ frame: AppOperationResultFrame, requestId: String) async -> AppOperationResultSendReport {
         liveSocketsLock.lock()
-        let socket = liveSockets[requestId]
+        let socket = liveSockets[requestId]?.task
         liveSocketsLock.unlock()
         guard let socket else {
             FileLog.shared.addMessage(
                 "[CloudRoute] app_operation_result undelivered: no live socket for turn \(requestId)"
             )
-            return false
+            return .undelivered
         }
         let json = frame.jsonFrame()
         do {
             let data = try JSONSerialization.data(withJSONObject: json)
-            guard let text = String(data: data, encoding: .utf8) else { return false }
+            guard let text = String(data: data, encoding: .utf8) else { return .undelivered }
             try await socket.send(.string(text))
-            return true
+            return .submitted
         } catch {
             // A send may TRANSMIT and then throw (the transport's own submission rule): the
-            // outcome of the operation is unchanged either way — only the server's knowledge is
-            // in question, which the undelivered report covers.
+            // report stays local-knowledge — the server's knowledge is in question either way.
             FileLog.shared.addMessage(
                 "[CloudRoute] app_operation_result send failed for turn \(requestId): \(error)"
             )
-            return false
+            return .undelivered
         }
     }
 
@@ -287,10 +317,10 @@ final class CloudRouteClient {
         }
 
         // Register the live socket under this turn's request id so mid-turn
-        // `app_operation_result` sends ride the SAME socket the operation arrived on.
-        liveSocketsLock.lock()
-        liveSockets[turn.requestId] = wsTask
-        liveSocketsLock.unlock()
+        // `app_operation_result` sends ride the SAME socket the operation arrived on. The
+        // registration identity is retired conditionally at close (a duplicate live id keeps
+        // its own registration).
+        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId)
 
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so
@@ -299,9 +329,7 @@ final class CloudRouteClient {
         // the connection held until the server's own idle timeout).
         defer {
             wsTask.cancel(with: .goingAway, reason: nil)
-            liveSocketsLock.lock()
-            liveSockets.removeValue(forKey: turn.requestId)
-            liveSocketsLock.unlock()
+            retireSocket(requestId: turn.requestId, identity: socketRegistration)
         }
 
         // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so

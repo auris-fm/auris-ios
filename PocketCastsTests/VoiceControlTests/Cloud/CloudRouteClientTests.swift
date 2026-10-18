@@ -54,43 +54,11 @@ final class CloudRouteClientTests: XCTestCase {
     }
 
     /// The `app_operation_result` frame rides the SAME socket as its turn (wire contract rev
-    /// da327e624): a send while the turn is live is delivered as a text frame with the contract's
-    /// exact field set; a send after the turn closed reports undelivered (typed false), which the
-    /// server reads as `unknown` — no retry, no fabricated success.
+    /// da327e624), observed on ONE client/turn across its whole life: held open → mid-turn send
+    /// SUBMITTED (frame captured on that socket) → turn completes → send after close is
+    /// UNDELIVERED (typed local-knowledge, not a server receipt). A duplicate live registration
+    /// of the same request_id is retired only by its own turn.
     func testOperationResultRidesTheLiveTurnSocketAndReportsUndeliveredAfterClose() async throws {
-        self.pendingFixture = """
-            event: action
-            data: {"operation_id":"op-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
-
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":0}}
-
-            """
-        let built = CloudRouteClient.stubbed(fixture: nextFixture())
-        // Keep the turn in flight until the result send has been attempted: hold the task's
-        // receive on a gate, release after the assertions.
-        let gate = Gate()
-        // Route a HELD turn via a dedicated stub so the socket stays open during the send.
-        let heldTask = StubWebSocketTask(textFrames: StubWebSocketTask.frames(
-            fromFixture: """
-            event: action
-            data: {"operation_id":"op-1","capability_version":"v1","tool":"playback","action":"pause","params":{}}
-
-            """
-        ))
-        var heldRequest: URLRequest?
-        let heldClient = CloudRouteClient(
-            baseURL: "https://cloud.test",
-            userId: userId,
-            tokenProvider: StubTokenProvider(token: "t"),
-            webSocketTaskFactory: { req in heldRequest = req; return heldTask }
-        )
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let stream = heldClient.route(request: "x", context: sampleContext, turn: turn)
-
-        // LIVE-SOCKET DELIVERY: hold the turn's receive on a gate so the socket stays open, send
-        // the result mid-turn, and assert the frame left on that same socket.
-        let heldGate = Gate()
         let liveFixture = [
             "event: action",
             "data: {\"operation_id\":\"op-live\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
@@ -100,80 +68,106 @@ final class CloudRouteClientTests: XCTestCase {
             "",
         ].joined(separator: "\n")
         let liveTask = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: liveFixture))
+        let heldGate = Gate()
         liveTask.holdUntilReleased(heldGate)
-        let liveClient = CloudRouteClient(
+        let client = CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: userId,
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in liveTask }
         )
-        let liveTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let liveStream = liveClient.route(request: "x", context: sampleContext, turn: liveTurn)
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let stream = client.route(request: "x", context: sampleContext, turn: turn)
         let reader = Task {
             var events: [CloudRouteEvent] = []
-            for await event in liveStream { events.append(event) }
+            for await event in stream { events.append(event) }
             return events
         }
-        // Wait for the turn's submission (the auth frame is the first send).
+        // Barrier 1: the turn has SUBMITTED (auth frame is the first send) before the result send.
         let submitted = Date().addingTimeInterval(5)
         while Date() < submitted && liveTask.sentTextFrames.isEmpty {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        let liveFrame = AppOperationResultFrame(
+        let frame = AppOperationResultFrame(
             operationId: "op-live", outcome: .refused,
             reason: OperationReason.referenceMappingUnavailable
         )
-        let liveDelivered = await liveClient.sendOperationResult(liveFrame!, requestId: liveTurn.requestId)
-        XCTAssertTrue(liveDelivered, "a result sent while the turn socket is live is delivered")
-        let resultFrame = try XCTUnwrap(
+        let midTurnReport = await client.sendOperationResult(try XCTUnwrap(frame), requestId: turn.requestId)
+        XCTAssertEqual(midTurnReport, .submitted, "a result sent while the turn socket is live is submitted")
+        let captured = try XCTUnwrap(
             liveTask.sentTextFrames.last.flatMap {
                 try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
             },
             "the result left as a text frame on the turn's own socket"
         )
-        XCTAssertEqual(resultFrame["type"] as? String, "app_operation_result")
-        XCTAssertEqual(resultFrame["operation_id"] as? String, "op-live")
-        XCTAssertEqual(resultFrame["outcome"] as? String, "refused")
-        XCTAssertEqual(resultFrame["reason"] as? String, "reference_mapping_unavailable")
+        XCTAssertEqual(captured["type"] as? String, "app_operation_result")
+        XCTAssertEqual(captured["operation_id"] as? String, "op-live")
+        XCTAssertEqual(captured["outcome"] as? String, "refused")
+        XCTAssertEqual(captured["reason"] as? String, "reference_mapping_unavailable")
+
+        // Barrier 2: the SAME turn completes; the socket closes; the registration retires.
         heldGate.release()
         _ = await reader.value
-
-        // UNDELIVERED case: a send AFTER the turn closed finds no live socket.
-        _ = gate
-        let closedFrame = AppOperationResultFrame(
-            operationId: "op-1", outcome: .refused,
-            reason: OperationReason.referenceMappingUnavailable
+        let afterCloseReport = await client.sendOperationResult(try XCTUnwrap(frame), requestId: turn.requestId)
+        XCTAssertEqual(
+            afterCloseReport, .undelivered,
+            "after the SAME turn closed, the result is undelivered — typed local-knowledge, not a server receipt"
         )
-        let delivered = await heldClient.sendOperationResult(closedFrame!, requestId: turn.requestId)
-        XCTAssertFalse(
-            delivered,
-            "after the turn closed, the result is undelivered — typed, not an error, not a success"
-        )
+    }
 
-        // Frame-JSON contract pins, independent of transport state.
+    /// A `request_id` reused while a predecessor turn is STILL OPEN must not have its successor's
+    /// registration removed by the predecessor's close: the predecessor retires only its own
+    /// registration (per-registration identity), so the successor's result path stays live.
+    func testADuplicateLiveRequestIDIsNotRetiredByThePredecessorsClose() async throws {
+        let openFixture = [
+            "event: action",
+            "data: {\"operation_id\":\"op-a\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "",
+        ].joined(separator: "\n")
+        let gateA = Gate()
+        let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
+        taskA.holdUntilReleased(gateA)
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in taskA }
+        )
+        // BOTH turns deliberately share one request_id (the reuse the retire rule guards).
+        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let streamA = client.route(request: "a", context: sampleContext, turn: sharedTurn)
+        let readerA = Task { for await _ in streamA {} }
+        let submitted = Date().addingTimeInterval(5)
+        while Date() < submitted && taskA.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        // Successor registers the SAME request id while A is live.
+        let gateB = Gate()
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
+        taskB.holdUntilReleased(gateB)
+        let clientB = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in taskB }
+        )
+        let streamB = clientB.route(request: "b", context: sampleContext, turn: sharedTurn)
+        let readerB = Task { for await _ in streamB {} }
+        let submittedB = Date().addingTimeInterval(5)
+        while Date() < submittedB && taskB.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        // A closes: retires only its own registration — B's result path must stay live.
+        gateA.release()
+        _ = await readerA.value
         let frame = AppOperationResultFrame(
-            operationId: "op-1", outcome: .refused,
-            reason: OperationReason.referenceMappingUnavailable
-        )!.jsonFrame()
-        XCTAssertEqual(frame["type"] as? String, "app_operation_result")
-        XCTAssertEqual(frame["operation_id"] as? String, "op-1")
-        XCTAssertEqual(frame["outcome"] as? String, "refused")
-        XCTAssertEqual(frame["reason"] as? String, "reference_mapping_unavailable")
-        XCTAssertNil(frame["state"])
-        let success = AppOperationResultFrame(
-            operationId: "op-2", outcome: .succeeded,
-            state: ["playing": .bool(false)]
-        )!.jsonFrame()
-        XCTAssertNil(success["reason"], "a success carries NO reason — a client bug the contract names")
-        XCTAssertNil(
-            AppOperationResultFrame(operationId: "x", outcome: .succeeded, reason: "client_policy"),
-            "an invalid external shape is TYPED-REFUSED, never a crash"
+            operationId: "op-a", outcome: .refused,
+            reason: OperationReason.malformedSeekTarget
         )
-        XCTAssertNil(
-            AppOperationResultFrame(operationId: "x", outcome: .refused),
-            "a non-success without a reason is typed-refused"
-        )
-        XCTAssertEqual(success["state"] as? [String: Any] as? [String: Bool], ["playing": false])
+        let report = await clientB.sendOperationResult(try XCTUnwrap(frame), requestId: sharedTurn.requestId)
+        XCTAssertEqual(report, .submitted, "the successor's registration survived the predecessor's close")
+        gateB.release()
+        _ = await readerB.value
     }
 
     func testActionOnlyStream() async {

@@ -27,7 +27,16 @@ struct AppOperationResultFrame: Equatable {
         state: [String: CloudRouteJSONValue]? = nil,
         detail: String? = nil
     ) {
+        // Owning-frame contract, enforced on every external shape:
+        // - operation_id is always present and NON-EMPTY (an empty id names nothing);
+        // - reason is non-empty on every non-success and absent on success;
+        // - state rides SUCCESS ONLY (a non-success has no resulting state to report);
+        // - detail is bounded prose (512 chars), never the gate.
+        guard !operationId.isEmpty else { return nil }
         guard (outcome == .succeeded) == (reason == nil) else { return nil }
+        if let reason, reason.isEmpty { return nil }
+        if outcome != .succeeded && state != nil { return nil }
+        if let detail, detail.count > 512 { return nil }
         self.operationId = operationId
         self.outcome = outcome
         self.reason = reason
