@@ -322,13 +322,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // late results can never ride a successor's socket.
         activeResultSocket = routed.resultSocket
         resultSendClient = client
+        // The consumer takes ownership of the turn socket here: the bounded never-consumed
+        // cleanup no longer applies, however long this turn's awaited effect/result takes.
+        routed.resultSocket.claimConsumerOwnership()
         turnLoop: for await event in routed.stream {
             // Superseded mid-stream: stop consuming so this turn cannot execute
             // late actions or overwrite the new turn's state. The stream's own
             // termination closes the transport. (`break turnLoop` — a bare
             // `break` inside the switch would only leave the switch.)
             if turnToken.isCancelled { break turnLoop }
-            client.lifecycleLogAppendForTesting("event:\(String(describing: event).prefix(24))")
             switch event {
             case let .connected(codec):
                 // The server names the codec for this turn's binary frames;
@@ -337,12 +339,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
             case let .action(tool, action, params, operationId, capabilityVersion):
-                client.lifecycleLogAppendForTesting("actionBegin")
                 await executeAction(
                     tool: tool, action: action, params: params,
                     operationId: operationId, capabilityVersion: capabilityVersion
                 )
-                client.lifecycleLogAppendForTesting("actionEnd")
                 routed.resultSocket.finishTurn()
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").
@@ -558,21 +558,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // AWAITED inside the turn loop: a fire-and-forget Task can be scheduled after the turn's
         // socket closed, turning a deliverable result into a spurious undelivered (measured).
         guard let client = resultSendClient else {
-            lastResultSendReportForTesting = nil
             return
         }
-        client.lifecycleLogAppendForTesting("report:\(result.outcome)")
         let report = await client.sendOperationResult(frame, via: socket)
-        lastResultSendReportForTesting = report
     }
 
-    /// Diagnostic for the through-transport controls: this turn's routed client.
-    var routedClientForTesting: CloudRouteClient? { resultSendClient }
     /// Diagnostic: this turn's bound result socket handle.
-    var resultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
-    /// Diagnostic for the through-transport controls: the last report the sink's report path got.
-    private(set) var lastResultSendReportForTesting: CloudRouteClient.AppOperationResultSendReport?
 
     /// Success carries the ACTUAL resulting state, typed per the owning family (wire contract §3):
     /// playback seeks state position and playing; identity-less successes cannot occur (the gate).

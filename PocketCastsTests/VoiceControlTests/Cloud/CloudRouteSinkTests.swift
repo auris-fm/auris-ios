@@ -506,12 +506,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             }
             if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         }
-        if resultFrame == nil {
-            let dbg = await MainActor.run {
-                sink.routedClientForTesting.map { "\($0.lifecycleLogForTesting) report=\(String(describing: sink.lastResultSendReportForTesting))" } ?? "no client"
-            }
-            XCTFail("dbg=\(dbg)")
-        }
         let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
         XCTAssertEqual(frame["operation_id"] as? String, "op-seek-1")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
@@ -544,14 +538,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 }.first { ($0["type"] as? String) == "app_operation_result" }
             }
             if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        }
-        let report = await MainActor.run { sink.lastResultSendReportForTesting }
-        if resultFrame == nil {
-            let dbg = await MainActor.run {
-                guard let c = sink.routedClientForTesting else { return "no client" }
-                return "\(c.lifecycleLogForTesting)"
-            }
-            XCTFail("diagnostic report=\(String(describing: report)) dbg=\(dbg)")
         }
         let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
         XCTAssertEqual(frame["operation_id"] as? String, "op-seek-2")

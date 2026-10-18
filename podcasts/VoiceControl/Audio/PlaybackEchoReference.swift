@@ -80,10 +80,30 @@ final class PlaybackEchoReference {
     }
 
     /// Appends emitted PCM, keeping only the retained window.
+    @discardableResult
     func append(_ frame: [Float]) {
-        guard !frame.isEmpty else { return }
+        appendReturningOrigin(frame)
+    }
+
+    /// Appends emitted PCM and returns the reference index the block LANDS at, in ONE
+    /// critical section (PR #49 review comment 4305981485 — the pair of findings this serves).
+    ///
+    /// The old producer pattern was `let rangeStart = streamIndex` followed by `append`: two
+    /// separate lock acquisitions, so a concurrent producer could append between them and the
+    /// recorded origin would describe where the block was *about* to land rather than where it
+    /// actually landed. Every later position mapped through that block is then shifted by the
+    /// interleaved length, and the shift is invisible — the anchor reads as a plausible index.
+    /// Reading the origin inside the same section as the append makes the pair atomic by
+    /// construction, which no call-site ordering can provide.
+    ///
+    /// - Returns: the reference-stream index of the block's FIRST sample, i.e. the total
+    ///   appended before this block. Empty frames append nothing and return the current index.
+    @discardableResult
+    func appendReturningOrigin(_ frame: [Float]) -> Int {
         lock.lock()
         defer { lock.unlock() }
+        let origin = totalAppended
+        guard !frame.isEmpty else { return origin }
         if samples.isEmpty {
             startTime = clock.now()
         }
@@ -98,6 +118,7 @@ final class PlaybackEchoReference {
             // its start time at a rate its samples were never at.
             startTime += Double(dropped) / sampleRate
         }
+        return origin
     }
 
     /// The retained emitted audio, oldest first.

@@ -132,7 +132,14 @@ final class CloudRouteClient {
         // AsyncStream surfaces as `onTermination` on `finish()` while the consumer may still
         // be awaiting a result send. Awaiting local submission before normal retirement is the
         // design; server receipt stays unclaimed.
-        socket.closeHook = { [weak lifetime] in lifetime?.close() }
+        // Strong: the socket OWNS its lifetime. The lifetime must outlive the producer task so
+        // the consumer's claim and close still reach the registration after producer completion.
+        socket.closeHook = { lifetime.close() }
+        socket.claimHook = { lifetime.claimOwnership() }
+        // Bounded cleanup armed at creation: if no consumer ever claims the turn, the
+        // registration is retired on a bound. claimOwnership() cancels this timer; a
+        // claimed consumer is NEVER closed by it, however long its work takes.
+        lifetime.closeAfterGrace()
         let stream = route(request: request, context: context, turn: turn, resultSocket: socket, lifetime: lifetime)
         return (stream, socket)
     }
@@ -149,6 +156,7 @@ final class CloudRouteClient {
         fileprivate var wsTask: WebSocketTasking?
         private let closeLock = NSLock()
         private var closed = false
+        private var consumerClaimed = false
         private var graceTask: Task<Void, Never>?
 
         /// Idempotent: whichever of consumer close (`finishTurn`) or bounded cleanup wins, the
@@ -159,22 +167,34 @@ final class CloudRouteClient {
             closed = true
             graceTask?.cancel()
             closeLock.unlock()
-            client?.lifecycleLogAppendForTesting("lifetimeClose")
             if let client, let requestId, let identity {
                 client.retireSocket(requestId: requestId, identity: identity)
             }
             wsTask?.cancel(with: .goingAway, reason: nil)
         }
 
-        /// Bounded cleanup for a turn whose consumer never claims the socket. A live consumer
-        /// that is draining buffered events finishes its awaited send well inside the grace.
+        /// The consumer takes ownership when it starts iterating the turn: from then on the
+        /// registration lives only as long as the consumer's own close (or stream cancellation).
+        /// A claimed consumer held past the grace deadline must NOT lose its registration.
+        fileprivate func claimOwnership() {
+            closeLock.lock()
+            consumerClaimed = true
+            graceTask?.cancel()
+            graceTask = nil
+            closeLock.unlock()
+        }
+
+        /// Bounded cleanup for a turn whose consumer never claimed the socket. A claimed
+        /// consumer is never closed by this timer, however long its work takes.
         fileprivate func closeAfterGrace(seconds: UInt64 = 2) {
             closeLock.lock()
-            guard !closed else { closeLock.unlock(); return }
+            if closed || consumerClaimed { closeLock.unlock(); return }
             closeLock.unlock()
             graceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-                self?.close()
+                do { try await Task.sleep(nanoseconds: seconds * 1_000_000_000) }
+                catch { return } // cancelled by claim/close: never close on a cancelled timer
+                guard let self, !Task.isCancelled else { return }
+                self.close()
             }
         }
     }
@@ -190,7 +210,7 @@ final class CloudRouteClient {
             let task = Task {
                 await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime)
             }
-            continuation.onTermination = { [weak lifetime] reason in
+            continuation.onTermination = { [lifetime] reason in
                 task.cancel()
                 // Consumer-side close ownership: `.cancelled` means the consumer abandoned (or
                 // the surrounding task was cancelled) — close immediately. `.finished` is
@@ -198,14 +218,11 @@ final class CloudRouteClient {
                 // is lawfully draining (an awaited result send lives there), so closing now was
                 // measured severing a deliverable send. Bound the cleanup instead: if the
                 // consumer never claims the socket via `finishTurn`, close after a grace period.
-                switch reason {
-                case .cancelled:
+                if case .cancelled = reason {
                     lifetime?.close()
-                case .finished:
-                    lifetime?.closeAfterGrace()
-                @unknown default:
-                    lifetime?.closeAfterGrace()
                 }
+                // `.finished` needs no action: the grace was armed at creation and is
+                // cancelled by claimOwnership(); a claimed consumer closes via finishTurn.
             }
         }
     }
@@ -296,7 +313,6 @@ final class CloudRouteClient {
         defer { liveSocketsLock.unlock() }
         let registration = SocketRegistration(task: task)
         liveSockets[requestId] = registration
-        lifecycleLogAppendForTesting("register:\(requestId.prefix(8))")
         resultSocket?.boundIdentity = registration.identity
         return registration.identity
     }
@@ -306,7 +322,6 @@ final class CloudRouteClient {
     private func retireSocket(requestId: String, identity: UUID) {
         liveSocketsLock.lock()
         defer { liveSocketsLock.unlock() }
-        lifecycleLogAppendForTesting("retire:\(requestId.prefix(8))")
         if liveSockets[requestId]?.identity == identity {
             liveSockets.removeValue(forKey: requestId)
         }
@@ -322,31 +337,8 @@ final class CloudRouteClient {
         case undelivered
     }
 
-    /// Diagnostic: ordered lifecycle events (register/retire/lookup/report) for the
-    /// through-transport controls. Lock-guarded so cross-thread ordering is trustworthy.
-    private var lifecycleLogLock = NSLock()
-    private var lifecycleLogStorage: [String] = []
-    var lifecycleLogForTesting: [String] {
-        lifecycleLogLock.lock()
-        defer { lifecycleLogLock.unlock() }
-        return lifecycleLogStorage
-    }
-    func lifecycleLogAppendForTesting(_ entry: String) {
-        lifecycleLogLock.lock()
-        lifecycleLogStorage.append(entry)
-        lifecycleLogLock.unlock()
-    }
 
-    /// Diagnostic: state captured at the last sendOperationResult lookup.
-    private(set) var lastSendLookupStateForTesting: (requestId: String, hasEntry: Bool, identityMatches: Bool, boundIdentityNil: Bool)?
 
-    /// Diagnostic for the through-transport controls: registration state for a handle.
-    func debugRegistrationState(for socket: AppOperationResultSocket) -> (hasEntry: Bool, identityMatches: Bool, boundIdentityNil: Bool) {
-        liveSocketsLock.lock()
-        defer { liveSocketsLock.unlock() }
-        let entry = liveSockets[socket.requestId]
-        return (entry != nil, entry?.identity == socket.boundIdentity, socket.boundIdentity == nil)
-    }
 
     /// Sends an `app_operation_result` on the turn socket that carried the operation — bound to
     /// the ORIGINAL registration via the handle, so a late result from a retired turn can never
@@ -356,8 +348,6 @@ final class CloudRouteClient {
         liveSocketsLock.lock()
         let entry = liveSockets[socket.requestId]
         let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
-        lastSendLookupStateForTesting = (socket.requestId, entry != nil, entry?.identity == socket.boundIdentity, socket.boundIdentity == nil)
-        lifecycleLogAppendForTesting("lookup:\(socket.requestId.prefix(8)) hit=\(entry != nil)")
         liveSocketsLock.unlock()
         guard let boundTask else {
             FileLog.shared.addMessage(

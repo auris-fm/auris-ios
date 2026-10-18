@@ -67,6 +67,7 @@ final class AppOperationResultSocket: @unchecked Sendable {
     /// Bound by the client at socket registration; read by the send path.
     var boundIdentity: UUID?
     private var _closeHook: (() -> Void)?
+    private var _claimHook: (() -> Void)?
 
     init(requestId: String) {
         self.requestId = requestId
@@ -74,6 +75,12 @@ final class AppOperationResultSocket: @unchecked Sendable {
 }
 
 extension AppOperationResultSocket {
+    /// Called by the sink when it starts consuming the turn: takes ownership of the socket's
+    /// lifetime, cancelling any bounded cleanup timer.
+    func claimConsumerOwnership() {
+        _claimHook?()
+    }
+
     /// Set by `routeWithResultSocket`; invoked by the sink when the turn's event loop has ended.
     /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
     /// never on producer completion, which `AsyncStream` signals via `onTermination` on
@@ -86,5 +93,10 @@ extension AppOperationResultSocket {
     var closeHook: (() -> Void)? {
         get { _closeHook }
         set { _closeHook = newValue }
+    }
+
+    var claimHook: (() -> Void)? {
+        get { _claimHook }
+        set { _claimHook = newValue }
     }
 }

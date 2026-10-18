@@ -190,6 +190,27 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// actually sent to the output. Set by the assembly; nil when nothing is listening.
     var emittedPCMReference: PlaybackEchoReference?
 
+    /// The shared handoff that records block ranges for every OTHER producer (earcon, episode
+    /// tap). The cloud producer appends its own audio directly (it is not on a real-time
+    /// callback), but it publishes its render positions THROUGH the handoff, so a position is
+    /// mapped against the block that contains it rather than assumed to equal one block
+    /// (PR #49 review comment 4305981528). Nil in builds/tests without a handoff, where the
+    /// player falls back to its own last-appended range.
+    weak var echoReferenceHandoff: EchoReferenceHandoff?
+    /// Test-visible view of the wiring above. The handoff is `weak` because the assembly owns it
+    /// for the session, so a case that wants to drive or drain it needs the same object rather
+    /// than a locally constructed stand-in — two mappings would each see part of the stream.
+    var echoReferenceHandoffForTesting: EchoReferenceHandoff? { echoReferenceHandoff }
+
+    /// This producer's clock identity within the shared reference. `nodeIncarnation` advances
+    /// every time the engine is rebuilt — each turn gets a fresh `AVAudioPlayerNode` whose frame
+    /// counter returns to zero — so a position from a retired node is refused by the handoff's
+    /// active-incarnation boundary instead of matching a previous turn's blocks.
+    private var nodeIncarnation: UInt64 = 0
+    var producerIdentityForTesting: EchoReferenceHandoff.ProducerIdentity {
+        EchoReferenceHandoff.ProducerIdentity(kind: .cloud, incarnation: nodeIncarnation)
+    }
+
     init() {
         runnerThread = Thread(target: self, selector: #selector(runnerLoop), object: nil)
         runnerThread?.name = "CloudAudioPlayer"
@@ -230,11 +251,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
             runnerLock.lock()
 
             // Wait for work or a request. `enqueue` sets `runnerRunning`, and
-            // `finish`/`cancel` set their own flags, so any of the three wakes
+            // `finish`/`cancel` set their own flags, so any of the three wake
             // this loop.
+            //
+            // Render catch-up (@spec contract, PR #49): when the buffer emptied but the node
+            // still has scheduled-unrendered audio, the engine stays alive and the wait is
+            // BOUNDED by the pending audio's duration, so the runner re-enters processFrames
+            // to re-check measured render progress — queue emptiness alone must not stop or
+            // rotate away still-pending audible work.
             while !runnerRunning && !drainRemaining && !stopRequested && !shutdownRequested {
-                runnerLock.wait()
+                runnerLock.wait(until: renderCatchUpWake ?? .distantFuture)
             }
+            renderCatchUpWake = nil
 
             if shutdownRequested {
                 shutdownRequested = false
@@ -308,10 +336,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
             }
             isPlaying = true
             paused = false
+            renderStopDeadline = nil
+        } else if isPlaying && pendingAudibleOrUnverified {
+            // Buffer drained below threshold, but scheduled audio may still be rendering (or the
+            // node has not reported progress yet). Pausing here rotated the incarnation away from
+            // ranges whose audio had not been heard — the defect under review. Stay playing; the
+            // drain check below owns the bounded catch-up stop.
         } else if isPlaying {
-            // Buffer drained below threshold — pause.
+            // Buffer drained below threshold with nothing audible pending — pause.
             paused = true
             isPlaying = false
+            renderStopDeadline = nil
             stopEngine()
             if let delegate = delegate {
                 DispatchQueue.main.async {
@@ -339,17 +374,77 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
 
         // Check if buffer drained.
+        //
+        // Queue emptiness is NOT proof that the scheduled audio finished rendering (@spec
+        // contract, PR #49 review round): stopping here discarded still-pending audible work
+        // and rotated the incarnation away from ranges whose audio had not been heard yet.
+        // Stop only when MEASURED render progress has caught up with what was scheduled;
+        // otherwise keep the engine alive and wake the runner when catch-up is due.
         if isBufferEmpty && !drainRemaining {
-            paused = true
-            isPlaying = false
-            stopEngine()
-            if let delegate = delegate {
-                DispatchQueue.main.async {
-                    delegate.audioPlayerDidPause()
+            // No engine: nothing can be pending.
+            if playerNode == nil {
+                paused = true
+                isPlaying = false
+                if let delegate = delegate {
+                    DispatchQueue.main.async {
+                        delegate.audioPlayerDidPause()
+                    }
                 }
+                return
+            }
+            // Measured progress, if the node reports one yet. Just after a scheduling burst the
+            // node has not rendered its first quantum, so an UNREADABLE position is UNKNOWN, not
+            // finished — treating it as finished is what discarded audible work. Unknown keeps
+            // the engine alive, bounded: if no reading appears within twice the scheduled span
+            // (a degraded engine), stop anyway rather than leak the engine forever.
+            let scheduled = nodeIncarnationFrames
+            let deadline = renderStopDeadline ?? Date().addingTimeInterval(
+                scheduled / negotiatedSampleRate * 2.0 + 1.0
+            )
+            if let position = renderPosition(of: playerNode!)?.renderedFrames,
+               position >= scheduled {
+                paused = true
+                isPlaying = false
+                renderStopDeadline = nil
+                stopEngine()
+                if let delegate = delegate {
+                    DispatchQueue.main.async {
+                        delegate.audioPlayerDidPause()
+                    }
+                }
+            } else if Date() >= deadline {
+                paused = true
+                isPlaying = false
+                renderStopDeadline = nil
+                stopEngine()
+                if let delegate = delegate {
+                    DispatchQueue.main.async {
+                        delegate.audioPlayerDidPause()
+                    }
+                }
+            } else {
+                renderStopDeadline = deadline
+                renderCatchUpWake = Date().addingTimeInterval(0.05)
             }
         }
     }
+
+    /// Whether audible work may still be in flight: either the node reports unrendered scheduled
+    /// audio, or it has not reported progress at all yet (unknown — conservatively pending).
+    private var pendingAudibleOrUnverified: Bool {
+        guard let node = playerNode else { return false }
+        guard let position = renderPosition(of: node)?.renderedFrames else {
+            return nodeIncarnationFrames > 0
+        }
+        return position < nodeIncarnationFrames
+    }
+
+    /// When the runner should wake to re-check render catch-up. Runner-thread only; nil means
+    /// wait for the next event.
+    private var renderCatchUpWake: Date?
+
+    /// Hard bound for keeping an engine alive on unverified pending audio. Runner-thread only.
+    private var renderStopDeadline: Date?
 
     private var isPlaying = false
     private var paused = false
@@ -447,35 +542,104 @@ final class CloudAudioPlayer: @unchecked Sendable {
         if let engine = engine {
             engine.stop()
             engine.reset()
-            engine.attachedNodes.forEach { engine.detach($0) }
+            // Detach only the nodes THIS class attached. `attachedNodes` also reports the
+            // mixer and the output node, which are the engine's own internal graph: detaching
+            // an internal node raises `!IsInternalNode(node)` once the engine has rendered
+            // through them (observed under offline rendering; a real-time-only teardown
+            // happened to tolerate it), so blanket-detaching every attached node crashes
+            // teardown instead of just releasing the graph.
+            if let playerNode {
+                engine.detach(playerNode)
+            }
         }
         playerNode = nil
         self.engine = nil
+        // The next start builds a NEW node whose frame count restarts at zero, so this
+        // producer's clock identity rotates here — at the point the counter actually resets —
+        // and the handoff refuses positions from the retired incarnation. The running block
+        // count returns to zero with it.
+        nodeIncarnation &+= 1
+        nodeIncarnationFrames = 0
+        echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
 
-    /// Appends this frame's audio to the emitted reference and records where the node had
-    /// reached, mapped into the reference's own timeline.
+    /// Appends this frame's audio to the emitted reference and publishes where the node has
+    /// rendered, mapped through the block that CONTAINS that position.
     ///
     /// Extracted from `playFrame` so the mapping is reachable by a test: the conversion is
     /// the part that can be wrong, and it was — the node reports a position in its own
     /// played audio, which restarts each turn while the reference keeps growing, so writing
     /// it through unmapped placed second-turn audio against the wrong origin.
     ///
-    /// This is the one producer that does not hand off, so it performs the same
-    /// range-plus-position conversion the handoff performs for the others.
+    /// This producer appends its samples directly (it runs on the runner thread, not a
+    /// real-time deadline callback), but it records its block ranges with the shared handoff
+    /// and submits positions THROUGH the handoff, like every other producer. The previous
+    /// version assumed the just-appended block was the one being rendered —
+    /// `progressInProducer ≡ one block` — which fails under queue lead: the append happens
+    /// BEFORE `scheduleBuffer`, and the node is still rendering an earlier block, so the anchor
+    /// ran ahead of the emitted audio and bleed could not correlate (PR #49 review comment
+    /// 4305981528). Mapping through the containing block is what the handoff already does for
+    /// the tap and earcon producers; using it here makes all three use one mapping.
     func appendToEmittedReference(_ pcmBuffer: AVAudioPCMBuffer, node: AVAudioPlayerNode) {
-        guard let reference = emittedPCMReference,
-              let channel = pcmBuffer.floatChannelData?[0] else { return }
+        guard let reference = emittedPCMReference else { return }
 
-        let frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
+        // The player's own buffers are Int16 (see `pcmFormat`), whose `floatChannelData` is nil.
+        // Read whichever channel layout the buffer carries: playFrame produces Int16, and the
+        // tap-shaped float buffers some callers pass are read as before. A nil on BOTH means the
+        // buffer carries no readable channel and there is nothing to append.
+        let frame: [Float]
+        if let channel = pcmBuffer.floatChannelData?[0] {
+            frame = Array(UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)))
+        } else if let channel = pcmBuffer.int16ChannelData?.pointee {
+            frame = UnsafeBufferPointer(start: channel, count: Int(pcmBuffer.frameLength)).map {
+                Float($0) / Float(Int16.max)
+            }
+        } else {
+            return
+        }
         let resampled = PlaybackResampler.toPipelineRate(frame, sourceRate: negotiatedSampleRate)
 
-        // Read the range BEFORE the append: this is where the block will land, and it is the
-        // only correct origin for a position inside it. An interleaved producer's appends sit
-        // between this producer's frames, so no per-producer offset maps them.
-        let rangeStart = reference.streamIndex
-        reference.append(resampled)
+        // Read the origin and append in ONE critical section: this is where the block lands,
+        // and it is the only correct origin for a position inside it. An interleaved producer's
+        // appends sit between this producer's frames, so no per-producer offset maps them — and
+        // reading `streamIndex` before a separate `append` let an interleaved append shift the
+        // recorded origin after the read (PR #49 review comment 4305981485).
+        let rangeStart = reference.appendReturningOrigin(resampled)
 
+        // Publishes the position through the shared handoff when one is wired, so it is matched
+        // against the appended block that contains it — including THIS producer's earlier
+        // blocks, which is what queue lead means. The producer's frame counter counts scheduled
+        // blocks (a node reports its render position as the end of everything it has taken), so
+        // the block's local range is [counter-before-append, counter-after) at the rate the
+        // counter runs at — the node's own rendering rate.
+        if let handoff = echoReferenceHandoff {
+            let producerFrames = Double(resampled.count)
+                / PlaybackEchoReference.pipelineSampleRate * negotiatedSampleRate
+            handoff.recordCloudBlockRange(
+                referenceStart: rangeStart,
+                referenceLength: resampled.count,
+                producer: producerIdentityForTesting,
+                producerStart: Double(nodeIncarnationFrames),
+                producerEnd: Double(nodeIncarnationFrames) + producerFrames,
+                sampleRate: negotiatedSampleRate
+            )
+            nodeIncarnationFrames += producerFrames
+            // Read the node's ACTUAL rendered position rather than assuming anything about it:
+            // scheduling a buffer does not mean it is audible, and what the filter needs is
+            // where the node has RENDERED. A node that reports no valid render time publishes
+            // nil — the position is unknown, and the handoff clears the anchor instead of
+            // guessing one.
+            handoff.submitRenderPosition(renderPosition(of: node), producer: producerIdentityForTesting)
+            return
+        }
+
+        // No handoff wired (unit-test hosts, degraded builds): the fallback maps through the
+        // blocks THIS producer recorded, so a position that has not reached any of them is
+        // refused rather than anchored at a guessed offset. Without a handoff there is no range
+        // store to consult, so this path keeps its own single-block view: correct only when this
+        // producer's blocks are contiguous, which is the assumption the queue-lead defect broke.
+        // Production always wires the handoff (VoiceControlAssembly), and the controls below pin
+        // the handoff path; this branch exists so a host without one cannot crash.
         let anchor = renderPosition(of: node).map { position -> PlaybackRenderAnchor in
             PlaybackRenderAnchor(
                 renderedFrames: Double(
@@ -496,6 +660,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
         reference.recordRenderPosition(anchor)
     }
+
+    /// This incarnation's running count of blocks handed to the node, in the producer's own
+    /// frames. It advances on every append and returns to zero when the node is rebuilt
+    /// (`stopEngine` rotates the incarnation), which is precisely the reset the incarnation
+    /// boundary exists to catch.
+    private var nodeIncarnationFrames: Double = 0
 
     private func playFrame(_ frame: CloudAudioFrame) {
         guard let node = playerNode, let engine = engine else { return }
@@ -525,10 +695,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Checked rather than assumed: this is called from the bounded drain loop above
         // (`for _ in 0..<framesToProcess { dequeueFrame(); playFrame(frame) }`), not from an
         // `AVAudioEngine` tap callback. The handoff's reason is a real-time deadline, and
-        // this path has none — the drain loop yields. So this is the one producer that
-        // legitimately does not hand off, and it is not an oversight. The producers that do
-        // run on a deadline callback (the episode tap and the earcon) both submit instead.
+        // this path has none — the drain loop yields. So its SAMPLES are appended here, while
+        // its render positions travel through the handoff's mapping like every other
+        // producer's. The producers that run on a deadline callback (the episode tap and the
+        // earcon) submit both halves instead.
         appendToEmittedReference(pcmBuffer, node: node)
+        // SCHEDULE AFTER the publish, deliberately (PR #49 review comment 4305981528): the
+        // position published above is the node's ACTUAL rendered state — it excludes this
+        // buffer if the node has not reached it yet. That is the honest anchor, and it is what
+        // keeps the reference aligned with what the microphone can hear rather than with what
+        // has merely been handed to the output node. A queue of scheduled-but-unrendered audio
+        // therefore shows up as an anchor BEHIND the appended stream, which the containing-block
+        // mapping resolves; appending first would have the reference claim audio before it is
+        // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
     }
@@ -541,10 +720,24 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// and the host instant places it on the shared monotonic basis. A node that is not
     /// playing reports no render time, which is a discontinuity rather than a position
     /// of zero.
-    private func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
+    ///
+    /// **A counter that has not started is not a position.** Measured on this host: an attached
+    /// node reports `lastRenderTime.sampleTime == 0` with BOTH validity flags false before its
+    /// first render, and `playerTime(forNodeTime:)` throws an `AVFAudio` exception for a node time
+    /// that carries neither a valid sample time nor a valid host time. So the pre-start reading is
+    /// refused here — as unknown — rather than converted, because zero is indistinguishable from
+    /// "rendered exactly one frame" once the first block is in flight, and mapping it would anchor
+    /// the first observation at the start of whichever block happens to cover zero.
+    ///
+    /// Internal but test-visible: the deterministic queue-lead control drives a real node whose
+    /// counter advances without hardware, and asserts THIS function's reading of it.
+    func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
         guard let lastRender = node.lastRenderTime,
-              lastRender.isSampleTimeValid,
-              let playerTime = node.playerTime(forNodeTime: lastRender),
+              lastRender.isSampleTimeValid || lastRender.isHostTimeValid else { return nil }
+        // The precondition above is what keeps the conversion safe: `playerTime(forNodeTime:)`
+        // raises rather than returning nil for an invalid node time, so an unvalidated call is a
+        // crash in the producer's own path.
+        guard let playerTime = node.playerTime(forNodeTime: lastRender),
               playerTime.isSampleTimeValid else { return nil }
         return PlaybackRenderAnchor(
             renderedFrames: Double(playerTime.sampleTime),
@@ -559,6 +752,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// asserts (rather than throwing) when a node graph is built without one,
     /// so the player checks before constructing any graph.
     static var audioOutputIsAvailable: Bool {
+        // A test host may supply an output by other means (an offline-rendering engine); the seam
+        // is consulted first so the decision point stays in one place. See the override's note for
+        // why this exists instead of node injection.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+           let override = audioOutputAvailabilityOverrideForTesting {
+            return override
+        }
         #if targetEnvironment(simulator)
         // The simulator's audio unit asserts if a node graph is built before an
         // output device exists, which is the case in the test host.
@@ -567,6 +767,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return true
         #endif
     }
+
+    /// Seam for the availability decision above, consulted only when the process reports itself as
+    /// running under a test configuration.
+    ///
+    /// Why this exists rather than a direct node injection: the queue-lead controls must drive the
+    /// producer's REAL path — `enqueue` → runner → `processFrames` → `playFrame` — because that is
+    /// where the node's position is read and published. A test that called `appendToEmittedReference`
+    /// with its own node would be supplying the very position the review comment disputes, so it
+    /// could not fail for the reason the fix cares about. What a test host genuinely cannot provide
+    /// is an output device, so the seam replaces exactly that judgement and nothing else: the graph
+    /// still comes from `startEngine`, the buffer still goes through `scheduleBuffer`, and the
+    /// position still comes from `renderPosition(of:)`. Production never sets it, so production
+    /// behaviour is unchanged.
+    static var audioOutputAvailabilityOverrideForTesting: Bool? = nil
 
     /// Mono Int16 PCM at `sampleRate` — the shape the negotiated `pcm_s16le`
     /// codec delivers.
@@ -598,6 +812,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Buffered frame count, for tests that assert the runner actually consumes
     /// frames (a player that buffers forever plays nothing).
     var bufferedFrameCountForTesting: Int { bufferedFrameCount }
+
+    /// The engine and node the runner thread built, or nil before a turn has started one.
+    ///
+    /// Exposed so a test host can render this graph offline and advance ITS OWN counter. The point
+    /// of the queue-lead controls is that the position comes from a real node rather than from the
+    /// test's arithmetic, and reading the player's own node is what preserves that: the alternative
+    /// — handing the player a node the test made — reintroduces the assumption under review.
+    /// Reading is racy by construction (the runner owns these), which is acceptable for a seam used
+    /// after the runner has been observed idle; production does not consult it.
+    var engineForTesting: AVAudioEngine? { engine }
+    var playerNodeForTesting: AVAudioPlayerNode? { playerNode }
 
     /// TEST-ONLY drain hold. Guarded by `runnerLock` — the single domain for every read and write,
     /// including the condition wait in `parkIfHeld`.

@@ -77,6 +77,11 @@ final class EchoReferenceHandoff {
     }
 
     private let reference: PlaybackEchoReference
+    /// The shared reference this handoff appends to. Exposed read-only so a producer that
+    /// appends its own samples directly (the cloud player, which is not on a real-time
+    /// deadline callback) can still publish ranges and positions through THIS handoff's
+    /// mapping rather than keeping a second one.
+    var emittedReference: PlaybackEchoReference { reference }
     private let capacity: Int
     private let queue: DispatchQueue
 
@@ -256,7 +261,58 @@ final class EchoReferenceHandoff {
     func rotateIncarnation(for kind: ProducerIdentity.Kind, to incarnation: UInt64) {
         lock.lock()
         activeIncarnations[kind] = incarnation
+        // Drop the retired clock's ranges with the clock. They are expressed in a frame count that
+        // restarts at zero for the new node, so leaving them would let a position from the NEW
+        // incarnation match a block of the OLD one — the numbers overlap by construction, and the
+        // identity comparison alone cannot separate them once both are current-looking. This is the
+        // producer's own retirement path (the cloud player reports its rotation from `stopEngine`),
+        // so clearing here is what makes "a retired node cannot reuse its ranges" reachable in
+        // production rather than only when a test constructs a stale observation.
+        appendedRanges.removeAll { $0.producer.kind == kind && $0.producer.incarnation != incarnation }
         lock.unlock()
+    }
+
+    /// Records the reference range and producer-local range of a block a producer has ALREADY
+    /// appended to the shared reference itself.
+    ///
+    /// The cloud player is the one producer whose samples do not travel this queue — it runs on
+    /// its own runner thread rather than a real-time deadline callback, so appending directly is
+    /// legitimate. But its RENDER POSITIONS still need the containing-block mapping, and that
+    /// mapping needs the ranges. Without this record, a position submitted through the handoff
+    /// finds no containing block and is refused (anchor cleared), which would make the cloud
+    /// producer's audio uncorrelatable whenever a handoff is wired — worse than the defect this
+    /// replaces. So the producer publishes its accepted range here, in the same critical section
+    /// as the retention trim, and positions map against it exactly like a handed-off block's.
+    ///
+    /// A retired incarnation for this kind is refused BEFORE recording, matching `deliver`'s
+    /// acceptance boundary: a block from a replaced clock must not extend the timeline the new
+    /// clock's positions will be matched against.
+    func recordCloudBlockRange(
+        referenceStart: Int,
+        referenceLength: Int,
+        producer: ProducerIdentity,
+        producerStart: Double,
+        producerEnd: Double,
+        sampleRate: Double
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let active = activeIncarnations[producer.kind], active != producer.incarnation {
+            return
+        }
+        appendedRanges.append(
+            AppendedRange(
+                producer: producer,
+                producerStart: producerStart,
+                producerEnd: producerEnd,
+                referenceStart: referenceStart,
+                referenceLength: referenceLength,
+                generation: generation
+            )
+        )
+        if appendedRanges.count > appendedRangeRetention {
+            appendedRanges.removeFirst(appendedRanges.count - appendedRangeRetention)
+        }
     }
 
     /// Submits a render position to be recorded on the reference, in order with the blocks.
@@ -300,10 +356,21 @@ final class EchoReferenceHandoff {
     /// reset are refused. The session's DROP DIAGNOSTICS go with it — the count and the
     /// logged-once latch — so `droppedBlockCount` means "this session" and a new session
     /// gets its own first notice rather than inheriting a latch that silences it.
+    ///
+    /// The recorded block RANGES go too. They are the lookup table a later render position is
+    /// matched against, and they carry the producer-local counters of the nodes that produced
+    /// them. A reset retires those nodes' clocks — that is what the generation bump means — so
+    /// their numbers describe audio the new session will never hear. Keeping them would let a
+    /// position from a restarted node match a range from before the reset and be anchored inside
+    /// retained samples that belong to the old session. The reference deliberately KEEPS its
+    /// audio across a reset (the acoustic tail still has to be filtered), which is exactly why
+    /// the ranges need their own retirement: the two bounds are independent, and only one of
+    /// them is cleared here.
     func reset() {
         lock.lock()
         generation += 1
         pending.removeAll()
+        appendedRanges.removeAll()
         droppedBlocks = 0
         dropLogged = false
         lock.unlock()
@@ -443,14 +510,14 @@ final class EchoReferenceHandoff {
             block.samples,
             sourceRate: block.sampleRate
         )
-        // Where this block will land in the reference, read before the append moves the
-        // stream on. This is the producer's own range within the shared timeline, and it is
-        // the only correct origin for a position inside the block: an interleaved producer's
-        // appends sit between this producer's blocks, so no single per-producer offset maps
-        // them and the append tail would be another producer's audio.
-        let rangeStart = reference.streamIndex
-
-        reference.append(resampled)
+        // Where this block lands in the reference, read IN THE SAME critical section as the
+        // append. This is the producer's own range within the shared timeline, and it is the
+        // only correct origin for a position inside the block: an interleaved producer's appends
+        // sit between this producer's blocks, so no single per-producer offset maps them and the
+        // append tail would be another producer's audio. A separate `streamIndex` read before a
+        // separate append let an interleaved append shift the origin after it was read
+        // (PR #49 review comment 4305981485).
+        let rangeStart = reference.appendReturningOrigin(resampled)
 
         // Keep this block's two clocks together so a later position can be matched to the
         // block that contains it. Recorded only when the producer reported its own range: a
