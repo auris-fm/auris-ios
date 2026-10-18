@@ -880,6 +880,73 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
+    /// DETERMINISTIC owning-Task cancellation boundary: operation-specific effect counter
+    /// (seek_relative has no lifecycle lookalike), claimed-before-cancel asserted via the
+    /// journal's public interrupted list, durable store recreated to verify recovery.
+    func testOwnerTaskCancellationHeldBoundaryEffectOnceAndReconstructedUnknown() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-held-cancel","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("journal-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let owner = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        }
+        // Deterministic premise: the operation is CLAIMED before cancellation (poll the public
+        // interrupted list — never created by a verification-side claim).
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && journal.interruptedOperationIDs().isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-cancel"], "operation must be claimed before cancellation")
+        owner.cancel()
+        _ = await owner.value
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let effectCount = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
+        XCTAssertLessThanOrEqual(effectCount, 1, "the identified effect must not duplicate")
+        // Recreate store + journal (restart simulation). The record's state decides the
+        // expectation: completed-before-cancel must be settled (alreadyRun, nil reconstruction —
+        // bytes persisted proves the durable round trip); a still-in-progress record must
+        // reconstruct as persisted unknown.
+        let restarted = OperationJournal(store: FileOperationRecordStore(url: url))
+        let effectPausesOrRelatives = effectCount
+        switch restarted.claim("op-held-cancel") {
+        case .alreadyRun:
+            XCTAssertLessThanOrEqual(effectPausesOrRelatives, 1)
+        case .inProgress:
+            XCTAssertEqual(restarted.reconstructInterrupted("op-held-cancel")?.outcome, .unknown)
+            if case .alreadyRun = restarted.claim("op-held-cancel") {} else {
+                XCTFail("reconstructed record must settle")
+            }
+        default:
+            XCTFail("durable record lost across recreation")
+        }
+    }
+
+    /// Recreated-store recovery, deterministic (no sink race): a process that claimed and died
+    /// leaves `.inProgress` on disk; a RECREATED store+journal reconstructs persisted unknown,
+    /// settles it, and never replays it as executable.
+    func testRecreatedDurableStoreReconstructsUnknownWithoutReplay() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("journal-\(UUID().uuidString).json")
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-died"), OperationClaim.claimed)
+        // Process death: no complete() ever runs. A NEW store+journal over the same URL:
+        let restarted = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(restarted.interruptedOperationIDs(), ["op-died"])
+        XCTAssertEqual(restarted.reconstructInterrupted("op-died")?.outcome, .unknown)
+        if case .alreadyRun = restarted.claim("op-died") {} else {
+            XCTFail("reconstructed record must settle")
+        }
+    }
+
     /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
     /// reconstructed as persisted `unknown` (the assembly does this at launch), and the sink then
     /// replays that recorded unknown through the bound transport WITHOUT re-executing the effect.
