@@ -419,11 +419,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                let fixture = self.pendingFixture
+                let fixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
                 self.pendingFixture = nil
                 let built = CloudRouteClient.stubbed(
-                    baseURL: cloudConfig.baseUrl, fixture: fixture ?? "", audioPayloads: []
+                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: []
                 )
+                self.capturedTask = built.task
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
@@ -474,6 +475,122 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.malformedSeekTarget)
+    }
+
+    /// THROUGH-TRANSPORT control: an IDENTIFIED unmapped reference seek must send the
+    /// `app_operation_result` frame on the turn's own captured socket, correlated to the
+    /// server-issued operation id, with the refused outcome and mapping-unavailable reason.
+    func testIdentifiedUnmappedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-seek-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "an unmapped reference time must not become a playback position"
+        )
+        let deadline = Date().addingTimeInterval(5)
+        var resultFrame: [String: Any]?
+        while Date() < deadline && resultFrame == nil {
+            resultFrame = await MainActor.run {
+                capturedTask?.sentTextFrames.compactMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+                }.first { ($0["type"] as? String) == "app_operation_result" }
+            }
+            if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        if resultFrame == nil {
+            let dbg = await MainActor.run {
+                sink.routedClientForTesting.map { "\($0.lifecycleLogForTesting) report=\(String(describing: sink.lastResultSendReportForTesting))" } ?? "no client"
+            }
+            XCTFail("dbg=\(dbg)")
+        }
+        let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
+        XCTAssertEqual(frame["operation_id"] as? String, "op-seek-1")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// THROUGH-TRANSPORT control: an identified MALFORMED seek (both target forms) sends the
+    /// refused frame with the malformed-target reason.
+    func testIdentifiedMalformedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-seek-2","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        XCTAssertEqual(consumer.consumed.first?.result.reason, OperationReason.malformedSeekTarget,
+                       "diagnostic: the refusal reached the consumer surface")
+
+        let deadline = Date().addingTimeInterval(5)
+        var resultFrame: [String: Any]?
+        while Date() < deadline && resultFrame == nil {
+            resultFrame = await MainActor.run {
+                capturedTask?.sentTextFrames.compactMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+                }.first { ($0["type"] as? String) == "app_operation_result" }
+            }
+            if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let report = await MainActor.run { sink.lastResultSendReportForTesting }
+        if resultFrame == nil {
+            let dbg = await MainActor.run {
+                guard let c = sink.routedClientForTesting else { return "no client" }
+                return "\(c.lifecycleLogForTesting)"
+            }
+            XCTFail("diagnostic report=\(String(describing: report)) dbg=\(dbg)")
+        }
+        let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
+        XCTAssertEqual(frame["operation_id"] as? String, "op-seek-2")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
+    }
+
+    /// LEGACY refusal case (explicit, per the runtime gate): an identity-less cloud mutation
+    /// does NOT execute and sends NO result frame (there is no server identity to tie it to);
+    /// the refusal is recorded for the executor surface.
+    func testLegacyIdentitylessMutationRefusesWithoutExecutingAndWithoutAResultFrame() async throws {
+        // LEGACY_ACTION marker: the fixture-boundary injector skips it, so this fixture stays a
+        // genuine identity-less cloud mutation — exactly what the strict runtime gate must refuse.
+        self.pendingFixture = """
+            LEGACY_ACTION
+
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "an identity-less cloud mutation must not execute (no legacy fallback)"
+        )
+        let refused = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refused.first?.result.reason, OperationReason.unsupportedOperation)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let sentFrames = await MainActor.run { capturedTask?.sentTextFrames ?? [] }
+        XCTAssertFalse(
+            sentFrames.contains { $0.contains("app_operation_result") },
+            "no result frame is sent for an operation the server never identified"
+        )
     }
 
     /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
@@ -598,6 +715,31 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     // MARK: - Helpers
 
+    /// Under the strict runtime gate (wire contract rev da327e624), valid cloud app operations
+    /// carry the server-issued `operation_id` and `capability_version`. Fixtures are upgraded AT
+    /// THE SOCKET BOUNDARY so every valid-operation case exercises the identified envelope; the
+    /// explicit legacy/malformed refusal cases opt out with the `LEGACY_ACTION` marker.
+    static func injectOperationIdentity(_ fixture: String) -> String {
+        guard fixture.contains("event: action"), !fixture.contains("LEGACY_ACTION") else { return fixture }
+        var counter = 0
+        var lines: [String] = []
+        for raw in fixture.split(separator: "\n", omittingEmptySubsequences: false) {
+            var line = String(raw)
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("data:"),
+               line.contains("\"tool\""), line.contains("playback"),
+               !line.contains("operation_id"),
+               let toolRange = line.range(of: "\"tool\"") {
+                counter += 1
+                line.replaceSubrange(
+                    toolRange,
+                    with: "\"operation_id\":\"op-fixture-\(counter)\",\"capability_version\":\"v1\",\"tool\""
+                )
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private func makeSink(
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil
@@ -607,7 +749,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             clientFactory: {
                 let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl,
-                    fixture: self.nextFixture()
+                    fixture: Self.injectOperationIdentity(self.nextFixture())
                 )
                 self.capturedTask = built.task
                 return built.client
@@ -1013,7 +1155,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                let fixture = self.nextTurnFixture ?? self.nextFixture()
+                let fixture = CloudRouteSinkTests.injectOperationIdentity(self.nextTurnFixture ?? self.nextFixture())
                 self.nextTurnFixture = nil
                 let audio = self.nextTurnAudioPayloads
                 self.nextTurnAudioPayloads = []

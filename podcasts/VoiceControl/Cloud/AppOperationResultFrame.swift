@@ -66,8 +66,25 @@ final class AppOperationResultSocket: @unchecked Sendable {
     let requestId: String
     /// Bound by the client at socket registration; read by the send path.
     var boundIdentity: UUID?
+    private var _closeHook: (() -> Void)?
 
     init(requestId: String) {
         self.requestId = requestId
+    }
+}
+
+extension AppOperationResultSocket {
+    /// Set by `routeWithResultSocket`; invoked by the sink when the turn's event loop has ended.
+    /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
+    /// never on producer completion, which `AsyncStream` signals via `onTermination` on
+    /// `finish()` while the consumer may still be mid-turn.
+    func finishTurn() {
+        closeHook?()
+        closeHook = nil
+    }
+
+    var closeHook: (() -> Void)? {
+        get { _closeHook }
+        set { _closeHook = newValue }
     }
 }
