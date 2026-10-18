@@ -470,7 +470,14 @@ final class CloudRouteClient {
             // past the grace), retire THIS registration immediately — a later close() would
             // no-op against the closed flag and leak the socket.
             if lifetime.isClosed {
+                // Atomic bind acceptance: the lifetime closed before this transport registered.
+                // REJECT the bind — retire the registration AND cancel the task so no auth/turn
+                // frame is ever submitted on a socket whose lifetime is already settled.
                 retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                wsTask.cancel(with: .goingAway, reason: nil)
+                continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                continuation.finish()
+                return true
             }
         }
 

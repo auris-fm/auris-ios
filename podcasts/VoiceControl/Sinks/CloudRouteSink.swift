@@ -325,10 +325,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
-        // ONE idempotent close covering EVERY exit after the awaited result work — normal end,
-        // break, early return, error — never per-action (a second action, audio, and done must
-        // all keep riding the same live socket).
-        defer { routed.resultSocket.finishTurn() }
         // Cancellation cleanup is bound to THIS turn's token — the cancellation state of the
         // task that owns consumer execution — not to AsyncStream termination (which never fires
         // on task cancellation). If the turn is cancelled while suspended in action or result
@@ -342,6 +338,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             resultSocket?.finishTurn()
+        }
+        // ONE turn-wide cleanup covering EVERY exit — normal end, break, early return, error,
+        // token cancellation: stop the watcher AND retire the registration idempotently. Never
+        // per-action: a second action, audio, and done must all keep riding the same live socket.
+        defer {
+            cancelWatch.cancel()
+            routed.resultSocket.finishTurn()
         }
         turnLoop: for await event in routed.stream {
             // Superseded mid-stream: stop consuming so this turn cannot execute
@@ -361,7 +364,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     tool: tool, action: action, params: params,
                     operationId: operationId, capabilityVersion: capabilityVersion
                 )
-                routed.resultSocket.finishTurn()
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").
             case .token:
@@ -420,8 +422,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
             }
         }
-        cancelWatch.cancel()
-
         if turnToken.isCancelled {
             // The superseding turn owns pause/restore and analytics. Superseded is not a
             // completion: the winner's turn decides the window, and reporting this one as

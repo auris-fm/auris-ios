@@ -673,13 +673,14 @@ extension CloudRouteClientTests {
         liveTask.holdUntilReleased(heldGate)
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
+        // PRODUCTION SHAPE: the consumer claims, installs the same single idempotent close the
+        // sink runs in a defer, and iterates. Cancelling the OWNING task makes AsyncStream's
+        // next() return nil, the loop exits, and the defer retires the registration — no
+        // test-only cancellation handler.
         let reader = Task {
-            await withTaskCancellationHandler {
-                routed.resultSocket.claimConsumerOwnership()
-                for await _ in stream {}
-            } onCancel: {
-                routed.resultSocket.finishTurn()
-            }
+            routed.resultSocket.claimConsumerOwnership()
+            defer { routed.resultSocket.finishTurn() }
+            for await _ in stream {}
         }
         // The consumer claims ownership (cancelling the creation-armed grace), then abandons
         // the turn: only the cancellation close can retire the registration.
