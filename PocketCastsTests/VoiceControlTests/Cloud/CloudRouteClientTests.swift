@@ -119,13 +119,11 @@ final class CloudRouteClientTests: XCTestCase {
         while Date() < submitted && liveTask.sentTextFrames.isEmpty {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        let liveDelivered = await liveClient.sendOperationResult(
-            AppOperationResultFrame(
-                operationId: "op-live", outcome: .refused,
-                reason: OperationReason.referenceMappingUnavailable
-            ),
-            requestId: liveTurn.requestId
+        let liveFrame = AppOperationResultFrame(
+            operationId: "op-live", outcome: .refused,
+            reason: OperationReason.referenceMappingUnavailable
         )
+        let liveDelivered = await liveClient.sendOperationResult(liveFrame!, requestId: liveTurn.requestId)
         XCTAssertTrue(liveDelivered, "a result sent while the turn socket is live is delivered")
         let resultFrame = try XCTUnwrap(
             liveTask.sentTextFrames.last.flatMap {
@@ -142,13 +140,11 @@ final class CloudRouteClientTests: XCTestCase {
 
         // UNDELIVERED case: a send AFTER the turn closed finds no live socket.
         _ = gate
-        let delivered = await heldClient.sendOperationResult(
-            AppOperationResultFrame(
-                operationId: "op-1", outcome: .refused,
-                reason: OperationReason.referenceMappingUnavailable
-            ),
-            requestId: turn.requestId
+        let closedFrame = AppOperationResultFrame(
+            operationId: "op-1", outcome: .refused,
+            reason: OperationReason.referenceMappingUnavailable
         )
+        let delivered = await heldClient.sendOperationResult(closedFrame!, requestId: turn.requestId)
         XCTAssertFalse(
             delivered,
             "after the turn closed, the result is undelivered — typed, not an error, not a success"
@@ -158,7 +154,7 @@ final class CloudRouteClientTests: XCTestCase {
         let frame = AppOperationResultFrame(
             operationId: "op-1", outcome: .refused,
             reason: OperationReason.referenceMappingUnavailable
-        ).jsonFrame()
+        )!.jsonFrame()
         XCTAssertEqual(frame["type"] as? String, "app_operation_result")
         XCTAssertEqual(frame["operation_id"] as? String, "op-1")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
@@ -167,8 +163,16 @@ final class CloudRouteClientTests: XCTestCase {
         let success = AppOperationResultFrame(
             operationId: "op-2", outcome: .succeeded,
             state: ["playing": .bool(false)]
-        ).jsonFrame()
+        )!.jsonFrame()
         XCTAssertNil(success["reason"], "a success carries NO reason — a client bug the contract names")
+        XCTAssertNil(
+            AppOperationResultFrame(operationId: "x", outcome: .succeeded, reason: "client_policy"),
+            "an invalid external shape is TYPED-REFUSED, never a crash"
+        )
+        XCTAssertNil(
+            AppOperationResultFrame(operationId: "x", outcome: .refused),
+            "a non-success without a reason is typed-refused"
+        )
         XCTAssertEqual(success["state"] as? [String: Any] as? [String: Bool], ["playing": false])
     }
 

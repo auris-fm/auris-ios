@@ -16,17 +16,18 @@ struct AppOperationResultFrame: Equatable {
     /// Bounded prose for humans. Never the gate.
     let detail: String?
 
-    init(
+    /// Typed refusal of an invalid external result shape — NEVER a crash: reason values and
+    /// outcomes can arrive from caller code assembling results from untrusted action frames, and
+    /// a precondition there would take the app down over a shape the contract merely refuses.
+    /// Nil = invalid: a success carrying a reason, or a non-success without one.
+    init?(
         operationId: String,
         outcome: OperationOutcome,
         reason: String? = nil,
         state: [String: CloudRouteJSONValue]? = nil,
         detail: String? = nil
     ) {
-        precondition(
-            (outcome == .succeeded) == (reason == nil),
-            "a success carries no reason; every non-success carries one"
-        )
+        guard (outcome == .succeeded) == (reason == nil) else { return nil }
         self.operationId = operationId
         self.outcome = outcome
         self.reason = reason
@@ -34,9 +35,7 @@ struct AppOperationResultFrame: Equatable {
         self.detail = detail
     }
 
-    /// The wire shape. Failure here is a programming error (non-string values), so it traps via
-    /// the force-unwrap of the encoding guard's alternative — JSONSerialization on dictionary
-    /// literals of strings/numbers cannot fail.
+    /// The wire shape. Values come from typed builders, so encoding cannot fail here.
     func jsonFrame() -> [String: Any] {
         var frame: [String: Any] = [
             "type": "app_operation_result",
