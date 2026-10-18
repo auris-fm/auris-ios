@@ -285,17 +285,34 @@ final class OperationJournal {
         defer { lock.unlock() }
         guard case .inProgress? = records[operationID] else { return nil }
         let result = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
-        records[operationID] = .finished(result)
-        if !store.save(records) { persistenceUnavailable = true }
+        // Persist FIRST, publish second: a failed settlement write must leave the durable
+        // record in progress (still interrupted, never executable) and NOT report settled
+        // unknown that disk never saw.
+        var updated = records
+        updated[operationID] = .finished(result)
+        guard store.save(updated) else {
+            persistenceUnavailable = true
+            return nil
+        }
+        records = updated
         return result
     }
 
     /// Records the outcome of a claimed operation.
-    func complete(_ operationID: String, result: OperationResult, storeOverride: OperationRecordStore? = nil) {
+    /// Settles a claimed operation. Returns false when the settlement could NOT be persisted:
+    /// the in-memory record then stays in progress and the caller must not report success.
+    @discardableResult
+    func complete(_ operationID: String, result: OperationResult) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        records[operationID] = .finished(result)
-        if !(storeOverride ?? store).save(records) { persistenceUnavailable = true }
+        var updated = records
+        updated[operationID] = .finished(result)
+        guard store.save(updated) else {
+            persistenceUnavailable = true
+            return false
+        }
+        records = updated
+        return true
     }
 
     /// The recorded result, or nil when the operation never ran or is still in progress.
@@ -344,35 +361,34 @@ final class FileOperationRecordStore: OperationRecordStore {
 
     func loadResult() -> OperationRecordLoadResult {
         guard let data = try? Data(contentsOf: url) else {
-            return .loaded([:]) // no file yet is genuinely empty history, not corruption
+            // Only a genuinely absent file is fresh history. Any other read failure
+            // (permissions, I/O) must fail closed, never silently become empty.
+            return FileManager.default.fileExists(atPath: url.path) ? .unreadable : .loaded([:])
         }
         guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
             return .unreadable // present but undecodable: fail closed, never silently empty
         }
-        return .loaded(decode(raw))
-    }
-
-    private func decode(_ raw: [String: [String: String]]) -> [String: StoredRecord] {
-
         var records: [String: StoredRecord] = [:]
         for (operationID, fields) in raw {
             switch fields["state"] {
             case "inProgress":
                 records[operationID] = .inProgress
             case "finished":
-                guard let outcome = fields["outcome"].flatMap(OperationOutcome.init(rawValue:)) else { continue }
+                guard let outcome = fields["outcome"].flatMap(OperationOutcome.init(rawValue:)) else {
+                    return .unreadable // a bogus outcome is corruption, not absence
+                }
                 records[operationID] = .finished(
                     outcome == .succeeded
                         ? .succeeded
                         : .nonSuccess(outcome, reason: fields["reason"] ?? OperationReason.interruptedInFlight)
                 )
             default:
-                // An unreadable record is treated as absent: the operation is not claimed, so
-                // it will execute rather than be reported with an outcome we made up.
-                continue
+                // An unknown state is semantically corrupt: the whole history is unreadable,
+                // so no id in it can silently re-claim and execute.
+                return .unreadable
             }
         }
-        return records
+        return .loaded(records)
     }
 
     @discardableResult

@@ -981,24 +981,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(effectCount, 0, "a failed claim write must prevent the effect entirely")
     }
 
-    /// A settlement write that fails after the effect ran: the operation must not be replayable —
-    /// it reports unknown and never re-executes.
+    /// A settlement write that fails after the effect ran, observed through the store's ACTUAL
+    /// write path: complete returns false, live memory stays unsettled (never replayable as
+    /// succeeded), and a recreated store still holds the in-progress id.
     func testFailingSettlementWriteNeverReplaysTheOperation() async {
+        let store = SettlementFailingOperationRecordStore()
+        let journal = OperationJournal(store: store)
+        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
+        XCTAssertFalse(journal.complete("op-settle-fail", result: .succeeded), "failed settlement must be reported")
+        // Live-memory observation: the record did NOT publish as finished-succeeded.
+        XCTAssertNil(journal.result(for: "op-settle-fail"), "failed settlement must not publish success")
+        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.inProgress, "unsettled operation stays in progress, never replayable")
+        // Recreated-store observation through the same write path:
+        let recreated = OperationJournal(store: SettlementFailingOperationRecordStore(backing: store))
+        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-settle-fail"], "durable record must still be in progress")
+        XCTAssertNil(recreated.reconstructInterrupted("op-settle-fail"), "failed recovery settlement must not report settled unknown")
+        XCTAssertEqual(recreated.claim("op-settle-fail"), OperationClaim.inProgress)
+    }
+
+    /// Semantically corrupt durable history (bogus outcome, unknown state) must fail closed:
+    /// no id in it may silently re-claim and execute.
+    func testSemanticallyCorruptHistoryIsUnreadableNeverExecutable() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
-        let real = FileOperationRecordStore(url: url)
-        let journal = OperationJournal(store: real)
-        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
-        // Simulate the effect having run, then persistence failing at settlement time:
-        journal.complete("op-settle-fail", result: .succeeded, storeOverride: AlwaysFailingOperationRecordStore())
-        // A fresh journal over the SAME durable store still holds the in-progress claim — the
-        // failed settlement must not have downgraded it to executable:
-        let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-settle-fail"])
-        XCTAssertEqual(recreated.reconstructInterrupted("op-settle-fail")?.outcome, .unknown)
-        if case .alreadyRun = recreated.claim("op-settle-fail") {} else {
-            XCTFail("must settle as unknown, never replay")
-        }
+        try? Data("{\"op-x\":{\"state\":\"weird\"},\"op-y\":{\"state\":\"finished\",\"outcome\":\"bogus\"}}".utf8)
+            .write(to: url)
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(journal.claim("op-x"), .persistenceUnavailable, "unknown-state history must refuse, not re-claim")
+        XCTAssertEqual(journal.claim("op-y"), .persistenceUnavailable, "bogus-outcome history must refuse, not re-claim")
     }
 
     /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
@@ -2402,4 +2412,21 @@ final class AlwaysFailingOperationRecordStore: OperationRecordStore {
     func load() -> [String: StoredRecord] { records }
     func save(_ records: [String: StoredRecord]) -> Bool { false }
     func loadResult() -> OperationRecordLoadResult { .loaded([:]) }
+}
+
+
+/// Store that persists in-progress claims but FAILS every finished-record write — settlement
+/// failure observed through the real write path. A `backing` store is consulted for loads so a
+/// recreated journal can observe the same durable state.
+final class SettlementFailingOperationRecordStore: OperationRecordStore {
+    private let backing: SettlementFailingOperationRecordStore?
+    private var records: [String: StoredRecord] = [:]
+    init(backing: SettlementFailingOperationRecordStore? = nil) { self.backing = backing }
+    func load() -> [String: StoredRecord] { backing?.records ?? records }
+    func save(_ records: [String: StoredRecord]) -> Bool {
+        guard !records.values.contains(where: { if case .finished = $0 { return true }; return false }) else { return false }
+        self.records = records
+        return true
+    }
+    func loadResult() -> OperationRecordLoadResult { .loaded(load()) }
 }

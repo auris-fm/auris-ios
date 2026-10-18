@@ -501,9 +501,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             recordSeekRejection(refusal)
             await reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion)
         } else {
-            let succeeded = OperationResult.succeeded
-            operationJournal?.complete(operationId, result: succeeded)
-            await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
+            // Persist the settlement FIRST and observe it: a failed settlement write must not
+            // be reported as success — the durable record is still in progress, so the honest
+            // answer is unknown, never a replayable success.
+            let settled = operationJournal?.complete(operationId, result: .succeeded) ?? true
+            if settled {
+                await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
+            } else {
+                let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
+                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+            }
         }
     }
 
