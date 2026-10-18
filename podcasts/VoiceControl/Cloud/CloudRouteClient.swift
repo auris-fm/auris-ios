@@ -159,6 +159,14 @@ final class CloudRouteClient {
         private var consumerClaimed = false
         private var graceTask: Task<Void, Never>?
 
+        /// True once the lifetime has closed. Read by the binding site so a socket that closed
+        /// before its transport registered retires immediately at bind time instead of leaking.
+        fileprivate var isClosed: Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            return closed
+        }
+
         /// Idempotent: whichever of consumer close (`finishTurn`) or bounded cleanup wins, the
         /// cancel+retire runs exactly once.
         fileprivate func close() {
@@ -184,6 +192,21 @@ final class CloudRouteClient {
             closeLock.unlock()
         }
 
+        /// Deadline close that re-checks claimed/closed UNDER the lock, so a consumer claiming
+        /// concurrently with the deadline is never severed by the timer (blocker: the old timer
+        /// checked outside the lock and closed after a concurrent claim).
+        fileprivate func closeIfUnclaimed() {
+            closeLock.lock()
+            if closed || consumerClaimed { closeLock.unlock(); return }
+            closed = true
+            graceTask?.cancel()
+            closeLock.unlock()
+            if let client, let requestId, let identity {
+                client.retireSocket(requestId: requestId, identity: identity)
+            }
+            wsTask?.cancel(with: .goingAway, reason: nil)
+        }
+
         /// Bounded cleanup for a turn whose consumer never claimed the socket. A claimed
         /// consumer is never closed by this timer, however long its work takes.
         fileprivate func closeAfterGrace(seconds: UInt64 = 2) {
@@ -194,7 +217,7 @@ final class CloudRouteClient {
                 do { try await Task.sleep(nanoseconds: seconds * 1_000_000_000) }
                 catch { return } // cancelled by claim/close: never close on a cancelled timer
                 guard let self, !Task.isCancelled else { return }
-                self.close()
+                self.closeIfUnclaimed()
             }
         }
     }
@@ -443,6 +466,12 @@ final class CloudRouteClient {
             lifetime.identity = socketRegistration
             lifetime.client = self
             lifetime.wsTask = wsTask
+            // Close-before-bind: if the lifetime already closed (early cancel, slow credentials
+            // past the grace), retire THIS registration immediately — a later close() would
+            // no-op against the closed flag and leak the socket.
+            if lifetime.isClosed {
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+            }
         }
 
         // Close the socket whenever this call returns, on every path. The

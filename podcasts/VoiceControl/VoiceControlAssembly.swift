@@ -176,7 +176,15 @@ class VoiceControlAssembly {
                         url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                             .appendingPathComponent("cloud-operation-journal.json")
                     )
-                    return OperationJournal(store: store)
+                    let journal = OperationJournal(store: store)
+                    // PRODUCTION RESTART RECOVERY: any operation a previous process left in
+                    // progress is reconstructed as typed `unknown` (persisted, never re-executed)
+                    // at assembly time, so the first claim of that id after restart replays the
+                    // recorded unknown rather than re-running the effect.
+                    for operationID in journal.interruptedOperationIDs() {
+                        journal.reconstructInterrupted(operationID)
+                    }
+                    return journal
                 }(),
                 conversationManager: conversationManager,
                 conversationSelectionProvider: { [weak gracePeriodSignal] in

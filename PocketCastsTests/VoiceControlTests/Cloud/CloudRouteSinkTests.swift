@@ -415,7 +415,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
@@ -434,6 +434,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
             operationResultConsumer: consumer,
+            operationJournal: operationJournal,
             conversationManager: conversationManager ?? testConversationManager()
         )
     }
@@ -837,6 +838,57 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             "the coming-soon refusal was reported as a completed cloud turn"
         )
     }
+
+    /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
+    /// reconstructed as persisted `unknown` (the assembly does this at launch), and the sink then
+    /// replays that recorded unknown through the bound transport WITHOUT re-executing the effect.
+    func testRestartReconstructedUnknownReplaysThroughTransportWithoutReExecution() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-restart","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":30}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // A previous process died after claiming and before completing.
+        let store = InMemoryOperationRecordStore()
+        let journal = OperationJournal(store: store)
+        XCTAssertEqual(journal.claim("op-restart"), OperationClaim.claimed)
+        // The restart recovery path the assembly runs at launch:
+        let reconstructed = journal.reconstructInterrupted("op-restart")
+        XCTAssertEqual(reconstructed?.outcome, .unknown)
+
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        // The effect must NOT have run: no seek reached playback.
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "a reconstructed-unknown operation must never re-execute its effect"
+        )
+        // The recorded unknown replays through the bound transport.
+        let deadline = Date().addingTimeInterval(5)
+        var resultFrame: [String: Any]?
+        while Date() < deadline && resultFrame == nil {
+            resultFrame = await MainActor.run {
+                capturedTask?.sentTextFrames.compactMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+                }.first { ($0["type"] as? String) == "app_operation_result" }
+            }
+            if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let frame = try XCTUnwrap(resultFrame, "the reconstructed unknown must ride the turn socket")
+        XCTAssertEqual(frame["operation_id"] as? String, "op-restart")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.interruptedInFlight)
+        // And the record stays settled: a further claim replays, not re-claims.
+        if case .alreadyRun = journal.claim("op-restart") {} else {
+            XCTFail("the reconstructed record must be settled")
+        }
+    }
+
 }
 
 

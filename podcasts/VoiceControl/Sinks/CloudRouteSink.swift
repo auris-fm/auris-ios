@@ -325,6 +325,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
+        // ONE idempotent close covering EVERY exit after the awaited result work — normal end,
+        // break, early return, error — never per-action (a second action, audio, and done must
+        // all keep riding the same live socket).
+        defer { routed.resultSocket.finishTurn() }
         // Cancellation cleanup is bound to THIS turn's token — the cancellation state of the
         // task that owns consumer execution — not to AsyncStream termination (which never fires
         // on task cancellation). If the turn is cancelled while suspended in action or result
