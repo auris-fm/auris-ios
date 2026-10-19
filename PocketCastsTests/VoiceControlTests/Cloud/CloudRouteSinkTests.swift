@@ -427,7 +427,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = []) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeDuration: (() -> TimeInterval)? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -475,6 +475,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
+            episodeDuration: episodeDuration,
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
             operationResultConsumer: consumer,
@@ -705,6 +706,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
         let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success carries A's SETTLED state")
         XCTAssertEqual(replayState["position_seconds"] as? Int, 77, "A's SETTLED position S, not the live drift T")
+        // SAME CAPTURED ENVELOPE: the first send, the settled record, and the fresh-store replay
+        // all carry ONE captured state — no second live snapshot at send or replay time.
+        XCTAssertEqual(firstState["position_seconds"] as? Int, replayState["position_seconds"] as? Int,
+                       "the first send is the settled envelope, not a second snapshot")
+        XCTAssertEqual(firstState["playing"] as? Bool, replayState["playing"] as? Bool,
+                       "playing agrees between settlement and replay")
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1, "the effect never runs twice")
     }
 
@@ -746,7 +753,40 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio
+        /// REAL PRECONDITION (review 5295572f): with NO current episode (zero duration), the
+    /// system seek wrapper early-returns and its silent response is NOT a success — the honest
+    /// durable outcome is a refusal, and no seek is attempted.
+    func testSeekToWithNoCurrentEpisodeIsRefusedStalePrecondition() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-seek-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("seek-noep-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            operationJournal: journal,
+            episodeDuration: { 0 }
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let frame = try await awaitResultFrame(operationId: "op-seek-noep")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0,
+                       "no seek is attempted without an episode")
+        if case .alreadyRun(let recorded) = journal.claim("op-seek-noep") {
+            XCTAssertEqual(recorded.outcome, .refused)
+        } else {
+            XCTFail("the refusal was not durably settled")
+        }
+    }
+
+    /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio
     /// releases the host playback only after the ACTUAL stop the cancel requested — the resume
     /// never overlaps the un-stopped cloud output.
     func testErrorTerminalReleasesHostPlaybackOnlyAfterTheConfirmedStop() async throws {

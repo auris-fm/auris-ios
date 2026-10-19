@@ -130,15 +130,105 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     /// Waits (bounded) for the ACTUAL stop of `epoch` — the identity-bound completion a caller
-    /// needs before releasing a grace hold or resuming host playback. Returns false only when
-    /// the bound expired without confirmation.
+    /// needs before releasing a grace hold or resuming host playback. Implemented as an
+    /// identity WAITER resumed by the confirmation itself (no polling loop on the caller's
+    /// actor, which would starve the main-queue confirmation); raced against a bounded timer.
+    /// Cancellation is honored: a cancelled waiter resumes false and is removed, never left
+    /// parked or looping.
     func awaitActualStop(after epoch: Int, timeout: TimeInterval = 2) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if confirmedStopEpoch() >= epoch { return true }
-            try? await Task.sleep(nanoseconds: 10_000_000)
+        if confirmedStopEpoch() >= epoch { return true }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await self.waitAsStopWaiter(epoch) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                if Task.isCancelled { return false }
+                return await self.confirmStopForBoundWaiter(epoch)
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
         }
-        return confirmedStopEpoch() >= epoch
+    }
+
+    /// Suspend until `recordConfirmedStop` resumes this identity's waiter (or the task is
+    /// cancelled — then clean up and return false).
+    private func waitAsStopWaiter(_ epoch: Int) async -> Bool {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                registerStopWaiter(epoch: epoch, continuation: continuation)
+            }
+        } onCancel: {
+            self.cancelStopWaiter(epoch: epoch)
+        }
+    }
+
+    // Waiter registry, guarded by the buffer lock. Keyed by identity; a confirmation resumes
+    // every waiter whose identity it satisfies.
+    private struct StopWaiter {
+        let epoch: Int
+        var continuation: CheckedContinuation<Bool, Never>?
+        var cancelled = false
+    }
+    private var stopWaiters: [Int: StopWaiter] = [:]
+
+    private func registerStopWaiter(epoch: Int, continuation: CheckedContinuation<Bool, Never>) {
+        bufferLock.lock()
+        if confirmedSatisfiedLocked(epoch) {
+            bufferLock.unlock()
+            continuation.resume(returning: true)
+            return
+        }
+        var waiter = stopWaiters[epoch] ?? StopWaiter(epoch: epoch, continuation: nil)
+        if waiter.cancelled {
+            bufferLock.unlock()
+            continuation.resume(returning: false)
+            return
+        }
+        waiter.continuation = continuation
+        stopWaiters[epoch] = waiter
+        bufferLock.unlock()
+    }
+
+    private func confirmedSatisfiedLocked(_ epoch: Int) -> Bool {
+        lastConfirmedStopEpoch >= epoch
+    }
+
+    private func cancelStopWaiter(epoch: Int) {
+        bufferLock.lock()
+        guard var waiter = stopWaiters[epoch] else {
+            bufferLock.unlock()
+            return
+        }
+        guard let continuation = waiter.continuation else {
+            // Not yet registered (cancellation raced registration): mark cancelled so a late
+            // registration resumes immediately instead of parking forever.
+            waiter.cancelled = true
+            stopWaiters[epoch] = waiter
+            bufferLock.unlock()
+            return
+        }
+        waiter.continuation = nil
+        stopWaiters[epoch] = waiter
+        bufferLock.unlock()
+        continuation.resume(returning: false)
+    }
+
+    private func resumeStopWaiters(upTo epoch: Int) {
+        bufferLock.lock()
+        var resumed: [CheckedContinuation<Bool, Never>] = []
+        for (identity, var waiter) in stopWaiters where identity <= epoch {
+            if let continuation = waiter.continuation {
+                resumed.append(continuation)
+                waiter.continuation = nil
+                stopWaiters[identity] = waiter
+            }
+        }
+        bufferLock.unlock()
+        for continuation in resumed { continuation.resume(returning: true) }
+    }
+
+    private func confirmStopForBoundWaiter(_ epoch: Int) async -> Bool {
+        confirmedStopEpoch() >= epoch
     }
 
     // MARK: - Internal
@@ -917,18 +1007,24 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Drain
 
     private func drainAndStop(claimedEpoch: Int) {
-        // `claimedEpoch` was snapshotted at the CLAIM, under the lock, in the drainRemaining
-        // branch. Re-reading the identity here would be after the claim boundary.
         parkIfHeld()
         // Play any remaining frames.
         while true {
             guard let frame = dequeueFrame() else { break }
             playFrame(frame)
         }
+        // The stop's IDENTITY is what the runner owns AT THE STOP, not the drain claim: a cancel
+        // that landed while this drain was parked/playing bumped the identity and shed the
+        // frames — the physical stop below IS that cancel's stop, so confirming the stale claim
+        // would either strand the cancel's awaiter or (worse) promote a delayed A stop onto B's
+        // unperformed identity. Read under runnerLock (the writers' domain).
+        runnerLock.lock()
+        let stoppedEpoch = drainEpoch
+        runnerLock.unlock()
         stopEngine()
         isPlaying = false
         paused = false
-        notifyDidStop(epoch: claimedEpoch)
+        notifyDidStop(epoch: stoppedEpoch)
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
@@ -951,16 +1047,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
-    /// CONFIRMATION: the stop for `epoch` completed — the engine stopped and the stop
-    /// notification was issued. A releaser awaiting an identity-bound stop completion keys off
-    /// this, so release ordering tracks the REAL stop, not the request. When a cancel bumped the
-    /// epoch after this stop path claimed its identity, the SAME physical stop was caused by
-    /// that cancel (the enqueued frames were shed), so the current epoch is confirmed with it —
-    /// a releaser must not time out waiting for a second stop that will never come.
+    /// CONFIRMATION: the stop for `epoch` completed — the engine actually stopped (output
+    /// quiescent) and the stop notification was issued. EXACTLY this identity is confirmed,
+    /// never a later one: a delayed stop of A must not promote a cancel-bumped B identity that
+    /// was never physically stopped (review 5295572f).
     private func recordConfirmedStop(_ epoch: Int) {
         bufferLock.lock()
-        lastConfirmedStopEpoch = max(epoch, drainEpoch)
+        // Monotonic over CONFIRMED identities only: a delayed stop of A (older identity) must
+        // not regress the record — but it also must never PROMOTE an identity that was not
+        // physically stopped (the banned `max(epoch, drainEpoch)` folded the REQUESTED identity;
+        // this max folds only identities that actually fired).
+        lastConfirmedStopEpoch = max(lastConfirmedStopEpoch, epoch)
         bufferLock.unlock()
+        resumeStopWaiters(upTo: epoch)
     }
 
 

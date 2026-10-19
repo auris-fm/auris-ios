@@ -130,6 +130,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Audio player for cloud-delivered speech.
     private let audioPlayer: CloudAudioPlayer
     private let playbackManager: PlaybackManager?
+    /// Injectable episode-duration source (test seam); nil falls back to the manager.
+    private let episodeDuration: (() -> TimeInterval)?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -200,6 +202,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
+        episodeDuration: (() -> TimeInterval)? = nil,
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: VoiceAnalytics? = nil,
         rendersStructuredResults: Bool = false,
@@ -231,6 +234,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
+        self.episodeDuration = episodeDuration
         self.cloudPlaybackContextState = cloudPlaybackContextState
         self.analytics = analytics
         self.rendersStructuredResults = rendersStructuredResults
@@ -497,9 +501,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // releases via the deferral record — never an unconfirmed resume.
                     let stopEpoch = audioPlayer.cancel()
                     if await audioPlayer.awaitActualStop(after: stopEpoch) {
+                        // REVALIDATE after the suspension: a successor may have started while
+                        // this turn was suspended on the stop wait. Release only if the captured
+                        // turn is still this turn's own.
+                        guard activeTurn == nil || activeTurn === turnToken else { break turnLoop }
                         restoreTransientAudioState()
                     } else {
-                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+                        // Defer to the confirmed stop — but NEVER overwrite a successor's existing
+                        // deferral: B started while A was suspended, so the release belongs to B.
+                        if restoreHeldForPlayerDrain == nil {
+                            restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+                        }
                     }
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                     // A server-supplied message passes through (localising it is the
@@ -546,9 +558,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // audio this turn enqueued.
         let stopEpoch = audioPlayer.cancel()
         if await audioPlayer.awaitActualStop(after: stopEpoch) {
-            restoreTransientAudioState()
+            // REVALIDATE after the suspension (review 5295572f): a successor B can start while
+            // this turn was suspended on the stop wait; release ONLY the own token. A successor
+            // still gets its own truncation release (the earlyClose return below stands).
+            if activeTurn == nil || activeTurn === turnToken {
+                restoreTransientAudioState()
+            }
         } else {
-            restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+            if restoreHeldForPlayerDrain == nil {
+                restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+            }
         }
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
@@ -688,12 +707,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // answer is unknown, never a replayable success.
             // Settle with the state CAPTURED AT SETTLEMENT: replay must answer with what was
             // true when THIS operation finished, never a later reading.
-            let settled = operationJournal?.complete(
-                operationId,
-                result: .succeeded(state: currentPlaybackState())
-            ) ?? true
+            let settledResult = OperationResult.succeeded(state: currentPlaybackState())
+            let settled = operationJournal?.complete(operationId, result: settledResult) ?? true
             if settled {
-                await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
+                // The FIRST send is the SAME CAPTURED envelope that was settled — not a second
+                // live snapshot (review 5295572f): between settlement and send the state could
+                // move, and then the wire answer and the durable record would disagree.
+                await reportFrame(
+                    AppOperationResultFrame(
+                        operationId: operationId, outcome: .succeeded, state: settledResult.state
+                    ),
+                    capabilityVersion: capabilityVersion
+                )
             } else {
                 let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
                 await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
@@ -713,6 +738,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             let referenceMs = params["reference_position_ms"]?.int64Value
             switch (sinkSeconds, referenceMs) {
             case (let seconds?, nil):
+                // REAL PRECONDITION: no current episode (zero duration) makes the system seek
+                // wrapper a silent no-op — that is NOT a success. Refuse durably instead.
+                if let precondition = currentEpisodePrecondition { return precondition }
                 seekToSinkSeconds(seconds)
                 return nil
             case (nil, let reference?):
@@ -730,6 +758,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let referenceMs = params["reference_position_ms"]?.int64Value else {
                 return .nonSuccess(.refused, reason: OperationReason.malformedSeekTarget)
             }
+            if let precondition = currentEpisodePrecondition { return precondition }
             capturePreActionPosition(referenceMs: referenceMs)
             return seekToReference(referenceMs)
         case "stop_quote":
@@ -738,6 +767,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let restoreMs = preQuotePositionMs else {
                 return .nonSuccess(.refused, reason: OperationReason.stalePrecondition)
             }
+            if let precondition = currentEpisodePrecondition { return precondition }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
             return nil
@@ -745,6 +775,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Per the recovery contract (PR 59, cloud-seek-relative):
             // Capture previous position so "go back to where I was" works
             // after a relative seek.
+            if let precondition = currentEpisodePrecondition { return precondition }
             capturePreActionPositionForRelativeSeek()
             // Zero delta is treated as "no stated amount" — the sink
             // applies its interval in the request's direction.
@@ -925,6 +956,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// The most recent malformed-seek rejection, consumed by the executor.
     @MainActor private(set) var lastSeekRejection: OperationResult?
+
+    /// REAL PRECONDITION (review 5295572f): the system seek wrapper early-returns when no
+    /// episode is current, and its silent response would dress "nothing happened" as success.
+    /// A position-changing operation REQUIRES a current episode with a duration; without one the
+    /// honest durable outcome is refused (stale precondition of current state), not a success.
+    private var currentEpisodePrecondition: OperationResult? {
+        // The injected closure is the test seam (same pattern as playbackPositionMs); the
+        // manager is production. A PRESENT source reporting zero duration is the evidence:
+        // the system seek wrapper early-returns on no episode, and its silent wrapper would
+        // otherwise dress "nothing happened" as success.
+        let duration = episodeDuration?() ?? playbackManager?.duration()
+        if let duration, duration <= 0 {
+            return OperationResult.nonSuccess(.refused, reason: OperationReason.stalePrecondition)
+        }
+        return nil
+    }
 
     private func seekToReference(_ referenceMs: Int64) -> OperationResult? {
         let referenceSeconds = Double(referenceMs) / 1000.0
