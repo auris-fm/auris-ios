@@ -175,7 +175,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// associated with the predecessor's token (review 14f66b72): the superseded turn's cleanup
     /// awaits ITS OWN captured identity — never the shared latest counter, which later stops
     /// move.
-    private var pendingRetireStops: [CloudTurnToken: Int] = [:]
 
 
 
@@ -185,7 +184,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     final class CloudTurnToken: Hashable {
         private let lock = NSLock()
         private var cancelled = false
-        /// Identity for the captured-retire table: object identity (a token is never reused).
+        /// The retire identity captured for THIS turn at the successor's admission transfer
+    /// (review 14f66b72): stored ON the token so it lives exactly as long as the suspended
+    /// turn that must await it — no shared table to reap, and no reap can discard it early.
+    private let tokenLock = NSLock()
+    private var capturedRetireEpochStorage: Int?
+    var capturedRetireEpoch: Int? {
+        get { tokenLock.lock(); defer { tokenLock.unlock() }; return capturedRetireEpochStorage }
+        set { tokenLock.lock(); capturedRetireEpochStorage = newValue; tokenLock.unlock() }
+    }
+    /// Identity for the captured-retire table: object identity (a token is never reused).
         nonisolated func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
         nonisolated static func == (lhs: CloudTurnToken, rhs: CloudTurnToken) -> Bool {
             lhs === rhs
@@ -363,24 +371,27 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // token, playback ownership, and the admitted hold. A return from INSIDE this block
             // (timeout or superseded-while-waiting) bypasses the turn-wide defer below, so the
             // scoped defer here retires exactly what this turn acquired — never a strand.
+            var returnedEarly = true
             defer {
-                if activeTurn === turnToken { activeTurn = nil }
-                // Playback ownership reverts to the predecessor: this turn admitted nothing, so
-                // the next successor must gate on the SAME outstanding output this turn saw.
-                if playbackOwner === turnToken { playbackOwner = playbackPredecessor }
-                // Release the hold THIS turn acquired (the predecessor's was already ended at
-                // the atomic transfer above).
-                if let acquired = heldPlaybackToken, acquired === admittedHold {
-                    heldPlaybackToken = nil
-                    onGracePlaybackHoldEnd?(acquired)
+                // SUCCESS fall-through: B keeps what it acquired.
+                if returnedEarly {
+                    if activeTurn === turnToken { activeTurn = nil }
+                    // Playback ownership reverts to the predecessor: this turn admitted
+                    // nothing, so the next successor must gate on the SAME outstanding output
+                    // this turn saw.
+                    if playbackOwner === turnToken { playbackOwner = playbackPredecessor }
+                    // Release the hold THIS turn acquired (the predecessor's was already ended
+                    // at the atomic transfer above).
+                    if let acquired = heldPlaybackToken, acquired === admittedHold {
+                        heldPlaybackToken = nil
+                        onGracePlaybackHoldEnd?(acquired)
+                    }
                 }
             }
             let retireEpoch = audioPlayer.cancel()
-            // REAP (review 05d27ddb): only the immediate predecessor's entry is meaningful — an
-            // older suspended turn's identity is covered by resumeStopWaiters(upTo:) monotonic
-            // confirmation, so dropping its entry cannot strand it.
-            pendingRetireStops.removeAll()
-            pendingRetireStops[playbackPredecessor] = retireEpoch
+            // Identity lives ON the predecessor's token (review 4fc59e2c): a suspended turn
+            // always finds its own identity, however many transfers happen meanwhile.
+            playbackPredecessor.capturedRetireEpoch = retireEpoch
             var quiesced = false
             for _ in 0..<8 {
                 if await audioPlayer.awaitActualStop(after: retireEpoch, timeout: 0.25) {
@@ -396,6 +407,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // confirmed quiescent, and never run as a superseded-while-waiting turn.
                 return CloudRouteResult(response: .silent, outcome: .earlyClose)
             }
+            // Success: the scoped rollback above must NOT fire on fall-through — B keeps the
+            // active ownership, playback ownership, and admitted hold through its stream
+            // (review 4fc59e2c).
+            returnedEarly = false
         }
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
@@ -657,7 +672,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             } else {
                 // Superseded: await the identity captured for THIS token at the transfer
                 // (review 14f66b72) — never the shared latest counter, which later stops move.
-                if let capturedEpoch = pendingRetireStops.removeValue(forKey: turnToken) {
+                if let capturedEpoch = turnToken.capturedRetireEpoch {
+                    turnToken.capturedRetireEpoch = nil // consumed: nothing leaks
                     // Bounded: the confirmed stop lands via the normal path; if every bound
                     // expires the disposition is explicit — this turn releases NOTHING (the
                     // successor owns the window) and reports an incomplete turn, never claiming

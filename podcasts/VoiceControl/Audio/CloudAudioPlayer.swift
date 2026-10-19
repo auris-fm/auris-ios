@@ -83,7 +83,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// schedule, so the deferral would wait on an identity that is not its own.
     @discardableResult
     func finish() -> Int {
-        stopRequestQueued()
+        runnerLock.lock()
+        let alreadyQueued = stopRequested || drainRemaining
+        runnerLock.unlock()
+        if !alreadyQueued { stopRequestQueued() }
         runnerLock.lock()
         drainEpoch += 1
         let allocated = drainEpoch
@@ -119,6 +122,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferClearCountForTesting += 1
         bufferLock.unlock()
         runnerLock.lock()
+        // COALESCED ACCOUNTING (review 4fc59e2c): cancel/finish coalesce through the runner's
+        // boolean flags — several requests can share ONE processed stop and ONE notification.
+        // An increment per REQUEST would strand the counter positive forever (a successor would
+        // then be refused on every admission). Increment only when this request transitions the
+        // runner from not-queued to queued; the single notification settles it.
+        let alreadyQueued = stopRequested || drainRemaining
         drainEpoch += 1
         let requestedEpoch = drainEpoch
         drainRemaining = false
@@ -126,6 +135,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
+        if !alreadyQueued { stopRequestQueued() }
         return requestedEpoch
     }
 
@@ -680,8 +690,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// engine still up — a queued-but-unprocessed stop keeps `isPlaying` true until the runner
     /// processes it, so a successor can detect "a stop is still in flight" and must not skip
     /// its quiescence await.
+    /// Runner-lock-synced playback state: `isPlaying` is runner-owned and must not be read
+    /// unsynchronized by admission gating (review 4fc59e2c).
+    private var playbackActiveSynced: Bool {
+        runnerLock.lock()
+        defer { runnerLock.unlock() }
+        return isPlaying
+    }
+
     var hasOutstandingOutput: Bool {
-        hasPendingAudio || isPlaying || hasQueuedStop
+        hasPendingAudio || playbackActiveSynced || hasQueuedStop
     }
     private var paused = false
 

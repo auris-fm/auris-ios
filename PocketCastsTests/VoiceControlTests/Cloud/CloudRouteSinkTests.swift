@@ -1889,6 +1889,176 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
+    /// SUCCESS-PATH OWNERSHIP (review 4fc59e2c / spec dbf71ccf): the scoped rollback defer must
+    /// fire ONLY on early return. On a successful A-retire, B keeps its active ownership,
+    /// playback ownership, and admitted hold through its live stream and drain — snapshot at
+    /// B's first frame (exactly one hold end: A's transfer) and after B completes (two).
+    func testSuccessfulRetireKeepsBOwnershipAndHoldThroughStreamAndDrain() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let sink = makeSink(withHoldCounters: true)
+        hookedSink = sink
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(true)
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aBuffered = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aBuffered = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aBuffered, "A's audio is buffered under the drain hold")
+        // B supersedes successfully: retire A, confirm, then stream.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"B"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        firstFrameActionForNextBuild = { [holdCounters] in
+            // Snapshot BEFORE B's done: exactly one end (A's at the transfer) must have
+            // fired — an early-return-style rollback here would be a second.
+            Self.successSnapshot.bump(holdCounters?.end.value ?? -1)
+        }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        // Confirm A's stop so B is admitted for real: the runner must leave its park to
+        // process the retire stop, then the withheld notification is delivered.
+        try await Task.sleep(nanoseconds: 120_000_000)
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes after a successful retire")
+        _ = await a.value
+        // A's own end may legitimately fire once its drain stop confirms — the invariant is
+        // that B's OWN hold ends exactly once AFTER its first frame: n2 == n1 + 1. Under the
+        // rollback bug the scoped defer ends B's hold at admission and the real end no-ops
+        // (heldPlaybackToken already cleared), so n2 == n1 there.
+        let endsAtFirstFrame = Self.successSnapshot.value
+        XCTAssertGreaterThanOrEqual(endsAtFirstFrame, 1, "A's transfer end fired")
+        var ends = 0
+        for _ in 0..<60 {
+            ends = holdCounters?.end.value ?? -1
+            if ends == endsAtFirstFrame + 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(ends, endsAtFirstFrame + 1,
+                       "B's own hold ends at its real drain/stop, exactly once after its first frame")
+    }
+    /// Hold-end count captured at B's first frame (success-path ownership control).
+    static let successSnapshot = SnapshotInt()
+
+    final class SnapshotInt: @unchecked Sendable {
+        private let lock = NSLock(); private var v = 0
+        func bump(_ n: Int) { lock.lock(); v = n; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return v }
+    }
+
+    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
+    /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
+    /// Request-per-increment accounting would strand the counter positive and refuse every
+    /// later admission; transition-only accounting settles to zero and D runs normally.
+    func testCoalescedStopsSettleAndLaterAdmissionIsNotRefused() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let sink = makeSink()
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(true)
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aBuffered = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aBuffered = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aBuffered, "A's audio is buffered under the drain hold")
+        let plainDone =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnFixture = plainDone
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        self.nextTurnFixture = plainDone
+        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        // Process the coalesced stop: ONE notification for B's and C's queued requests.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        let cResult = await c.value
+        let bResult = await b.value
+        _ = await a.value
+        XCTAssertEqual(bResult.outcome, .earlyClose, "B was superseded while waiting on the coalesced stop")
+        XCTAssertEqual(cResult.outcome, .completed, "C completes once the coalesced stop confirms")
+        // THE PIN: with per-request accounting the counter would still be positive here and
+        // D would be refused; with transition-only accounting it settles and D runs.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"D"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (80..<90).map { Data([UInt8($0)]) }
+        let d = Task { await sink.routeToCloud(request: "D", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let dResult = await d.value
+        XCTAssertEqual(dResult.outcome, .completed, "a later admission is not refused by stranded stop accounting")
+    }
+
     /// QUEUED-STOP VISIBILITY (review 05d27ddb): a stop that is queued but not yet processed is
     /// invisible to buffer/isPlaying — a THIRD turn (C) superseding B must still wait, because
     /// the queued stop would shed anything C admits. With A buffered and the runner parked, B
@@ -2303,8 +2473,18 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var cancelPlayerOnFirstFrameForNextBuild = false
     private var injectedStopDone = false
     private var hookedSink: CloudRouteSink?
+    /// Opt-in action on the NEXT built client's first frame (ownership-snapshot probes).
+    private var firstFrameActionForNextBuild: (@Sendable () -> Void)?
+    /// Grace hold lifecycle counters for ownership controls.
+    private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
 
-    private func makeSink(conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
+    final class AtomicInteger: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
@@ -2340,6 +2520,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                         }
                     }
                 }
+                if let action = self.firstFrameActionForNextBuild {
+                    self.firstFrameActionForNextBuild = nil
+                    let inner = built.client
+                    built.client.onFrameReceived = { action() }
+                    _ = inner
+                }
                 if self.cancelPlayerOnFirstFrameForNextBuild {
                     self.cancelPlayerOnFirstFrameForNextBuild = false
                     built.client.onFrameReceived = { [weak self] in
@@ -2361,7 +2547,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
-            conversationManager: conversationManager ?? testConversationManager()
+            conversationManager: conversationManager ?? testConversationManager(),
+            onGracePlaybackHoldBegin: withHoldCounters ? { origin in
+                self.holdCounters?.begin.bump()
+                return GracePeriodSignal.PlaybackHoldToken(generation: origin ?? -1)
+            } : nil,
+            onGracePlaybackHoldEnd: withHoldCounters ? { _ in
+                self.holdCounters?.end.bump()
+            } : nil
         )
     }
 
