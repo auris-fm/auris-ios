@@ -224,7 +224,10 @@ final class SourceLanguageHandoffControls: XCTestCase {
         let fixtureConfig = CloudConfig(defaults: defaults)
         objc_setAssociatedObject(self, "srclang_local_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
 
-        let inference = FakeLfmInference()
+        // Records what the router ACTUALLY classified: every text tokenized during routing.
+        // The stub classifier returns a fixed label, so the parsed intent alone proves nothing —
+        // the recorded classification input must contain the English utterance.
+        let inference = RecordingLfmInference()
         inference.classifyLabel = "playback:pause"
         inference.generateResult = "playback(action='pause')"
         let modelManager = ModelManager(
@@ -232,6 +235,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
                 .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
+        objc_setAssociatedObject(self, "srclang_recinf", inference, .OBJC_ASSOCIATION_RETAIN)
 
         guard let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: provenanceAudioSession(),
@@ -271,6 +275,14 @@ final class SourceLanguageHandoffControls: XCTestCase {
         // Bounded settle: a cloud dispatch would open a socket within this window.
         try await Task.sleep(nanoseconds: 1_500_000_000)
 
+        // ACTUAL CLASSIFICATION INPUT: the router consumed the ENGLISH protocol text "pause
+        // playback" (the recorded tokenized routing input contains it verbatim).
+        XCTAssertTrue(
+            inference.tokenizedTexts.contains { $0.contains("pause playback") },
+            "the router must classify the ENGLISH utterance itself — recorded inputs: "
+                + "\(inference.tokenizedTexts)"
+        )
+
         // ACTUAL LOCAL EXECUTION: the English router input produced a local pause intent and the
         // playback manager REALLY received the pause.
         let intents = intentBox.intents
@@ -292,6 +304,33 @@ final class SourceLanguageHandoffControls: XCTestCase {
 
     private final class IntentBox: @unchecked Sendable {
         var intents: [any VoiceIntent] = []
+    }
+
+    /// Standalone LfmInference that records the exact texts reaching tokenization — the
+    /// observable classification input (reviewer 9a336798). `FakeLfmInference` is final, so this
+    /// is its own conformer: same stub behaviour, plus the recorded routing text.
+    final class RecordingLfmInference: LfmInference {
+        private(set) var tokenizedTexts: [String] = []
+        var classifyLabel: String?
+        var generateResult: String?
+        var lastError: String { "" }
+
+        func load(modelPath: String, classifierPath: String, labelMapPath: String, nCtx: Int) -> Bool {
+            true
+        }
+        func tokenize(_ text: String, addBos: Bool) throws -> [Int] {
+            tokenizedTexts.append(text)
+            return [1, 10, 2]
+        }
+        func classify(promptTokenIds: [Int], poolStart: Int, poolEnd: Int) throws -> String {
+            classifyLabel ?? "no_match:"
+        }
+        func generate(prefill: String, nPredict: Int) throws -> String {
+            guard let generateResult else { throw LfmInferenceError.notReady }
+            return generateResult
+        }
+        func reset() {}
+        func release() {}
     }
 
     /// Records ACTUAL local playback invocations (reviewer 9d6dc5a7).
