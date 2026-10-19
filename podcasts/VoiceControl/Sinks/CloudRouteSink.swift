@@ -347,32 +347,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
-        // Cancellation cleanup is bound to THIS turn's token — the cancellation state of the
-        // task that owns consumer execution — not to AsyncStream termination (which never fires
-        // on task cancellation). If the turn is cancelled while suspended in action or result
-        // handling, the watcher retires the registration within one poll tick, idempotently and
-        // tied to the original registration identity. The journal is deliberately untouched: a
+        // Cancellation cleanup is bound to the task that owns consumer execution, not to
+        // AsyncStream termination (which never fires on task cancellation). A cancellation
+        // handler installed on the OWNING task fires `onCancel` synchronously at cancel time —
+        // the only legal observation of another task's cancellation — marks the flag, and retires
+        // the ORIGINAL registration immediately. The journal is deliberately untouched: a
         // claimed-but-unfinished operation stays `.in_progress` on disk, so a restart
         // reconstructs `unknown` — never a fabricated `cancelled`.
-        let resultSocket = routed.resultSocket
-        // The watcher runs on its OWN task, so it must observe the OWNER's cancellation directly
-        // (control-armed box) alongside the turn token: a consumer suspended inside action
-        // handling never reaches a throwing suspension point, and without this the registration
-        // would outlive the cancelled owner.
-        // Observation uses the SAME lock-guarded mechanism as production close paths: an
-        // unstructured poller cannot observe the owner task's cancellation (no legal API), so it
-        // mirrors `withTaskCancellationHandler` — the handler runs synchronously at cancel time.
-        // The flag is checked under the lifetime's closeLock by `closeIfOwnerCancelled`, so a
-        // consumer suspended inside held work still retires the ORIGINAL registration promptly.
-        // Observation uses the SAME mechanism production close paths use: withTaskCancellationHandler's
-        // onCancel runs synchronously at cancel time on the owning task. The flag is guarded so the
-        // watcher (and any later check) sees cancellation immediately, even while the consumer is
-        // suspended inside held work with no throwing suspension point to reach.
-        // The consumer is wrapped in a cancellation handler installed on the OWNING task, so its
-        // `onCancel` fires synchronously at cancel time — the only legal observation of another
-        // task's cancellation. Held work therefore sees the flag immediately after any release,
-        // and the turn-wide cleanup plus this post-loop check retire the ORIGINAL registration
-        // before the loop can return normally on a cancelled turn.
         let ownerCancelledFlag = OwnerCancelFlag()
         currentOwnerCancelFlag = ownerCancelledFlag
 
@@ -757,9 +738,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// This turn's bound result socket (nil between turns). Sends via it are bound to the
     /// original registration — late results from a superseded turn never ride a successor.
-    /// Set at turn start from the caller-supplied owning Task; refreshed by the pre-effect
-    /// cancellation check sites. The watcher polls it so retirement does not depend on the
-    /// consumer reaching a suspension point.
+    /// Retired on owner cancellation by the owning task's own cancellation handler, so no
+    /// suspension point needs to be reached.
     /// Read-only test seam: the socket whose lifetime the current turn owns (nil between turns).
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
