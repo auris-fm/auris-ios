@@ -501,7 +501,43 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Test-only deterministic hold between the durable claim and the effect, so a control can
         // cancel the owning Task while the operation is provably claimed-but-unexecuted. Always
         // nil in production assembly; nil skips instantly.
-        if let effectGate { await effectGate() }
+        if let effectGate {
+            // Production cancellation policy at the held boundary: a cancelled owner may NOT be
+            // permitted to run the effect merely because the final result could be journaled.
+            // The registration is retired FIRST (prompt original-registration retirement, before
+            // any release of held work), then the pre-effect cancellation settles refused(client_policy)
+            // — nothing happened, so a redelivery may re-run it; an effect that had already STARTED
+            // stays in progress and reconstructs as unknown, never replayed or fabricated.
+            await effectGate()
+            if Task.isCancelled {
+                activeResultSocket?.finishTurn()
+                let cancelledBeforeEffect = OperationResult.nonSuccess(.refused, reason: OperationReason.clientPolicy)
+                let settledPre = operationJournal?.complete(operationId, result: cancelledBeforeEffect) ?? true
+                if settledPre {
+                    await reportResult(cancelledBeforeEffect, operationId: operationId, capabilityVersion: capabilityVersion)
+                } else {
+                    let unsettledPre = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
+                    await reportResult(unsettledPre, operationId: operationId, capabilityVersion: capabilityVersion)
+                }
+                return
+            }
+        }
+        // Explicit cancellation policy at the effect boundary: a cancelled owner BEFORE the
+        // effect starts means the effect never runs — settle the claim as refused(client_policy)
+        // (nothing happened; a redelivery may legitimately re-run it). An effect that had already
+        // started when cancellation arrived stays in progress and reconstructs as `unknown`:
+        // its outcome is not knowable and must never be replayed or fabricated.
+        if Task.isCancelled {
+            let cancelledBeforeEffect = OperationResult.nonSuccess(.refused, reason: OperationReason.clientPolicy)
+            let settled = operationJournal?.complete(operationId, result: cancelledBeforeEffect) ?? true
+            if settled {
+                await reportResult(cancelledBeforeEffect, operationId: operationId, capabilityVersion: capabilityVersion)
+            } else {
+                let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
+                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+            }
+            return
+        }
         let refusal = performMutation(action: action, params: params)
         if let refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable

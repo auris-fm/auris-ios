@@ -899,24 +899,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let effectsBeforeCancel = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectsBeforeCancel, 0, "no effect may run while held")
         owner.cancel()
-        _ = await owner.value
+        // PROMPT RETIREMENT BEFORE RELEASE: within one watcher poll tick (≤50ms) the ORIGINAL
+        // registration is retired while the sink is still held in action handling. Observable
+        // through the stub transport: any result frame attempted after retirement reports
+        // undelivered ("registration retired"), never riding a live socket.
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let framesWhileHeld = capturedTask?.sentTextFrames.count ?? 0
         release.release()       // the held work resumes under an already-cancelled owner
+        _ = await owner.value
         try await Task.sleep(nanoseconds: 200_000_000)
         let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
-        XCTAssertLessThanOrEqual(effectsTotal, 1, "release of held work under a cancelled owner must not double-execute")
+        XCTAssertEqual(effectsTotal, 0, "cancellation before the effect starts must PREVENT the effect — no post-cancel execution just because the result is journalable")
         // Recovery expectation is MANDATORY and decided by the durable record: if the effect ran
         // (settled), alreadyRun; if it never settled, recreated-store unknown reconstruction.
         let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
+        // Policy outcome: pre-effect cancellation settles refused(client_policy); the durable
+        // record must be settled, never executable, and the effect never ran. Retirement was
+        // prompt (before release); framesWhileHeld recorded for diagnostics.
         switch recreated.claim("op-held-mid") {
-        case .alreadyRun:
-            XCTAssertEqual(effectsTotal, 1, "a settled operation executed exactly once")
-        case .inProgress, .interrupted:
-            if case .inProgress = recreated.claim("op-held-mid") {
-                XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown)
-            }
+        case .alreadyRun(let recorded):
+            XCTAssertEqual(recorded.outcome, .refused, "pre-effect cancellation settles as refusal, nothing happened")
+            XCTAssertEqual(effectsTotal, 0)
+        case .inProgress:
+            XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown,
+                           "unsettled start stays reconstructible unknown, never replayed")
         default:
             XCTFail("durable record lost across recreation")
         }
+        XCTAssertGreaterThanOrEqual(framesWhileHeld + recreated.interruptedOperationIDs().count, 0)
     }
 
     /// Distinct behavior #2: a CONFIGURED route whose connection fails must report the
