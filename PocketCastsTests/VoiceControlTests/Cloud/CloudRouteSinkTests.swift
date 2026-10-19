@@ -2054,9 +2054,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (80..<90).map { Data([UInt8($0)]) }
+        let cancelsBeforeD: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
         let d = Task { await sink.routeToCloud(request: "D", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
         let dResult = await d.value
         XCTAssertEqual(dResult.outcome, .completed, "a later admission is not refused by stranded stop accounting")
+        // Settled accounting: D's admission sees nothing outstanding and issues NO stop request.
+        // Per-request increment accounting strands the counter positive, so D would spuriously
+        // retire (an extra stop identity shift) even with nothing to stop.
+        let cancelsAfterD: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
+        XCTAssertEqual(cancelsAfterD, cancelsBeforeD, "D's admission issues no stop request when nothing is outstanding")
     }
 
     /// QUEUED-STOP VISIBILITY (review 05d27ddb): a stop that is queued but not yet processed is

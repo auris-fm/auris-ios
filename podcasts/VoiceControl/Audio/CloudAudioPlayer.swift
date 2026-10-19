@@ -115,7 +115,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private(set) var cancelRequestCountForTesting = 0
     @discardableResult
     func cancel() -> Int {
-        stopRequestQueued()
         cancelRequestCountForTesting += 1
         bufferLock.lock()
         buffer.removeAll()
@@ -671,6 +670,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var queuedStopRequests = 0
     /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
     private(set) var bufferClearCountForTesting = 0
+    var queuedStopCountForTesting: Int {
+        stopCounterLock.lock()
+        defer { stopCounterLock.unlock() }
+        return queuedStopRequests
+    }
     var hasQueuedStop: Bool {
         stopCounterLock.lock()
         defer { stopCounterLock.unlock() }
