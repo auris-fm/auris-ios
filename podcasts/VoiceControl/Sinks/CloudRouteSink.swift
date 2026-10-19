@@ -355,6 +355,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // claimed-but-unfinished operation stays `.in_progress` on disk, so a restart
         // reconstructs `unknown` — never a fabricated `cancelled`.
         let ownerCancelledFlag = OwnerCancelFlag()
+        // Nonisolated local copy for the cancellation handler: the handler runs on the owning
+        // task and cannot touch main-actor state. The socket object itself is Sendable and its
+        // close is idempotent and identity-bound, so this copy retires exactly THIS turn's
+        // registration and nothing else.
+        let turnSocket = routed.resultSocket
         currentOwnerCancelFlag = ownerCancelledFlag
 
         // ONE turn-wide cleanup covering EVERY exit — normal end, break, early return, error,
@@ -476,7 +481,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // lifetime close is idempotent and identity-checked, so the turn-wide defer and any
             // later path re-running it is harmless; a successor turn's socket is never touched.
             ownerCancelledFlag.mark()
-            resultSocket.finishTurn()
+            turnSocket.finishTurn()
         }
         if let turnResult {
             return CloudRouteResult(response: turnResponse, outcome: turnResult)
