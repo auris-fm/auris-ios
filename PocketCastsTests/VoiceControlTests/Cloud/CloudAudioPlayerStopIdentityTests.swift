@@ -137,7 +137,9 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 5)
             }
         }
-        let waiter = Task { await player.awaitActualStop(after: 1, timeout: 5) }
+        // DETACHED: the latch blocks its thread (a non-cancellation-sensitive semaphore wait),
+        // so the awaiter must not share the main actor with the test that releases it.
+        let waiter = Task.detached { await player.awaitActualStop(after: 1, timeout: 5) }
         // Parked in the latch: registration has NOT run yet.
         await latch.wait(timeout: .now() + 2)
         waiter.cancel()  // the cancellation handler runs BEFORE registration
