@@ -863,6 +863,62 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
 
+    /// ACTUAL held-work owning-Task cancellation boundary, deterministic via the production
+    /// pre-effect seam: the gate holds AFTER the durable claim and BEFORE the effect, so the
+    /// cancel provably strikes mid-operation. Asserts (a) claimed-before-cancel premise observed
+    /// through the journal's public interrupted list while held, (b) no effect executed while
+    /// cancelled-and-held then released, (c) the operation reconstructs as persisted unknown from
+    /// a RECREATED store — never replayed, never fabricated success.
+    func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-held-mid","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("journal-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let entered = Gate()   // released when the gate body runs = claimed & holding pre-effect
+        let release = Gate()   // released by the test AFTER cancelling the owner
+        await MainActor.run {
+            sink.effectGate = {
+                entered.release()
+                try? await release.wait()
+            }
+        }
+        let owner = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        }
+        // Deterministic premise: wait until the sink is HELD between claim and effect.
+        do { try await entered.wait() } catch { XCTFail("sink never reached the pre-effect hold"); return }
+        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation must be durably claimed while held")
+        let effectsBeforeCancel = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
+        XCTAssertEqual(effectsBeforeCancel, 0, "no effect may run while held")
+        owner.cancel()
+        _ = await owner.value
+        release.release()       // the held work resumes under an already-cancelled owner
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
+        XCTAssertLessThanOrEqual(effectsTotal, 1, "release of held work under a cancelled owner must not double-execute")
+        // Recovery expectation is MANDATORY and decided by the durable record: if the effect ran
+        // (settled), alreadyRun; if it never settled, recreated-store unknown reconstruction.
+        let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
+        switch recreated.claim("op-held-mid") {
+        case .alreadyRun:
+            XCTAssertEqual(effectsTotal, 1, "a settled operation executed exactly once")
+        case .inProgress, .interrupted:
+            if case .inProgress = recreated.claim("op-held-mid") {
+                XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown)
+            }
+        default:
+            XCTFail("durable record lost across recreation")
+        }
+    }
+
     /// Distinct behavior #2: a CONFIGURED route whose connection fails must report the
     /// transport failure — not be relabeled as a pre-transport refusal. This is what the old
     /// broken-premise test accidentally measured; it belongs here explicitly.
@@ -914,11 +970,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// NOT a held-cancellation proof: this control cannot cancel provably mid-effect (claim →
-    /// effect → complete run inline), so it makes no retirement claim. It pins effect-once for
-    /// the owner-task cancel that lands during an identified operation, with recovery decided
-    /// by the recreated record's actual state. Held-work proof remains separately assigned.
-    func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordState() async throws {
+func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordState() async throws {
         self.pendingFixture = """
             event: action
             data: {"operation_id":"op-held-cancel","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}

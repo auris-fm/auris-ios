@@ -83,6 +83,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let conversationSelectionProvider: () -> CloudConversationSelection
     /// The origin the turn runs under, so a resume cannot cross an ended window.
 
+    /// Optional pre-effect hold used ONLY by controls to strike cancellation deterministically
+    /// between claim and effect. Production never sets it; nil means no pause.
+    var effectGate: (@Sendable () async -> Void)?
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let playbackPositionMs: () -> Int64
@@ -495,6 +498,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         case .claimed:
             break
         }
+        // Test-only deterministic hold between the durable claim and the effect, so a control can
+        // cancel the owning Task while the operation is provably claimed-but-unexecuted. Always
+        // nil in production assembly; nil skips instantly.
+        if let effectGate { await effectGate() }
         let refusal = performMutation(action: action, params: params)
         if let refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
