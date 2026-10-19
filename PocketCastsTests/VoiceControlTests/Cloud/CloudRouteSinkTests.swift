@@ -2054,6 +2054,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (80..<90).map { Data([UInt8($0)]) }
+        // Accounting settles eventually: wait (bounded) for the counter to drain before D.
+        var settled = false
+        for _ in 0..<200 {
+            let q: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasQueuedStop ?? true }
+            if !q { settled = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(settled, "stop accounting settles after the coalesced pair")
         let cancelsBeforeD: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
         let d = Task { await sink.routeToCloud(request: "D", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
         let dResult = await d.value
