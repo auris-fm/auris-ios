@@ -427,7 +427,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, serverClosesWithoutTerminal: Bool = false) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -443,6 +443,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 self.pendingFixture = nil
                 let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: audioPayloads,
+                    serverClosesWithoutTerminal: serverClosesWithoutTerminal,
+                    
                     prepareTask: { task in
                         producerHold.map(task.holdUntilReleased)
                         if let armedHold { task.armReceiveHoldOnEntered = armedHold }
@@ -826,6 +828,55 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refusal for the unavailable resume")
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
+    }
+
+    /// BARE TRUNCATION, REACHABLE (review dee03708): a server clean close with pending owned
+    /// audio reaches the truncation path WITHOUT the error handler — the turn is an
+    /// incomplete turn, owned output is stopped, and the release follows the CONFIRMED stop
+    /// (withheld delivery → zero resumes; delivered → exactly one).
+    func testBareServerCloseTruncatesAndReleasesAfterConfirmedStop() async throws {
+        let fixture = """
+            event: token
+            data: {"text":"partial"}
+
+            """
+        self.pendingFixture = fixture
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) },
+            serverClosesWithoutTerminal: true
+        )
+        // Withhold the ACTUAL stop notification: the truncation release must wait for it.
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        // Unconfirmed stop: no host resume yet, no confirmed epoch.
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "an unconfirmed stop does not release the host playback at truncation")
+        let confirmedBefore = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertEqual(confirmedBefore, 0, "the stop is not confirmed before it completes")
+        // Deliver the actual stop: release lands, exactly once, turn classified earlyClose.
+        await MainActor.run { box.deliverAll() }
+        let result = await turn.value
+        XCTAssertEqual(result.outcome, .earlyClose, "a bare truncation is an incomplete turn")
+        XCTAssertTrue(playback.awaitResume(timeout: 5), "the release lands at the confirmed stop")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one release")
+        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertGreaterThan(confirmed, 0, "the stop was confirmed")
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pending, "no owned audio survives the confirmed stop")
+        await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
     }
 
     /// PRODUCTION DEFAULT availability (review 0846e993): with NO injected availability closure

@@ -654,6 +654,16 @@ final class CloudRouteClient {
                 continuation.finish()
                 return true
             }
+            // A SERVER-INITIATED CLEAN CLOSE surfaces from URLSession receive as a
+            // WebSocket-domain error carrying the close code. It ends the stream WITHOUT a
+            // terminal event: the consumer classifies it as an INCOMPLETE turn (truncation),
+            // not a connection failure — "the server stopped talking" is not the same fact as
+            // "the connection broke".
+            let nsError = error as NSError
+            if nsError.domain == "WebSocket", (1000...1006).contains(nsError.code) {
+                continuation.finish()
+                return true
+            }
             // A transport failure is the same user-facing fact as a socket
             // that closed without a terminal event (above), so it carries the
             // same code and *no* message. The `localizedDescription` that used
