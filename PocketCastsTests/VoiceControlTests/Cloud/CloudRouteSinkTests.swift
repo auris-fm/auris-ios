@@ -1981,6 +1981,79 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return v }
     }
 
+    /// ROLLBACK HOLD RESPONSIBILITY (review 8eb9fb44): when a TIMED-OUT admission rolls back,
+    /// it is still the active owner and its hold is the LAST live one over the predecessor's
+    /// still-unconfirmed output — ending it at rollback would re-arm the allowance mid-flight.
+    /// The hold must stay live until the retire stop CONFIRMS, and end exactly then.
+    /// (A superseded-while-waiting rollback needs no such handling: the successor's atomic
+    /// transfer already moved the hold before the rollback runs.)
+    func testRolledBackAdmissionKeepsItsHoldLiveUntilTheRetireStopConfirms() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let sink = makeSink(withHoldCounters: true)
+        hookedSink = sink
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(true)
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aBuffered = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aBuffered = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aBuffered, "A's audio is buffered under the drain hold")
+        // B supersedes A; the retire stop stays unconfirmed (runner parked, notification
+        // withheld) until B's admission bounds expire and B rolls back.
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .earlyClose, "B's admission times out and rolls back")
+        // THE PIN: exactly two ends have fired — the nil-predecessor transfer at A's admission
+        // and A's transfer at B's admission. B's OWN hold (the last live one) is NOT ended
+        // while its retire stop is unconfirmed (the bug ended it at rollback: 3).
+        XCTAssertEqual(holdCounters?.end.value ?? -1, 2,
+                       "the rolled-back admission's hold is NOT ended while its retire stop is unconfirmed")
+        // Confirm E1: B's release responsibility fires exactly here.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        var ends = 0
+        for _ in 0..<100 {
+            ends = holdCounters?.end.value ?? -1
+            if ends == 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(ends, 3, "B's hold ends exactly when the retire stop confirms")
+    }
+
     /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every

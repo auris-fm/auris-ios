@@ -84,14 +84,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     @discardableResult
     func finish() -> Int {
         runnerLock.lock()
-        let alreadyQueued = stopRequested || drainRemaining
-        runnerLock.unlock()
-        if !alreadyQueued { stopRequestQueued() }
-        runnerLock.lock()
+        // Same atomic coalescing as cancel(): the check and the publication share one
+        // critical section, so the runner cannot complete a decrement before the increment.
+        let sharesNotification = stopRequested || drainRemaining
         drainEpoch += 1
         let allocated = drainEpoch
         drainRemaining = true
         runnerRunning = true
+        if !sharesNotification { pendingStopNotifications += 1 }
         runnerLock.signal()
         runnerLock.unlock()
         return allocated
@@ -126,15 +126,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // An increment per REQUEST would strand the counter positive forever (a successor would
         // then be refused on every admission). Increment only when this request transitions the
         // runner from not-queued to queued; the single notification settles it.
-        let alreadyQueued = stopRequested || drainRemaining
+        // COALESCED ACCOUNTING, ATOMIC (review 8eb9fb44): cancel/finish coalesce through the
+        // runner's boolean flags — several requests can share ONE processed stop and ONE
+        // notification. The pending-notification count is incremented INSIDE the same critical
+        // section that signals the runner: the runner can never observe the signal and complete
+        // its decrement before the increment is published (that race stranded the counter
+        // positive forever).
+        let sharesNotification = stopRequested || drainRemaining
         drainEpoch += 1
         let requestedEpoch = drainEpoch
         drainRemaining = false
         stopRequested = true
         runnerRunning = true
+        if !sharesNotification { pendingStopNotifications += 1 }
         runnerLock.signal()
         runnerLock.unlock()
-        if !alreadyQueued { stopRequestQueued() }
         return requestedEpoch
     }
 
@@ -660,50 +666,43 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Hard bound for keeping an engine alive on unverified pending audio. Runner-thread only.
     private var renderStopDeadline: Date?
 
-    private(set) var isPlaying = false
+    /// Authoritative playback-active state under the RUNNER lock: every writer (runner loop,
+    /// processFrames) and every admission-gating reader synchronize here (review 8eb9fb44).
+    /// No write site holds the lock (the runner unlocks before engine operations), so the
+    /// computed accessor's own locking is safe everywhere.
+    private var playbackActiveStorage = false
+    private(set) var isPlaying: Bool {
+        get { runnerLock.lock(); defer { runnerLock.unlock() }; return playbackActiveStorage }
+        set { runnerLock.lock(); playbackActiveStorage = newValue; runnerLock.unlock() }
+    }
     /// Stop requests queued but not yet processed by the runner (review 14f66b72/05d27ddb):
     /// a queued stop is INVISIBLE to buffer/isPlaying once the buffer is cleared but before the
     /// runner acts — a successor that skips its quiescence wait on that window would be shed by
     /// the queued stop. Incremented by every cancel/finish (each is followed by exactly one
     /// stop notification); decremented when that notification is issued.
-    private let stopCounterLock = NSLock()
-    private var queuedStopRequests = 0
+    /// Pending stop NOTIFICATIONS, owned by the RUNNER lock together with the queued flags:
+    /// request publication and runner completion can never interleave across two locks
+    /// (review 8eb9fb44). Incremented at request time in the same critical section that
+    /// signals the runner; decremented when the stop notification is issued.
+    private var pendingStopNotifications = 0
     /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
     private(set) var bufferClearCountForTesting = 0
-    var queuedStopCountForTesting: Int {
-        stopCounterLock.lock()
-        defer { stopCounterLock.unlock() }
-        return queuedStopRequests
-    }
     var hasQueuedStop: Bool {
-        stopCounterLock.lock()
-        defer { stopCounterLock.unlock() }
-        return queuedStopRequests > 0
-    }
-    private func stopRequestQueued() {
-        stopCounterLock.lock()
-        queuedStopRequests += 1
-        stopCounterLock.unlock()
+        runnerLock.lock()
+        defer { runnerLock.unlock() }
+        return stopRequested || drainRemaining || pendingStopNotifications > 0
     }
     private func stopRequestSettled() {
-        stopCounterLock.lock()
-        queuedStopRequests = max(0, queuedStopRequests - 1)
-        stopCounterLock.unlock()
+        runnerLock.lock()
+        pendingStopNotifications = max(0, pendingStopNotifications - 1)
+        runnerLock.unlock()
     }
     /// Outstanding-output signal for admission gating (review 14f66b72): frames buffered OR the
     /// engine still up — a queued-but-unprocessed stop keeps `isPlaying` true until the runner
     /// processes it, so a successor can detect "a stop is still in flight" and must not skip
     /// its quiescence await.
-    /// Runner-lock-synced playback state: `isPlaying` is runner-owned and must not be read
-    /// unsynchronized by admission gating (review 4fc59e2c).
-    private var playbackActiveSynced: Bool {
-        runnerLock.lock()
-        defer { runnerLock.unlock() }
-        return isPlaying
-    }
-
     var hasOutstandingOutput: Bool {
-        hasPendingAudio || playbackActiveSynced || hasQueuedStop
+        hasPendingAudio || isPlaying || hasQueuedStop
     }
     private var paused = false
 

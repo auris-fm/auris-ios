@@ -159,6 +159,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// so a successor never runs hold-free between turns. Released at every terminal: error,
     /// superseded/earlyClose, done-without-pending, and the real drain/stop.
     private var heldPlaybackToken: GracePeriodSignal.PlaybackHoldToken?
+    /// A rolled-back admission's hold, kept live until the retire stop it is waiting on
+    /// CONFIRMS (review 8eb9fb44): the hold is the last live one over the predecessor's
+    /// still-outstanding output, so its release responsibility transfers to the stop
+    /// confirmation instead of firing at rollback time.
+    private var pendingHoldRelease: (hold: GracePeriodSignal.PlaybackHoldToken, epoch: Int)?
     private let onGracePlaybackHoldBegin: ((Int?) -> GracePeriodSignal.PlaybackHoldToken?)?
     private let onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
@@ -371,6 +376,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // token, playback ownership, and the admitted hold. A return from INSIDE this block
             // (timeout or superseded-while-waiting) bypasses the turn-wide defer below, so the
             // scoped defer here retires exactly what this turn acquired — never a strand.
+            let retireEpoch = audioPlayer.cancel()
+            // Identity lives ON the predecessor's token (review 4fc59e2c): a suspended turn
+            // always finds its own identity, however many transfers happen meanwhile.
+            playbackPredecessor.capturedRetireEpoch = retireEpoch
             var returnedEarly = true
             defer {
                 // SUCCESS fall-through: B keeps what it acquired.
@@ -380,18 +389,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // nothing, so the next successor must gate on the SAME outstanding output
                     // this turn saw.
                     if playbackOwner === turnToken { playbackOwner = playbackPredecessor }
-                    // Release the hold THIS turn acquired (the predecessor's was already ended
-                    // at the atomic transfer above).
+                    // HOLD RESPONSIBILITY (review 8eb9fb44): the predecessor's own hold was
+                    // already ended at the atomic transfer, so THIS hold is the last live one.
+                    // Ending it while the predecessor's stop is unconfirmed would leave the
+                    // output with NO hold and re-arm the allowance mid-flight. If the stop is
+                    // already confirmed, end it now; otherwise the release responsibility
+                    // rides the stop confirmation (audioPlayerDidStop) — never a timer, never
+                    // an allowance renewal.
                     if let acquired = heldPlaybackToken, acquired === admittedHold {
-                        heldPlaybackToken = nil
-                        onGracePlaybackHoldEnd?(acquired)
+                        if audioPlayer.confirmedStopEpoch() >= retireEpoch {
+                            heldPlaybackToken = nil
+                            onGracePlaybackHoldEnd?(acquired)
+                        } else {
+                            pendingHoldRelease = (hold: acquired, epoch: retireEpoch)
+                        }
                     }
                 }
             }
-            let retireEpoch = audioPlayer.cancel()
-            // Identity lives ON the predecessor's token (review 4fc59e2c): a suspended turn
-            // always finds its own identity, however many transfers happen meanwhile.
-            playbackPredecessor.capturedRetireEpoch = retireEpoch
             var quiesced = false
             for _ in 0..<8 {
                 if await audioPlayer.awaitActualStop(after: retireEpoch, timeout: 0.25) {
@@ -1165,6 +1179,16 @@ extension CloudRouteSink {
     }
 
     func audioPlayerDidStop(drainEpoch: Int) {
+        // A rolled-back admission's hold releases exactly here: the stop it was waiting on
+        // has confirmed (epoch identity, monotonic), so the output it covered is quiescent
+        // and the window's allowance may be re-armed by THIS end — never earlier.
+        if let pending = pendingHoldRelease, drainEpoch >= pending.epoch {
+            pendingHoldRelease = nil
+            if heldPlaybackToken === pending.hold {
+                heldPlaybackToken = nil
+                onGracePlaybackHoldEnd?(pending.hold)
+            }
+        }
         // The player has drained its buffer and stopped output. This is when a
         // hold taken for the turn may be released, so the answer is not played
         // over the resumed episode, and the turn's held state stays consistent
