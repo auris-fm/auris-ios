@@ -411,6 +411,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 case let .audioFrame(frame):
                     audioPlayer.enqueue(frame)
                 case let .action(tool, action, params, operationId, capabilityVersion):
+                    // BUFFERED ADMISSION CHECK: an event drained from the buffer after the owner
+                    // was cancelled must not admit any later effect or a completed result. The
+                    // handler's mark (or Task.isCancelled) stops consumption here; the turn is
+                    // classified earlyClose below, never `completed`.
+                    if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     await executeAction(
                         tool: tool, action: action, params: params,
                         operationId: operationId, capabilityVersion: capabilityVersion
@@ -424,6 +429,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // completes on `done` with the same restore/analytics behavior.
                     presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
                 case let .done(usage):
+                    // Buffered-`done` admission check: a cancelled owner must not report a
+                    // completed result for an event drained after cancellation (mirrors the
+                    // action guard above; earlyClose classification follows below).
+                    if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     guard !turnToken.isCancelled else { break turnLoop }
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",

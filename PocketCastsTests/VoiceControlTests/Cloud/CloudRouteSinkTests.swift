@@ -901,6 +901,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(capturedTask?.isCancelledSocket ?? true, "original registration must be LIVE before cancellation")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
                        "no effect may run while held")
+        // Two-action fixture would be needed to test later-admission; with one action we assert
+        // below that nothing completes. Cancel the OWNER only: note this may cancel the stub
+        // socket receive (task-cancel path), but the EFFECT hold is a separate latch released
+        // ONLY by `release.release()` below — owner cancellation never releases it.
         owner.cancel()   // the ONLY cancellation mechanism — no side channel
         // ACTUAL RETIREMENT before release: the synchronous onCancel path cancels the transport
         // while the consumer remains suspended in held work.

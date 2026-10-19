@@ -267,24 +267,24 @@ final class Gate: @unchecked Sendable {
         }
     }
 
-    /// Waits for release WITHOUT polling: suspends on a checked continuation that `release()`
-    /// resumes. Throws `CancellationError` on task cancellation, and returns by resuming with
-    /// failure when `untilCancelled` reports an external cancellation (e.g. the owning socket
-    /// was retired) so a parked transport wakes promptly instead of busy-looping.
+    /// Waits for release WITHOUT polling. The continuation is registered UNDER the same lock
+    /// that guards `isOpen`, so a release that lands between the state check and registration
+    /// cannot be lost (cancel-before-continuation race closed). Throws `CancellationError` on
+    /// task cancellation; `untilCancelled` lets a parked transport wake on external retirement.
     func wait(untilCancelled isExternallyCancelled: (@Sendable () -> Bool)?) async throws {
-        final class Cell: @unchecked Sendable { var resume: ((Result<Void, Error>) -> Void)? }
-        let cell = Cell()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                var alreadyOpen = false
-                var alreadyCancelled = false
                 lock.lock()
-                if isOpen { alreadyOpen = true }
-                else if let f = isExternallyCancelled, f() { alreadyCancelled = true }
-                else { resume = cont.resume }
-                lock.unlock()
-                if alreadyOpen { cont.resume() }
-                if alreadyCancelled { cont.resume(throwing: URLError(.cancelled)) }
+                if isOpen {
+                    lock.unlock()
+                    cont.resume()
+                } else if let f = isExternallyCancelled, f() {
+                    lock.unlock()
+                    cont.resume(throwing: URLError(.cancelled))
+                } else {
+                    resume = cont.resume   // registered atomically with the open check
+                    lock.unlock()
+                }
             }
         } onCancel: {
             var r: ((Result<Void, Error>) -> Void)?
@@ -318,15 +318,30 @@ extension StubWebSocketTask {
     /// a bare assertion here reads `nil` intermittently. Poll rather than race.
     /// Continuation-based wait for socket cancellation (no polling): resumes when `cancel(with:)`
     /// runs or the bounded timeout elapses.
+    /// Bounded, race-safe wait for socket cancellation. The waiter is registered UNDER the
+    /// snapshot lock (so a cancel landing during setup cannot be missed), and the timeout wins
+    /// via a racing sleep — no polling loop, no ignored timeout.
     func awaitCancellation(timeout: TimeInterval = 1) async -> Bool {
-        if isCancelledSocket { return true }
         let gate = Gate()
+        snapshotLock.lock()
+        if cancelled != nil {
+            snapshotLock.unlock()
+            return true
+        }
         cancellationWaiters.append({ [gate] in gate.release() })
-        do {
-            try await gate.wait(untilCancelled: { self.isCancelledSocket })
-            return isCancelledSocket
-        } catch {
-            return isCancelledSocket
+        snapshotLock.unlock()
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
+                return self.isCancelledSocket
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return self.isCancelledSocket
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first || self.isCancelledSocket
         }
     }
 
@@ -401,7 +416,11 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         // Parked receives must WAKE on socket cancellation: a retired socket cannot keep the
         // producer busy-waiting or holding a closed connection concept open.
         if let gate {
-            try await gate.wait(untilCancelled: { self.isCancelledSocket })
+            // Wake on socket retirement WITHOUT cancelling the consumer task: this is a test
+            // transport, and a thrown error here would end the AsyncStream via the producer and
+            // blur "socket retired" with "stream terminated". The waiter resumes when cancel
+            // runs; we then serve the remaining scripted events normally.
+            _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
         }
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
