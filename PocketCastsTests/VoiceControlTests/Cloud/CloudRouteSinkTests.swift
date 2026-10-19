@@ -1764,38 +1764,22 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         super.tearDown()
     }
 
-    /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9): the superseded turn's OWNED
-    /// output stops with an identity-bound AWAIT — the turn does not return until the actual
-    /// stop completes — and it does NOT restore the window (the successor owns the release).
-    /// The successor's single resume is intact.
+    /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a
+    /// superseded turn with NO pending playback owes no await — it returns earlyClose, never
+    /// restores (the successor owns the window), and the successor's single resume is intact.
     func testSupersededTurnAwaitsItsOwnedStopAndLeavesTheReleaseToTheSuccessor() async throws {
-        // Turn A: held open with pending owned audio.
         self.nextTurnFixture =
             """
             event: token
             data: {"text":"slow"}
 
             """
-        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
         let gate = holdNextTurn()
         let sink = makeSink()
-        final class Box: @unchecked Sendable {
-            private let lock = NSLock()
-            private var deliveries: [() -> Void] = []
-            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
-            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
-        }
-        let box = Box()
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
         try await Task.sleep(nanoseconds: 200_000_000)
-        gate.release()
-        // Withhold A's stop notification: A must SUSPEND on its owned stop await.
-        await MainActor.run {
-            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
-                box.store(deliver)
-            }
-        }
-        // Turn B supersedes A and completes cleanly.
+        // B supersedes A FIRST: A's cleanup must observe the transfer (still no stop is
+        // requested — A owned no pending playback at supersession).
         self.nextTurnFixture =
             """
             event: done
@@ -1803,46 +1787,37 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
-        // B's release is intact: exactly one resume (B's).
-        var resumes = 0
-        for _ in 0..<60 {
-            resumes = playback.calls.filter { $0 == .resume }.count
-            if resumes == 1 { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTAssertEqual(resumes, 1, "the successor's single release is intact")
-        // A has NOT returned: its owned-stop await is still suspended (stop withheld).
-        let aFinished = try await timeoutProbe(slow, nanoseconds: 200_000_000)
-        XCTAssertFalse(aFinished, "A is still suspended on its identity-bound stop await")
-        // Deliver the actual stop: A returns, earlyClose, and did NOT restore (B owns the window).
-        await MainActor.run { box.deliverAll() }
+        gate.release()
         let aResult = await slow.value
         XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1,
-                       "A does not restore the window after the successor took it")
-        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
-        XCTAssertGreaterThan(confirmed, 0, "A's owned output stopped with a confirmed identity")
-        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
-        XCTAssertFalse(pending, "A's owned audio is gone")
-        await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
+                       "only the winning turn restores playback")
+        let cancels = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
+        XCTAssertEqual(cancels, 0, "no stop was REQUESTED: nothing was pending at supersession")
     }
 
-    /// SUCCESSOR-AUDIO OWNERSHIP (review 9fc2603e): A is superseded and its cleanup must NEVER
-    /// touch the shared player after B owns the turn — B's newly ADMITTED audio must survive.
-    /// A is suspended on the retire-stop confirmation (withheld) while B admits frames, so the
-    /// timing is deterministic: frames alive while A suspended, STILL alive after A returns.
-    func testSupersededCleanupPreservesSuccessorAdmittedAudio() async throws {
-        // Turn A: HELD at its first receive — its sink loop never consumes a single frame until
-        // the test releases the gate, so A's cleanup ordering vs B's admission is DETERMINISTIC.
+    /// ADMISSION AWAITS PREDECESSOR QUIESCENCE (review 14f66b72): B's retire only QUEUES a
+    /// runner stop, so B must not admit (or even build) its stream until A's stop is CONFIRMED.
+    /// A's producer is parked after its audio frames (all enqueued, A still running); B
+    /// supersedes; with the retire stop's confirmation withheld, B has neither built its client
+    /// nor completed; delivery releases B, which then completes normally.
+    func testSuccessorAdmissionAwaitsPredecessorQuiescence() async throws {
         self.nextTurnFixture =
             """
             event: token
             data: {"text":"slow"}
 
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
             """
+        // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
+        // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
-        let gate = holdNextTurn()
+        let aGate = DispatchSemaphore(value: 0)
+        self.blockProducerAfterFrames = (40, aGate)
         let sink = makeSink()
+        hookedSink = sink
         final class Box: @unchecked Sendable {
             private let lock = NSLock()
             private var deliveries: [() -> Void] = []
@@ -1850,19 +1825,22 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
         }
         let box = Box()
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
-        try await Task.sleep(nanoseconds: 200_000_000)
-        // Withhold stop-notification delivery: A's superseded cleanup suspends awaiting the
-        // retire stop's confirmation, giving the control a held observation point.
+        var aEnqueued = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aEnqueued = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aEnqueued, "A's audio is enqueued while its producer is parked")
+        let aTask = capturedTask
+        // Withhold stop-notification delivery: B's admission await suspends on the retire stop.
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
                 box.store(deliver)
             }
         }
-        // Hold B's DRAIN so its done-path physical stop cannot shed its own frames while the
-        // control observes them.
-        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
-        // Turn B SUPERSEDES A and admits its own audio — while A is still parked.
         self.nextTurnFixture =
             """
             event: token
@@ -1874,80 +1852,127 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
         let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
-        var bAdmitted = false
-        for _ in 0..<60 {
-            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
-            if pending { bAdmitted = true; break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTAssertTrue(bAdmitted, "B admitted its own audio while A is parked")
-        let bResult = await fast.value
-        XCTAssertEqual(bResult.outcome, .completed, "B completes while A is still parked")
-        // Let B's completion bookkeeping fully settle before taking the identity anchor.
+        // B must be SUSPENDED at admission: no client built, no completion.
+        let bFinishedEarly = try await timeoutProbe(fast, nanoseconds: 200_000_000)
+        XCTAssertFalse(bFinishedEarly, "B is suspended at admission while A's stop is unconfirmed")
+        // A's frames were retired synchronously; nothing new is admitted while B waits.
+        let pendingNow: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pendingNow, "nothing is admitted while A's stop is unconfirmed")
+        // Release the drain hold FIRST: the runner is parked inside the hold and must process
+        // the queued retire stop (and issue its notification) before anything can confirm.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
-        // Anchor: how many stop requests the SHARED player has served so far. A cleanup that
-        // runs LATER must not add one (epoch arithmetic races concurrent finish/drain
-        // scheduling; a raw request count does not).
-        let cancelAnchor: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
-        XCTAssertGreaterThanOrEqual(cancelAnchor, 1, "the successor's retire requested a stop")
-        // A is still parked: it has consumed nothing.
-        let aFinished = try await timeoutProbe(slow, nanoseconds: 200_000_000)
-        XCTAssertFalse(aFinished, "A is still parked when B has fully completed")
-        // NOW let A's loop run: the supersession flag breaks it at the first event and its
-        // cleanup executes — AFTER B's audio was admitted and B's identity was fixed.
-        gate.release()
-        // Deliver the withheld retire-stop confirmation so A's await completes by confirmation,
-        // not by timeout.
-        await MainActor.run { box.deliverAll() }
+        // Deliver the retire stop: B proceeds, admits ITS OWN audio, and completes. The capture
+        // hook is uninstalled first so B's OWN drain stop delivers normally.
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        let bResult = await fast.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes once the predecessor is quiescent")
+        // A's producer unblocked: its cleanup awaits the CAPTURED retire identity (already
+        // confirmed) and returns an incomplete turn without touching B's window.
+        aGate.signal()
         let aResult = await slow.value
         XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
-        // The DISCRIMINATOR: A's cleanup must not have touched the shared player — the
-        // stop-request identity is unchanged (an unconditional A cancel would bump it), and
-        // B's admitted audio SURVIVES.
-        let cancelAfter: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
-        XCTAssertEqual(cancelAfter, cancelAnchor, "A's superseded cleanup must not request another stop on the shared player")
-        let survived = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
-        XCTAssertTrue(survived, "A's superseded cleanup must not shed B's admitted audio")
-        // Release the drain: B's own stop runs and clears ITS OWN audio.
-        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
-        var drainedOk = false
+        // B's deferring drain restores asynchronously — bounded poll, never an instant assert.
+        var resumes = 0
         for _ in 0..<60 {
-            if !(await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }) { drainedOk = true; break }
+            resumes = playback.calls.filter { $0 == .resume }.count
+            if resumes == 1 { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertTrue(drainedOk, "B's audio drained under B's own completion")
+        XCTAssertEqual(resumes, 1, "only B restores the window")
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
             sink.audioPlayerForTesting?.setDrainHoldForTesting(false)
         }
     }
 
-    /// OWNING-TASK CANCELLATION vs CLOUD-TOKEN SUPERSESSION (review 9fc2603e): an actual
-    /// `Task.cancel` on the owning task (no successor) still stops the owned output with a
-    /// confirmed identity — a distinct path from token supersession.
-    func testOwningTaskCancellationStopsOwnedOutputWithConfirmedIdentity() async throws {
+    /// CAPTURED RETIRE IDENTITY (review 14f66b72): the superseded turn's cleanup awaits the
+    /// identity captured for ITS token at the transfer — never the shared latest counter. A
+    /// test-injected stop (E2) moves the counter AFTER B's admission; A must still resolve on
+    /// E1's confirmation and return while E2's confirmation is still withheld.
+    func testSupersededCleanupAwaitsItsCapturedRetireIdentity() async throws {
         self.nextTurnFixture =
             """
             event: token
             data: {"text":"slow"}
 
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
             """
+        // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
+        // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
-        let gate = holdNextTurn()
+        let aGate = DispatchSemaphore(value: 0)
+        self.blockProducerAfterFrames = (40, aGate)
         let sink = makeSink()
-        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        hookedSink = sink
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverOldest() { lock.lock(); let d = deliveries.isEmpty ? nil : deliveries.removeFirst(); lock.unlock(); d?() }
+            func pendingCount() -> Int { lock.lock(); let c = deliveries.count; lock.unlock(); return c }
+        }
+        let box = Box()
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aEnqueued = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aEnqueued = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aEnqueued, "A's audio is enqueued while its producer is parked")
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"fast"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        // B's FIRST-frame hook injects a test stop (E2) — only once B is actually admitted,
+        // i.e. strictly after E1's confirmation.
+        self.cancelPlayerOnFirstFrameForNextBuild = true
+        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
         try await Task.sleep(nanoseconds: 200_000_000)
-        // Cancel while the turn is still live (held mid-stream), THEN release the stream:
-        // the cancellation must take the owner-cancel path, not a post-exhaustion truncation.
-        turn.cancel()
-        try await Task.sleep(nanoseconds: 100_000_000)
-        gate.release()
-        let result = await turn.value
-        XCTAssertEqual(result.outcome, .earlyClose, "a task-cancelled turn is an incomplete turn")
-        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
-        XCTAssertGreaterThan(confirmed, 0, "the owned output stopped with a confirmed identity")
-        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
-        XCTAssertFalse(pending, "no owned audio survives the task cancellation")
+        // Release the drain hold so the runner processes the retire stop, then deliver E1:
+        // B is admitted and its FIRST-frame hook injects E2.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run { box.deliverOldest() }
+        let bResult = await fast.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes after E1 quiescence")
+        // Withheld confirmations exist (E2 among them — B's own drain may also be captured);
+        // E2 is definitely not confirmed yet.
+        XCTAssertGreaterThanOrEqual(box.pendingCount(), 1,
+                                    "the injected stop's confirmation is withheld")
+        // Release A's producer: its cleanup reads the CAPTURED identity (E1, already
+        // confirmed) and returns WITHOUT waiting on E2.
+        aGate.signal()
+        let aFinished = try await timeoutProbe(slow, nanoseconds: 2_000_000_000)
+        XCTAssertTrue(aFinished, "A resolved on its CAPTURED identity, not the moved counter")
+        let aResult = await slow.value
+        XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
+        XCTAssertGreaterThanOrEqual(box.pendingCount(), 1,
+                                    "A resolved without needing the later stop's confirmation")
+        // Cleanup: deliver E2 and release the drain hold so nothing stays stranded.
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(false)
+            box.deliverOldest()
+        }
     }
 
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
@@ -2101,6 +2126,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// OPT-IN binary audio for the next built turn, mirroring `nextTurnFixture`. Empty means the
     /// turn carries no audio, so every existing case is unaffected.
     private var nextTurnAudioPayloads: [Data] = []
+    /// Producer-side park (review 14f66b72 controls): blocks the NEXT built client's producer
+    /// after N frames — A's audio is enqueued while A is still running.
+    private var blockProducerAfterFrames: (count: Int, semaphore: DispatchSemaphore)?
+    /// Install a first-frame hook on the NEXT built client that cancels the player (a stop the
+    /// test itself injects, to move the shared latest identity AFTER a captured retire).
+    private var cancelPlayerOnFirstFrameForNextBuild = false
+    private var injectedStopDone = false
+    private var hookedSink: CloudRouteSink?
 
     private func makeSink(conversationManager: CloudConversationManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
@@ -2118,6 +2151,37 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                     built.task.holdUntilReleased(gate)
                     self.heldTurn = (built.task, gate)
                     self.pendingHeldGate = nil
+                }
+                if let block = self.blockProducerAfterFrames {
+                    self.blockProducerAfterFrames = nil
+                    // SYNC park on the producer's own task (never the main queue): the control
+                    // holds A's producer AFTER its audio frames are enqueued, with a bounded
+                    // wait so a lost release fails promptly instead of hanging.
+                    let sem = block.semaphore
+                    final class Counter: @unchecked Sendable {
+                        private let lock = NSLock(); private var n = 0
+                        func next() -> Int { lock.lock(); n += 1; let v = n; lock.unlock(); return v }
+                    }
+                    let counter = Counter()
+                    built.client.onFrameReceived = {
+                        // Block the producer AFTER the Nth frame (frames keep flowing to the
+                        // sink before that). Bounded waits: a lost release fails promptly.
+                        if counter.next() >= block.count {
+                            while sem.wait(timeout: .now() + 0.05) == .timedOut {}
+                        }
+                    }
+                }
+                if self.cancelPlayerOnFirstFrameForNextBuild {
+                    self.cancelPlayerOnFirstFrameForNextBuild = false
+                    built.client.onFrameReceived = { [weak self] in
+                        guard let self else { return }
+                        let sink = self.hookedSink
+                        Task { @MainActor in
+                            guard !(self.injectedStopDone) else { return }
+                            self.injectedStopDone = true
+                            sink?.audioPlayerForTesting?.cancel()
+                        }
+                    }
                 }
                 self.capturedTask = built.task
                 return built.client

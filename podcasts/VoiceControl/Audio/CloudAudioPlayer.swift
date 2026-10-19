@@ -345,14 +345,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Identity of the drain most recently SCHEDULED, incremented in `finish()`/`cancel()`.
     private var drainEpoch = 0
-    /// The identity of the most recent REQUESTED stop (cancel/finish) — visible to callers that
-    /// arrived after someone else (e.g. a successor's supersede retire) already requested it.
-    /// Read under `runnerLock`; guarded by `runnerLock` in the mutators.
-    var lastStopRequestEpoch: Int {
-        runnerLock.lock()
-        defer { runnerLock.unlock() }
-        return drainEpoch
-    }
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
@@ -656,7 +648,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Hard bound for keeping an engine alive on unverified pending audio. Runner-thread only.
     private var renderStopDeadline: Date?
 
-    private var isPlaying = false
+    private(set) var isPlaying = false
+    /// Outstanding-output signal for admission gating (review 14f66b72): frames buffered OR the
+    /// engine still up — a queued-but-unprocessed stop keeps `isPlaying` true until the runner
+    /// processes it, so a successor can detect "a stop is still in flight" and must not skip
+    /// its quiescence await.
+    var hasOutstandingOutput: Bool {
+        hasPendingAudio || isPlaying
+    }
     private var paused = false
 
     private var hasEnoughFramesToPlay: Bool {

@@ -166,15 +166,30 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
     /// double-restore the pause.
     private var activeTurn: CloudTurnToken?
+    /// PLAYBACK ownership, distinct from consumer-Task lifetime (review 14f66b72): a turn that
+    /// finished its NETWORK work can still own pending player audio (a deferring drain), so a
+    /// successor must retire THAT even though `activeTurn` is already gone. Set at each
+    /// admission transfer; never cleared on completion — retirement is by the next transfer.
+    private var playbackOwner: CloudTurnToken?
+    /// The stop identity each predecessor's retirement requested, captured AT THE TRANSFER and
+    /// associated with the predecessor's token (review 14f66b72): the superseded turn's cleanup
+    /// awaits ITS OWN captured identity — never the shared latest counter, which later stops
+    /// move.
+    private var pendingRetireStops: [CloudTurnToken: Int] = [:]
 
 
 
 
 
     /// Cancellation handle for one logical turn.
-    final class CloudTurnToken {
+    final class CloudTurnToken: Hashable {
         private let lock = NSLock()
         private var cancelled = false
+        /// Identity for the captured-retire table: object identity (a token is never reused).
+        nonisolated func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+        nonisolated static func == (lhs: CloudTurnToken, rhs: CloudTurnToken) -> Bool {
+            lhs === rhs
+        }
 
         var isCancelled: Bool {
             lock.lock()
@@ -328,20 +343,40 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Supersede any in-flight turn (double wake / barge-in) before touching
         // shared per-turn state. Only a turn that will actually run supersedes.
         let turnToken = CloudTurnToken()
-        let predecessor = activeTurn
+        let playbackPredecessor = playbackOwner
         activeTurn?.cancel()
-        // ATOMIC RETIRE AT ADMISSION (review 9fc2603e): the successor retires the PREDECESSOR's
-        // output HERE — before this turn can admit any audio of its own — so the shared player's
-        // buffer and runner contain only this turn's audio from here on. The superseded turn's
-        // own cleanup never cancels: a `cancel` from A after this point would shed B's admitted
-        // frames (epoch identity is a stop REQUEST, not audio ownership). Sequential turns (no
-        // predecessor in flight) retire nothing: an extra stop request would only shift
-        // confirmed-stop identities under existing deferral records.
-        if predecessor != nil {
-            audioPlayer.cancel()
-        }
+        // Transfer happens AT ADMISSION, before the quiescence wait: a turn that supersedes US
+        // while we wait must observe itself as the owner (review 14f66b72).
         activeTurn = turnToken
-
+        playbackOwner = turnToken
+        // ATOMIC RETIRE + QUIESCENCE AT ADMISSION (reviews 9fc2603e / 14f66b72): the successor
+        // retires the PLAYBACK predecessor's output HERE — before this turn can admit any audio
+        // of its own — and WAITS for the confirmed stop before admitting, because `cancel` only
+        // QUEUES a runner stop: frames admitted before the runner processes it would be shed by
+        // the queued stop. The identity is captured at the transfer and associated with the
+        // predecessor's token; the superseded turn's own cleanup awaits that captured identity.
+        // Sequential turns (no playback predecessor, or nothing pending) retire nothing: an
+        // extra stop request would only shift confirmed-stop identities under existing deferral
+        // records.
+        if let playbackPredecessor, audioPlayer.hasOutstandingOutput {
+            let retireEpoch = audioPlayer.cancel()
+            pendingRetireStops[playbackPredecessor] = retireEpoch
+            var quiesced = false
+            for _ in 0..<8 {
+                if await audioPlayer.awaitActualStop(after: retireEpoch, timeout: 0.25) {
+                    quiesced = true
+                    break
+                }
+                // Revalidate between bounds: a newer turn may have superseded US while we
+                // waited; then THIS turn must not admit either.
+                guard activeTurn === turnToken else { break }
+            }
+            guard activeTurn === turnToken, quiesced else {
+                // Ownership-safe disposition: never admit over a predecessor that is not
+                // confirmed quiescent, and never run as a superseded-while-waiting turn.
+                return CloudRouteResult(response: .silent, outcome: .earlyClose)
+            }
+        }
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
@@ -600,9 +635,24 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     }
                 }
             } else {
-                // Superseded: the successor requested this turn's retire at admission; await the
-                // identity it requested so this turn cannot outlive its own engine stop.
-                _ = await audioPlayer.awaitActualStop(after: audioPlayer.lastStopRequestEpoch)
+                // Superseded: await the identity captured for THIS token at the transfer
+                // (review 14f66b72) — never the shared latest counter, which later stops move.
+                if let capturedEpoch = pendingRetireStops.removeValue(forKey: turnToken) {
+                    // Bounded: the confirmed stop lands via the normal path; if every bound
+                    // expires the disposition is explicit — this turn releases NOTHING (the
+                    // successor owns the window) and reports an incomplete turn, never claiming
+                    // a quiescence that was not confirmed.
+                    var quiesced = false
+                    for _ in 0..<8 {
+                        if await audioPlayer.awaitActualStop(after: capturedEpoch, timeout: 0.25) {
+                            quiesced = true
+                            break
+                        }
+                    }
+                    _ = quiesced // disposition is: no release either way; earlyClose below
+                }
+                // No captured entry: nothing was retired for this turn (it owned no pending
+                // playback at supersession) — nothing to await.
             }
             return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
