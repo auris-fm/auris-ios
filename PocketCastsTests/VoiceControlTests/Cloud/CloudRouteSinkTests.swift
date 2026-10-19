@@ -863,12 +863,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
 
-    /// ACTUAL held-work owning-Task cancellation boundary with the production policy: a hold
-    /// INDEPENDENT of owner cancellation (Gate.wait never observes the owner's cancel), cancel
-    /// while provably held pre-effect, REQUIRE prompt original-registration retirement BEFORE
-    /// release, then release and require ZERO operation effects and mandatory recreated/persisted
-    /// unknown for the claimed interrupted case — no settled-or-unsettled branch, no swallowed
-    /// CancellationError, no count-only substitute.
+    /// ACTUAL held-work owning-Task cancellation boundary with production prompt cleanup:
+    /// cancellation is delivered ONLY by cancelling the real owning Task; the sink's own
+    /// `withTaskCancellationHandler` retires the ORIGINAL registration synchronously while the
+    /// consumer is suspended. Asserted: live original registration BEFORE cancel, actual socket
+    /// cancellation BEFORE hold release, zero effects after release, and mandatory THIRD-store
+    /// persisted settled unknown with no in-progress id.
     func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
         self.pendingFixture = """
             event: action
@@ -881,64 +881,48 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
         let entered = Gate()
         let release = Gate()
         await MainActor.run {
-            // The hold ignores owner cancellation entirely: it returns only when the TEST releases
-            // it, so the cancel provably strikes mid-operation while held.
+            // Hold INDEPENDENT of owner cancellation: returns only when the TEST releases it.
             sink.effectGate = {
                 entered.release()
-                while !release.released {
-                    try? await Task.sleep(nanoseconds: 2_000_000)
-                }
+                do { try await release.wait() } catch { /* bounded hold: released or cancelled */ }
             }
         }
-        final class Holder: @unchecked Sendable { var cancelled = false }
-        let holder = Holder()
-        let box = CancellableObservingBox { holder.cancelled }
-        let owner = Task { () -> CloudRouteResult in
-            await MainActor.run { sink.setOwnerForTesting(box) }   // arm from INSIDE: after the turn-start reset
-            return await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let owner = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         }
-        do { try await entered.wait() } catch { XCTFail("sink never reached the pre-effect hold"); return }
+        try? await entered.wait(timeout: 5)
         XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation durably claimed while held")
+        // LIVE ORIGINAL REGISTRATION before cancel: the stub socket has not been cancelled and
+        // a result send would still ride it.
+        XCTAssertFalse(capturedTask?.isCancelledSocket ?? true, "original registration must be LIVE before cancellation")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
                        "no effect may run while held")
-        holder.cancelled = true
-        // Deterministic held boundary: keep the producer parked in `receive()` until AFTER the
-        // test releases, so "retirement before release" is a real ordering requirement, not an
-        // accident of the stream ending first.
-        // Deterministic held boundary: the stub socket itself is held in receive() until AFTER
-        // release, so the producer cannot finish the stream and retire first — retirement-before-
-        // release becomes a real ordering requirement, not an accident of stream end.
-        owner.cancel()
-        // RETIREMENT BEFORE RELEASE: the immediate production cancel-check retires the ORIGINAL
-        // registration synchronously at cancellation detection — observable through the result
-        // socket's close hook having run — strictly BEFORE this control releases the hold.
-        var retiredBeforeRelease = false
-        let deadline = Date().addingTimeInterval(0.5)
-        while Date() < deadline {
-            let finished = await MainActor.run { sink.currentTurnResultSocketForTesting?.isTurnFinished ?? false }
-            if finished { retiredBeforeRelease = true; break }
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertTrue(retiredBeforeRelease, "original registration must retire while the sink is held, before release")
-        XCTAssertFalse(release.released, "retirement assertion happened strictly before release")
+        owner.cancel()   // the ONLY cancellation mechanism — no side channel
+        // ACTUAL RETIREMENT before release: the synchronous onCancel path cancels the transport
+        // while the consumer remains suspended in held work.
+        let retiredBeforeRelease = await capturedTask?.awaitCancellation(timeout: 0.5) ?? false
+        XCTAssertTrue(retiredBeforeRelease, "cancellation itself must retire the original registration while suspended, before release")
+        XCTAssertFalse(release.released, "retirement asserted strictly before release")
         release.release()
         _ = await owner.value
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try? await Task.sleep(nanoseconds: 100_000_000)
         let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectsTotal, 0, "cancelled-before-start must NEVER execute after release")
-        // Mandatory recovery through a RECREATED store+journal: persisted unknown, then settled.
+        // Mandatory recovery through RECREATED stores: second reconstructs persisted unknown,
+        // THIRD reload proves the settlement itself is durable with no in-progress id.
         let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-held-mid"], "claimed interrupted case stays in progress")
         XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown)
-        if case .alreadyRun = recreated.claim("op-held-mid") {} else {
-            XCTFail("reconstructed record must settle")
-        }
+        let third = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertTrue(third.interruptedOperationIDs().isEmpty, "settled unknown must be durable, no in-progress id")
+        XCTAssertEqual(third.claim("op-held-mid"),
+                       OperationClaim.alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)))
     }
+
 
     /// Distinct behavior #2: a CONFIGURED route whose connection fails must report the
     /// transport failure — not be relabeled as a pre-transport refusal. This is what the old

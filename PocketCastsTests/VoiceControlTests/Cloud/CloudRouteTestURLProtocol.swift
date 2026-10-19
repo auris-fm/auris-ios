@@ -244,25 +244,63 @@ extension CloudRouteClient {
 final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
+    private var resume: ((Result<Void, Error>) -> Void)?
 
     /// Waits for the latch to open. Throws `CancellationError` if the waiting
     /// task is cancelled — a transport that ignores cancellation cannot be
     /// superseded, and swallowing the error here would hide that (as well as
     /// spin a cancelled task forever).
     func wait() async throws {
-        while true {
-            lock.lock()
-            let open = isOpen
-            lock.unlock()
-            if open { return }
-            try await Task.sleep(nanoseconds: 2_000_000)
+        try await wait(untilCancelled: nil)
+    }
+
+    /// Bounded wait used by controls to fail fast instead of hanging a suite.
+    func wait(timeout: TimeInterval) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await self.wait() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// Waits for release WITHOUT polling: suspends on a checked continuation that `release()`
+    /// resumes. Throws `CancellationError` on task cancellation, and returns by resuming with
+    /// failure when `untilCancelled` reports an external cancellation (e.g. the owning socket
+    /// was retired) so a parked transport wakes promptly instead of busy-looping.
+    func wait(untilCancelled isExternallyCancelled: (@Sendable () -> Bool)?) async throws {
+        final class Cell: @unchecked Sendable { var resume: ((Result<Void, Error>) -> Void)? }
+        let cell = Cell()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                var alreadyOpen = false
+                var alreadyCancelled = false
+                lock.lock()
+                if isOpen { alreadyOpen = true }
+                else if let f = isExternallyCancelled, f() { alreadyCancelled = true }
+                else { resume = cont.resume }
+                lock.unlock()
+                if alreadyOpen { cont.resume() }
+                if alreadyCancelled { cont.resume(throwing: URLError(.cancelled)) }
+            }
+        } onCancel: {
+            var r: ((Result<Void, Error>) -> Void)?
+            lock.lock(); r = resume; resume = nil; lock.unlock()
+            r?(.failure(CancellationError()))
         }
     }
 
     func release() {
+        var r: ((Result<Void, Error>) -> Void)?
         lock.lock()
         isOpen = true
+        r = resume
+        resume = nil
         lock.unlock()
+        r?(.success(()))
     }
 
     var released: Bool {
@@ -278,13 +316,18 @@ extension StubWebSocketTask {
     /// The closure happens in the client's producer task, while the consumer that
     /// drained the stream returns on another — the consumer can win that race, so
     /// a bare assertion here reads `nil` intermittently. Poll rather than race.
+    /// Continuation-based wait for socket cancellation (no polling): resumes when `cancel(with:)`
+    /// runs or the bounded timeout elapses.
     func awaitCancellation(timeout: TimeInterval = 1) async -> Bool {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while Date() < deadline {
-            if cancelled != nil { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+        if isCancelledSocket { return true }
+        let gate = Gate()
+        cancellationWaiters.append({ [gate] in gate.release() })
+        do {
+            try await gate.wait(untilCancelled: { self.isCancelledSocket })
+            return isCancelledSocket
+        } catch {
+            return isCancelledSocket
         }
-        return cancelled != nil
     }
 
     /// The auth frame the client sent, as a JSON object.
@@ -343,8 +386,23 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.gate = gate
     }
 
+    /// True once `cancel(with:reason:)` has run — the observable retirement of the ORIGINAL
+    /// registration at the transport level.
+    var isCancelledSocket: Bool {
+        lockForSnapshot()
+        defer { unlockForSnapshot() }
+        return cancelled != nil
+    }
+    private func lockForSnapshot() { snapshotLock.lock() }
+    private func unlockForSnapshot() { snapshotLock.unlock() }
+    private let snapshotLock = NSLock()
+
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let gate { try await gate.wait() }
+        // Parked receives must WAKE on socket cancellation: a retired socket cannot keep the
+        // producer busy-waiting or holding a closed connection concept open.
+        if let gate {
+            try await gate.wait(untilCancelled: { self.isCancelledSocket })
+        }
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
@@ -354,8 +412,15 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         return incoming.removeFirst()
     }
 
+    fileprivate var cancellationWaiters: [@Sendable () -> Void] = []
+
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        snapshotLock.lock()
         cancelled = (closeCode, reason)
+        let waiters = cancellationWaiters
+        cancellationWaiters = []
+        snapshotLock.unlock()
+        for w in waiters { w() }
     }
 
     /// The JSON payloads the client sent, decoded for assertions.

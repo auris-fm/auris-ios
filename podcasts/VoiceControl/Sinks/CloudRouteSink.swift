@@ -37,25 +37,6 @@ final class OwnerCancelFlag: @unchecked Sendable {
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flagged }
 }
 
-/// Anything that can report its cancellation state — lets the sink observe an owning Task of
-/// any result/failure type without generics. `Task` satisfies it structurally via the wrapper.
-protocol CancellableObserving: AnyObject {
-    var isCancelled: Bool { get }
-}
-
-/// Type-erasing box so a caller's `Task<T, E>` can be observed for cancellation.
-/// Caller-supplied view of the owning Task's cancellation state. Production assembly leaves it
-/// unset; controls that cancel an owning Task mid-turn arm it so the sink's watcher and the
-/// pre-effect check observe the ACTUAL owner rather than only the turn token.
-final class CancellableObservingBox: CancellableObserving, @unchecked Sendable {
-    private let check: @Sendable () -> Bool
-    init(_ check: @escaping @Sendable () -> Bool) { self.check = check }
-    var isCancelled: Bool { check() }
-}
-
-protocol HasIsCancelled { var isCancelled: Bool { get } }
-extension Task: HasIsCancelled {}
-
 @MainActor
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
@@ -114,6 +95,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Optional pre-effect hold used ONLY by controls to strike cancellation deterministically
     /// between claim and effect. Production never sets it; nil means no pause.
     var effectGate: (@Sendable () async -> Void)?
+    /// The CURRENT turn's cancellation mark, installed by the owning task's handler. Held work
+    /// reads it after any suspension; cleared when the turn ends.
+    private var currentOwnerCancelFlag: OwnerCancelFlag?
+
+    var ownerCancelledNowForCurrentTurn: Bool { currentOwnerCancelFlag?.isSet ?? false }
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let playbackPositionMs: () -> Int64
@@ -258,8 +244,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         selection: CloudConversationSelection?,
         preparedObserver: PreparedObserver? = nil
     ) async -> CloudRouteResult {
-        // A fresh turn starts un-cancelled; the caller re-arms observation via setOwnerForTesting.
-        ownerRefForTesting = nil
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
         // the seam blind to exactly the refused turns a caller-level case most needs to observe.
@@ -386,11 +370,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // and the turn-wide cleanup plus this post-loop check retire the ORIGINAL registration
         // before the loop can return normally on a cancelled turn.
         let ownerCancelledFlag = OwnerCancelFlag()
+        currentOwnerCancelFlag = ownerCancelledFlag
         let cancelWatch = Task { [weak resultSocket, weak self] in
             while !turnToken.isCancelled && !Task.isCancelled {
-                let cancelledNow = await MainActor.run {
-                    (self?.ownerCancelledForTesting ?? false) || ownerCancelledFlag.isSet
-                }
+                let cancelledNow = ownerCancelledFlag.isSet
                 if cancelledNow { break }
                 try? await Task.sleep(nanoseconds: 20_000_000)
             }
@@ -403,6 +386,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         defer {
             cancelWatch.cancel()
             routed.resultSocket.finishTurn()
+            currentOwnerCancelFlag = nil
         }
         // Loop-exit immediate check: `onCancel` fires synchronously at cancel time and marks the
         // flag; when the suspended loop returns here after cancellation, retire the ORIGINAL
@@ -585,9 +569,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // IN PROGRESS — no settlement here: this process reports `unknown`, and a restart
         // reconstructs the same honest unknown. Never a replay, never a fabricated outcome.
         if let effectGate { await effectGate() }
-        // Post-hold re-arm: the control arms the owner box after routeToCloud starts, so the
-        // check below reads the CURRENT value (the turn-start reset cannot clear a later arm).
-        if Task.isCancelled || ownerCancelledForTesting {
+        if Task.isCancelled || ownerCancelledNowForCurrentTurn {
             // Immediate, synchronous retirement of the ORIGINAL registration (idempotent; the
             // turn-wide defer re-runs it harmlessly): the held work cannot proceed to the effect
             // on a live socket and late results report undelivered against the retired identity.
@@ -756,15 +738,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Set at turn start from the caller-supplied owning Task; refreshed by the pre-effect
     /// cancellation check sites. The watcher polls it so retirement does not depend on the
     /// consumer reaching a suspension point.
-    private var ownerRefForTesting: CancellableObservingBox?
-    var ownerCancelledForTesting: Bool {
-        ownerRefForTesting?.isCancelled ?? false
-    }
-
-    /// Arms owner-cancellation observation for this turn (control-only seam; production callers
-    /// rely on the turn token plus stream cancellation exactly as before).
-    func setOwnerForTesting(_ box: CancellableObservingBox) { ownerRefForTesting = box }
-
     /// Read-only test seam: the socket whose lifetime the current turn owns (nil between turns).
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
