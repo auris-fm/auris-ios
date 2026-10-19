@@ -37,6 +37,7 @@ class VoiceControlAssembly {
         modelManager injectedModelManager: ModelManager? = nil,
         clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
         playbackSink injectedPlaybackSink: VoicePlaybackSink? = nil,
+        graceTimeout injectedGraceTimeout: TimeInterval? = nil,
         cloudConfig injectedCloudConfig: CloudConfig? = nil,
         asrBackend injectedBackend: (() -> AsrBackend?)? = nil,
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
@@ -46,7 +47,9 @@ class VoiceControlAssembly {
         parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) -> VoiceControlService? {
-        let gracePeriodSignal = GracePeriodSignal()
+        // Test-only injection: a controlled (short) clock lets a control hold actual playback
+        // PAST the grace timeout without real sleeps of 30s.
+        let gracePeriodSignal = GracePeriodSignal(timeout: injectedGraceTimeout ?? 30.0)
         let conversationManager = CloudConversationManager()
         // Keep the manager's live origin in step with the window that actually opens. The
         // sink reads the origin from the INTENT (captured at dispatch), so this only supplies
@@ -160,6 +163,8 @@ class VoiceControlAssembly {
             statsQuerySink: StatsQuerySink(dataManager: .sharedManager),
             cloudRouteSink: CloudRouteSink(
                 clientFactory: acceptanceClientFactoryForBuild(injectedClientFactory),
+                // Grace contract: expiry holds while the answer is actually draining/playing and
+                // resumes exactly once at the real stop — identity-bound to the turn's window.
                 isConfigured: { !(injectedCloudConfig ?? CloudConfig.shared).baseUrl.isEmpty },
                 audioPlayer: cloudAudioPlayer,
                 playbackManager: playbackManager,
@@ -194,6 +199,14 @@ class VoiceControlAssembly {
                 conversationSelectionProvider: { [weak gracePeriodSignal] in
                     // A wake opens a window; a recognised command continues the current one.
                     (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
+                },
+                // Grace contract: expiry holds while the answer is actually draining/playing and
+                // resumes exactly once at the real stop — identity-bound to the turn's window.
+                onGracePlaybackHoldBegin: {
+                    if let g = $0 { gracePeriodSignal.beginPlaybackHold(forGeneration: g) }
+                },
+                onGracePlaybackHoldEnd: {
+                    if let g = $0 { gracePeriodSignal.endPlaybackHold(forGeneration: g) }
                 }
             ),
             playbackContextProvider: playbackContextProvider,

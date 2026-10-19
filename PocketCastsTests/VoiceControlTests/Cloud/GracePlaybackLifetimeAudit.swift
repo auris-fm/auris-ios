@@ -187,6 +187,125 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         return session
     }
 
+    /// CONTROLLED-CLOCK EXPIRY control (spec 4acb4aa8): with a SHORT grace clock, actual
+    /// playback pending PAST the timeout must keep the window active and the generation unchanged;
+    /// releasing the REAL drain/stop starts the permitted interval EXACTLY ONCE (it then expires
+    /// normally). Identity-bound ownership: a stale end (wrong generation) must not resume
+    /// anything, and after the window has expired a late hold-end must not reopen it.
+    @MainActor
+    func testPlaybackPendingPastTheGraceTimeoutHoldsExpiryUntilTheRealDrain() async throws {
+        let playback = RecordingPlaybackSink()
+        let suite = "graceauditclock_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "graceauditclock_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult = "<|tool_call_start|>[cloud_route(request='play something upbeat')]<|tool_call_end|>"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+
+        let audio = (0..<40).map { Data([UInt8($0)]) }
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: auditAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
+                    audioPayloads: audio
+                ).client
+            },
+            playbackSink: playback,
+            graceTimeout: 0.5,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        )
+        guard let service else {
+            XCTFail("the assembly built no service, so the control proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+        }
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let generationAtWake = service.gracePeriodSignalForTesting.currentGeneration()
+
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "play something upbeat",
+                language: "en",
+                selection: .wakeWord
+            ),
+            origin: generationAtWake
+        )
+
+        // PAST THE TIMEOUT (2.4x), actual playback still pending: the window must be held.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        XCTAssertTrue(
+            service.gracePeriodSignalForTesting.isActive,
+            "expiry must be HELD while the answer is actually pending — a 0.5s clock ran out "
+                + "under the drain and the window died"
+        )
+        XCTAssertEqual(
+            service.gracePeriodSignalForTesting.currentGeneration(), generationAtWake,
+            "the held window keeps its generation"
+        )
+        XCTAssertEqual(playback.resumeCalls, 0, "the drain is still pending; nothing may resume")
+
+        // Release the REAL drain: the production drain loop finishes and the real
+        // audioPlayerDidStop(drainEpoch:) restores the held playback exactly once.
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if playback.resumeCalls > 0 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(playback.resumeCalls, 1, "restored exactly once, by the real stop")
+
+        // The permitted interval STARTED exactly once: observe it expire normally (one
+        // active→inactive transition) and count transitions on the way.
+        var transitions = 0
+        var wasActive = service.gracePeriodSignalForTesting.isActive
+        let expiryDeadline = Date().addingTimeInterval(3)
+        while Date() < expiryDeadline {
+            let now = service.gracePeriodSignalForTesting.isActive
+            if now != wasActive { transitions += 1; wasActive = now }
+            if !now { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(
+            service.gracePeriodSignalForTesting.isActive,
+            "the interval resumed at the real stop must EXPIRE normally (started exactly once)"
+        )
+        XCTAssertEqual(transitions, 1, "exactly one expiry: no double-start, no re-arm")
+
+        // STALE EVENTS cannot reopen or extend: a late hold-end for the finished generation, and
+        // an end for a never-held generation, must leave the expired window dead.
+        service.gracePeriodSignalForTesting.endPlaybackHold(forGeneration: generationAtWake)
+        service.gracePeriodSignalForTesting.endPlaybackHold(forGeneration: generationAtWake + 99)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(
+            service.gracePeriodSignalForTesting.isActive,
+            "stale stop/hold-end events must not reopen or extend another window"
+        )
+    }
+
     @MainActor
     private func provenanceConditionMonitor() -> LiveConditionMonitor {
         let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
