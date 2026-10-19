@@ -85,6 +85,10 @@ extension AppOperationResultSocket {
     /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
     /// never on producer completion, which `AsyncStream` signals via `onTermination` on
     /// `finish()` while the consumer may still be mid-turn.
+    /// True once the turn's close hook has run — i.e. the ORIGINAL registration was retired
+    /// (close is idempotent at the lifetime, so re-checking after the first close is safe).
+    var isTurnFinished: Bool { _closeHook == nil }
+
     func finishTurn() {
         closeHook?()
         closeHook = nil

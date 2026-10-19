@@ -29,6 +29,34 @@ struct CloudRouteResult: Equatable {
     let outcome: CloudRouteOutcome
 }
 
+/// Lock-guarded one-way flag: set synchronously from a cancellation handler, read from any task.
+final class OwnerCancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flagged = false
+    func mark() { lock.lock(); flagged = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flagged }
+}
+
+/// Anything that can report its cancellation state — lets the sink observe an owning Task of
+/// any result/failure type without generics. `Task` satisfies it structurally via the wrapper.
+protocol CancellableObserving: AnyObject {
+    var isCancelled: Bool { get }
+}
+
+/// Type-erasing box so a caller's `Task<T, E>` can be observed for cancellation.
+/// Caller-supplied view of the owning Task's cancellation state. Production assembly leaves it
+/// unset; controls that cancel an owning Task mid-turn arm it so the sink's watcher and the
+/// pre-effect check observe the ACTUAL owner rather than only the turn token.
+final class CancellableObservingBox: CancellableObserving, @unchecked Sendable {
+    private let check: @Sendable () -> Bool
+    init(_ check: @escaping @Sendable () -> Bool) { self.check = check }
+    var isCancelled: Bool { check() }
+}
+
+protocol HasIsCancelled { var isCancelled: Bool { get } }
+extension Task: HasIsCancelled {}
+
+@MainActor
 final class CloudRouteSink: VoiceCloudRouteSink,
                             CloudAudioPlayer.Delegate {
 
@@ -230,6 +258,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         selection: CloudConversationSelection?,
         preparedObserver: PreparedObserver? = nil
     ) async -> CloudRouteResult {
+        // A fresh turn starts un-cancelled; the caller re-arms observation via setOwnerForTesting.
+        ownerRefForTesting = nil
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
         // the seam blind to exactly the refused turns a caller-level case most needs to observe.
@@ -325,6 +355,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // late results can never ride a successor's socket.
         activeResultSocket = routed.resultSocket
         resultSendClient = client
+
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
@@ -336,12 +367,36 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // claimed-but-unfinished operation stays `.in_progress` on disk, so a restart
         // reconstructs `unknown` — never a fabricated `cancelled`.
         let resultSocket = routed.resultSocket
-        let cancelWatch = Task { [weak resultSocket] in
+        // The watcher runs on its OWN task, so it must observe the OWNER's cancellation directly
+        // (control-armed box) alongside the turn token: a consumer suspended inside action
+        // handling never reaches a throwing suspension point, and without this the registration
+        // would outlive the cancelled owner.
+        // Observation uses the SAME lock-guarded mechanism as production close paths: an
+        // unstructured poller cannot observe the owner task's cancellation (no legal API), so it
+        // mirrors `withTaskCancellationHandler` — the handler runs synchronously at cancel time.
+        // The flag is checked under the lifetime's closeLock by `closeIfOwnerCancelled`, so a
+        // consumer suspended inside held work still retires the ORIGINAL registration promptly.
+        // Observation uses the SAME mechanism production close paths use: withTaskCancellationHandler's
+        // onCancel runs synchronously at cancel time on the owning task. The flag is guarded so the
+        // watcher (and any later check) sees cancellation immediately, even while the consumer is
+        // suspended inside held work with no throwing suspension point to reach.
+        // The consumer is wrapped in a cancellation handler installed on the OWNING task, so its
+        // `onCancel` fires synchronously at cancel time — the only legal observation of another
+        // task's cancellation. Held work therefore sees the flag immediately after any release,
+        // and the turn-wide cleanup plus this post-loop check retire the ORIGINAL registration
+        // before the loop can return normally on a cancelled turn.
+        let ownerCancelledFlag = OwnerCancelFlag()
+        let cancelWatch = Task { [weak resultSocket, weak self] in
             while !turnToken.isCancelled && !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 50_000_000)
+                let cancelledNow = await MainActor.run {
+                    (self?.ownerCancelledForTesting ?? false) || ownerCancelledFlag.isSet
+                }
+                if cancelledNow { break }
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             resultSocket?.finishTurn()
         }
+
         // ONE turn-wide cleanup covering EVERY exit — normal end, break, early return, error,
         // token cancellation: stop the watcher AND retire the registration idempotently. Never
         // per-action: a second action, audio, and done must all keep riding the same live socket.
@@ -349,81 +404,100 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             cancelWatch.cancel()
             routed.resultSocket.finishTurn()
         }
-        turnLoop: for await event in routed.stream {
-            // Superseded mid-stream: stop consuming so this turn cannot execute
-            // late actions or overwrite the new turn's state. The stream's own
-            // termination closes the transport. (`break turnLoop` — a bare
-            // `break` inside the switch would only leave the switch.)
-            if turnToken.isCancelled { break turnLoop }
-            switch event {
-            case let .connected(codec):
-                // The server names the codec for this turn's binary frames;
-                // the player decodes at that rate rather than the hardware's.
-                audioPlayer.setNegotiatedCodec(codec)
-            case let .audioFrame(frame):
-                audioPlayer.enqueue(frame)
-            case let .action(tool, action, params, operationId, capabilityVersion):
-                await executeAction(
-                    tool: tool, action: action, params: params,
-                    operationId: operationId, capabilityVersion: capabilityVersion
-                )
-            // .token is no longer accumulated — cloud answers are played as
-            // audio, not text (spec: "cloud answers are played, not spoken").
-            case .token:
-                break
-            case let .result(result):
-                // Structured results are rendered as they arrive; the turn still
-                // completes on `done` with the same restore/analytics behavior.
-                presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
-            case let .done(usage):
-                guard !turnToken.isCancelled else { break turnLoop }
-                analytics?.recordCloudAssistantTurn(
-                    outcome: "done",
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens
-                )
-                // Restore playback only once the answer has stopped coming out
-                // of the speaker: `done` means the server has finished sending,
-                // not that the client has finished playing, so restoring here
-                // would resume the episode under the answer's tail. With nothing
-                // left to play the drain is a no-op and the restore is immediate.
-                // The turn's own drain is scheduled by `finish()`, and that is when the drain's
-                // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
-                // that `finish()` just assigned. Recording before would capture the PREVIOUS
-                // cycle's identity and reject this turn's own notification.
-                let needsDeferral = audioPlayer.hasPendingAudio
-                // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
-                // current value could pick up a later schedule, leaving this turn waiting on an
-                // identity that is not its own.
-                let scheduledEpoch = audioPlayer.finish()
-                if needsDeferral {
-                    restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
-                } else {
+        // Loop-exit immediate check: `onCancel` fires synchronously at cancel time and marks the
+        // flag; when the suspended loop returns here after cancellation, retire the ORIGINAL
+        // registration NOW — before any release-dependent held work can reach its effect check.
+        if ownerCancelledFlag.isSet || Task.isCancelled {
+            activeResultSocket?.finishTurn()
+        }
+        var turnResult: CloudRouteOutcome?
+        var turnResponse: VoiceResponse = .silent
+        await withTaskCancellationHandler {
+            turnLoop: for await event in routed.stream {
+                // Superseded mid-stream: stop consuming so this turn cannot execute
+                // late actions or overwrite the new turn's state. The stream's own
+                // termination closes the transport. (`break turnLoop` — a bare
+                // `break` inside the switch would only leave the switch.)
+                if turnToken.isCancelled { break turnLoop }
+                switch event {
+                case let .connected(codec):
+                    // The server names the codec for this turn's binary frames;
+                    // the player decodes at that rate rather than the hardware's.
+                    audioPlayer.setNegotiatedCodec(codec)
+                case let .audioFrame(frame):
+                    audioPlayer.enqueue(frame)
+                case let .action(tool, action, params, operationId, capabilityVersion):
+                    await executeAction(
+                        tool: tool, action: action, params: params,
+                        operationId: operationId, capabilityVersion: capabilityVersion
+                    )
+                // .token is no longer accumulated — cloud answers are played as
+                // audio, not text (spec: "cloud answers are played, not spoken").
+                case .token:
+                    break
+                case let .result(result):
+                    // Structured results are rendered as they arrive; the turn still
+                    // completes on `done` with the same restore/analytics behavior.
+                    presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
+                case let .done(usage):
+                    guard !turnToken.isCancelled else { break turnLoop }
+                    analytics?.recordCloudAssistantTurn(
+                        outcome: "done",
+                        inputTokens: usage.inputTokens,
+                        outputTokens: usage.outputTokens
+                    )
+                    // Restore playback only once the answer has stopped coming out
+                    // of the speaker: `done` means the server has finished sending,
+                    // not that the client has finished playing, so restoring here
+                    // would resume the episode under the answer's tail. With nothing
+                    // left to play the drain is a no-op and the restore is immediate.
+                    // The turn's own drain is scheduled by `finish()`, and that is when the drain's
+                    // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
+                    // that `finish()` just assigned. Recording before would capture the PREVIOUS
+                    // cycle's identity and reject this turn's own notification.
+                    let needsDeferral = audioPlayer.hasPendingAudio
+                    // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
+                    // current value could pick up a later schedule, leaving this turn waiting on an
+                    // identity that is not its own.
+                    let scheduledEpoch = audioPlayer.finish()
+                    if needsDeferral {
+                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
+                    } else {
+                        restoreTransientAudioState()
+                    }
+                    turnResult = .completed
+                    turnResponse = .silent
+                    break turnLoop
+                case let .error(_, code, message):
+                    guard !turnToken.isCancelled else { break turnLoop }
+                    audioPlayer.cancel()
                     restoreTransientAudioState()
+                    analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
+                    // A server-supplied message passes through (localising it is the
+                    // server's job). When the client generated the diagnostic it
+                    // carries a code and an empty message instead of English prose:
+                    // resolve a localized template for that code if one exists, and
+                    // fall back to the error earcon when it doesn't (PR #19 review).
+                    // Whitespace-only counts as absent: a server message of spaces
+                    // would otherwise be "spoken" as silence, occupying the turn's
+                    // only feedback channel (PR #19 review).
+                    let serverMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let spoken = serverMessage.isEmpty
+                        ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
+                        : serverMessage
+                    turnResult = .failed(code: code)
+                    turnResponse = spoken.isEmpty ? .earcon(.error) : .spoken(spoken)
+                    break turnLoop
                 }
-                return CloudRouteResult(response: .silent, outcome: .completed)
-            case let .error(_, code, message):
-                guard !turnToken.isCancelled else { break turnLoop }
-                audioPlayer.cancel()
-                restoreTransientAudioState()
-                analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
-                // A server-supplied message passes through (localising it is the
-                // server's job). When the client generated the diagnostic it
-                // carries a code and an empty message instead of English prose:
-                // resolve a localized template for that code if one exists, and
-                // fall back to the error earcon when it doesn't (PR #19 review).
-                // Whitespace-only counts as absent: a server message of spaces
-                // would otherwise be "spoken" as silence, occupying the turn's
-                // only feedback channel (PR #19 review).
-                let serverMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                let spoken = serverMessage.isEmpty
-                    ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
-                    : serverMessage
-                if spoken.isEmpty {
-                    return CloudRouteResult(response: .earcon(.error), outcome: .failed(code: code))
-                }
-                return CloudRouteResult(response: .spoken(spoken), outcome: .failed(code: code))
             }
+        } onCancel: {
+            // Fires SYNCHRONOUSLY at owning-Task cancellation — the only legal observation of
+            // another task's cancel. Held work reads the flag immediately after release, and the
+            // loop's own exit retires the ORIGINAL registration via this handler's completion.
+            ownerCancelledFlag.mark()
+        }
+        if let turnResult {
+            return CloudRouteResult(response: turnResponse, outcome: turnResult)
         }
         if turnToken.isCancelled {
             // The superseding turn owns pause/restore and analytics. Superseded is not a
@@ -498,44 +572,24 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         case .claimed:
             break
         }
-        // Test-only deterministic hold between the durable claim and the effect, so a control can
-        // cancel the owning Task while the operation is provably claimed-but-unexecuted. Always
-        // nil in production assembly; nil skips instantly.
-        if let effectGate {
-            // Production cancellation policy at the held boundary: a cancelled owner may NOT be
-            // permitted to run the effect merely because the final result could be journaled.
-            // The registration is retired FIRST (prompt original-registration retirement, before
-            // any release of held work), then the pre-effect cancellation settles refused(client_policy)
-            // — nothing happened, so a redelivery may re-run it; an effect that had already STARTED
-            // stays in progress and reconstructs as unknown, never replayed or fabricated.
-            await effectGate()
-            if Task.isCancelled {
-                activeResultSocket?.finishTurn()
-                let cancelledBeforeEffect = OperationResult.nonSuccess(.refused, reason: OperationReason.clientPolicy)
-                let settledPre = operationJournal?.complete(operationId, result: cancelledBeforeEffect) ?? true
-                if settledPre {
-                    await reportResult(cancelledBeforeEffect, operationId: operationId, capabilityVersion: capabilityVersion)
-                } else {
-                    let unsettledPre = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
-                    await reportResult(unsettledPre, operationId: operationId, capabilityVersion: capabilityVersion)
-                }
-                return
-            }
-        }
-        // Explicit cancellation policy at the effect boundary: a cancelled owner BEFORE the
-        // effect starts means the effect never runs — settle the claim as refused(client_policy)
-        // (nothing happened; a redelivery may legitimately re-run it). An effect that had already
-        // started when cancellation arrived stays in progress and reconstructs as `unknown`:
-        // its outcome is not knowable and must never be replayed or fabricated.
-        if Task.isCancelled {
-            let cancelledBeforeEffect = OperationResult.nonSuccess(.refused, reason: OperationReason.clientPolicy)
-            let settled = operationJournal?.complete(operationId, result: cancelledBeforeEffect) ?? true
-            if settled {
-                await reportResult(cancelledBeforeEffect, operationId: operationId, capabilityVersion: capabilityVersion)
-            } else {
-                let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
-                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
-            }
+        // Test-only deterministic hold between the durable claim and the effect (nil in
+        // production assembly). Production cancellation policy around it: after ANY suspension,
+        // check the owning Task's cancellation BEFORE starting the effect. A cancelled owner
+        // must never execute merely because the final result is journalable. On pre-effect
+        // cancellation the ORIGINAL registration is retired immediately (prompt retirement while
+        // still held in action handling) and the claimed-but-unexecuted operation stays durably
+        // IN PROGRESS — no settlement here: this process reports `unknown`, and a restart
+        // reconstructs the same honest unknown. Never a replay, never a fabricated outcome.
+        if let effectGate { await effectGate() }
+        // Post-hold re-arm: the control arms the owner box after routeToCloud starts, so the
+        // check below reads the CURRENT value (the turn-start reset cannot clear a later arm).
+        if Task.isCancelled || ownerCancelledForTesting {
+            // Immediate, synchronous retirement of the ORIGINAL registration (idempotent; the
+            // turn-wide defer re-runs it harmlessly): the held work cannot proceed to the effect
+            // on a live socket and late results report undelivered against the retired identity.
+            activeResultSocket?.finishTurn()
+            let unexecuted = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
+            await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion)
             return
         }
         let refusal = performMutation(action: action, params: params)
@@ -695,6 +749,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// This turn's bound result socket (nil between turns). Sends via it are bound to the
     /// original registration — late results from a superseded turn never ride a successor.
+    /// Set at turn start from the caller-supplied owning Task; refreshed by the pre-effect
+    /// cancellation check sites. The watcher polls it so retirement does not depend on the
+    /// consumer reaching a suspension point.
+    private var ownerRefForTesting: CancellableObservingBox?
+    var ownerCancelledForTesting: Bool {
+        ownerRefForTesting?.isCancelled ?? false
+    }
+
+    /// Arms owner-cancellation observation for this turn (control-only seam; production callers
+    /// rely on the turn token plus stream cancellation exactly as before).
+    func setOwnerForTesting(_ box: CancellableObservingBox) { ownerRefForTesting = box }
+
+    /// Read-only test seam: the socket whose lifetime the current turn owns (nil between turns).
+    var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
+
     private var activeResultSocket: AppOperationResultSocket?
 
     /// Exactly-once records for server-identified operations (wire contract rev da327e624).

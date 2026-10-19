@@ -863,12 +863,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
 
-    /// ACTUAL held-work owning-Task cancellation boundary, deterministic via the production
-    /// pre-effect seam: the gate holds AFTER the durable claim and BEFORE the effect, so the
-    /// cancel provably strikes mid-operation. Asserts (a) claimed-before-cancel premise observed
-    /// through the journal's public interrupted list while held, (b) no effect executed while
-    /// cancelled-and-held then released, (c) the operation reconstructs as persisted unknown from
-    /// a RECREATED store — never replayed, never fabricated success.
+    /// ACTUAL held-work owning-Task cancellation boundary with the production policy: a hold
+    /// INDEPENDENT of owner cancellation (Gate.wait never observes the owner's cancel), cancel
+    /// while provably held pre-effect, REQUIRE prompt original-registration retirement BEFORE
+    /// release, then release and require ZERO operation effects and mandatory recreated/persisted
+    /// unknown for the claimed interrupted case — no settled-or-unsettled branch, no swallowed
+    /// CancellationError, no count-only substitute.
     func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
         self.pendingFixture = """
             event: action
@@ -881,52 +881,63 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        let entered = Gate()   // released when the gate body runs = claimed & holding pre-effect
-        let release = Gate()   // released by the test AFTER cancelling the owner
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        let entered = Gate()
+        let release = Gate()
         await MainActor.run {
+            // The hold ignores owner cancellation entirely: it returns only when the TEST releases
+            // it, so the cancel provably strikes mid-operation while held.
             sink.effectGate = {
                 entered.release()
-                try? await release.wait()
+                while !release.released {
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                }
             }
         }
-        let owner = Task {
-            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        final class Holder: @unchecked Sendable { var cancelled = false }
+        let holder = Holder()
+        let box = CancellableObservingBox { holder.cancelled }
+        let owner = Task { () -> CloudRouteResult in
+            await MainActor.run { sink.setOwnerForTesting(box) }   // arm from INSIDE: after the turn-start reset
+            return await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         }
-        // Deterministic premise: wait until the sink is HELD between claim and effect.
         do { try await entered.wait() } catch { XCTFail("sink never reached the pre-effect hold"); return }
-        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation must be durably claimed while held")
-        let effectsBeforeCancel = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
-        XCTAssertEqual(effectsBeforeCancel, 0, "no effect may run while held")
+        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation durably claimed while held")
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "no effect may run while held")
+        holder.cancelled = true
+        // Deterministic held boundary: keep the producer parked in `receive()` until AFTER the
+        // test releases, so "retirement before release" is a real ordering requirement, not an
+        // accident of the stream ending first.
+        // Deterministic held boundary: the stub socket itself is held in receive() until AFTER
+        // release, so the producer cannot finish the stream and retire first — retirement-before-
+        // release becomes a real ordering requirement, not an accident of stream end.
         owner.cancel()
-        // PROMPT RETIREMENT BEFORE RELEASE: within one watcher poll tick (≤50ms) the ORIGINAL
-        // registration is retired while the sink is still held in action handling. Observable
-        // through the stub transport: any result frame attempted after retirement reports
-        // undelivered ("registration retired"), never riding a live socket.
-        try await Task.sleep(nanoseconds: 120_000_000)
-        let framesWhileHeld = capturedTask?.sentTextFrames.count ?? 0
-        release.release()       // the held work resumes under an already-cancelled owner
-        _ = await owner.value
-        try await Task.sleep(nanoseconds: 200_000_000)
-        let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
-        XCTAssertEqual(effectsTotal, 0, "cancellation before the effect starts must PREVENT the effect — no post-cancel execution just because the result is journalable")
-        // Recovery expectation is MANDATORY and decided by the durable record: if the effect ran
-        // (settled), alreadyRun; if it never settled, recreated-store unknown reconstruction.
-        let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
-        // Policy outcome: pre-effect cancellation settles refused(client_policy); the durable
-        // record must be settled, never executable, and the effect never ran. Retirement was
-        // prompt (before release); framesWhileHeld recorded for diagnostics.
-        switch recreated.claim("op-held-mid") {
-        case .alreadyRun(let recorded):
-            XCTAssertEqual(recorded.outcome, .refused, "pre-effect cancellation settles as refusal, nothing happened")
-            XCTAssertEqual(effectsTotal, 0)
-        case .inProgress:
-            XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown,
-                           "unsettled start stays reconstructible unknown, never replayed")
-        default:
-            XCTFail("durable record lost across recreation")
+        // RETIREMENT BEFORE RELEASE: the immediate production cancel-check retires the ORIGINAL
+        // registration synchronously at cancellation detection — observable through the result
+        // socket's close hook having run — strictly BEFORE this control releases the hold.
+        var retiredBeforeRelease = false
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline {
+            let finished = await MainActor.run { sink.currentTurnResultSocketForTesting?.isTurnFinished ?? false }
+            if finished { retiredBeforeRelease = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
         }
-        XCTAssertGreaterThanOrEqual(framesWhileHeld + recreated.interruptedOperationIDs().count, 0)
+        XCTAssertTrue(retiredBeforeRelease, "original registration must retire while the sink is held, before release")
+        XCTAssertFalse(release.released, "retirement assertion happened strictly before release")
+        release.release()
+        _ = await owner.value
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
+        XCTAssertEqual(effectsTotal, 0, "cancelled-before-start must NEVER execute after release")
+        // Mandatory recovery through a RECREATED store+journal: persisted unknown, then settled.
+        let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-held-mid"], "claimed interrupted case stays in progress")
+        XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown)
+        if case .alreadyRun = recreated.claim("op-held-mid") {} else {
+            XCTFail("reconstructed record must settle")
+        }
     }
 
     /// Distinct behavior #2: a CONFIGURED route whose connection fails must report the

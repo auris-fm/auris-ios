@@ -264,6 +264,12 @@ final class Gate: @unchecked Sendable {
         isOpen = true
         lock.unlock()
     }
+
+    var released: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isOpen
+    }
 }
 
 extension StubWebSocketTask {

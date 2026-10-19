@@ -183,7 +183,7 @@ final class CloudRouteClient {
 
         /// Idempotent: whichever of consumer close (`finishTurn`) or bounded cleanup wins, the
         /// cancel+retire runs exactly once.
-        fileprivate func close() {
+        func close() {
             closeLock.lock()
             if closed { closeLock.unlock(); return }
             closed = true
@@ -209,7 +209,7 @@ final class CloudRouteClient {
         /// Deadline close that re-checks claimed/closed UNDER the lock, so a consumer claiming
         /// concurrently with the deadline is never severed by the timer (blocker: the old timer
         /// checked outside the lock and closed after a concurrent claim).
-        fileprivate func closeIfUnclaimed() {
+        func closeIfUnclaimed() {
             closeLock.lock()
             if closed || consumerClaimed { closeLock.unlock(); return }
             closed = true
