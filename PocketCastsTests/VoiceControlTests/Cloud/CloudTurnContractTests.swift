@@ -6,6 +6,57 @@ import XCTest
 /// Field names/semantics are pinned against `docs/specs/cloud-assistant.md`
 /// ("Turn control fields").
 final class CloudTurnContractTests: XCTestCase {
+    // MARK: - source-first runtime request + optional source_language (core b6eafe25)
+
+    /// The runtime `request` carries the complete wake-trimmed SOURCE utterance when one is
+    /// available; the English routing translation never replaces the original on the wire.
+    /// The optional `source_language` carries the ASR pipeline's actual LID — yue stays yue.
+    func testSourceUtteranceAndLanguageRideTheAuthFrameWhenAvailable() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let json = try await authFrame(
+            request: "play something upbeat",   // English routing translation
+            turn: turn,
+            sourceTranscript: "来点欢快的",       // wake-trimmed source utterance
+            sourceLanguage: "yue"                // actual ASR LID — yue, not zh
+        )
+        XCTAssertEqual(json["request"] as? String, "来点欢快的",
+                       "the original source utterance must be the runtime request, not the routing translation")
+        XCTAssertEqual(json["source_language"] as? String, "yue",
+                       "the actual detected language must ride the frame, preserving yue vs zh")
+    }
+
+    /// Translated-only (backend translate exposes English only): no original exists, so the
+    /// available English text is used WITHOUT fabricating an original, and `source_language` is
+    /// omitted — unknown is omitted, never invented (not the OS locale, not "en").
+    func testTranslatedOnlyTurnSendsAvailableTextAndOmitsUnknownLanguage() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let json = try await authFrame(
+            request: "play something upbeat",
+            turn: turn,
+            sourceTranscript: nil,
+            sourceLanguage: nil
+        )
+        XCTAssertEqual(json["request"] as? String, "play something upbeat",
+                       "without an original, the available text is the request — nothing fabricated")
+        XCTAssertFalse(json.keys.contains("source_language"),
+                       "an unknown language must be OMITTED from the frame, never defaulted")
+    }
+
+    /// An EMPTY source transcript is not an original: the routing request is used and the
+    /// language rides only if actually present.
+    func testEmptySourceTranscriptFallsBackToRoutingRequest() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let json = try await authFrame(
+            request: "pause",
+            turn: turn,
+            sourceTranscript: "",
+            sourceLanguage: "zh"
+        )
+        XCTAssertEqual(json["request"] as? String, "pause",
+                       "an empty source transcript must not replace the routing request")
+        XCTAssertEqual(json["source_language"] as? String, "zh")
+    }
+
     // MARK: - request_id
 
     func testRequestIdIsPresentAndStableWhenReused() async throws {
@@ -229,7 +280,9 @@ final class CloudTurnContractTests: XCTestCase {
     private func authFrame(
         request: String,
         turn: CloudTurnEnvelope,
-        token: String? = "test_token"
+        token: String? = "test_token",
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) async throws -> [String: Any] {
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
@@ -239,7 +292,13 @@ final class CloudTurnContractTests: XCTestCase {
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
         )
-        for await _ in client.route(request: request, context: sampleContext(), turn: turn) {}
+        for await _ in client.route(
+            request: request,
+            context: sampleContext(),
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        ) {}
         return try XCTUnwrap(task.sentAuthFrame)
     }
 

@@ -111,6 +111,14 @@ enum StatsQueryIntent: VoiceIntent, Equatable {
 struct CloudRouteIntent: VoiceIntent, Equatable {
     let request: String
     let tier: CloudTier
+    /// The complete wake-trimmed SOURCE utterance, when one exists (platform translate kept the
+    /// native text; backend translate exposes English only and leaves this nil). The runtime
+    /// cloud `request` carries this original — the English routing translation selects the
+    /// action but never replaces the original the model answers.
+    var sourceTranscript: String? = nil
+    /// The ASR pipeline's actual detected language (LID). Unknown stays nil and is OMITTED on
+    /// the wire — never the OS locale, never a default. Preserves yue vs zh.
+    var sourceLanguage: String? = nil
     /// Why this dispatch exists. A dispatch from a routing failure is a *fallback*
     /// rather than a command the user gave, and the two must not be treated alike
     /// by the grace window: handling a fallback continues the window but must not
@@ -138,12 +146,16 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     init(
         request: String,
         tier: CloudTier,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) {
         self.request = request
         self.tier = tier
+        self.sourceTranscript = sourceTranscript
+        self.sourceLanguage = sourceLanguage
         self.origin = origin
         self.generation = generation
         self.selection = selection

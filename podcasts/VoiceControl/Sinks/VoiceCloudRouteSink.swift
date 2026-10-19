@@ -13,7 +13,9 @@ protocol VoiceCloudRouteSink {
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?,
-        preparedObserver: CloudRouteSink.PreparedObserver?
+        preparedObserver: CloudRouteSink.PreparedObserver?,
+        sourceTranscript: String?,
+        sourceLanguage: String?
     ) async -> CloudRouteResult
 
 

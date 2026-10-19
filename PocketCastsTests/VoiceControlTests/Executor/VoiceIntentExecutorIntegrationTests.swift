@@ -218,7 +218,8 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
     func routeToCloud(
         request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
         selection: CloudConversationSelection?,
-        preparedObserver: CloudRouteSink.PreparedObserver?
+        preparedObserver: CloudRouteSink.PreparedObserver?,
+        sourceTranscript: String?, sourceLanguage: String?
     ) async -> CloudRouteResult {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }

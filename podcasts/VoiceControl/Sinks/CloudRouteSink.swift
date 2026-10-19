@@ -246,7 +246,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?,
-        preparedObserver: PreparedObserver? = nil
+        preparedObserver: PreparedObserver? = nil,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) async -> CloudRouteResult {
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -338,7 +340,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
 
-        let routed = client.routeWithResultSocket(request: request, context: routeContext, turn: turn)
+        let routed = client.routeWithResultSocket(
+            request: request,
+            context: routeContext,
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
         // The turn's own result socket: sends bind to THIS registration, so a superseded turn's
         // late results can never ride a successor's socket.
         activeResultSocket = routed.resultSocket

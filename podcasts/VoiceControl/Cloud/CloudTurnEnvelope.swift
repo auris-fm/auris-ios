@@ -129,8 +129,16 @@ enum CloudRouteRequestBuilder {
     static func envelope(
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> [String: Any] {
+        // SOURCE-FIRST RUNTIME REQUEST (core b6eafe25): the runtime `request` carries the complete
+        // wake-trimmed SOURCE utterance when one is available — the English routing translation
+        // selects the action but never REPLACES the original the model answers. When no original
+        // exists (backend translate exposes English only), the available text is used without
+        // fabricating an original.
+        let runtimeRequest = sourceTranscript?.isEmpty == false ? sourceTranscript! : request
         // Omitted when absent, never invented. The owning contract scopes the episode and its
         // position to "when a current episode exists" and forbids inventing either: an empty
         // `episode_id` is an ID that names nothing, and a zero position is a measurement the
@@ -160,7 +168,7 @@ enum CloudRouteRequestBuilder {
         // reachable.
 
         var payload: [String: Any] = [
-            "request": request,
+            "request": runtimeRequest,
             "context": contextObject,
             // The PREPARED request id when there is one. A retry of the same logical turn must
             // present the same `request_id`, so minting a fresh one here would make the server
@@ -179,6 +187,12 @@ enum CloudRouteRequestBuilder {
         // path is the absence of the capability.
         if !turn.capabilities.isEmpty {
             payload["capabilities"] = turn.capabilities
+        }
+        // OPTIONAL source_language: the ASR pipeline's actual LID when it detected one. Unknown
+        // is OMITTED, never invented (not the OS locale, not a default "en"): the wire field's
+        // whole value is that it states what the pipeline measured. Preserves yue vs zh.
+        if let sourceLanguage, !sourceLanguage.isEmpty {
+            payload["source_language"] = sourceLanguage
         }
         if let routeHint = turn.routeHint {
             payload["route_hint"] = [

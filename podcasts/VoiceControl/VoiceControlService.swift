@@ -556,6 +556,11 @@ class VoiceControlService: ObservableObject {
                 intent = CloudRouteIntent(
                     request: route.request,
                     tier: route.tier,
+                    // The INPUT's preserved source utterance and actual detected language — not
+                    // reconstructed from the route: the English routing translation must never
+                    // replace the original on the wire (core b6eafe25).
+                    sourceTranscript: input.sourceTranscript,
+                    sourceLanguage: input.sourceLanguage,
                     origin: route.origin,
                     // The origin captured with the INPUT, not read here: this point is after the
                     // routing work, so a live read would attribute the turn to whichever window
@@ -671,6 +676,10 @@ class VoiceControlService: ObservableObject {
                     CloudRouteIntent(
                         request: transcript,
                         tier: .unknown,
+                        // The same preservation on the fallback path: the escalated turn carries
+                        // the original utterance and its actual language when the input has them.
+                        sourceTranscript: input.sourceTranscript,
+                        sourceLanguage: input.sourceLanguage,
                         origin: .routingFailure,
                         generation: dispatchGeneration,
                         // The turn's own provenance, carried as it is on the model-chosen path.

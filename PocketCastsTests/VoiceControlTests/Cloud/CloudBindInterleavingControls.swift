@@ -255,3 +255,64 @@ extension CloudBindInterleavingControls {
                        "cancel drains the registry it fires")
     }
 }
+
+extension CloudBindInterleavingControls {
+    /// CANCELLATION BEFORE REGISTRATION, ORDERED EXPLICITLY. `Task { … }; task.cancel()` still
+    /// races the child's start. Here the order is forced: the child first parks on a
+    /// HoldLatch (which, unlike a Gate, does not throw on cancellation), the test cancels it
+    /// while it is PARKED — so cancellation is already flagged when the child resumes — and
+    /// only then releases it toward `gate.wait()`. `withTaskCancellationHandler` runs `onCancel`
+    /// immediately when the task is already cancelled at handler installation, i.e. strictly
+    /// before the body registers; the ticket flag must honor that and the body must throw
+    /// instead of parking a waiter that would never wake.
+    func testCancellationFlaggedBeforeGateRegistrationIsHonoredDeterministically() async throws {
+        let barrier = HoldLatch()
+        let gate = Gate()
+        let waiter = Task {
+            await barrier.waitUntilReleased()   // deterministic parking spot
+            try await gate.wait()               // registration AFTER the cancel below
+        }
+        // The child is now parked on the barrier, not yet at the gate.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        waiter.cancel()          // cancellation flagged BEFORE registration
+        barrier.release()        // NOW the child proceeds to register
+        let outcome = await waiter.result
+        guard case .failure(let error) = outcome else {
+            XCTFail("a waiter flagged cancelled before registration must fail; it succeeded")
+            return
+        }
+        XCTAssertTrue(error is CancellationError, "expected CancellationError, got \(error)")
+        XCTAssertFalse(gate.released, "the cancelled waiter must not have opened the gate")
+        // The gate still works for a survivor.
+        let late = Task { try await gate.wait() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        gate.release()
+        if case .failure(let error) = await late.result {
+            XCTFail("the surviving waiter must be delivered the release; got \(error)")
+        }
+    }
+
+    /// CANCELLING AN ACTUAL OBSERVER OWNER removes that observer's entry from the SOCKET
+    /// registry while a surviving observer stays registered and is delivered the real
+    /// cancellation. The owner's task is cancelled — not the socket — so this pins the
+    /// ownership path (the observer cleans up after itself on ITS OWN cancellation), and the
+    /// ACTUAL registry is inspected at each step.
+    func testCancellingAnObserverOwnerRemovesItsRegistryEntryAndSurvivorIsDelivered() async throws {
+        let task = StubWebSocketTask(textFrames: [])
+        let ownerA = Task { await task.awaitCancellation(timeout: 10) }
+        let survivor = Task { await task.awaitCancellation(timeout: 10) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 2,
+                       "both observers must actually be registered")
+        ownerA.cancel()
+        let aResult = await ownerA.value
+        XCTAssertFalse(aResult, "owner A's wait ends without a socket cancellation")
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 1,
+                       "the cancelled owner's entry must be removed from the registry")
+        task.cancel(with: .goingAway, reason: nil)
+        let delivered = await survivor.value
+        XCTAssertTrue(delivered, "the surviving observer must still be delivered the cancellation")
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 0,
+                       "cancel drains the registry it fires")
+    }
+}

@@ -201,6 +201,8 @@ class VoiceIntentExecutor {
                 origin: cr.generation,
                 selection: cr.selection,
                 preparedObserver: preparedObserver,
+                sourceTranscript: cr.sourceTranscript,
+                sourceLanguage: cr.sourceLanguage
             )
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the

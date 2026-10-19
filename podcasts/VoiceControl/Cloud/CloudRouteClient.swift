@@ -112,9 +112,18 @@ final class CloudRouteClient {
     func route(
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> AsyncStream<CloudRouteEvent> {
-        route(request: request, context: context, turn: turn, resultSocket: nil)
+        route(
+            request: request,
+            context: context,
+            turn: turn,
+            resultSocket: nil,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
     }
 
     /// Routes a turn AND hands back the handle its `app_operation_result` sends must travel by:
@@ -123,7 +132,9 @@ final class CloudRouteClient {
     func routeWithResultSocket(
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
         let lifetime = TurnSocketLifetime()
@@ -140,7 +151,15 @@ final class CloudRouteClient {
         // registration is retired on a bound. claimOwnership() cancels this timer; a
         // claimed consumer is NEVER closed by it, however long its work takes.
         lifetime.closeAfterGrace()
-        let stream = route(request: request, context: context, turn: turn, resultSocket: socket, lifetime: lifetime)
+        let stream = route(
+            request: request,
+            context: context,
+            turn: turn,
+            resultSocket: socket,
+            lifetime: lifetime,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
         return (stream, socket)
     }
 
@@ -241,11 +260,13 @@ final class CloudRouteClient {
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
         resultSocket: AppOperationResultSocket?,
-        lifetime: TurnSocketLifetime? = nil
+        lifetime: TurnSocketLifetime? = nil,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage)
             }
             continuation.onTermination = { [lifetime] reason in
                 task.cancel()
@@ -436,7 +457,9 @@ final class CloudRouteClient {
         turn: CloudTurnEnvelope,
         continuation: AsyncStream<CloudRouteEvent>.Continuation,
         resultSocket: AppOperationResultSocket?,
-        lifetime: TurnSocketLifetime? = nil
+        lifetime: TurnSocketLifetime? = nil,
+        sourceTranscript: String?,
+        sourceLanguage: String?
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
@@ -452,7 +475,9 @@ final class CloudRouteClient {
             tokenProvider: self.tokenProvider,
             request: request,
             context: context,
-            turn: turn
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
         ) else {
             // No credential: fail closed with a terminal event, so the sink can
             // speak/earcon the failure. Finishing silently would leave the user
@@ -653,12 +678,20 @@ final class CloudRouteClient {
         tokenProvider: CloudTokenProviding,
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String?,
+        sourceLanguage: String?
     ) async -> [String: Any]? {
         guard let credential = await tokenProvider.token() else {
             return nil
         }
-        var frame = CloudRouteRequestBuilder.envelope(request: request, context: context, turn: turn)
+        var frame = CloudRouteRequestBuilder.envelope(
+            request: request,
+            context: context,
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
         // Transport-specific fields: the credential rides the first frame, and
         // the codecs are advertised here so the server negotiates the binary
         // frame format up front.
