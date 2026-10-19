@@ -119,16 +119,15 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         await MainActor.run { player.setCapturedStopNotificationForTesting(nil) }
     }
 
-    /// CANCEL BEFORE REGISTER, DETERMINISTIC (review 3b2d4386): the test-only latch parks the
-    /// waiter BEFORE registration; cancellation runs while parked; release lands the
-    /// registration into an already-cancelled ticket. The awaiter must return false promptly
-    /// (pre-registration check) and the registry must hold ZERO tickets. Removing the marker
-    /// must NOT pass: without it the registration parks and the sweep's force-clean is the only
-    /// exit — measurably slower (bound-gated) and the registry passes through a parked state.
+    /// CANCEL BEFORE REGISTER, DETERMINISTIC (reviews 3b2d4386 + ec3b5150): the park is
+    /// ASSERTED before cancelling; the awaiter's completion is probed with a BOUND (never an
+    /// unbounded wait); a failed probe fails PROMPTLY and then RESCUES the (mutant-)stranded
+    /// waiter so the process never hangs; the latch hook is always unset.
     func testCancelBeforeRegisterWithDeterministicOrdering() async throws {
         let player = CloudAudioPlayer()
         let latch = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
         await MainActor.run {
             player.preRegistrationLatchForTesting = {
                 // NON-cancellation-sensitive park: only the explicit release lets registration
@@ -137,20 +136,39 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 5)
             }
         }
-        // DETACHED: the latch blocks its thread (a non-cancellation-sensitive semaphore wait),
-        // so the awaiter must not share the main actor with the test that releases it.
+        defer {
+            release.signal()
+            Task { @MainActor in
+                player.preRegistrationLatchForTesting = nil
+            }
+        }
+        // DETACHED: the latch blocks its thread, so the awaiter must not share the main actor.
         let waiter = Task.detached { await player.awaitActualStop(after: 1, timeout: 5) }
-        // Parked in the latch: registration has NOT run yet.
-        await latch.wait(timeout: .now() + 2)
+        let observer = Task.detached { [waiter] in
+            let r = await waiter.value
+            done.signal()
+            return r
+        }
+        // ASSERT the park: registration must NOT have run when we cancel.
+        let parked = latch.wait(timeout: .now() + 2)
+        XCTAssertEqual(parked, .success, "the waiter is parked in the latch BEFORE the cancel")
         waiter.cancel()  // the cancellation handler runs BEFORE registration
         try await Task.sleep(nanoseconds: 100_000_000)
-        // Release into registration: the ticket's cancel flag must reject the continuation.
-        let start = Date()
-        release.signal()
-        let result = await waiter.value
-        let elapsed = Date().timeIntervalSince(start)
+        release.signal()  // release INTO registration
+        // BOUNDED completion probe: fail PROMPTLY instead of hanging, then rescue.
+        var completed = false
+        for _ in 0..<40 {
+            if done.wait(timeout: .now()) == .success { completed = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if !completed {
+            await MainActor.run { player.rescueStopWaitersForTesting() }
+            XCTFail("the awaiter did not complete within the bound — stranded waiter (mutant?)")
+            _ = await observer.value
+            return
+        }
+        let result = await observer.value
         XCTAssertFalse(result, "pre-register cancellation returns false at registration")
-        XCTAssertLessThan(elapsed, 2.0, "no timeout wait: the marker rejected registration")
         let count = await MainActor.run { player.stopWaiterCountForTesting }
         XCTAssertEqual(count, 0, "zero retained tickets after pre-register cancellation")
         await MainActor.run { player.preRegistrationLatchForTesting = nil }

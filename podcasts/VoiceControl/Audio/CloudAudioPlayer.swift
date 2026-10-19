@@ -343,6 +343,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+    /// TEST-ONLY RESCUE: resumes EVERY registered waiter false and clears the registry. A
+    /// control uses this to reap a (mutant-)stranded waiter after its bounded completion probe
+    /// failed, so the test process never hangs on a leaked continuation.
+    func rescueStopWaitersForTesting() {
+        bufferLock.lock()
+        let tickets = Array(stopWaiters.values)
+        stopWaiters.removeAll()
+        bufferLock.unlock()
+        for ticket in tickets {
+            if let continuation = ticket.takeContinuation() {
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
     /// TEST OBSERVABILITY: the registry must hold ZERO tickets after every exit path
     /// (confirmation, timeout, cancellation) — a stranded ticket is a leaked continuation.
     var stopWaiterCountForTesting: Int {
