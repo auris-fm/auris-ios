@@ -204,6 +204,40 @@ final class SourceLanguageHandoffControls: XCTestCase {
         }
     }
 
+    /// LOCAL-ENGLISH ZERO-CLOUD control (reviewer 4af8d2d5): an English utterance whose router
+    /// classification is a LOCAL action never dispatches to the cloud sink — zero Authenticate
+    /// frames, zero client factory invocations. This is the honest form of the "local-english"
+    /// coverage: routing stays local, nothing reaches the socket.
+    @MainActor
+    func testLocalEnglishActionRoutesLocallyWithZeroAuthFrames() async throws {
+        let box = FrameBox()
+        let service = makeService(
+            classifyLabel: "playback:pause",
+            generateResult: "playback(action='pause')",
+            box: box
+        )
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "pause playback",
+                language: "en",
+                selection: .wakeWord
+            ),
+            origin: service.gracePeriodSignalForTesting.currentGeneration()
+        )
+
+        // Bounded settle: a cloud dispatch would open a socket within this window.
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        XCTAssertTrue(
+            box.tasks.isEmpty,
+            "a local action must never dispatch to the cloud — \(box.tasks.count) auth frames observed"
+        )
+    }
+
     @MainActor
     private func waitForListening(_ service: VoiceControlService) async throws {
         let deadline = Date().addingTimeInterval(8)
