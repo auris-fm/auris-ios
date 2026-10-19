@@ -15,10 +15,10 @@ class GracePeriodSignal: ObservableObject {
     /// attempt itself, so a run of routing failures inside one window dispatches
     /// once instead of once per failure.
     private var escalationClaimed = false
-    /// The generation whose PLAYBACK DRAIN is holding this window's expiry open, or nil.
-    /// Identity-bound: only the live generation can begin or end the hold, so a stale
-    /// completion/stop/privacy/successor event can neither suspend nor resume another window.
-    private var playbackHoldGeneration: Int?
+    /// The LIVE playback holds holding this window's expiry open. Ownership is a TOKEN, not the
+    /// generation: repeated begins on one generation each get their own independently releasable
+    /// hold, and an end clears only its own token — no overwrite, no clearing another owner.
+    private var playbackHolds: [PlaybackHoldToken] = []
     /// Identifies the window a dispatch was issued under. State alone cannot do
     /// this: an old request completing after a privacy close and a new wake would
     /// otherwise extend — or re-arm — a window it never belonged to.
@@ -73,6 +73,9 @@ class GracePeriodSignal: ObservableObject {
     /// claimed under — the dispatch hands that back on completion. `nil` when the
     /// window is closed or the allowance is already spent, in which case the
     /// caller keeps the turn local.
+    /// Test-only observation: whether the current window's escalation allowance is spent.
+    func escalationClaimedForTesting() -> Bool { escalationClaimed }
+
     func claimEscalationBudget() -> Int? {
         if Thread.isMainThread { return claimEscalationBudgetOnMain() }
         return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
@@ -125,15 +128,6 @@ class GracePeriodSignal: ObservableObject {
 
     private func recognizeCommandIfCurrentOnMain(_ generation: Int) -> Bool {
         guard isActive, self.generation == generation else { return false }
-        // GRACE CONTRACT: while THIS window's answer is actually draining/playing, expiry is held
-        // by the playback hold — the completion restores the allowance but must NOT re-arm the
-        // timer under the hold (that is the defect this guard fixes: the re-armed clock expired
-        // mid-drain). `endPlaybackHold` starts the interval exactly once at the real stop.
-        if playbackHoldGeneration == generation {
-            refusalToneGeneration = nil
-            escalationClaimed = false
-            return true
-        }
         startOrResetOnMain(trigger: "cloud route")
         return true
     }
@@ -209,46 +203,68 @@ class GracePeriodSignal: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
         timer?.invalidate()
-        let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
-            self?.deactivate(trigger: "timeout")
+        // GRACE CONTRACT (shared timer path): while THIS window's work/playback holds expiry, NO
+        // caller re-arms the clock under the hold — command recognition, fallback extension, and
+        // wake resets all preserve their allowance/state here, and the expiry resumes exactly
+        // once when the last hold releases. Holds of OTHER (older) generations do not bind this
+        // window: a successor wake must time out normally.
+        if !playbackHolds.contains(where: { $0.generation == generation }) {
+            let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
+                self?.deactivate(trigger: "timeout")
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
     }
 
-    /// SUSPENDS this window's expiry while its cloud answer is still draining/playing (grace
-    /// contract: cloud work and local playback hold expiry until actual drain or stop, regardless
-    /// of duration). Identity-bound: refused unless `generation` is the LIVE window — a stale
-    /// turn's playback can never hold a window it does not belong to. The interval is not
-    /// restarted here; `endPlaybackHold` does that exactly once, at the real stop.
-    func beginPlaybackHold(forGeneration generation: Int) -> Bool {
+    /// An independently releasable ownership hold on a window's expiry. The generation is
+    /// recorded at ACQUISITION (refused unless live); the token — not the generation — is the
+    /// release identity, so repeated begins on one generation never overwrite each other and an
+    /// end never clears another owner's hold.
+    final class PlaybackHoldToken: Equatable {
+        let generation: Int
+        fileprivate let id = UUID()
+        init(generation: Int) { self.generation = generation }
+        static func == (lhs: PlaybackHoldToken, rhs: PlaybackHoldToken) -> Bool { lhs.id == rhs.id }
+    }
+
+    /// SUSPENDS this window's expiry while its cloud work / local playback runs — from the
+    /// ADMITTED DISPATCH through done and the actual drain/stop, regardless of duration (grace
+    /// contract). Identity-bound at acquisition: refused unless `generation` is the LIVE window —
+    /// a stale turn's work can never hold a window it does not belong to. The interval is not
+    /// restarted here; releasing the LAST hold does that exactly once, at the real stop.
+    func beginPlaybackHold(forGeneration generation: Int) -> PlaybackHoldToken? {
         if Thread.isMainThread { return beginPlaybackHoldOnMain(generation) }
         return DispatchQueue.main.sync { beginPlaybackHoldOnMain(generation) }
     }
 
-    private func beginPlaybackHoldOnMain(_ generation: Int) -> Bool {
-        guard isActive, self.generation == generation else { return false }
-        playbackHoldGeneration = generation
+    private func beginPlaybackHoldOnMain(_ generation: Int) -> PlaybackHoldToken? {
+        guard isActive, self.generation == generation else { return nil }
+        let token = PlaybackHoldToken(generation: generation)
+        playbackHolds.append(token)
         timer?.invalidate()
         timer = nil
-        return true
+        return token
     }
 
-    /// ENDS this window's playback hold at the real drain/stop and starts (resumes) the permitted
-    /// grace interval EXACTLY ONCE. Identity-bound: a generation that is not the hold's own — a
-    /// stale stop, a privacy close that already ended the window, a successor's event — clears at
-    /// most its own stale hold and NEVER starts or extends the current window.
-    func endPlaybackHold(forGeneration generation: Int) {
-        if Thread.isMainThread { endPlaybackHoldOnMain(generation); return }
-        DispatchQueue.main.async { [weak self] in self?.endPlaybackHoldOnMain(generation) }
+    /// ENDS exactly this token's hold at its real terminal/stop/cancel. When the LAST hold goes,
+    /// the permitted interval starts (resumes) EXACTLY ONCE — and only if the released hold's
+    /// generation is still the live window: a stale stop, a privacy close that already ended the
+    /// window, or a successor's event drops its own hold and NEVER starts or extends the current
+    /// window.
+    func endPlaybackHold(_ token: PlaybackHoldToken?) {
+        guard let token else { return }
+        if Thread.isMainThread { endPlaybackHoldOnMain(token); return }
+        DispatchQueue.main.async { [weak self] in self?.endPlaybackHoldOnMain(token) }
     }
 
-    private func endPlaybackHoldOnMain(_ generation: Int) {
-        guard playbackHoldGeneration == generation else { return }
-        playbackHoldGeneration = nil
+    private func endPlaybackHoldOnMain(_ token: PlaybackHoldToken) {
+        guard let index = playbackHolds.firstIndex(of: token) else { return }
+        playbackHolds.remove(at: index)
+        guard playbackHolds.isEmpty else { return }
         // Only the LIVE window resumes: a hold whose window was closed (privacy close, expiry of
         // a later interval) is dropped without re-arming anything.
-        guard isActive, self.generation == generation else { return }
+        guard isActive, self.generation == token.generation else { return }
         startOrResetOnMain(trigger: "playback drained")
     }
 
@@ -257,7 +273,7 @@ class GracePeriodSignal: ObservableObject {
             guard let self else { return }
             let wasActive = self.isActive
             self.generation += 1   // a privacy close ends the generation
-            self.playbackHoldGeneration = nil   // a closed window cannot be held
+            self.playbackHolds.removeAll()   // a closed window cannot be held
             self.timer?.invalidate()
             self.timer = nil
             self.isActive = false

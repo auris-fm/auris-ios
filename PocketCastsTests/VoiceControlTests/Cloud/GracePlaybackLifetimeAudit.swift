@@ -297,13 +297,310 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
 
         // STALE EVENTS cannot reopen or extend: a late hold-end for the finished generation, and
         // an end for a never-held generation, must leave the expired window dead.
-        service.gracePeriodSignalForTesting.endPlaybackHold(forGeneration: generationAtWake)
-        service.gracePeriodSignalForTesting.endPlaybackHold(forGeneration: generationAtWake + 99)
+        // Token-identity discipline: an end for a token this window never issued — foreign
+        // generation or forged against the finished one — is dropped without reopening.
+        service.gracePeriodSignalForTesting.endPlaybackHold(
+            GracePeriodSignal.PlaybackHoldToken(generation: generationAtWake)
+        )
+        service.gracePeriodSignalForTesting.endPlaybackHold(
+            GracePeriodSignal.PlaybackHoldToken(generation: generationAtWake + 99)
+        )
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(
             service.gracePeriodSignalForTesting.isActive,
             "stale stop/hold-end events must not reopen or extend another window"
         )
+    }
+
+    /// BLOCKER CONTROL 1 — CLOUD-WORK interval: the hold is acquired at the ADMITTED DISPATCH,
+    /// before done. A slow cloud turn (gated pre-bind) must not let the window expire.
+    @MainActor
+    func testSlowCloudWorkBeforeDoneHoldsExpiryFromTheAdmittedDispatch() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        let playback = RecordingPlaybackSink()
+        let defaults = UserDefaults(suiteName: "graceauditcloud_\(UUID().uuidString)")!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "graceauditcloud_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult = "<|tool_call_start|>[cloud_route(request='play something upbeat')]<|tool_call_end|>"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let audio = (0..<40).map { Data([UInt8($0)]) }
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: auditAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let stub = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
+                    audioPayloads: audio
+                )
+                // SLOW CLOUD WORK: the transport parks before the bind — no done for a while.
+                stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
+                return stub.client
+            },
+            playbackSink: playback,
+            graceTimeout: 0.5,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        )
+        guard let service else { XCTFail("no service"); return }
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+        }
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let gen = service.gracePeriodSignalForTesting.currentGeneration()
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
+            origin: gen
+        )
+        // PAST the timeout with the cloud turn still in flight: expiry must be HELD already.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "cloud work holds expiry from admission")
+        XCTAssertEqual(service.gracePeriodSignalForTesting.currentGeneration(), gen)
+        gate.signal()  // cloud work completes -> done -> deferral keeps the hold through the drain
+        try await Task.sleep(nanoseconds: 600_000_000)  // let done land; window must stay held
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "hold retained through done into the drain")
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, playback.resumeCalls == 0 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(playback.resumeCalls, 1, "restored once, at the real drain stop")
+        // One interval expiry after the release; then stale token ends are no-ops.
+        var transitions = 0
+        var wasActive = service.gracePeriodSignalForTesting.isActive
+        let expiryDeadline = Date().addingTimeInterval(3)
+        while Date() < expiryDeadline {
+            let now = service.gracePeriodSignalForTesting.isActive
+            if now != wasActive { transitions += 1; wasActive = now }
+            if !now { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "interval expires normally after release")
+        XCTAssertEqual(transitions, 1, "exactly one expiry — hold started once, released once")
+    }
+
+    /// BLOCKER CONTROL 2 — SHARED timer path: with a live same-generation hold, NO caller
+    /// (command recognition, fallback extension, wake reset) arms the clock under the hold, while
+    /// every caller still preserves its allowance/state. Expiry resumes once at the release.
+    @MainActor
+    func testNoCallerArmsTheClockUnderALiveHoldWhileAllowancesArePreserved() async throws {
+        let signal = GracePeriodSignal(timeout: 0.3)
+        objc_setAssociatedObject(self, "graceauditshared_sig", signal, .OBJC_ASSOCIATION_RETAIN)
+        signal.onWakeWordDetected()
+        let gen = signal.currentGeneration()
+        XCTAssertTrue(signal.isActive)
+
+        guard let hold = signal.beginPlaybackHold(forGeneration: gen) else {
+            XCTFail("the live window refused its own hold")
+            return
+        }
+        // Each caller runs under the hold; each must succeed and preserve its semantics.
+        XCTAssertTrue(signal.recognizeCommandIfCurrentWindow(gen), "command recognized under the hold")
+        XCTAssertTrue(signal.isActive, "recognition kept the window alive")
+        XCTAssertFalse(signal.escalationClaimedForTesting(), "allowance NOT consumed by recognition")
+        signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
+        XCTAssertTrue(signal.isActive, "fallback extension kept the window alive")
+        signal.onWakeWordDetected()  // wake reset for the SAME window semantics? No: opens a NEW generation
+        let newGen = signal.currentGeneration()
+        XCTAssertNotEqual(gen, newGen, "a wake opens a new generation")
+        // The OLD generation's hold must not bind the NEW window: it times out normally.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, signal.isActive { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(signal.isActive, "new window times out normally; an old hold never binds it")
+
+        // And under the NEW window, begin its own hold; a STALE end for the old hold is a no-op
+        // and never resumes the new window.
+        signal.onWakeWordDetected()
+        let gen3 = signal.currentGeneration()
+        guard let hold3 = signal.beginPlaybackHold(forGeneration: gen3) else {
+            XCTFail("live window refused its own hold (second)")
+            return
+        }
+        signal.endPlaybackHold(hold)  // stale, older generation
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(signal.isActive, "stale hold end never resumed the live window")
+        signal.endPlaybackHold(hold3)
+        let expiryDeadline = Date().addingTimeInterval(2)
+        while Date() < expiryDeadline, signal.isActive { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(signal.isActive, "last release resumes the interval exactly once; it expires")
+    }
+
+    /// BLOCKER CONTROL 3 — PRIVACY CLOSE under a live hold: closing the window kills it and its
+    /// holds; the later real stop must NOT reopen it.
+    @MainActor
+    func testPrivacyCloseUnderALiveHoldKillsTheWindowAndLaterStopDoesNotReopen() async throws {
+        let playback = RecordingPlaybackSink()
+        let defaults = UserDefaults(suiteName: "graceauditpriv_\(UUID().uuidString)")!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "graceauditpriv_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult = "<|tool_call_start|>[cloud_route(request='play something upbeat')]<|tool_call_end|>"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let audio = (0..<40).map { Data([UInt8($0)]) }
+        let gate = DispatchSemaphore(value: 0)
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: auditAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let stub = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
+                    audioPayloads: audio
+                )
+                stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
+                return stub.client
+            },
+            playbackSink: playback,
+            graceTimeout: 5.0,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        )
+        guard let service else { XCTFail("no service"); return }
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+        }
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let gen = service.gracePeriodSignalForTesting.currentGeneration()
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
+            origin: gen
+        )
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "turn admitted under its hold")
+        service.gracePeriodSignalForTesting.onAppBackgrounded()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "privacy close ends the window under the hold")
+        gate.signal()  // turn completes + drain releases AFTER the close
+        try await Task.sleep(nanoseconds: 600_000_000)
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "the real stop must not reopen a closed window")
+        XCTAssertEqual(playback.resumeCalls, 1, "the drain still restored exactly once")
+    }
+
+    /// BLOCKER CONTROL 4 — SUCCESSOR LIVE, stale predecessor completion: a predecessor's late
+    /// terminal must not disturb (resume/extend/expire) the SUCCESSOR's live window.
+    @MainActor
+    func testStalePredecessorCompletionWhileTheSuccessorIsLiveLeavesTheSuccessorAlone() async throws {
+        let playback = RecordingPlaybackSink()
+        let defaults = UserDefaults(suiteName: "graceauditsucc_\(UUID().uuidString)")!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "graceauditsucc_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult = "<|tool_call_start|>[cloud_route(request='play something upbeat')]<|tool_call_end|>"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let audio = (0..<40).map { Data([UInt8($0)]) }
+        let gate = DispatchSemaphore(value: 0)
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: auditAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let stub = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
+                    audioPayloads: audio
+                )
+                stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
+                return stub.client
+            },
+            playbackSink: playback,
+            graceTimeout: 5.0,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        )
+        guard let service else { XCTFail("no service"); return }
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+        }
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let gen1 = service.gracePeriodSignalForTesting.currentGeneration()
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
+            origin: gen1
+        )
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "turn 1 admitted, hold in effect")
+        // SUCCESSOR wake: new generation while turn 1 still in flight. Ownership transfers
+        // atomically to the successor's dispatch.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let gen2 = service.gracePeriodSignalForTesting.currentGeneration()
+        XCTAssertNotEqual(gen1, gen2)
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
+            origin: gen2
+        )
+        XCTAssertTrue(service.gracePeriodSignalForTesting.isActive)
+        // The PREDECESSOR's stale completion (its gate release, now out of turn).
+        gate.signal()
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(
+            service.gracePeriodSignalForTesting.currentGeneration(), gen2,
+            "the stale predecessor terminal must not bump the successor's window"
+        )
+        XCTAssertTrue(
+            service.gracePeriodSignalForTesting.isActive,
+            "the successor's window survives the predecessor's stale terminal"
+        )
+        XCTAssertEqual(playback.resumeCalls, 0, "no resume was stolen from the successor")
+        // Now the successor completes and drains: exactly one resume, and its window's interval
+        // then expires normally.
+        gate.signal()  // second signal: the successor's own transport gate
+        try await Task.sleep(nanoseconds: 600_000_000)
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertEqual(playback.resumeCalls, 1, "the successor's drain restored exactly once")
+        let expiryDeadline = Date().addingTimeInterval(8)
+        while Date() < expiryDeadline, service.gracePeriodSignalForTesting.isActive {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "successor window expires normally")
     }
 
     @MainActor

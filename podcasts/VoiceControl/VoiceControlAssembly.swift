@@ -200,13 +200,14 @@ class VoiceControlAssembly {
                     // A wake opens a window; a recognised command continues the current one.
                     (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
                 },
-                // Grace contract: expiry holds while the answer is actually draining/playing and
-                // resumes exactly once at the real stop — identity-bound to the turn's window.
-                onGracePlaybackHoldBegin: {
-                    if let g = $0 { gracePeriodSignal.beginPlaybackHold(forGeneration: g) }
+                // Grace contract: expiry holds from the turn's ADMITTED DISPATCH through done
+                // and the actual drain/stop; token ownership — each hold releases only itself,
+                // and the last release resumes the interval exactly once.
+                onGracePlaybackHoldBegin: { origin in
+                    gracePeriodSignal.beginPlaybackHold(forGeneration: origin ?? -1)
                 },
-                onGracePlaybackHoldEnd: {
-                    if let g = $0 { gracePeriodSignal.endPlaybackHold(forGeneration: g) }
+                onGracePlaybackHoldEnd: { token in
+                    gracePeriodSignal.endPlaybackHold(token)
                 }
             ),
             playbackContextProvider: playbackContextProvider,

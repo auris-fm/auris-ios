@@ -152,12 +152,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// can be the same turn when a foreign notification arrives, and a drain identity alone cannot
     /// say whether this turn still owns the release.
     private var restoreHeldForPlayerDrain: (owner: CloudTurnToken, drainEpoch: Int)?
-    /// The dispatch generation whose grace expiry this sink suspended for the pending drain, or
-    /// nil. Identity for the hold: carried from the deferral to the release so only the turn that
-    /// suspended expiry can resume it.
-    private var heldPlaybackOrigin: Int?
-    private let onGracePlaybackHoldBegin: ((Int?) -> Void)?
-    private let onGracePlaybackHoldEnd: ((Int?) -> Void)?
+    /// THIS sink's live playback hold. Acquired at the turn's admitted dispatch; ownership
+    /// TRANSFERS atomically (begin-successor BEFORE end-predecessor) when a new turn is admitted,
+    /// so a successor never runs hold-free between turns. Released at every terminal: error,
+    /// superseded/earlyClose, done-without-pending, and the real drain/stop.
+    private var heldPlaybackToken: GracePeriodSignal.PlaybackHoldToken?
+    private let onGracePlaybackHoldBegin: ((Int?) -> GracePeriodSignal.PlaybackHoldToken?)?
+    private let onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
     /// consuming its stream and stops touching playback/analytics state, so two
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
@@ -211,12 +212,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
-        // Grace contract (identity/epoch-bound ownership hold): expiry of the turn's window is
-        // SUSPENDED while its answer is actually draining/playing and resumes EXACTLY ONCE at the
-        // real drain/stop. Identity is the turn's own dispatch generation; the signal rejects
-        // stale events. Optional so direct-constructed sinks in tests opt in.
-        onGracePlaybackHoldBegin: ((Int?) -> Void)? = nil,
-        onGracePlaybackHoldEnd: ((Int?) -> Void)? = nil
+        // Grace contract (token ownership holds): from the ADMITTED DISPATCH through done and the
+        // actual drain/stop, the turn's window expiry is SUSPENDED and resumes EXACTLY ONCE when
+        // the last hold releases. Identity is bound at acquisition (live generation only); release
+        // is per-token, so a stale terminal never clears another owner's hold. Optional so
+        // direct-constructed sinks in tests opt in.
+        onGracePlaybackHoldBegin: ((Int?) -> GracePeriodSignal.PlaybackHoldToken?)? = nil,
+        onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)? = nil
     ) {
         self.onGracePlaybackHoldBegin = onGracePlaybackHoldBegin
         self.onGracePlaybackHoldEnd = onGracePlaybackHoldEnd
@@ -305,6 +307,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
+
+        // GRACE CONTRACT, acquisition at the ADMITTED DISPATCH: the window's expiry is held from
+        // here — before any cloud/streamed audio — through done and the actual drain/stop.
+        // Atomic transfer of ownership: the successor's hold is begun BEFORE the predecessor's is
+        // released, so there is never a hold-free instant between turns in which the clock could
+        // re-arm mid-flight.
+        let admittedHoldOrigin = origin
+        let admittedHold = onGracePlaybackHoldBegin?(admittedHoldOrigin)
+        if let admittedHold {
+            let predecessor = heldPlaybackToken
+            heldPlaybackToken = admittedHold
+            onGracePlaybackHoldEnd?(predecessor)
+        }
 
         // Supersede any in-flight turn (double wake / barge-in) before touching
         // shared per-turn state. Only a turn that will actually run supersedes.
@@ -467,9 +482,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     let scheduledEpoch = audioPlayer.finish()
                     if needsDeferral {
                         restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
-                        // Expiry of THIS window holds until the real drain/stop (grace contract).
-                        heldPlaybackOrigin = origin
-                        onGracePlaybackHoldBegin?(origin)
+                        // The hold was acquired at this turn's admitted dispatch; it RETAINS
+                        // through done into the actual drain and releases at the real stop.
                     } else {
                         restoreTransientAudioState()
                     }
@@ -524,11 +538,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     private func restoreTransientAudioState() {
-        // Whatever playback hold this sink suspended ends with the release of the audio state:
-        // error/supersede/no-pending paths resume the window's interval exactly once. Idempotent
-        // with the drain-stop path (the signal drops its own stale identity).
-        if let held = heldPlaybackOrigin {
-            heldPlaybackOrigin = nil
+        // Whatever playback hold this sink owns ends with the release of the audio state:
+        // error/supersede/no-pending/drain-stop all resume the window's interval exactly once.
+        // Per-token release: a stale terminal never clears another owner's hold.
+        if let held = heldPlaybackToken {
+            heldPlaybackToken = nil
             onGracePlaybackHoldEnd?(held)
         }
         // Release only a hold we took, and only if it stopped playback the user
