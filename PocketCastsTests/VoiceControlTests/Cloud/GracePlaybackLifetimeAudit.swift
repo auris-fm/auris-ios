@@ -744,8 +744,20 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
         // (outcome of the dispatch is not directly returned here; the sink's terminal
         // classification is observed through the resume/pending assertions below)
-        try await Task.sleep(nanoseconds: 800_000_000)
-        // The truncation released the hold exactly once and left NO owned output behind.
+        // Release the pin: the truncation's cancel REQUESTED the stop; the ACTUAL engine stop —
+        // and therefore the identity-bound release — can only complete once the runner can leave
+        // the drain park. Poll for the release instead of a fixed sleep.
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        var released = false
+        for _ in 0..<60 {
+            if await MainActor.run(body: { playback.resumeCalls }) == 1 { released = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // The truncation released the hold exactly once, AFTER the confirmed stop.
+        XCTAssertTrue(released, "the hold released exactly once at the truncation, after the stop")
         XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
         let pending = await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.hasPendingAudio ?? false

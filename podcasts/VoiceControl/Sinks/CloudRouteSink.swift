@@ -492,8 +492,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     break turnLoop
                 case let .error(_, code, message):
                     guard !turnToken.isCancelled else { break turnLoop }
-                    audioPlayer.cancel()
-                    restoreTransientAudioState()
+                    // GRACE STOP ORDER: release waits for the ACTUAL stop this cancel requested
+                    // (identity-bound). On a timeout the confirmed stop notification itself
+                    // releases via the deferral record — never an unconfirmed resume.
+                    let stopEpoch = audioPlayer.cancel()
+                    if await audioPlayer.awaitActualStop(after: stopEpoch) {
+                        restoreTransientAudioState()
+                    } else {
+                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+                    }
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                     // A server-supplied message passes through (localising it is the
                     // server's job). When the client generated the diagnostic it
@@ -531,12 +538,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // completed would let a turn that was cancelled mid-stream reopen it.
             return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
-        // DEFECT 3 (reviewer 7fc40b74): stop THIS turn's OWNED output before releasing the host
-        // playback and the hold. A truncated stream can leave enqueued cloud audio in the
-        // player; resuming the episode under it would overlap two outputs. The cancel is
-        // successor-safe: it only touches audio this turn enqueued.
-        audioPlayer.cancel()
-        restoreTransientAudioState()
+        // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
+        // AWAIT the identity-bound stop completion BEFORE releasing the host playback and the
+        // hold. A truncated stream can leave enqueued cloud audio in the player; resuming the
+        // episode under it would overlap two outputs. On a timeout the confirmed stop
+        // notification releases via the deferral record. Successor-safe: the cancel touches only
+        // audio this turn enqueued.
+        let stopEpoch = audioPlayer.cancel()
+        if await audioPlayer.awaitActualStop(after: stopEpoch) {
+            restoreTransientAudioState()
+        } else {
+            restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+        }
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
         return CloudRouteResult(response: .silent, outcome: .earlyClose)

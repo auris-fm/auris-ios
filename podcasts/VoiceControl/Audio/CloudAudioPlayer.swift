@@ -101,17 +101,44 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// `isPlaying`/`paused` would stay true into the next turn (whose first
     /// frames are then treated as an underrun). The runner thread owns the
     /// engine, so the stop is done in drain mode.
-    func cancel() {
+    /// Cancels output and returns the identity whose stop notification will follow the ACTUAL
+    /// engine stop. Callers that must release a grace hold / resume host playback only after the
+    /// real stop await this epoch's confirmation (`awaitActualStop(after:)`) — `cancel` only
+    /// REQUESTS the stop; it does not report one.
+    @discardableResult
+    func cancel() -> Int {
         bufferLock.lock()
         buffer.removeAll()
         bufferLock.unlock()
         runnerLock.lock()
         drainEpoch += 1
+        let requestedEpoch = drainEpoch
         drainRemaining = false
         stopRequested = true
         runnerRunning = true
         runnerLock.signal()
         runnerLock.unlock()
+        return requestedEpoch
+    }
+
+    /// The identity of the most recent CONFIRMED stop (the engine actually stopped and the stop
+    /// notification was issued). Guarded by the buffer lock; written from the runner/main paths.
+    func confirmedStopEpoch() -> Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return lastConfirmedStopEpoch
+    }
+
+    /// Waits (bounded) for the ACTUAL stop of `epoch` — the identity-bound completion a caller
+    /// needs before releasing a grace hold or resuming host playback. Returns false only when
+    /// the bound expired without confirmation.
+    func awaitActualStop(after epoch: Int, timeout: TimeInterval = 2) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if confirmedStopEpoch() >= epoch { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return confirmedStopEpoch() >= epoch
     }
 
     // MARK: - Internal
@@ -171,6 +198,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+    /// The most recent stop the engine CONFIRMED (see `notifyDidStop`).
+    private var lastConfirmedStopEpoch = 0
 
     /// Teardown only, and reachable in principle rather than in practice: the
     /// runner thread holds the player for the app session, so `deinit` does not
@@ -905,17 +934,33 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Report that output has stopped, so the caller can restore what the turn
     /// ducked. Delivered on the main queue like the other delegate callbacks.
     private func notifyDidStop(epoch: Int) {
-        guard let delegate = delegate else { return }
+        guard delegate != nil || capturedStopNotification != nil else { return }
         DispatchQueue.main.async {
             // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
             // the delegate itself, so a delayed notification can be delivered at a chosen moment
             // while another turn owns the hold.
             if let capture = self.capturedStopNotification {
-                capture(epoch) { delegate.audioPlayerDidStop(drainEpoch: epoch) }
+                capture(epoch) {
+                    self.recordConfirmedStop(epoch)
+                    self.delegate?.audioPlayerDidStop(drainEpoch: epoch)
+                }
                 return
             }
-            delegate.audioPlayerDidStop(drainEpoch: epoch)
+            self.recordConfirmedStop(epoch)
+            self.delegate?.audioPlayerDidStop(drainEpoch: epoch)
         }
+    }
+
+    /// CONFIRMATION: the stop for `epoch` completed — the engine stopped and the stop
+    /// notification was issued. A releaser awaiting an identity-bound stop completion keys off
+    /// this, so release ordering tracks the REAL stop, not the request. When a cancel bumped the
+    /// epoch after this stop path claimed its identity, the SAME physical stop was caused by
+    /// that cancel (the enqueued frames were shed), so the current epoch is confirmed with it —
+    /// a releaser must not time out waiting for a second stop that will never come.
+    private func recordConfirmedStop(_ epoch: Int) {
+        bufferLock.lock()
+        lastConfirmedStopEpoch = max(epoch, drainEpoch)
+        bufferLock.unlock()
     }
 
 

@@ -427,7 +427,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = []) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -442,7 +442,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 let fixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
                 self.pendingFixture = nil
                 let built = CloudRouteClient.stubbed(
-                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: [],
+                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: audioPayloads,
                     prepareTask: { task in
                         producerHold.map(task.holdUntilReleased)
                         if let armedHold { task.armReceiveHoldOnEntered = armedHold }
@@ -746,7 +746,70 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// PER-ACTION TRUE RESULT: play_quote WITHOUT its reference target refuses
+        /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio
+    /// releases the host playback only after the ACTUAL stop the cancel requested — the resume
+    /// never overlaps the un-stopped cloud output.
+    func testErrorTerminalReleasesHostPlaybackOnlyAfterTheConfirmedStop() async throws {
+        let fixture = """
+            event: error
+            data: {"message":"boom"}
+
+            """
+        self.pendingFixture = fixture
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        // Withhold the ACTUAL stop: the error terminal's release must wait for it, not for the
+        // cancel request. Delivery (and therefore the stop confirmation) happens only below.
+        // The capture runs on the MAIN queue, so it must never block: it stores the delivery
+        // continuation and the test drives it from its own thread.
+        final class DeliveryBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliver: (() -> Void)?
+            func store(_ d: @escaping () -> Void) {
+                lock.lock(); deliver = d; lock.unlock()
+            }
+            func deliverIfStored() {
+                lock.lock(); let d = deliver; deliver = nil; lock.unlock()
+                d?()
+            }
+        }
+        let delivery = DeliveryBox()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                delivery.store(deliver)
+            }
+        }
+        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        // The turn cannot finish while the stop is unconfirmed: no resume, no confirmed epoch.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "an unconfirmed stop does not release the host playback")
+        let confirmedBefore = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertEqual(confirmedBefore, 0, "the stop is not confirmed before it completes")
+        // Deliver the actual stop: NOW the release lands, exactly once.
+        var delivered = false
+        for _ in 0..<100 {
+            await MainActor.run { delivery.deliverIfStored() }
+            if await MainActor.run(body: { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }) > 0 {
+                delivered = true; break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(delivered, "the withheld stop was delivered")
+        let result = await turn.value
+        _ = result
+        XCTAssertTrue(playback.awaitResume(timeout: 5), "the release lands at the confirmed stop")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "exactly one release")
+        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertGreaterThan(confirmed, 0, "the stop was confirmed")
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pending, "no owned audio survives the confirmed stop")
+        await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
+    }
+
+    /// PER-ACTION TRUE RESULT: play_quote WITHOUT its reference target refuses
     /// (malformed target) and settles durably — it is never reported as a success.
     func testPlayQuoteWithoutReferenceIsRefusedAndDurablySettled() async throws {
         self.pendingFixture = """
