@@ -289,6 +289,18 @@ final class Promise<Value>: @unchecked Sendable {
 
     private var resolvedFlag = false
 
+    /// Test-only: marks the promise as settled by a CLOSE rather than by its resolver, so a
+    /// blocking seam can wait for the close itself to have run. Distinct from `resolve` so a
+    /// control can both signal "close requested" and observe "close done" on one object.
+    private var closedFlag = false
+    var didClose: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closedFlag
+    }
+    func markClosed() {
+        lock.lock(); closedFlag = true; lock.unlock()
+    }
+
     func value() async -> Value {
         await withCheckedContinuation { (cont: CheckedContinuation<Value, Never>) in
             lock.lock()

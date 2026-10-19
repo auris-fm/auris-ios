@@ -420,6 +420,11 @@ final class CloudRouteClient {
     /// producer exactly where the turn needs to be held (after the frame carrying the action,
     /// before the frame carrying its result). Production never sets it.
     var onFrameReceived: (@Sendable () -> Void)?
+
+    /// Test-only seam: invoked with the turn's request id at the exact instant between creating
+    /// the socket task and binding its registration. A deterministic bind-interleaving control
+    /// uses it to settle (or inspect) the lifetime before the transport publishes its bind.
+    var onBeforeBind: (@Sendable (String) -> Void)?
     /// Control-only: parked transport latches to notify when THIS transport is retired. The
     /// production `cancel(with:reason:)` path invokes it, so the parked receive wakes from the
     /// same retirement that retires the registration — no polling, no race window.
@@ -484,6 +489,14 @@ final class CloudRouteClient {
         // registration identity is retired conditionally at close (a duplicate live id keeps
         // its own registration).
         let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
+        // DETERMINISTIC BIND SEAM (test-only). This point is the last instant before the bind makes
+        // its ACCEPTANCE DECISION, and the registration has already been published into the live
+        // table — so a lifetime settled here is exactly the window that a publish-then-check bind
+        // would honour (keeping a registration whose lifetime is already closed) while the single
+        // synchronized transition still rejects it. The seam is a synchronous call on the
+        // transport's own task, so a control can hold this task until the consumer's close has
+        // landed, making the "settled before the decision" order deterministic.
+        if let lifetime, let willBind = onBeforeBind { willBind(turn.requestId) }
         if let lifetime {
             // Deferred-close mode: the CALLER closes on consumer completion. Bind acceptance is
             // ONE synchronized transition: a lifetime that closed before registration REJECTS the

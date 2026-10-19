@@ -49,7 +49,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     /// The registration is published BEFORE the close, so the close retires it. This is the
     /// baseline that makes the rejected-bind case meaningful: the same assertions, opposite order.
     func testRegistrationIsRetiredWhenCloseFollowsABind() async throws {
-        let task = StubWebSocketTask(textFrames: [])
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
             capabilities: [], routeHint: nil, recentConversation: []
@@ -59,10 +59,15 @@ final class CloudBindInterleavingControls: XCTestCase {
         )
         let socket = routed.resultSocket
 
-        // Bind happens on the producer's task when the transport registers. Wait for the frame
-        // seam so the registration is known-published before closing — deterministic, no sleep.
+        // Bind happens on the producer's task when the transport registers. Wait for the FIRST
+        // FRAME so the registration is known-published before closing — deterministic, no sleep:
+        // the frame can only have been received after the bind accepted.
+        // Fulfilled at most once: the producer may serve several frames, and a repeated
+        // `fulfill()` on the same expectation is an XCTest API violation.
         let bound = expectation(description: "registration bound")
-        client.onFrameReceived = { bound.fulfill() }
+        let boundFlag = Promise<Void>()
+        client.onFrameReceived = { boundFlag.resolve(()) }
+        Task { await boundFlag.value(); bound.fulfill() }
 
         let consume = Task { () -> [CloudRouteEvent] in
             var events: [CloudRouteEvent] = []
@@ -104,22 +109,34 @@ final class CloudBindInterleavingControls: XCTestCase {
             capabilities: [], routeHint: nil, recentConversation: []
         )
 
-        // The consumer settles the lifetime BEFORE the transport binds. This is a REAL close on the
-        // real lifetime (not a stub flag), so the bind must observe `closed` under its own lock.
-        let closed = expectation(description: "lifetime closed before bind")
-        client.onFrameReceived = { closed.fulfill() }
+        let closeRequested = Promise<Void>()
+        let seamOpened = Promise<Void>()
+        // The seam runs on the transport's OWN task at the last instant before the bind decides —
+        // after the registration was published, so a publish-then-check bind would already have
+        // honoured a lifetime settled here. The control BLOCKS that task until the consumer's close
+        // has landed, which makes "settled before the decision" the deterministic order rather than
+        // a scheduling accident. The close is issued from OFF-task (never nested inside a held
+        // lock, so it cannot deadlock).
+        client.onBeforeBind = { _ in
+            closeRequested.resolve(())
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline, !closeRequested.didClose { usleep(1_000) }
+            seamOpened.resolve(())
+        }
 
         let routed = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
-
-        // Close the lifetime first, then let the transport reach its bind. `routeWithResultSocket`
-        // arms the grace timer; `finishTurn()` is the consumer's own close.
-        routed.resultSocket.finishTurn()
+        let closer = Task {
+            await closeRequested.value()
+            routed.resultSocket.finishTurn()
+            closeRequested.markClosed()
+            await seamOpened.value()
+        }
 
         var events: [CloudRouteEvent] = []
         for await event in routed.stream { events.append(event) }
-
+        _ = await closer.value
         // The rejected bind must surface as a terminal transport fact, never as a silent no-op.
         let errors = events.compactMap { event -> String? in
             if case let .error(_, code, _) = event { return code }
@@ -127,7 +144,11 @@ final class CloudBindInterleavingControls: XCTestCase {
         }
         XCTAssertTrue(errors.contains("connection_lost"),
                       "a bind rejected by an already-closed lifetime must report connection_lost; got \(errors)")
-        // No frame was ever delivered after the rejection.
+        // No frame was ever DELIVERED after the rejection: the rejected bind cancels the socket
+        // before the receive loop can serve the scripted action frame.
+        XCTAssertTrue(task.isCancelledSocket, "a rejected bind retires the registration immediately")
+        XCTAssertEqual(task.sentTextFrames.count, 0,
+                       "no auth or turn frame may be submitted on a lifetime that rejected the bind")
         XCTAssertFalse(events.contains { if case .action = $0 { return true }; return false },
                        "no action may be admitted on a lifetime that rejected the bind")
     }
