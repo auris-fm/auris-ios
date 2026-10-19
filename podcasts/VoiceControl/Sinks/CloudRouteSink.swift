@@ -164,6 +164,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// still-outstanding output, so its release responsibility transfers to the stop
     /// confirmation instead of firing at rollback time.
     private var pendingHoldRelease: (hold: GracePeriodSignal.PlaybackHoldToken, epoch: Int)?
+    var pendingHoldReleaseEpochForTesting: Int? { pendingHoldRelease?.epoch }
     private let onGracePlaybackHoldBegin: ((Int?) -> GracePeriodSignal.PlaybackHoldToken?)?
     private let onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)?
     /// The in-flight turn. A new turn supersedes it: the older turn stops
@@ -1186,7 +1187,13 @@ extension CloudRouteSink {
             pendingHoldRelease = nil
             if heldPlaybackToken === pending.hold {
                 heldPlaybackToken = nil
+                // End THIS hold explicitly (restoreTransientAudioState only ends what is still
+                // in heldPlaybackToken), then run the FULL transient restore (review 9a093876):
+                // the rolled-back turn inherited the host's auto-pause responsibility at the
+                // transfer, so the confirmation must resume the inherited pause — exactly once,
+                // guarded by the same flags as every other restore.
                 onGracePlaybackHoldEnd?(pending.hold)
+                restoreTransientAudioState()
             }
         }
         // The player has drained its buffer and stopped output. This is when a
@@ -1203,7 +1210,12 @@ extension CloudRouteSink {
         // The notification must belong to the drain this turn is waiting on. A foreign drain's
         // notification is rejected on its own identity, and the record is LEFT INTACT so the turn
         // that does own it is not robbed of its restoration.
-        guard deferred.drainEpoch == drainEpoch else {
+        // MONOTONIC QUIESCENCE PROOF for the DEFERRAL RELEASE (review 9a093876): the claimed
+        // drain epoch (the turn's finish()) and the epoch the runner actually stopped (a later
+        // retire-cancel can shed the drain) differ, but any CONFIRMED stop at or after the
+        // claimed epoch proves the output quiesced — the exact-identity rule governs
+        // CONFIRMATION records, not this restore.
+        guard drainEpoch >= deferred.drainEpoch else {
             return
         }
         // ...and the deferring turn must still own the release.

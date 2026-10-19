@@ -2038,6 +2038,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // while its retire stop is unconfirmed (the bug ended it at rollback: 3).
         XCTAssertEqual(holdCounters?.end.value ?? -1, 2,
                        "the rolled-back admission's hold is NOT ended while its retire stop is unconfirmed")
+        // Precondition: the host was auto-paused for the cloud audio and B inherited that
+        // responsibility at the transfer.
+        let pauses = playback.calls.filter { $0 == .pause }.count
+        XCTAssertGreaterThanOrEqual(pauses, 1, "the host was auto-paused for A's cloud audio")
         // Confirm E1: B's release responsibility fires exactly here.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -2046,12 +2050,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             box.deliverAll()
         }
         var ends = 0
+        var resumesAfterConfirm = 0
         for _ in 0..<100 {
             ends = holdCounters?.end.value ?? -1
-            if ends == 2 { break }
+            resumesAfterConfirm = playback.calls.filter { $0 == .resume }.count
+            if ends == 3 && resumesAfterConfirm == 1 { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(ends, 3, "B's hold ends exactly when the retire stop confirms")
+        XCTAssertEqual(resumesAfterConfirm, 1,
+                       "exactly ONE host resume: the confirmation restores the inherited pause")
     }
 
     /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
