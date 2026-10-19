@@ -24,22 +24,35 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         XCTAssertEqual(confirmedWhileWithheld, 0,
                        "nothing is confirmed while the stop is withheld")
         // Turn B: cancel bumps the identity; the engine (empty) stops — the capture STILL holds
-        // it, so B's confirmation is withheld too. Release ONLY B's delivery.
+        // it, so B's confirmation is withheld too.
         let cancelEpoch = player.cancel()
         XCTAssertGreaterThan(cancelEpoch, drainEpoch, "the cancel allocated a fresh identity")
         try await Task.sleep(nanoseconds: 200_000_000)
-        // Deliver ONLY the newest stop (B's): the box holds A's first, B's second.
-        await MainActor.run { delivery.deliverLast() }
+        // Deliver the STALE A stop FIRST, while B's identity is still unconfirmed — the exact
+        // promotion hazard (review 5295572f): confirmation must mean the identity that actually
+        // stopped. A stale delivery must not promote the unconfirmed B identity.
+        await MainActor.run { delivery.deliverOldest() }
+        try await Task.sleep(nanoseconds: 200_000_000)
         var confirmed = await MainActor.run { player.confirmedStopEpoch() }
         for _ in 0..<50 {
             if confirmed != 0 { break }
             try await Task.sleep(nanoseconds: 20_000_000)
             confirmed = await MainActor.run { player.confirmedStopEpoch() }
         }
-        XCTAssertEqual(confirmed, cancelEpoch, "confirmation is EXACTLY the stopped identity")
+        XCTAssertEqual(confirmed, drainEpoch,
+                       "confirmation is EXACTLY the identity that physically stopped")
+        // Deliver B's stop: B's identity confirms exactly; A's waiter resolves (the output it
+        // awaited is genuinely quiescent).
+        await MainActor.run { delivery.deliverOldest() }
+        for _ in 0..<50 {
+            let c = await MainActor.run { player.confirmedStopEpoch() }
+            if c >= cancelEpoch { confirmed = c; break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(confirmed, cancelEpoch, "B's identity confirms exactly when B's stop lands")
         let aResolved = await waiter.value
         XCTAssertTrue(aResolved, "A's waiter resolves: the output it awaited is quiescent")
-        // Stale delivery of A's notification: no regression, no promotion.
+        // Exhaust further deliveries: no regression, no promotion.
         await MainActor.run { delivery.deliverAll() }
         try await Task.sleep(nanoseconds: 200_000_000)
         let afterStale = await MainActor.run { player.confirmedStopEpoch() }
@@ -114,9 +127,9 @@ final class DeliveryBox: @unchecked Sendable {
     func store(_ d: @escaping () -> Void) {
         lock.lock(); deliveries.append(d); lock.unlock()
     }
-    /// Delivers ONLY the most recent withheld stop (newest identity).
-    func deliverLast() {
-        lock.lock(); let d = deliveries.popLast(); lock.unlock()
+    /// Delivers ONLY the OLDEST withheld stop (the earliest identity still pending).
+    func deliverOldest() {
+        lock.lock(); let d = deliveries.isEmpty ? nil : deliveries.removeFirst(); lock.unlock()
         d?()
     }
     /// Delivers every withheld stop, oldest first.
