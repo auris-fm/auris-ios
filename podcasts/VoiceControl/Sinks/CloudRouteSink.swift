@@ -492,9 +492,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         } onCancel: {
             // Fires SYNCHRONOUSLY at owning-Task cancellation — the only legal observation of
-            // another task's cancel. Held work reads the flag immediately after release, and the
-            // loop's own exit retires the ORIGINAL registration via this handler's completion.
+            // another task's cancel. Cancellation itself performs the cleanup: mark the flag AND
+            // retire the ORIGINAL registration immediately, even while the consumer stays
+            // suspended in held work (retirement must not wait for eventual loop exit). The
+            // lifetime close is idempotent and identity-checked, so the turn-wide defer and any
+            // later path re-running it is harmless; a successor turn's socket is never touched.
             ownerCancelledFlag.mark()
+            resultSocket.finishTurn()
         }
         if let turnResult {
             return CloudRouteResult(response: turnResponse, outcome: turnResult)
