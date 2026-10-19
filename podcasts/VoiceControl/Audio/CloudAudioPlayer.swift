@@ -116,6 +116,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         cancelRequestCountForTesting += 1
         bufferLock.lock()
         buffer.removeAll()
+        bufferClearCountForTesting += 1
         bufferLock.unlock()
         runnerLock.lock()
         drainEpoch += 1
@@ -658,6 +659,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// stop notification); decremented when that notification is issued.
     private let stopCounterLock = NSLock()
     private var queuedStopRequests = 0
+    /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
+    private(set) var bufferClearCountForTesting = 0
     var hasQueuedStop: Bool {
         stopCounterLock.lock()
         defer { stopCounterLock.unlock() }

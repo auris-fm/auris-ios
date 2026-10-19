@@ -1904,7 +1904,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        self.nextTurnAudioPayloads = [Data([0])] // one frame: below the play threshold — the
+        // engine never starts (isPlaying false), which is exactly the cleared-buffer window.
         let sink = makeSink()
         final class Box: @unchecked Sendable {
             private let lock = NSLock()
@@ -1927,6 +1928,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertTrue(aBuffered, "A's audio is buffered under the drain hold")
+        let aPlaying: Bool = await MainActor.run { sink.audioPlayerForTesting?.isPlaying ?? true }
+        XCTAssertFalse(aPlaying, "A's engine never started: the window is buffer-only")
         // B supersedes A (retire E1 queued behind the parked runner), then C supersedes B
         // (retire E2): with the queued stop invisible to buffer/isPlaying, only the explicit
         // queued-stop signal can hold C.
@@ -1952,9 +1955,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
         let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
-        // C may not complete while the queued stops are unprocessed.
-        let cFinished = try await timeoutProbe(c, nanoseconds: 200_000_000)
-        XCTAssertFalse(cFinished, "C is suspended: the queued stop it cannot see holds its admission")
+        // C may not complete while the queued stops are unprocessed — and in particular not
+        // while the runner is still parked (a C that "completed" here admitted over the stop
+        // the runner has not yet processed).
+        let cFinishedParked = try await timeoutProbe(c, nanoseconds: 800_000_000)
+        XCTAssertFalse(cFinishedParked,
+                       "C is suspended: the queued stop it cannot see holds its admission while the runner is parked")
+        // And C RETIRED before admitting: E1's clear (A's leftovers) plus C's own retire clear.
+        // A C that skipped its wait (queued stop invisible) never performs the second clear.
+        let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
+        XCTAssertEqual(clears, 2, "C retired B's queued-stop-window output before admitting")
         // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
