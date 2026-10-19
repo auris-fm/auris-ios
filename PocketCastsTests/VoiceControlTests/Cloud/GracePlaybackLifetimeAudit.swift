@@ -400,7 +400,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
     /// every caller still preserves its allowance/state. Expiry resumes once at the release.
     @MainActor
     func testNoCallerArmsTheClockUnderALiveHoldWhileAllowancesArePreserved() async throws {
-        let signal = GracePeriodSignal(timeout: 0.3)
+        // 1.0s clock: the co-owner probe (1.5s) outlives a premature re-arm, so a mutant that
+        // releases on a generation match cannot hide behind a timer that has not fired yet.
+        let signal = GracePeriodSignal(timeout: 1.0)
         objc_setAssociatedObject(self, "graceauditshared_sig", signal, .OBJC_ASSOCIATION_RETAIN)
         signal.onWakeWordDetected()
         let gen = signal.currentGeneration()
@@ -435,8 +437,18 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         signal.endPlaybackHold(hold)  // stale, older generation
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(signal.isActive, "stale hold end never resumed the live window")
+        // TWO concurrent holds on the SAME generation: releasing ONE must not resume — the
+        // release identity is the TOKEN, not the generation.
+        guard let hold3b = signal.beginPlaybackHold(forGeneration: gen3) else {
+            XCTFail("second hold on the live generation refused")
+            return
+        }
         signal.endPlaybackHold(hold3)
-        let expiryDeadline = Date().addingTimeInterval(2)
+        let coOwnerDeadline = Date().addingTimeInterval(1.5)
+        while Date() < coOwnerDeadline, signal.isActive { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertTrue(signal.isActive, "a same-generation co-owner still holds expiry (1.5s > clock)")
+        signal.endPlaybackHold(hold3b)
+        let expiryDeadline = Date().addingTimeInterval(3)
         while Date() < expiryDeadline, signal.isActive { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertFalse(signal.isActive, "last release resumes the interval exactly once; it expires")
     }
@@ -528,7 +540,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let audio = (0..<40).map { Data([UInt8($0)]) }
-        let gate = DispatchSemaphore(value: 0)
+        let gates = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
+        objc_setAssociatedObject(self, "graceauditsucc_gates", gates, .OBJC_ASSOCIATION_RETAIN)
+        var gateIndex = 0
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -540,7 +554,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                     fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
                     audioPayloads: audio
                 )
-                stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
+                let index = gateIndex
+                gateIndex += 1
+                stub.client.onBeforeBind = { _ in _ = gates[index].wait(timeout: .now() + 8) }
                 return stub.client
             },
             playbackSink: playback,
@@ -573,8 +589,8 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             origin: gen2
         )
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive)
-        // The PREDECESSOR's stale completion (its gate release, now out of turn).
-        gate.signal()
+        // The PREDECESSOR's stale completion (its own gate release, now out of turn).
+        gates[0].signal()
         try await Task.sleep(nanoseconds: 1_000_000_000)
         XCTAssertEqual(
             service.gracePeriodSignalForTesting.currentGeneration(), gen2,
@@ -587,7 +603,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertEqual(playback.resumeCalls, 0, "no resume was stolen from the successor")
         // Now the successor completes and drains: exactly one resume, and its window's interval
         // then expires normally.
-        gate.signal()  // second signal: the successor's own transport gate
+        gates[1].signal()  // the successor's own transport gate
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting
