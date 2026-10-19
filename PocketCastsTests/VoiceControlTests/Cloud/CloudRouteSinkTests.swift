@@ -660,6 +660,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("replay-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        // A's SETTLED state S: position 77 at the moment A finishes.
+        playback.setPositionMs(77_000)
 
         // Turn 1: executes and settles succeeded with the typed state.
         let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
@@ -667,13 +669,27 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let firstFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
         XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
         let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any], "a success frame carries the resulting state")
-        XCTAssertNotNil(firstState["position_seconds"])
-        XCTAssertNotNil(firstState["playing"])
+        XCTAssertEqual(firstState["position_seconds"] as? Int, 77, "S: A settled at position 77")
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1)
 
-        // Turn 2: the SAME operation_id redelivered through a FRESH sink sharing the durable
-        // store. Answered from the journal: same recorded outcome, typed state still reported,
-        // and the effect never runs again.
+        // Turn 2: an UNRELATED operation B settles and moves the LIVE state (playing=false).
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-unrelated-b","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = try await awaitResultFrame(operationId: "op-unrelated-b")
+        // T: unrelated live drift AFTER A settled.
+        playback.setPositionMs(9999_000)
+
+        // Turn 3: the SAME operation_id A redelivered through a FRESH sink AND a FRESH journal
+        // instance over the SAME durable file. The replay must answer A's SETTLED state S —
+        // not the live state T that B created.
         self.pendingFixture = """
             event: action
             data: {"operation_id":"op-redeliver-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
@@ -682,13 +698,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let reloadedJournal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: reloadedJournal)
         _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         let replayFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
-        let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success still carries the actual resulting state")
-        XCTAssertNotNil(replayState["position_seconds"])
-        XCTAssertNotNil(replayState["playing"])
+        let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success carries A's SETTLED state")
+        XCTAssertEqual(replayState["position_seconds"] as? Int, 77, "A's SETTLED position S, not the live drift T")
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1, "the effect never runs twice")
     }
 
@@ -1286,7 +1302,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let store = SettlementFailingOperationRecordStore()
         let journal = OperationJournal(store: store)
         XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
-        XCTAssertFalse(journal.complete("op-settle-fail", result: .succeeded), "failed settlement must be reported")
+        XCTAssertFalse(journal.complete("op-settle-fail", result: .succeeded(state: ["position_seconds": .int(0)])), "failed settlement must be reported")
         // Live-memory observation: the record did NOT publish as finished-succeeded.
         XCTAssertNil(journal.result(for: "op-settle-fail"), "failed settlement must not publish success")
         XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.inProgress, "unsettled operation stays in progress, never replayable")

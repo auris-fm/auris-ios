@@ -22,8 +22,8 @@ final class OperationJournalTests: XCTestCase {
     func test_secondClaimForTheSameOperation_isAlreadyRun() {
         let (journal, _) = makeJournal()
         XCTAssertEqual(journal.claim("op-1"), .claimed)
-        journal.complete("op-1", result: .succeeded)
-        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded))
+        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_differentOperations_claimIndependently() {
@@ -31,9 +31,9 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(journal.claim("op-1"), .claimed)
         XCTAssertEqual(journal.claim("op-2"), .claimed)
         journal.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.clientPolicy))
-        journal.complete("op-2", result: .succeeded)
+        journal.complete("op-2", result: .succeeded(state: ["position_seconds": .int(0)]))
         XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.nonSuccess(.refused, reason: OperationReason.clientPolicy)))
-        XCTAssertEqual(journal.claim("op-2"), .alreadyRun(.succeeded))
+        XCTAssertEqual(journal.claim("op-2"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_aSecondClaimWhileInProgress_doesNotClaimAgain() {
@@ -45,8 +45,8 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(journal.claim("op-1"), .inProgress)
         XCTAssertNil(journal.result(for: "op-1"))
 
-        journal.complete("op-1", result: .succeeded)
-        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded))
+        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_complete_replacesTheRecordedResult() {
@@ -54,8 +54,8 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(journal.claim("op-1"), .claimed)
         journal.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
         XCTAssertEqual(journal.result(for: "op-1")?.outcome, .refused)
-        journal.complete("op-1", result: .succeeded)
-        XCTAssertEqual(journal.result(for: "op-1"), .succeeded)
+        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.result(for: "op-1"), .succeeded(state: ["position_seconds": .int(0)]))
     }
 
     func test_result_forAnUnclaimedOperation_isNil() {
@@ -100,11 +100,11 @@ final class OperationJournalTests: XCTestCase {
         let store = InMemoryOperationRecordStore()
         let first = OperationJournal(store: store)
         _ = first.claim("op-1")
-        first.complete("op-1", result: .succeeded)
+        first.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
 
         let second = OperationJournal(store: store)
         XCTAssertTrue(second.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(second.claim("op-1"), .alreadyRun(.succeeded))
+        XCTAssertEqual(second.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_anUnclaimedOperationSurvivesRestartWithoutBecomingInterrupted() {
@@ -132,7 +132,7 @@ final class OperationJournalTests: XCTestCase {
     /// The distinction the outcome table turns on: `unknown` is a recorded, final answer that
     /// is not a success.
     func test_unknownPreventsReExecutionButIsNotSuccess() {
-        XCTAssertNotEqual(OperationOutcome.unknown, .succeeded)
+        XCTAssertNotEqual(OperationOutcome.unknown, OperationOutcome.succeeded)
         XCTAssertEqual(
             OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight).outcome,
             .unknown
@@ -161,8 +161,8 @@ final class OperationJournalTests: XCTestCase {
     }
 
     func test_successCarriesNoReason() {
-        XCTAssertNil(OperationResult.succeeded.reason)
-        XCTAssertEqual(OperationResult.succeeded.outcome, .succeeded)
+        XCTAssertNil(OperationResult.succeeded(state: ["position_seconds": .int(0)]).reason)
+        XCTAssertEqual(OperationResult.succeeded(state: ["position_seconds": .int(0)]).outcome, OperationOutcome.succeeded)
     }
 
     // MARK: - the file-backed store

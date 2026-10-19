@@ -139,6 +139,36 @@ enum CloudRouteJSONValue: Equatable {
         return nil
     }
 
+    /// Total decoder from Foundation JSON (journal persistence of a settled state). Returns nil
+    /// for shapes this build does not model — callers treat nil as unreadable history, never as
+    /// an invented value.
+    init?(json: Any) {
+        switch json {
+        case let v as String: self = .string(v)
+        case let v as Int: self = .int(Int64(v))
+        case let v as Int64: self = .int(v)
+        case let v as Double: self = .double(v)
+        case let v as Bool: self = .bool(v)
+        case is NSNull: self = .null
+        case let dict as [String: Any]:
+            var decoded: [String: CloudRouteJSONValue] = [:]
+            for (key, value) in dict {
+                guard let item = CloudRouteJSONValue(json: value) else { return nil }
+                decoded[key] = item
+            }
+            self = .object(decoded)
+        case let arr as [Any]:
+            var decoded: [CloudRouteJSONValue] = []
+            for value in arr {
+                guard let item = CloudRouteJSONValue(json: value) else { return nil }
+                decoded.append(item)
+            }
+            self = .array(decoded)
+        default:
+            return nil
+        }
+    }
+
     /// Plain Foundation JSON for outbound frame encoding (`app_operation_result` state).
     func toJSONSerializable() -> Any {
         switch self {

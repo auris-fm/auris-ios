@@ -74,19 +74,26 @@ enum OperationOutcome: String, Equatable, CaseIterable {
 struct OperationResult: Equatable {
     let outcome: OperationOutcome
     let reason: String?
+    /// The ACTUAL resulting state AT SETTLEMENT, typed per the owning family. Replay contract:
+    /// the stored state — not a fresh reading of current playback — is what a redelivery answers
+    /// with, so an unrelated later operation cannot rewrite a settled answer.
+    let state: [String: CloudRouteJSONValue]?
 
-    private init(outcome: OperationOutcome, reason: String?) {
+    private init(outcome: OperationOutcome, reason: String?, state: [String: CloudRouteJSONValue]?) {
         self.outcome = outcome
         self.reason = reason
+        self.state = state
     }
 
-    /// A non-success result carries a reason; success carries none.
+    /// A non-success result carries a reason and NO state; success carries its settled state.
     static func nonSuccess(_ outcome: OperationOutcome, reason: String) -> OperationResult {
         precondition(outcome != .succeeded, "success is not a non-success outcome")
-        return OperationResult(outcome: outcome, reason: reason)
+        return OperationResult(outcome: outcome, reason: reason, state: nil)
     }
 
-    static let succeeded = OperationResult(outcome: .succeeded, reason: nil)
+    static func succeeded(state: [String: CloudRouteJSONValue]) -> OperationResult {
+        OperationResult(outcome: .succeeded, reason: nil, state: state)
+    }
 }
 
 /// The reasons an app operation does not succeed, as named by the owning contract.
@@ -390,11 +397,26 @@ final class FileOperationRecordStore: OperationRecordStore {
                     // interrupted_in_flight for a reason the file did not carry.
                     return .unreadable
                 }
-                records[operationID] = .finished(
-                    outcome == .succeeded
-                        ? .succeeded
-                        : .nonSuccess(outcome, reason: fields["reason"]!)
-                )
+                if outcome == .succeeded {
+                    // Replay contract: the settled state is PART of the record. A success
+                    // without its state is corrupt history, not a stateless success.
+                    guard let raw = fields["result_state"],
+                          let data = raw.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data),
+                          let state = json as? [String: Any],
+                          !state.isEmpty
+                    else { return .unreadable }
+                    var typed: [String: CloudRouteJSONValue] = [:]
+                    for (key, value) in state {
+                        guard let item = CloudRouteJSONValue(json: value) else { return .unreadable }
+                        typed[key] = item
+                    }
+                    records[operationID] = .finished(.succeeded(state: typed))
+                } else {
+                    records[operationID] = .finished(
+                        .nonSuccess(outcome, reason: fields["reason"]!)
+                    )
+                }
             default:
                 // An unknown state is semantically corrupt: the whole history is unreadable,
                 // so no id in it can silently re-claim and execute.
@@ -417,6 +439,13 @@ final class FileOperationRecordStore: OperationRecordStore {
                     "outcome": result.outcome.rawValue,
                 ]
                 if let reason = result.reason { fields["reason"] = reason }
+                if let state = result.state,
+                   let data = try? JSONSerialization.data(
+                        withJSONObject: state.mapValues { $0.toJSONSerializable() }
+                   ),
+                   let encoded = String(data: data, encoding: .utf8) {
+                    fields["result_state"] = encoded
+                }
                 raw[operationID] = fields
             }
         }

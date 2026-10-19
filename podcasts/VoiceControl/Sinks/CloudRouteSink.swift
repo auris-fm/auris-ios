@@ -595,14 +595,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run.
         switch operationJournal?.claim(operationId) ?? .claimed {
         case .alreadyRun(let recorded):
-            // TYPED REPLAY: a replayed success still reports the ACTUAL resulting state (wire
-            // contract §3 — the journal stores the outcome; the state is read live). A replayed
-            // non-success replays its recorded reason.
-            if recorded.outcome == .succeeded {
-                await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
-            } else {
-                await reportResult(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
-            }
+            // REPLAY CONTRACT: answer from the DURABLE RECORD — the outcome AND the state settled
+            // with it. The live playback state is not read: an unrelated operation may have moved
+            // it since, and a settled answer must not be rewritten by later events.
+            await reportRecorded(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
             return
         case .inProgress:
             return
@@ -675,7 +671,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Persist the settlement FIRST and observe it: a failed settlement write must not
             // be reported as success — the durable record is still in progress, so the honest
             // answer is unknown, never a replayable success.
-            let settled = operationJournal?.complete(operationId, result: .succeeded) ?? true
+            // Settle with the state CAPTURED AT SETTLEMENT: replay must answer with what was
+            // true when THIS operation finished, never a later reading.
+            let settled = operationJournal?.complete(
+                operationId,
+                result: .succeeded(state: currentPlaybackState())
+            ) ?? true
             if settled {
                 await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
             } else {
@@ -741,7 +742,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             didAutoPause = false
             return nil
         default:
-            return nil // unknown action ignored (forward compatibility)
+            // Unreachable for identified mutations (the runtime gate refuses unknown actions
+            // before the claim); kept as an honest refusal, never a fabricated success.
+            return .nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
         }
     }
 
@@ -773,16 +776,46 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Success carries the ACTUAL resulting state, typed per the owning family (wire contract §3):
     /// playback seeks state position and playing; identity-less successes cannot occur (the gate).
     private func reportSuccess(operationId: String, capabilityVersion: String?) async {
+        await reportFrame(
+            AppOperationResultFrame(
+                operationId: operationId, outcome: .succeeded,
+                state: currentPlaybackState()
+            ),
+            capabilityVersion: capabilityVersion
+        )
+    }
+
+    /// The live typed playback state, captured at settlement (fresh executions only — replay
+    /// answers from the journal's stored state).
+    private func currentPlaybackState() -> [String: CloudRouteJSONValue] {
+        [
+            "position_seconds": .int(playbackPositionMs() / 1000),
+            "playing": .bool(playbackSink.isPlaying),
+        ]
+    }
+
+    /// Sends a RECORDED result: the journal's settled outcome and state, byte-for-byte the fact
+    /// this client settled — not a reconstruction.
+    private func reportRecorded(
+        _ recorded: OperationResult,
+        operationId: String,
+        capabilityVersion: String?
+    ) async {
         guard let socket = activeResultSocket,
               let frame = AppOperationResultFrame(
-                operationId: operationId, outcome: .succeeded,
-                state: [
-                    "position_seconds": .int(playbackPositionMs() / 1000),
-                    "playing": .bool(playbackSink.isPlaying),
-                ]
+                operationId: operationId,
+                outcome: recorded.outcome,
+                reason: recorded.reason,
+                state: recorded.state
               ) else { return }
-        _ = capabilityVersion
+        await reportFrame(frame, capabilityVersion: capabilityVersion)
+    }
+
+    private func reportFrame(_ frame: AppOperationResultFrame?, capabilityVersion: String?) async {
+        _ = capabilityVersion // validated at the gate; rides the action frame, not the result
+        guard let frame else { return }
         guard let client = resultSendClient else { return }
+        guard let socket = activeResultSocket else { return }
         _ = await client.sendOperationResult(frame, via: socket)
     }
 
