@@ -863,6 +863,17 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
 
+    /// Distinct behavior #2: a CONFIGURED route whose connection fails must report the
+    /// transport failure — not be relabeled as a pre-transport refusal. This is what the old
+    /// broken-premise test accidentally measured; it belongs here explicitly.
+    func testConfiguredTransportFailureReportsConnectionLossNotRefusal() async {
+        self.pendingFixture = ""   // configured stub whose socket closes before any event
+        let result = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        XCTAssertEqual(result.outcome, .failed(code: "connection_lost"),
+                       "a configured route with a dead connection reports transport failure")
+    }
+
     /// Owning-Task cancellation regression, attribution-corrected: an identified pause turn has
     /// EXPECTED lifecycle auto-pause (CloudRouteSink.swift:315, when playing before hold) plus the
     /// action effect (line 551). Cancellation must not add a second effect execution: total pauses
