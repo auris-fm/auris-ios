@@ -617,7 +617,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Runtime gate: an identified operation whose action this build does not implement
             // is REFUSED (unsupported_operation) and the refusal SETTLED durably — never a
             // fabricated success, and a redelivery replays the recorded refusal. Identity-less
-            // legacy frames keep the forward-compatible ignore (performMutation's default).
+            // playback frames NEVER reach here: the gate above refuses them before any claim
+            // (there is no legacy fallback that authorizes a mutation without
+            // operation_id + capability_version).
             let knownActions: Set<String> = ["seek_to", "play_quote", "stop_quote", "seek_relative", "pause", "resume"]
             if !knownActions.contains(action) {
                 let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
@@ -710,11 +712,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return nil }
+            // A quote without its reference target is a malformed request, not a success: the
+            // honest outcome is refused, durably settled, and replayed on redelivery.
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else {
+                return .nonSuccess(.refused, reason: OperationReason.malformedSeekTarget)
+            }
             capturePreActionPosition(referenceMs: referenceMs)
             return seekToReference(referenceMs)
         case "stop_quote":
-            guard let restoreMs = preQuotePositionMs else { return nil }
+            // Restoring requires a position this client actually saved (a prior play_quote). No
+            // saved position: a precondition of current state failed — refused, never a success.
+            guard let restoreMs = preQuotePositionMs else {
+                return .nonSuccess(.refused, reason: OperationReason.stalePrecondition)
+            }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
             return nil

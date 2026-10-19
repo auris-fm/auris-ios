@@ -746,7 +746,60 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
+        /// PER-ACTION TRUE RESULT: play_quote WITHOUT its reference target refuses
+    /// (malformed target) and settles durably — it is never reported as a success.
+    func testPlayQuoteWithoutReferenceIsRefusedAndDurablySettled() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-pq-noref","capability_version":"v1","tool":"playback","action":"play_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pq-noref-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let frame = try await awaitResultFrame(operationId: "op-pq-noref")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
+        XCTAssertNil(frame["state"])
+        if case .alreadyRun(let recorded) = journal.claim("op-pq-noref") {
+            XCTAssertEqual(recorded.outcome, .refused)
+        } else {
+            XCTFail("the refusal was not durably settled")
+        }
+    }
+
+    /// PER-ACTION TRUE RESULT: stop_quote with NO saved position (no prior play_quote) refuses
+    /// (stale precondition) — there is nothing to restore, and silence is not a success.
+    func testStopQuoteWithoutASavedPositionIsRefusedStalePrecondition() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-sq-nosave","capability_version":"v1","tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sq-nosave-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let frame = try await awaitResultFrame(operationId: "op-sq-nosave")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
+        if case .alreadyRun(let recorded) = journal.claim("op-sq-nosave") {
+            XCTAssertEqual(recorded.outcome, .refused)
+        } else {
+            XCTFail("the refusal was not durably settled")
+        }
+    }
+
+    /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
     /// value. A mapping that returned its input would satisfy an equality check by accident, so
     /// the offset is deliberate.
     func testMappedReferenceSeekUsesTheMappedPositionNotTheRawReferenceValue() async {
