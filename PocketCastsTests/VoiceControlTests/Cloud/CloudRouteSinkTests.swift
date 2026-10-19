@@ -1756,6 +1756,69 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         super.tearDown()
     }
 
+    /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9): the superseded turn's OWNED
+    /// output stops with an identity-bound AWAIT — the turn does not return until the actual
+    /// stop completes — and it does NOT restore the window (the successor owns the release).
+    /// The successor's single resume is intact.
+    func testSupersededTurnAwaitsItsOwnedStopAndLeavesTheReleaseToTheSuccessor() async throws {
+        // Turn A: held open with pending owned audio.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let gate = holdNextTurn()
+        let sink = makeSink()
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        gate.release()
+        // Withhold A's stop notification: A must SUSPEND on its owned stop await.
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        // Turn B supersedes A and completes cleanly.
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        // B's release is intact: exactly one resume (B's).
+        var resumes = 0
+        for _ in 0..<60 {
+            resumes = playback.calls.filter { $0 == .resume }.count
+            if resumes == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(resumes, 1, "the successor's single release is intact")
+        // A has NOT returned: its owned-stop await is still suspended (stop withheld).
+        let aFinished = try await timeoutProbe(slow, nanoseconds: 200_000_000)
+        XCTAssertFalse(aFinished, "A is still suspended on its identity-bound stop await")
+        // Deliver the actual stop: A returns, earlyClose, and did NOT restore (B owns the window).
+        await MainActor.run { box.deliverAll() }
+        let aResult = await slow.value
+        XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1,
+                       "A does not restore the window after the successor took it")
+        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertGreaterThan(confirmed, 0, "A's owned output stopped with a confirmed identity")
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pending, "A's owned audio is gone")
+        await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
+    }
+
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
         // Turn A: held open, so it is still running when B starts. Its fixture is
         // bound to A's client explicitly, because B's turn is built in between.
@@ -1874,6 +1937,26 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// cases; the socket is also where "the losing turn was closed, not left
     /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
+
+    /// BOUNDED completion probe (review ec3b5150 pattern): true when the task completed within
+    /// the bound — never an unbounded wait.
+    private actor CompletionProbe { }
+    private func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
+        let probe = Task { _ = await task.value; return true }
+        let bounded = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await probe.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                return false
+            }
+            let first = (try? await group.next()) ?? false
+            group.cancelAll()
+            _ = await group.next()
+            return first
+        }
+        if !bounded { probe.cancel() }
+        return bounded
+    }
 
     /// Stalls the *next* client's turn until `release()` is called on the returned
     /// gate, so another turn can supersede it while it is still running.

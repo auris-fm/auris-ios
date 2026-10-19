@@ -548,9 +548,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return CloudRouteResult(response: turnResponse, outcome: turnResult)
         }
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics. Superseded is not a
-            // completion: the winner's turn decides the window, and reporting this one as
-            // completed would let a turn that was cancelled mid-stream reopen it.
+            // OWNER CANCELLATION (review dee03708/fa03b7f9): the cancelled turn's OWNED output
+            // still has to STOP, and the actual stop must complete before the window's host
+            // playback resumes over it. The successor owns the WINDOW (pause/restore/analytics),
+            // so this turn releases only if it still owns the captured release — but its own
+            // audio dies here, identity-bound, not whenever the successor's drain happens to
+            // shed it. Superseded is not a completion either.
+            let stopEpoch = audioPlayer.cancel()
+            _ = await audioPlayer.awaitActualStop(after: stopEpoch)
+            if activeTurn == nil || activeTurn === turnToken {
+                restoreTransientAudioState()
+            }
             return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
         // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
