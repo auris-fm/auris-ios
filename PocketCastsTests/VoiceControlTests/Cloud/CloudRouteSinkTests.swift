@@ -830,8 +830,31 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testUnconfiguredReportsRefusedNotCompletion() async {
+        // Premise must be genuinely unconfigured at BOTH layers. Removing only the UserDefaults
+        // override left the build-time default (Info.plist AurisCloudBaseURL, non-empty in the
+        // StagingDebug test host) active — the sink was actually CONFIGURED and correctly routed
+        // to the stub transport, whose empty-fixture connection failure was the RIGHT answer for
+        // the route it actually took. The old assertion measured a wrong premise, not wrong
+        // production. Neutralise the build default via CloudConfig's injected buildDefaultGatewayURL.
         defaults.removeObject(forKey: CloudConfig.baseURLKey)
-        let result = await makeSink().routeToCloud(
+        let unconfiguredConfig = CloudConfig(defaults: defaults, buildDefaultGatewayURL: "")
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: unconfiguredConfig.baseUrl, fixture: "")
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !unconfiguredConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            rendersStructuredResults: false,
+            routeHintProvider: { nil },
+            conversationManager: testConversationManager()
+        )
+        let result = await sink.routeToCloud(
             request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         XCTAssertEqual(
             result.outcome, .refused,
