@@ -36,6 +36,7 @@ class VoiceControlAssembly {
         inference injectedInference: (any LfmInference)? = nil,
         modelManager injectedModelManager: ModelManager? = nil,
         clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
+        playbackSink injectedPlaybackSink: VoicePlaybackSink? = nil,
         cloudConfig injectedCloudConfig: CloudConfig? = nil,
         asrBackend injectedBackend: (() -> AsrBackend?)? = nil,
         onInputRoutingFinished: (@MainActor (IntentRoutingInput) -> Void)? = nil,
@@ -143,7 +144,10 @@ class VoiceControlAssembly {
             cloudPlaybackContextState: cloudPlaybackContextState
         )
 
-        let playbackSink = PlaybackManagerSink(playbackManager: playbackManager)
+        // Test-only injection: a control that must observe ACTUAL local execution (e.g. a pause
+        // the router classified from an English utterance) supplies a recording sink. Nil in
+        // production — the real manager-backed sink is used unchanged.
+        let playbackSink = injectedPlaybackSink ?? PlaybackManagerSink(playbackManager: playbackManager)
         let executor = VoiceIntentExecutor(
             playbackSink: playbackSink,
             effectsSink: EffectsManagerSink(playbackManager: playbackManager),

@@ -204,18 +204,55 @@ final class SourceLanguageHandoffControls: XCTestCase {
         }
     }
 
-    /// LOCAL-ENGLISH ZERO-CLOUD control (reviewer 4af8d2d5): an English utterance whose router
-    /// classification is a LOCAL action never dispatches to the cloud sink — zero Authenticate
-    /// frames, zero client factory invocations. This is the honest form of the "local-english"
-    /// coverage: routing stays local, nothing reaches the socket.
+    /// LOCAL-ENGLISH control (reviewer 4af8d2d5 + 9d6dc5a7): an English utterance whose router
+    /// classification is a LOCAL action (1) actually executes locally — the recording playback
+    /// manager observes the real pause invocation and the parsed-intent observer sees the
+    /// PlaybackIntent the English routing input produced — and (2) never dispatches to the cloud
+    /// sink: zero Authenticate frames, zero client factory invocations. The prior form
+    /// (tasks.isEmpty + sleep alone) also passed if local execution was silently dropped; a
+    /// suppress-local-execution mutant now fails this control on the pause assertion.
     @MainActor
     func testLocalEnglishActionRoutesLocallyWithZeroAuthFrames() async throws {
         let box = FrameBox()
-        let service = makeService(
-            classifyLabel: "playback:pause",
-            generateResult: "playback(action='pause')",
-            box: box
+        let recorder = RecordingPlaybackSink()
+        let intentBox = IntentBox()
+        objc_setAssociatedObject(self, "srclang_intentbox", intentBox, .OBJC_ASSOCIATION_RETAIN)
+
+        let suite = "srclang_local_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "srclang_local_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "playback:pause"
+        inference.generateResult = "playback(action='pause')"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
         )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                let stub = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                box.tasks.append(stub.task)
+                return stub.client
+            },
+            playbackSink: recorder,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
         service.startIfAllowed()
         try await waitForListening(service)
         try await waitForRouter(service)
@@ -227,15 +264,46 @@ final class SourceLanguageHandoffControls: XCTestCase {
                 language: "en",
                 selection: .wakeWord
             ),
-            origin: service.gracePeriodSignalForTesting.currentGeneration()
+            origin: service.gracePeriodSignalForTesting.currentGeneration(),
+            parsedIntentObserver: { intent in intentBox.intents.append(intent) }
         )
 
         // Bounded settle: a cloud dispatch would open a socket within this window.
         try await Task.sleep(nanoseconds: 1_500_000_000)
+
+        // ACTUAL LOCAL EXECUTION: the English router input produced a local pause intent and the
+        // playback manager REALLY received the pause.
+        let intents = intentBox.intents
+        XCTAssertTrue(
+            intents.contains { $0 is PlaybackIntent },
+            "the English routing input must parse to a LOCAL playback intent — got \(intents)"
+        )
+        XCTAssertEqual(
+            recorder.pauseCalls, 1,
+            "the local pause must ACTUALLY execute against the playback sink"
+        )
+
+        // ZERO CLOUD: routing stayed local.
         XCTAssertTrue(
             box.tasks.isEmpty,
             "a local action must never dispatch to the cloud — \(box.tasks.count) auth frames observed"
         )
+    }
+
+    private final class IntentBox: @unchecked Sendable {
+        var intents: [any VoiceIntent] = []
+    }
+
+    /// Records ACTUAL local playback invocations (reviewer 9d6dc5a7).
+    final class RecordingPlaybackSink: VoicePlaybackSink {
+        private(set) var pauseCalls = 0
+        var isPlaying = false
+        func pause() -> VoiceResponse { pauseCalls += 1; return .earcon(.success) }
+        func resume() -> VoiceResponse { .silent }
+        func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse { .silent }
+        func seekTo(positionSeconds: Int) -> VoiceResponse { .silent }
+        func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse { .silent }
+        func nextEpisode() -> VoiceResponse { .silent }
     }
 
     @MainActor
