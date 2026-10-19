@@ -217,7 +217,6 @@ extension CloudRouteClient {
         /// the binary payload the transport treats as audio, followed by the text event that
         /// follows it. Empty by default, so every existing text fixture behaves exactly as before.
         audioPayloads: [Data] = [],
-        serverClosesWithoutTerminal: Bool = false,
         prepareTask: @Sendable (StubWebSocketTask) -> Void = { _ in }
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
         var messages: [URLSessionWebSocketTask.Message] = []
@@ -227,7 +226,6 @@ extension CloudRouteClient {
         messages.append(contentsOf: audioPayloads.map { .data($0) })
         messages.append(contentsOf: textFrames.map { .string($0) })
         let task = StubWebSocketTask(messages)
-        task.endsWithServerClose = serverClosesWithoutTerminal
         // Install holds BEFORE the client exists: the producer parks at its FIRST receive, so a
         // cancellation-insensitive park cannot be raced by stream end.
         prepareTask(task)
@@ -580,9 +578,6 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     private var incoming: [URLSessionWebSocketTask.Message]
     private(set) var sent: [URLSessionWebSocketTask.Message] = []
     private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
-    /// When the scripted events are exhausted: end with the PRODUCTION clean-close shape
-    /// (WebSocket-domain error) instead of a generic transport failure.
-    var endsWithServerClose = false
     var receiveError: Error?
     /// Set by the control: invoked when THIS socket retires (`cancel(with:reason:)`), so a
     /// parked receive wakes from the same retirement instead of polling a predicate.
@@ -705,13 +700,6 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         framesServedForPark += 1
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
-            if endsWithServerClose {
-                // PRODUCTION-SHAPED CLEAN CLOSE: a server-initiated close frame surfaces from
-                // URLSession receive as a WebSocket-domain error carrying the close code —
-                // NOT as a generic transport failure. The client classifies this shape as
-                // stream EOF (an incomplete turn), which is exactly what this exercises.
-                throw NSError(domain: "WebSocket", code: 1000)
-            }
             // A closed socket: the server ended the stream without a terminal
             // event, which the client must surface rather than treat as success.
             throw URLError(.badServerResponse)
