@@ -595,7 +595,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run.
         switch operationJournal?.claim(operationId) ?? .claimed {
         case .alreadyRun(let recorded):
-            await reportResult(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
+            // TYPED REPLAY: a replayed success still reports the ACTUAL resulting state (wire
+            // contract §3 — the journal stores the outcome; the state is read live). A replayed
+            // non-success replays its recorded reason.
+            if recorded.outcome == .succeeded {
+                await reportSuccess(operationId: operationId, capabilityVersion: capabilityVersion)
+            } else {
+                await reportResult(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
+            }
             return
         case .inProgress:
             return
@@ -611,7 +618,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
             return
         case .claimed:
-            break
+            // Runtime gate: an identified operation whose action this build does not implement
+            // is REFUSED (unsupported_operation) and the refusal SETTLED durably — never a
+            // fabricated success, and a redelivery replays the recorded refusal. Identity-less
+            // legacy frames keep the forward-compatible ignore (performMutation's default).
+            let knownActions: Set<String> = ["seek_to", "play_quote", "stop_quote", "seek_relative", "pause", "resume"]
+            if !knownActions.contains(action) {
+                let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
+                let settled = operationJournal?.complete(operationId, result: refused) ?? true
+                if settled {
+                    await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+                } else {
+                    let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
+                    await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+                }
+                return
+            }
         }
         // Test-only deterministic hold between the durable claim and the effect (nil in
         // production assembly). Production cancellation policy around it: after ANY suspension,

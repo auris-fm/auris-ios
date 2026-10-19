@@ -711,7 +711,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
 
-        XCTAssertTrue(playback.calls.isEmpty, "an unknown action executes nothing")
+        // The turn's own auto-duck may pause/resume; the unknown action itself must effect nothing.
+        let effectCalls = playback.calls.filter { switch $0 { case .pause, .resume: return false; default: return true } }
+        XCTAssertTrue(effectCalls.isEmpty, "an unknown action executes nothing: \(playback.calls)")
         let frame = try await awaitResultFrame(operationId: "op-unknown-1")
         XCTAssertEqual(frame["outcome"] as? String, "refused", "the server is not told an unknown action succeeded")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation)
@@ -724,7 +726,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
+    // MARK: - Typed journal persistence/replay + action-outcome propagation
+
+    /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
+    /// captured transport.
+        /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
     /// value. A mapping that returned its input would satisfy an equality check by accident, so
     /// the offset is deliberate.
     func testMappedReferenceSeekUsesTheMappedPositionNotTheRawReferenceValue() async {

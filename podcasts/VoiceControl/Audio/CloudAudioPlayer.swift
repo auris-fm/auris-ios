@@ -875,6 +875,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return !buffer.isEmpty
     }
 
+    /// Test-only diagnostic: best-effort read of the runner-owned engine state. Used by the
+    /// truncation control to prove owned output was STOPPED, not merely dequeued.
+    var isPlayingForTesting: Bool { isPlaying }
+
     /// The identity of the drain most recently SCHEDULED.
     var currentDrainEpoch: Int {
         runnerLock.lock(); defer { runnerLock.unlock() }

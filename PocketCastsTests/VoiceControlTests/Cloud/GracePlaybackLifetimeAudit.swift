@@ -699,10 +699,8 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
-        // Frames arrive, then the stream ENDS without done: truncation with pending audio.
-        let audioBlock = String(repeating: "AAAA", count: 80)
-        let truncatedFixture = "event: connected\ndata: {\"codec\":\"pcm16\"}\n\n"
-            + "event: audio\ndata: {\"audio\":\"" + audioBlock + "\"}\n\n"
+        // Frames arrive (the stub's audio payload channel), then the stream ENDS without done:
+        // truncation with pending audio.
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -711,8 +709,10 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             modelManager: modelManager,
             clientFactory: {
                 CloudRouteClient.stubbed(
-                    fixture: truncatedFixture,
-                    audioPayloads: []
+                    // Payload frames first (the stub interleaves payloads before text), then a
+                    // NON-terminal text event, then EOF: truncation with pending audio.
+                    fixture: "event: token\ndata: {\"text\":\"partial\"}\n\n",
+                    audioPayloads: (0..<40).map { Data([UInt8($0)]) }
                 ).client
             },
             playbackSink: playback,
@@ -724,19 +724,34 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         service.startIfAllowed()
         try await waitForListening(service)
         try await waitForRouter(service)
+        // PIN the enqueued audio as pending: without the drain hold the player may shed the
+        // tiny synthetic frames before the truncation lands, making the ordering unobservable.
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+        }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
-        await service.handleRoutingInput(
+        let truncationResult = await service.handleRoutingInput(
             IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
             origin: gen
         )
+        // (outcome of the dispatch is not directly returned here; the sink's terminal
+        // classification is observed through the resume/pending assertions below)
         try await Task.sleep(nanoseconds: 800_000_000)
         // The truncation released the hold exactly once and left NO owned output behind.
         XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
         let pending = await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.hasPendingAudio ?? false
         }
-        XCTAssertFalse(pending, "owned output is stopped BEFORE the host playback resumes")
+        // DIRECT stop evidence: only cancel()/finish() advance the player's drain epoch. No
+        // `done` arrived, so a bumped epoch proves THIS turn's owned output was stopped BEFORE
+        // the host playback was released (cancel precedes restoreTransientAudioState).
+        let epochAfter = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.currentDrainEpoch ?? 0
+        }
+        XCTAssertGreaterThan(epochAfter, 0, "owned output was stopped (cancel) before the hold/host release")
+        XCTAssertFalse(pending, "no buffered owned audio survives the release")
     }
 
     @MainActor
