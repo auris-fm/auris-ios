@@ -105,8 +105,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// engine stop. Callers that must release a grace hold / resume host playback only after the
     /// real stop await this epoch's confirmation (`awaitActualStop(after:)`) — `cancel` only
     /// REQUESTS the stop; it does not report one.
+    /// TEST-ONLY observation: how many times `cancel()` was requested on this shared player.
+    /// Lets a control pin "this path never touches the shared player" without depending on
+    /// epoch arithmetic (which races concurrent finish/drain scheduling).
+    private(set) var cancelRequestCountForTesting = 0
     @discardableResult
     func cancel() -> Int {
+        cancelRequestCountForTesting += 1
         bufferLock.lock()
         buffer.removeAll()
         bufferLock.unlock()
@@ -340,6 +345,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Identity of the drain most recently SCHEDULED, incremented in `finish()`/`cancel()`.
     private var drainEpoch = 0
+    /// The identity of the most recent REQUESTED stop (cancel/finish) — visible to callers that
+    /// arrived after someone else (e.g. a successor's supersede retire) already requested it.
+    /// Read under `runnerLock`; guarded by `runnerLock` in the mutators.
+    var lastStopRequestEpoch: Int {
+        runnerLock.lock()
+        defer { runnerLock.unlock() }
+        return drainEpoch
+    }
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false

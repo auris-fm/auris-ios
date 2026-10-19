@@ -328,7 +328,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Supersede any in-flight turn (double wake / barge-in) before touching
         // shared per-turn state. Only a turn that will actually run supersedes.
         let turnToken = CloudTurnToken()
+        let predecessor = activeTurn
         activeTurn?.cancel()
+        // ATOMIC RETIRE AT ADMISSION (review 9fc2603e): the successor retires the PREDECESSOR's
+        // output HERE — before this turn can admit any audio of its own — so the shared player's
+        // buffer and runner contain only this turn's audio from here on. The superseded turn's
+        // own cleanup never cancels: a `cancel` from A after this point would shed B's admitted
+        // frames (epoch identity is a stop REQUEST, not audio ownership). Sequential turns (no
+        // predecessor in flight) retire nothing: an extra stop request would only shift
+        // confirmed-stop identities under existing deferral records.
+        if predecessor != nil {
+            audioPlayer.cancel()
+        }
         activeTurn = turnToken
 
         let turn = CloudTurnEnvelope.make(
@@ -412,6 +423,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         defer {
             routed.resultSocket.finishTurn()
             currentOwnerCancelFlag = nil
+            // A turn that ENDS (any exit) leaves no predecessor behind: the retire-at-admission
+            // must fire only when a successor actually SUPERSEDES a still-running turn, never
+            // for a sequential turn that starts after the previous one fully returned.
+            if activeTurn === turnToken {
+                activeTurn = nil
+            }
         }
         // Loop-exit immediate check: `onCancel` fires synchronously at cancel time and marks the
         // flag; when the suspended loop returns here after cancellation, retire the ORIGINAL
@@ -495,7 +512,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnResponse = .silent
                     break turnLoop
                 case let .error(_, code, message):
-                    guard !turnToken.isCancelled else { break turnLoop }
+                    // A cancelled owner (cloud-token supersession OR the caller's own
+                    // Task.cancel) classifies as an incomplete turn via the owner-cancel path
+                    // below — never as a connection failure it did not observe.
+                    guard !turnToken.isCancelled && !Task.isCancelled else { break turnLoop }
                     // GRACE STOP ORDER: release waits for the ACTUAL stop this cancel requested
                     // (identity-bound). On a timeout the confirmed stop notification itself
                     // releases via the deferral record — never an unconfirmed resume.
@@ -547,17 +567,42 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if let turnResult {
             return CloudRouteResult(response: turnResponse, outcome: turnResult)
         }
-        if turnToken.isCancelled {
+        if turnToken.isCancelled || ownerCancelledFlag.isSet {
             // OWNER CANCELLATION (review dee03708/fa03b7f9): the cancelled turn's OWNED output
             // still has to STOP, and the actual stop must complete before the window's host
             // playback resumes over it. The successor owns the WINDOW (pause/restore/analytics),
             // so this turn releases only if it still owns the captured release — but its own
             // audio dies here, identity-bound, not whenever the successor's drain happens to
             // shed it. Superseded is not a completion either.
-            let stopEpoch = audioPlayer.cancel()
-            _ = await audioPlayer.awaitActualStop(after: stopEpoch)
-            if activeTurn == nil || activeTurn === turnToken {
-                restoreTransientAudioState()
+            //
+            // AUDIO OWNERSHIP (review 9fc2603e): this turn NEVER cancels the shared player on
+            // the superseded path — the successor retired this turn's output AT ADMISSION
+            // (before admitting its own), so a cancel here could only destroy successor-owned
+            // audio. If no successor ran (plain Task cancellation), this turn is still the
+            // owner and requests the stop itself. TIMEOUT DISPOSITION: a timeout is NOT a
+            // confirmed stop — the turn returns earlyClose WITHOUT restoring the host playback
+            // and records a deferral so the confirmed stop notification releases the window;
+            // never an unconfirmed release.
+            if activeTurn === turnToken {
+                let stopEpoch = audioPlayer.cancel()
+                if await audioPlayer.awaitActualStop(after: stopEpoch) {
+                    guard activeTurn == nil || activeTurn === turnToken else {
+                        return CloudRouteResult(response: .silent, outcome: .earlyClose)
+                    }
+                    restoreTransientAudioState()
+                } else {
+                    // Timeout: the stop notification owns the release via the deferral — same
+                    // ownership rules as the error path (only if still owner, never overwrite a
+                    // successor's deferral).
+                    let stillOwner = activeTurn == nil || activeTurn === turnToken
+                    if stillOwner && restoreHeldForPlayerDrain == nil {
+                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+                    }
+                }
+            } else {
+                // Superseded: the successor requested this turn's retire at admission; await the
+                // identity it requested so this turn cannot outlive its own engine stop.
+                _ = await audioPlayer.awaitActualStop(after: audioPlayer.lastStopRequestEpoch)
             }
             return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }

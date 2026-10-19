@@ -1733,6 +1733,14 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
+/// Independent completion flag for bounded completion probes (review 9fc2603e).
+private final class ProbeCompletionFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func set() { lock.lock(); done = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); let d = done; lock.unlock(); return d }
+}
+
 final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
@@ -1817,6 +1825,129 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
         XCTAssertFalse(pending, "A's owned audio is gone")
         await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
+    }
+
+    /// SUCCESSOR-AUDIO OWNERSHIP (review 9fc2603e): A is superseded and its cleanup must NEVER
+    /// touch the shared player after B owns the turn — B's newly ADMITTED audio must survive.
+    /// A is suspended on the retire-stop confirmation (withheld) while B admits frames, so the
+    /// timing is deterministic: frames alive while A suspended, STILL alive after A returns.
+    func testSupersededCleanupPreservesSuccessorAdmittedAudio() async throws {
+        // Turn A: HELD at its first receive — its sink loop never consumes a single frame until
+        // the test releases the gate, so A's cleanup ordering vs B's admission is DETERMINISTIC.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let gate = holdNextTurn()
+        let sink = makeSink()
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // Withhold stop-notification delivery: A's superseded cleanup suspends awaiting the
+        // retire stop's confirmation, giving the control a held observation point.
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        // Hold B's DRAIN so its done-path physical stop cannot shed its own frames while the
+        // control observes them.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
+        // Turn B SUPERSEDES A and admits its own audio — while A is still parked.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"fast"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var bAdmitted = false
+        for _ in 0..<60 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { bAdmitted = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(bAdmitted, "B admitted its own audio while A is parked")
+        let bResult = await fast.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes while A is still parked")
+        // Let B's completion bookkeeping fully settle before taking the identity anchor.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        // Anchor: how many stop requests the SHARED player has served so far. A cleanup that
+        // runs LATER must not add one (epoch arithmetic races concurrent finish/drain
+        // scheduling; a raw request count does not).
+        let cancelAnchor: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
+        XCTAssertGreaterThanOrEqual(cancelAnchor, 1, "the successor's retire requested a stop")
+        // A is still parked: it has consumed nothing.
+        let aFinished = try await timeoutProbe(slow, nanoseconds: 200_000_000)
+        XCTAssertFalse(aFinished, "A is still parked when B has fully completed")
+        // NOW let A's loop run: the supersession flag breaks it at the first event and its
+        // cleanup executes — AFTER B's audio was admitted and B's identity was fixed.
+        gate.release()
+        // Deliver the withheld retire-stop confirmation so A's await completes by confirmation,
+        // not by timeout.
+        await MainActor.run { box.deliverAll() }
+        let aResult = await slow.value
+        XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
+        // The DISCRIMINATOR: A's cleanup must not have touched the shared player — the
+        // stop-request identity is unchanged (an unconditional A cancel would bump it), and
+        // B's admitted audio SURVIVES.
+        let cancelAfter: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
+        XCTAssertEqual(cancelAfter, cancelAnchor, "A's superseded cleanup must not request another stop on the shared player")
+        let survived = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertTrue(survived, "A's superseded cleanup must not shed B's admitted audio")
+        // Release the drain: B's own stop runs and clears ITS OWN audio.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        var drainedOk = false
+        for _ in 0..<60 {
+            if !(await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }) { drainedOk = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(drainedOk, "B's audio drained under B's own completion")
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+    }
+
+    /// OWNING-TASK CANCELLATION vs CLOUD-TOKEN SUPERSESSION (review 9fc2603e): an actual
+    /// `Task.cancel` on the owning task (no successor) still stops the owned output with a
+    /// confirmed identity — a distinct path from token supersession.
+    func testOwningTaskCancellationStopsOwnedOutputWithConfirmedIdentity() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let gate = holdNextTurn()
+        let sink = makeSink()
+        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // Cancel while the turn is still live (held mid-stream), THEN release the stream:
+        // the cancellation must take the owner-cancel path, not a post-exhaustion truncation.
+        turn.cancel()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        gate.release()
+        let result = await turn.value
+        XCTAssertEqual(result.outcome, .earlyClose, "a task-cancelled turn is an incomplete turn")
+        let confirmed = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? 0 }
+        XCTAssertGreaterThan(confirmed, 0, "the owned output stopped with a confirmed identity")
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pending, "no owned audio survives the task cancellation")
     }
 
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
@@ -1938,29 +2069,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
 
-    /// BOUNDED completion probe (review ec3b5150 pattern): true when the task completed within
-    /// the bound — never an unbounded wait.
-    private actor CompletionProbe { }
+    /// BOUNDED completion probe (review 9fc2603e): an INDEPENDENT completion flag set by a
+    /// detached watcher; the probe polls the flag under a bound and NEVER awaits the watched
+    /// task's value inside the group (a cancelled probe must not hang on the underlying wait).
     private func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
-        let probe = Task { _ = await task.value; return true }
-        let bounded = await withTaskGroup(of: Bool.self) { group -> Bool in
-            group.addTask { await probe.value }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: nanoseconds)
-                return false
-            }
-            let first = (try? await group.next()) ?? false
-            group.cancelAll()
-            _ = await group.next()
-            return first
+        let flag = ProbeCompletionFlag()
+        let watcher = Task.detached { _ = await task.value; flag.set() }
+        var completed = false
+        var elapsed: UInt64 = 0
+        while elapsed < nanoseconds {
+            if flag.isSet { completed = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            elapsed += 50_000_000
         }
-        if !bounded { probe.cancel() }
-        return bounded
+        if !completed { watcher.cancel() } // benign leak: the watcher cannot free the underlying wait
+        return completed
     }
 
-    /// Stalls the *next* client's turn until `release()` is called on the returned
-    /// gate, so another turn can supersede it while it is still running.
-    @discardableResult
     private func holdNextTurn() -> Gate {
         let gate = Gate()
         pendingHeldGate = gate
