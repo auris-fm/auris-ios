@@ -427,7 +427,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -472,6 +472,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackManager: playbackManager,
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
@@ -824,6 +825,27 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // machinery and not observable here — the action-level outcome is what matters).
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refusal for the unavailable resume")
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
+    }
+
+    /// PRODUCTION DEFAULT availability (review 0846e993): with NO injected availability closure
+    /// and the REAL manager reporting no current episode, the reference-form seek refuses on the
+    /// production path (existing-episode-with-unknown-duration would be AVAILABLE — duration is
+    /// not availability — but the test host has no episode, which is the absent branch).
+    func testProductionDefaultNoEpisodeRefusesReferenceSeek() async throws {
+        let consumer = RecordingResultConsumer()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-prod-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(consumer, playbackManager: PlaybackManager.shared)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.count, 1, "the production manager's absent episode refuses")
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 

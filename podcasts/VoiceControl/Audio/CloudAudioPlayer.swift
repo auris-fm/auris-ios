@@ -154,8 +154,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 }
                 let first = await group.next() ?? false
                 group.cancelAll()
-                // The loser's exit path (cancel or confirmation) removes its own ticket; sweep
-                // this ticket regardless so no path can leave it behind.
+                // FORCE-CLEAN the ticket before awaiting the loser: if the loser child is the
+                // registration child and it parks after a post-handler cancellation was missed,
+                // this removal resumes it false — the sweep can never strand on its own waiter.
+                if let continuation = self.forceRemoveStopTicket(ticket) {
+                    continuation.resume(returning: false)
+                }
                 _ = await group.next()
                 self.removeStopTicket(ticket)
                 return first
@@ -210,8 +214,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
+    /// TEST-ONLY, NON-CANCELLATION-SENSITIVE latch run immediately BEFORE ticket registration.
+    /// A control parks here, cancels the owning task (so the cancellation handler runs BEFORE
+    /// registration), then releases — making the cancel-before-register ordering DETERMINISTIC
+    /// instead of a scheduling race (review fa03b7f9/3b2d4386). Never installed in production.
+    var preRegistrationLatchForTesting: (() async -> Void)?
+
     private func waitAsStopWaiterBody(_ ticket: StopWaiterTicket) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        if let latch = preRegistrationLatchForTesting { await latch() }
+        let registered: Bool = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) -> Void in
             bufferLock.lock()
             // Confirmed while we were registering? Resume immediately.
             if lastConfirmedStopEpoch >= ticket.epoch {
@@ -228,6 +239,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             stopWaiters[ticket.id] = ticket
             bufferLock.unlock()
         }
+        return registered
     }
 
     private func cancelStopTicket(_ ticket: StopWaiterTicket) {
@@ -243,6 +255,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferLock.lock()
         stopWaiters.removeValue(forKey: ticket.id)
         bufferLock.unlock()
+    }
+
+    /// Removes the ticket AND takes its continuation (if registered) for the caller to resume.
+    private func forceRemoveStopTicket(_ ticket: StopWaiterTicket) -> CheckedContinuation<Bool, Never>? {
+        bufferLock.lock()
+        stopWaiters.removeValue(forKey: ticket.id)
+        bufferLock.unlock()
+        return ticket.takeContinuation()
     }
 
     private func resumeStopWaiters(upTo epoch: Int) {

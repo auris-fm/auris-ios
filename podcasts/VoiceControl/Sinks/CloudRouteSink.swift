@@ -978,8 +978,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // happened" as success. The injected closure is the test seam; production consults the
         // manager's own current-episode state. Applies to EVERY position-changing form INCLUDING
         // the reference-target seek and RESUME (play early-returns the same way).
+        // PRODUCTION source (review 0846e993): the manager's REAL current-episode state — an
+        // EXISTING episode with unknown/zero duration is present, not absent. Duration is not
+        // availability.
         let availabilitySource = episodeAvailable.map { $0() }
-            ?? playbackManager.map { $0.duration() > 0 }
+            ?? playbackManager.map { $0.currentEpisode != nil }
         // No source at all (injection-only configuration): no evidence the precondition FAILED.
         if let available = availabilitySource, !available {
             return OperationResult.nonSuccess(.refused, reason: OperationReason.stalePrecondition)

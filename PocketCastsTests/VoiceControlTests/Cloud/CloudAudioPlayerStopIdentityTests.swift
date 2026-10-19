@@ -119,6 +119,41 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         await MainActor.run { player.setCapturedStopNotificationForTesting(nil) }
     }
 
+    /// CANCEL BEFORE REGISTER, DETERMINISTIC (review 3b2d4386): the test-only latch parks the
+    /// waiter BEFORE registration; cancellation runs while parked; release lands the
+    /// registration into an already-cancelled ticket. The awaiter must return false promptly
+    /// (pre-registration check) and the registry must hold ZERO tickets. Removing the marker
+    /// must NOT pass: without it the registration parks and the sweep's force-clean is the only
+    /// exit — measurably slower (bound-gated) and the registry passes through a parked state.
+    func testCancelBeforeRegisterWithDeterministicOrdering() async throws {
+        let player = CloudAudioPlayer()
+        let latch = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        await MainActor.run {
+            player.preRegistrationLatchForTesting = {
+                // NON-cancellation-sensitive park: only the explicit release lets registration
+                // proceed, so the cancellation handler deterministically runs first.
+                latch.signal()
+                _ = release.wait(timeout: .now() + 5)
+            }
+        }
+        let waiter = Task { await player.awaitActualStop(after: 1, timeout: 5) }
+        // Parked in the latch: registration has NOT run yet.
+        await latch.wait(timeout: .now() + 2)
+        waiter.cancel()  // the cancellation handler runs BEFORE registration
+        try await Task.sleep(nanoseconds: 100_000_000)
+        // Release into registration: the ticket's cancel flag must reject the continuation.
+        let start = Date()
+        release.signal()
+        let result = await waiter.value
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertFalse(result, "pre-register cancellation returns false at registration")
+        XCTAssertLessThan(elapsed, 2.0, "no timeout wait: the marker rejected registration")
+        let count = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(count, 0, "zero retained tickets after pre-register cancellation")
+        await MainActor.run { player.preRegistrationLatchForTesting = nil }
+    }
+
     /// TWO waiters on the SAME epoch are independent: cancelling one must neither resume the
     /// other nor consume its delivery; the survivor resolves exactly once at confirmation, and
     /// the registry ends at ZERO.
