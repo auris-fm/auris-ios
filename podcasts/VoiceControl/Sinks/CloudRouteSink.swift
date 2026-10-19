@@ -130,8 +130,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Audio player for cloud-delivered speech.
     private let audioPlayer: CloudAudioPlayer
     private let playbackManager: PlaybackManager?
-    /// Injectable episode-duration source (test seam); nil falls back to the manager.
-    private let episodeDuration: (() -> TimeInterval)?
+    /// Injectable episode-AVAILABILITY source (test seam); nil falls back to the manager.
+    private let episodeAvailable: (() -> Bool)?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -202,7 +202,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         playbackSink: VoicePlaybackSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
-        episodeDuration: (() -> TimeInterval)? = nil,
+        episodeAvailable: (() -> Bool)? = nil,
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: VoiceAnalytics? = nil,
         rendersStructuredResults: Bool = false,
@@ -234,7 +234,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
-        self.episodeDuration = episodeDuration
+        self.episodeAvailable = episodeAvailable
         self.cloudPlaybackContextState = cloudPlaybackContextState
         self.analytics = analytics
         self.rendersStructuredResults = rendersStructuredResults
@@ -507,9 +507,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         guard activeTurn == nil || activeTurn === turnToken else { break turnLoop }
                         restoreTransientAudioState()
                     } else {
-                        // Defer to the confirmed stop — but NEVER overwrite a successor's existing
-                        // deferral: B started while A was suspended, so the release belongs to B.
-                        if restoreHeldForPlayerDrain == nil {
+                        // Defer to the confirmed stop — but ownership holds in BOTH branches: a
+                        // successor B that started (or already finished) while A was suspended owns
+                        // the window, so A defers only if it still owns the release and no
+                        // successor's deferral would be overwritten.
+                        let stillOwner = activeTurn == nil || activeTurn === turnToken
+                        if stillOwner && restoreHeldForPlayerDrain == nil {
                             restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
                         }
                     }
@@ -565,7 +568,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 restoreTransientAudioState()
             }
         } else {
-            if restoreHeldForPlayerDrain == nil {
+            let stillOwner = activeTurn == nil || activeTurn === turnToken
+            if stillOwner && restoreHeldForPlayerDrain == nil {
                 restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
             }
         }
@@ -744,6 +748,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 seekToSinkSeconds(seconds)
                 return nil
             case (nil, let reference?):
+                // The reference form was BYPASSED by the episode check (review fa03b7f9) —
+                // the mapping wrapper would early-return on no episode and report unavailable
+                // for the WRONG reason; the honest precondition runs first.
+                if let precondition = currentEpisodePrecondition { return precondition }
                 capturePreActionPosition(referenceMs: reference)
                 return seekToReference(reference)
             default:
@@ -792,6 +800,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             didAutoPause = false
             return nil
         case "resume":
+            // PlaybackManager.play EARLY-RETURNS on no current episode — the silent wrapper is
+            // a no-op, not a success. The availability precondition applies here too.
+            if let precondition = currentEpisodePrecondition { return precondition }
             _ = playbackSink.resume()
             didAutoPause = false
             return nil
@@ -962,12 +973,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// A position-changing operation REQUIRES a current episode with a duration; without one the
     /// honest durable outcome is refused (stale precondition of current state), not a success.
     private var currentEpisodePrecondition: OperationResult? {
-        // The injected closure is the test seam (same pattern as playbackPositionMs); the
-        // manager is production. A PRESENT source reporting zero duration is the evidence:
-        // the system seek wrapper early-returns on no episode, and its silent wrapper would
-        // otherwise dress "nothing happened" as success.
-        let duration = episodeDuration?() ?? playbackManager?.duration()
-        if let duration, duration <= 0 {
+        // EXPLICIT AVAILABILITY (review fa03b7f9), not duration: PlaybackManager.play/seek
+        // early-return on no current episode, and their silent wrappers would dress "nothing
+        // happened" as success. The injected closure is the test seam; production consults the
+        // manager's own current-episode state. Applies to EVERY position-changing form INCLUDING
+        // the reference-target seek and RESUME (play early-returns the same way).
+        let availabilitySource = episodeAvailable.map { $0() }
+            ?? playbackManager.map { $0.duration() > 0 }
+        // No source at all (injection-only configuration): no evidence the precondition FAILED.
+        if let available = availabilitySource, !available {
             return OperationResult.nonSuccess(.refused, reason: OperationReason.stalePrecondition)
         }
         return nil

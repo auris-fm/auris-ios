@@ -130,101 +130,136 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     /// Waits (bounded) for the ACTUAL stop of `epoch` — the identity-bound completion a caller
-    /// needs before releasing a grace hold or resuming host playback. Implemented as an
-    /// identity WAITER resumed by the confirmation itself (no polling loop on the caller's
-    /// actor, which would starve the main-queue confirmation); raced against a bounded timer.
-    /// Cancellation is honored: a cancelled waiter resumes false and is removed, never left
-    /// parked or looping.
+    /// needs before releasing a grace hold or resuming host playback. Each await gets its OWN
+    /// ticket (a UUID, not an epoch key), created BEFORE the cancellation handler is installed,
+    /// so a cancellation that races registration can never strand a later-registered waiter:
+    /// the ticket's cancel state is observable at registration time. Tickets are removed on
+    /// every exit path — confirmation, timeout, and cancellation — so the registry holds only
+    /// genuinely parked waiters. The caller's actor is never polled: the confirmation resumes
+    /// the waiter directly.
     func awaitActualStop(after epoch: Int, timeout: TimeInterval = 2) async -> Bool {
         if confirmedStopEpoch() >= epoch { return true }
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await self.waitAsStopWaiter(epoch) }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if Task.isCancelled { return false }
-                return await self.confirmStopForBoundWaiter(epoch)
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
-    }
-
-    /// Suspend until `recordConfirmedStop` resumes this identity's waiter (or the task is
-    /// cancelled — then clean up and return false).
-    private func waitAsStopWaiter(_ epoch: Int) async -> Bool {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                registerStopWaiter(epoch: epoch, continuation: continuation)
+        // PRECREATE the ticket before the handler: cancel-before-register flips this flag, and
+        // registration observes it instead of parking.
+        let ticket = StopWaiterTicket(epoch: epoch)
+        return await withTaskCancellationHandler {
+            await withTaskGroup(of: Bool.self) { group in
+                group.addTask { await self.waitAsStopWaiter(ticket) }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    if Task.isCancelled { return false }
+                    let confirmed = await self.confirmStopForBoundWaiter(ticket)
+                    if confirmed { self.removeStopTicket(ticket) }
+                    return confirmed
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                // The loser's exit path (cancel or confirmation) removes its own ticket; sweep
+                // this ticket regardless so no path can leave it behind.
+                _ = await group.next()
+                self.removeStopTicket(ticket)
+                return first
             }
         } onCancel: {
-            self.cancelStopWaiter(epoch: epoch)
+            self.cancelStopTicket(ticket)
         }
     }
 
-    // Waiter registry, guarded by the buffer lock. Keyed by identity; a confirmation resumes
-    // every waiter whose identity it satisfies.
-    private struct StopWaiter {
+    /// One await's registration state. A class so the cancellation handler and the registration
+    /// closure share the SAME object identity; the flag is the cancel-before-register marker.
+    private final class StopWaiterTicket: @unchecked Sendable {
         let epoch: Int
+        let id = UUID()
         var continuation: CheckedContinuation<Bool, Never>?
         var cancelled = false
-    }
-    private var stopWaiters: [Int: StopWaiter] = [:]
-
-    private func registerStopWaiter(epoch: Int, continuation: CheckedContinuation<Bool, Never>) {
-        bufferLock.lock()
-        if confirmedSatisfiedLocked(epoch) {
-            bufferLock.unlock()
-            continuation.resume(returning: true)
-            return
+        private let lock = NSLock()
+        init(epoch: Int) { self.epoch = epoch }
+        func setContinuation(_ c: CheckedContinuation<Bool, Never>) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if cancelled { return false }
+            continuation = c
+            return true
         }
-        var waiter = stopWaiters[epoch] ?? StopWaiter(epoch: epoch, continuation: nil)
-        if waiter.cancelled {
+        func takeContinuation() -> CheckedContinuation<Bool, Never>? {
+            lock.lock(); defer { lock.unlock() }
+            let c = continuation
+            continuation = nil
+            return c
+        }
+        func markCancelled() -> CheckedContinuation<Bool, Never>? {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+            let c = continuation
+            continuation = nil
+            return c
+        }
+    }
+
+    // Registry, guarded by the buffer lock. Keyed by the ticket's UUID — NEVER by epoch, so two
+    // concurrent waiters on one identity cannot overwrite each other and a cancellation can
+    // never resume the WRONG waiter.
+    private var stopWaiters: [UUID: StopWaiterTicket] = [:]
+
+    private func waitAsStopWaiter(_ ticket: StopWaiterTicket) async -> Bool {
+        // The GROUP cancels this child on sweep; the child must clean up its OWN ticket —
+        // withCheckedContinuation alone would strand the parked continuation and hang the sweep.
+        await withTaskCancellationHandler {
+            await waitAsStopWaiterBody(ticket)
+        } onCancel: {
+            cancelStopTicket(ticket)
+        }
+    }
+
+    private func waitAsStopWaiterBody(_ ticket: StopWaiterTicket) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            bufferLock.lock()
+            // Confirmed while we were registering? Resume immediately.
+            if lastConfirmedStopEpoch >= ticket.epoch {
+                bufferLock.unlock()
+                continuation.resume(returning: true)
+                return
+            }
+            guard ticket.setContinuation(continuation) else {
+                // Cancelled before we registered: the handler already ran; do not park.
+                bufferLock.unlock()
+                continuation.resume(returning: false)
+                return
+            }
+            stopWaiters[ticket.id] = ticket
             bufferLock.unlock()
+        }
+    }
+
+    private func cancelStopTicket(_ ticket: StopWaiterTicket) {
+        bufferLock.lock()
+        stopWaiters.removeValue(forKey: ticket.id)
+        bufferLock.unlock()
+        if let continuation = ticket.markCancelled() {
             continuation.resume(returning: false)
-            return
         }
-        waiter.continuation = continuation
-        stopWaiters[epoch] = waiter
-        bufferLock.unlock()
     }
 
-    private func confirmedSatisfiedLocked(_ epoch: Int) -> Bool {
-        lastConfirmedStopEpoch >= epoch
-    }
-
-    private func cancelStopWaiter(epoch: Int) {
+    private func removeStopTicket(_ ticket: StopWaiterTicket) {
         bufferLock.lock()
-        guard var waiter = stopWaiters[epoch] else {
-            bufferLock.unlock()
-            return
-        }
-        guard let continuation = waiter.continuation else {
-            // Not yet registered (cancellation raced registration): mark cancelled so a late
-            // registration resumes immediately instead of parking forever.
-            waiter.cancelled = true
-            stopWaiters[epoch] = waiter
-            bufferLock.unlock()
-            return
-        }
-        waiter.continuation = nil
-        stopWaiters[epoch] = waiter
+        stopWaiters.removeValue(forKey: ticket.id)
         bufferLock.unlock()
-        continuation.resume(returning: false)
     }
 
     private func resumeStopWaiters(upTo epoch: Int) {
         bufferLock.lock()
         var resumed: [CheckedContinuation<Bool, Never>] = []
-        for (identity, var waiter) in stopWaiters where identity <= epoch {
-            if let continuation = waiter.continuation {
+        for (id, ticket) in stopWaiters where ticket.epoch <= epoch {
+            stopWaiters.removeValue(forKey: id)
+            if let continuation = ticket.takeContinuation() {
                 resumed.append(continuation)
-                waiter.continuation = nil
-                stopWaiters[identity] = waiter
             }
         }
         bufferLock.unlock()
         for continuation in resumed { continuation.resume(returning: true) }
+    }
+
+    private func confirmStopForBoundWaiter(_ ticket: StopWaiterTicket) async -> Bool {
+        confirmedStopEpoch() >= ticket.epoch
     }
 
     private func confirmStopForBoundWaiter(_ epoch: Int) async -> Bool {
@@ -288,6 +323,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+    /// TEST OBSERVABILITY: the registry must hold ZERO tickets after every exit path
+    /// (confirmation, timeout, cancellation) — a stranded ticket is a leaked continuation.
+    var stopWaiterCountForTesting: Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return stopWaiters.count
+    }
+
     /// The most recent stop the engine CONFIRMED (see `notifyDidStop`).
     private var lastConfirmedStopEpoch = 0
 

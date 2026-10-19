@@ -427,7 +427,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeDuration: (() -> TimeInterval)? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -475,7 +475,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
-            episodeDuration: episodeDuration,
+            episodeAvailable: episodeAvailable,
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
             operationResultConsumer: consumer,
@@ -771,7 +771,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
             operationJournal: journal,
-            episodeDuration: { 0 }
+            episodeAvailable: { false }
         )
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         let frame = try await awaitResultFrame(operationId: "op-seek-noep")
@@ -784,6 +784,47 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         } else {
             XCTFail("the refusal was not durably settled")
         }
+    }
+
+    /// REAL PRECONDITION, reference form: seek_to reference_target ALSO refuses when no episode
+    /// is available (it was bypassed before review fa03b7f9) — no mapping attempt, no seek.
+    func testSeekToReferenceFormWithNoEpisodeIsRefusedBeforeMapping() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-seek-ref-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.count, 1, "exactly one refusal for the reference-form seek")
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
+    }
+
+    /// REAL PRECONDITION: resume with NO current episode refuses — PlaybackManager.play
+    /// early-returns on no episode, so the silent wrapper would be a no-op dressed as success.
+    func testResumeWithNoEpisodeIsRefusedStalePrecondition() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-resume-noep","capability_version":"v1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        // The ACTION refused durably (the turn's own host-playback restore is separate
+        // machinery and not observable here — the action-level outcome is what matters).
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.count, 1, "exactly one refusal for the unavailable resume")
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
     /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio

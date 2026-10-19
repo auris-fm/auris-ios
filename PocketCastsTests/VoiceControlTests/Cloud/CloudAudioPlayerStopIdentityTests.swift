@@ -84,6 +84,74 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.25, "the bound was honored")
     }
 
+    /// CANCEL BEFORE REGISTER (review fa03b7f9): a waiter whose await is cancelled before its
+    /// registration runs must return false promptly, never park — and the registry holds ZERO
+    /// tickets afterwards.
+    func testCancelBeforeRegisterDoesNotStrandTheWaiter() async throws {
+        let player = CloudAudioPlayer()
+        let delivery = DeliveryBox()
+        await MainActor.run { player.setCapturedStopNotificationForTesting { _, deliver in
+            delivery.store(deliver)
+        } }
+        player.enqueue(CloudAudioFrame(data: Self.silentFrames()))
+        let epoch = player.finish()
+        let waiter = Task { await player.awaitActualStop(after: epoch, timeout: 5) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        waiter.cancel()
+        let start = Date()
+        let result = await waiter.value
+        XCTAssertFalse(result, "pre-register cancellation returns false")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no strand, no timeout wait")
+        let countAfterCancel = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(countAfterCancel, 0,
+                       "the registry is empty after cancellation")
+        // The player still confirms normally afterwards.
+        await MainActor.run { delivery.deliverAll() }
+        for _ in 0..<50 {
+            let c = await MainActor.run(body: { player.confirmedStopEpoch() })
+            if c != 0 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let confirmed = await MainActor.run { player.confirmedStopEpoch() }
+        XCTAssertEqual(confirmed, epoch, "confirmation lands after the cancelled waiter is gone")
+        let countAfterConfirm = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(countAfterConfirm, 0)
+        await MainActor.run { player.setCapturedStopNotificationForTesting(nil) }
+    }
+
+    /// TWO waiters on the SAME epoch are independent: cancelling one must neither resume the
+    /// other nor consume its delivery; the survivor resolves exactly once at confirmation, and
+    /// the registry ends at ZERO.
+    func testSameEpochWaitersAreIndependent() async throws {
+        let player = CloudAudioPlayer()
+        let delivery = DeliveryBox()
+        await MainActor.run { player.setCapturedStopNotificationForTesting { _, deliver in
+            delivery.store(deliver)
+        } }
+        player.enqueue(CloudAudioFrame(data: Self.silentFrames()))
+        let epoch = player.finish()
+        let cancelled = Task { await player.awaitActualStop(after: epoch, timeout: 5) }
+        let survivor = Task { await player.awaitActualStop(after: epoch, timeout: 5) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let countBoth = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(countBoth, 2,
+                       "both same-epoch waiters are registered independently")
+        cancelled.cancel()
+        let cancelledResult = await cancelled.value
+        XCTAssertFalse(cancelledResult, "the cancelled waiter returns false")
+        let countAfterOneCancel = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(countAfterOneCancel, 1,
+                       "only the cancelled ticket was removed")
+        // Deliver the stop: the SURVIVOR resolves true, exactly once.
+        await MainActor.run { delivery.deliverAll() }
+        let survivorResult = await survivor.value
+        XCTAssertTrue(survivorResult, "the survivor is delivered its own confirmation")
+        let countAfterConfirm = await MainActor.run { player.stopWaiterCountForTesting }
+        XCTAssertEqual(countAfterConfirm, 0,
+                       "the registry is empty after confirmation")
+        await MainActor.run { player.setCapturedStopNotificationForTesting(nil) }
+    }
+
     /// Cancellation: a cancelled awaiter is removed cleanly (no leaked continuation, no busy
     /// loop) and does not consume a later confirmation meant for someone else.
     func testCancelledStopWaiterIsRemovedCleanly() async throws {
