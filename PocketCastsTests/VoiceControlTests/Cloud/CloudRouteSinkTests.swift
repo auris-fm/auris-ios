@@ -1003,6 +1003,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(release.released, "effect hold must remain parked until explicit test release")
         release.release()
         let outcome = await owner.value
+        // MANDATORY EXACT OUTCOME: the owner cancelled mid-operation must surface exactly
+        // `earlyClose` — not a bare failure, not a completion. The width of this assertion is the
+        // point: any other outcome means the cancelled turn was misclassified on its way out.
+        guard case .earlyClose = outcome.outcome else {
+            XCTFail("cancelled mid-operation must report exactly earlyClose; got \(outcome.outcome)")
+            return
+        }
         try? await Task.sleep(nanoseconds: 100_000_000)
         let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectsTotal, 0, "cancelled-before-start must NEVER execute after release")
