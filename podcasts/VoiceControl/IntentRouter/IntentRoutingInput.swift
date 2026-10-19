@@ -20,7 +20,7 @@ struct IntentRoutingInput: Equatable {
     /// Same source/router text with `.none` (native English path).
     static func english(
         transcript: String,
-        language: String? = "en",
+        language: String? = nil,
         selection: CloudConversationSelection? = nil
     ) -> IntentRoutingInput {
         IntentRoutingInput(

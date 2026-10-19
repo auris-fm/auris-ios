@@ -427,9 +427,11 @@ class VoiceAsrEngine {
                 selection: selection
             )
         }
+        // NO FABRICATED LANGUAGE: an unknown LID stays nil on the input (and is omitted on the
+        // wire) — defaulting to "en" mislabeled an undetected-language utterance as English.
         return IntentRoutingInput.english(
             transcript: routerText,
-            language: source.detectedLanguage ?? "en",
+            language: source.detectedLanguage,
             selection: selection
         )
     }
@@ -464,14 +466,17 @@ class VoiceAsrEngine {
     /// Translates a non-English, non-self-translating ASR result to English before
     /// intent routing. Fail / blank / no-op notes are dropped by the caller (ERROR earcon).
     private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> (AsrResult, String?) {
+        // BACKEND PROVENANCE FIRST: a backend that translates to English has already produced the
+        // English router text — including when it reported no language. Asking for a language id
+        // before the backend capability mislabeled that translated-only output as original text.
+        if backend.capabilities.canTranslateToEnglish {
+            return (result, "translate=skip(backend)")
+        }
         guard let detected = result.detectedLanguage?.lowercased() else {
             return (result, "translate=skip(no lang)")
         }
         if detected == "en" {
             return (result, nil)
-        }
-        if backend.capabilities.canTranslateToEnglish {
-            return (result, "translate=skip(backend)")
         }
         guard let translationStage else {
             // Missing platform translation is a hard failure for non-English SenseVoice text —
