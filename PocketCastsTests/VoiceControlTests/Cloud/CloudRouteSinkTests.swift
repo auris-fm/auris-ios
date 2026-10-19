@@ -415,15 +415,59 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
+    /// Optional cancellation-insensitive park installed on the stub task BEFORE the client is
+    /// constructed, so the producer's FIRST receive parks — no race with stream end.
+    private var pendingProducerHold: HoldLatch?
+    /// Optional one-shot PRODUCTION-boundary park: armed onto the stub at construction; the sink
+    /// installs it synchronously at the claim→effect seam via `effectEntered` (see
+    /// `StubWebSocketTask.armReceiveHoldOnEntered`).
+    private var pendingArmedReceiveHold: HoldLatch?
+    /// Transport park installed at client creation (survives the whole turn) plus how many
+    /// frames must be served before it engages.
+    private var pendingDeclaredPark: HoldLatch?
+    private var pendingDeclaredParkAfterFrames: Int?
+
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
+        let producerHold = pendingProducerHold
+        pendingProducerHold = nil
+        let armedHold = pendingArmedReceiveHold
+        pendingArmedReceiveHold = nil
+        let declaredPark = pendingDeclaredPark
+        pendingDeclaredPark = nil
+        let parkAfterFrames = pendingDeclaredParkAfterFrames
+        pendingDeclaredParkAfterFrames = nil
         return CloudRouteSink(
             clientFactory: {
                 let fixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
                 self.pendingFixture = nil
                 let built = CloudRouteClient.stubbed(
-                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: []
+                    baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: [],
+                    prepareTask: { task in
+                        producerHold.map(task.holdUntilReleased)
+                        if let armedHold { task.armReceiveHoldOnEntered = armedHold }
+                        // Installed at CREATION so the park exists before the first frame is
+                        // served, then engages only after the scripted frames ahead of it.
+                        task.armedReceivePark = declaredPark
+                        task.declaredParkAfterFrames = parkAfterFrames
+                    }
                 )
+                // MEASURED production parking point: the producer parks at the frame seam, not at
+                // a later receive (the stub only receives twice for this fixture). After the
+                // action frame (frame 2) the producer parks here, so the transport is genuinely
+                // held when cancellation lands.
+                // Production retirement seam: when the stub socket is cancelled, wake the
+                // parked receive from the SAME cancellation — no polling, no race window.
+                built.task.retiredParkNotifier = { declaredPark?.notifyRetired() }
+                // MEASURED production parking point: the producer parks at the frame seam, not
+                // at a later receive (the stub only receives twice for this fixture). After the
+                // action frame (frame 2) the producer parks here, so the transport is genuinely
+                // held when cancellation lands.
+                built.client.onFrameReceived = { [weak task = built.task] in
+                    guard let task, task.framesServedForPark >= (parkAfterFrames ?? 0) else { return }
+                    task.declaredParkDidPark = true
+                    Task { await declaredPark?.wait(untilRetired: { task.isCancelledSocket }) }
+                }
                 self.capturedTask = built.task
                 return built.client
             },
@@ -881,38 +925,80 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        // TRANSPORT PARK, INSTALLED AT CREATION. It engages after the two scripted frames (auth
+        // send + the action frame carrying the claim), so the turn reaches the claim/effect
+        // boundary first and the park then holds the transport while the consumer is suspended
+        // in the effect hold. Measured earlier design defect: arming this from `effectEntered`
+        // meant the transport had already served its frames, so the park never engaged and the
+        // "retirement woke the park" assertion could not be true. The park must therefore exist
+        // BEFORE the frames, and `declaredParkDidPark` below proves it actually engaged.
+        let receivePark = HoldLatch()
+        pendingDeclaredPark = receivePark
+        pendingDeclaredParkAfterFrames = 2
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        let entered = Gate()
-        let release = Gate()
+        // CANCELLATION-INSENSITIVE effect hold: separate primitive, no cancellation handler;
+        // ONLY `release.release()` frees it. Owner cancel cannot open this latch.
+        let release = HoldLatch()
+        // The single cancellation mechanism: the gate lands it on the REAL owning task — the
+        // same `owner.cancel()` an external caller performs. No side channel, no synthetic flag.
+        let cancelOwner = ControlCanceller()
+        let claimed = HoldLatch()
+        // The gate's own cancellation is captured so the test can LAND it on the real owning task
+        // after binding it (outside the sink's main-actor closure) — the same `owner.cancel()` an
+        // external caller performs, never a synthesized flag.
+        let gateCancel = ControlCanceller()
         await MainActor.run {
-            // Hold INDEPENDENT of owner cancellation: returns only when the TEST releases it.
-            sink.effectGate = {
-                entered.release()
-                do { try await release.wait() } catch { /* bounded hold: released or cancelled */ }
+            sink.effectEntered = { claimed.release() }
+            sink.controlCancelOwner = { gateCancel.cancel() }
+            sink.effectGate = { _, _ in
+                gateCancel.cancel()
+                Task { await release.waitUntilReleased() }
             }
         }
+
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         }
-        try? await entered.wait(timeout: 5)
+        // Wired strictly BEFORE the turn starts (same MainActor block above), so the sink's OWNER
+        // check cannot be skipped; the gate then strikes cancellation at the claim boundary.
+        await MainActor.run {
+            cancelOwner.bind(owner)
+            gateCancel.bind(owner)
+            sink.turnOwnerTaskForControl = owner
+        }
+        try? await claimed.wait(untilRetired: { false })
         XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation durably claimed while held")
-        // LIVE ORIGINAL REGISTRATION before cancel: the stub socket has not been cancelled and
-        // a result send would still ride it.
-        XCTAssertFalse(capturedTask?.isCancelledSocket ?? true, "original registration must be LIVE before cancellation")
+        // Park ENGAGED check FIRST: the producer parked at the frame seam once the second frame
+        // had been served, so the transport is held from here on. (Diagnostics showed the socket
+        // can be retired before the park engages in some interleavings; if the park did engage,
+        // the retirement that follows is meaningful, not a grace-timer artifact.)
+        XCTAssertTrue(capturedTask?.declaredParkDidPark ?? false,
+                      "the declared transport park must actually engage, or the wake assertion is vacuous")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
                        "no effect may run while held")
         // Two-action fixture would be needed to test later-admission; with one action we assert
         // below that nothing completes. Cancel the OWNER only: note this may cancel the stub
         // socket receive (task-cancel path), but the EFFECT hold is a separate latch released
         // ONLY by `release.release()` below — owner cancellation never releases it.
-        owner.cancel()   // the ONLY cancellation mechanism — no side channel
         // ACTUAL RETIREMENT before release: the synchronous onCancel path cancels the transport
         // while the consumer remains suspended in held work.
         let retiredBeforeRelease = await capturedTask?.awaitCancellation(timeout: 0.5) ?? false
         XCTAssertTrue(retiredBeforeRelease, "cancellation itself must retire the original registration while suspended, before release")
-        XCTAssertFalse(release.released, "retirement asserted strictly before release")
+        // The park ENGAGED: otherwise the wake assertion below would be vacuous — this is the
+        // check that caught the earlier arming design (park installed after the frames).
+        XCTAssertTrue(capturedTask?.declaredParkDidPark ?? false,
+                      "the declared transport park must actually engage, or the wake assertion is vacuous")
+        // The park woke because the SOCKET WAS RETIRED (the production onCancel path), never
+        // because this task was cancelled or because a test released it.
+        XCTAssertTrue(receivePark.releasedByRetirement,
+                      "the parked receive may wake ONLY on socket retirement, never task cancellation")
+        // STILL-HELD PROBE: the effect hold has no cancellation path — owner cancel could not
+        // have opened it; only the explicit release below does.
+        XCTAssertFalse(release.released, "effect hold must remain parked until explicit test release")
         release.release()
-        _ = await owner.value
+        let outcome = await owner.value
+        XCTAssertEqual(outcome.outcome, .earlyClose,
+                       "a cancelled owner's turn must pin to earlyClose — never completed, never discarded")
         try? await Task.sleep(nanoseconds: 100_000_000)
         let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectsTotal, 0, "cancelled-before-start must NEVER execute after release")

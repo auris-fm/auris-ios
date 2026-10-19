@@ -415,6 +415,16 @@ final class CloudRouteClient {
     /// Drives the turn over the WebSocket and always terminates the stream —
     /// either with the turn's events or with a delivered error. The return value
     /// is always `true`; it is kept for the caller's shape.
+    /// Producer-side observation seam, set only by controls: called after EACH frame is received,
+    /// on the producer's own task — just before the next `receive()`. Lets a control park the
+    /// producer exactly where the turn needs to be held (after the frame carrying the action,
+    /// before the frame carrying its result). Production never sets it.
+    var onFrameReceived: (@Sendable () -> Void)?
+    /// Control-only: parked transport latches to notify when THIS transport is retired. The
+    /// production `cancel(with:reason:)` path invokes it, so the parked receive wakes from the
+    /// same retirement that retires the registration — no polling, no race window.
+
+
     private func performWebSocket(
         request: String,
         context: CloudRouteContext,
@@ -561,6 +571,7 @@ final class CloudRouteClient {
                 let message = try await wsTask.receive()
                 // Cancel the timeout on first frame.
                 firstFrameTimeout.cancel()
+                onFrameReceived?()
 
                 switch message {
                 case .data(let data):
