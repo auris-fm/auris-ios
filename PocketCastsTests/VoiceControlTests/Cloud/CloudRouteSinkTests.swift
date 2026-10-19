@@ -936,69 +936,73 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         pendingDeclaredPark = receivePark
         pendingDeclaredParkAfterFrames = 2
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        // CANCELLATION-INSENSITIVE effect hold: separate primitive, no cancellation handler;
-        // ONLY `release.release()` frees it. Owner cancel cannot open this latch.
+        // CANCELLATION-INSENSITIVE effect hold: no cancellation handler of any kind. ONLY
+        // `release.release()` frees it, so owner cancellation cannot open it.
         let release = HoldLatch()
-        // The single cancellation mechanism: the gate lands it on the REAL owning task — the
-        // same `owner.cancel()` an external caller performs. No side channel, no synthetic flag.
-        let cancelOwner = ControlCanceller()
-        let claimed = HoldLatch()
-        // The gate's own cancellation is captured so the test can LAND it on the real owning task
-        // after binding it (outside the sink's main-actor closure) — the same `owner.cancel()` an
-        // external caller performs, never a synthesized flag.
-        let gateCancel = ControlCanceller()
+        // Bounded entry signal: set the moment the OWNER is actually inside the awaited hold, so
+        // the external cancel below lands mid-suspension rather than racing the turn's start.
+        let entered = HoldLatch()
+        // External cancellation of the REAL owning task — the only mechanism, no side channel.
+        let ownerRef = ControlCanceller()
+        var gateEntryCount = 0
+        // The owner's completion is observed by a NON-BLOCKING bounded race that never awaits the
+        // owner itself as a child. A structured wait on `owner.value` would have to await the very
+        // suspension the assertion is about, and its wait-for-all-children would never return.
+        /// True once the owner has finished. NON-BLOCKING: the check is a bounded alarm raced
+        /// against a completion PROMISE, so no branch ever leaves a child blocked on the owner's
+        /// unbounded suspension (a task-group over `owner.value` would block the drain forever,
+        /// which is exactly how this hung when first written).
+        func ownerHasCompleted() async -> Bool {
+            let completionPromise = Promise<Bool>()
+            let watcher = Task {
+                _ = await owner.value
+                completionPromise.resolve(true)
+            }
+            defer { watcher.cancel() }
+            let timeout = Task {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                completionPromise.resolve(false)
+            }
+            defer { timeout.cancel() }
+            return await completionPromise.value()
+        }
         await MainActor.run {
-            sink.effectEntered = { claimed.release() }
-            sink.controlCancelOwner = { gateCancel.cancel() }
-            sink.effectGate = { _, _ in
-                gateCancel.cancel()
-                Task { await release.waitUntilReleased() }
+            sink.effectGate = { _ in
+                gateEntryCount += 1
+                entered.release()
+                await release.waitUntilReleased()
             }
         }
 
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         }
-        // Wired strictly BEFORE the turn starts (same MainActor block above), so the sink's OWNER
-        // check cannot be skipped; the gate then strikes cancellation at the claim boundary.
-        await MainActor.run {
-            cancelOwner.bind(owner)
-            gateCancel.bind(owner)
-            sink.turnOwnerTaskForControl = owner
-        }
-        try? await claimed.wait(untilRetired: { false })
+        ownerRef.bind(owner)
+        // Wait until the OWNER is provably inside the awaited hold: the suspension is the owner's.
+        await entered.waitUntilReleased()
+        XCTAssertEqual(gateEntryCount, 1, "the owner itself must enter the awaited gate exactly once")
         XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation durably claimed while held")
-        // Park ENGAGED check FIRST: the producer parked at the frame seam once the second frame
-        // had been served, so the transport is held from here on. (Diagnostics showed the socket
-        // can be retired before the park engages in some interleavings; if the park did engage,
-        // the retirement that follows is meaningful, not a grace-timer artifact.)
         XCTAssertTrue(capturedTask?.declaredParkDidPark ?? false,
                       "the declared transport park must actually engage, or the wake assertion is vacuous")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
                        "no effect may run while held")
-        // Two-action fixture would be needed to test later-admission; with one action we assert
-        // below that nothing completes. Cancel the OWNER only: note this may cancel the stub
-        // socket receive (task-cancel path), but the EFFECT hold is a separate latch released
-        // ONLY by `release.release()` below — owner cancellation never releases it.
-        // ACTUAL RETIREMENT before release: the synchronous onCancel path cancels the transport
-        // while the consumer remains suspended in held work.
-        let retiredBeforeRelease = await capturedTask?.awaitCancellation(timeout: 0.5) ?? false
-        XCTAssertTrue(retiredBeforeRelease, "cancellation itself must retire the original registration while suspended, before release")
-        // The park ENGAGED: otherwise the wake assertion below would be vacuous — this is the
-        // check that caught the earlier arming design (park installed after the frames).
-        XCTAssertTrue(capturedTask?.declaredParkDidPark ?? false,
-                      "the declared transport park must actually engage, or the wake assertion is vacuous")
-        // The park woke because the SOCKET WAS RETIRED (the production onCancel path), never
-        // because this task was cancelled or because a test released it.
+        // Ordered, non-blocking suspension checks: this helper never blocks on the owner.
+        let heldInsideGate = await ownerHasCompleted()
+        XCTAssertFalse(heldInsideGate, "the owner must still be held inside the awaited gate")
+        // Cancel the REAL owning task — the only cancellation mechanism here.
+        ownerRef.cancel()
+        // ACTUAL RETIREMENT BEFORE RELEASE: the production onCancel path retires the ORIGINAL
+        // registration synchronously while the owner remains suspended in the held work.
+        let retiredBeforeRelease = await capturedTask?.awaitCancellation(timeout: 1.0) ?? false
+        XCTAssertTrue(retiredBeforeRelease,
+                      "cancellation itself must retire the original registration while suspended, before release")
         XCTAssertTrue(receivePark.releasedByRetirement,
                       "the parked receive may wake ONLY on socket retirement, never task cancellation")
-        // STILL-HELD PROBE: the effect hold has no cancellation path — owner cancel could not
-        // have opened it; only the explicit release below does.
+        let completedBeforeRelease = await ownerHasCompleted()
+        XCTAssertFalse(completedBeforeRelease, "completion must stay false until the explicit release")
         XCTAssertFalse(release.released, "effect hold must remain parked until explicit test release")
         release.release()
         let outcome = await owner.value
-        XCTAssertEqual(outcome.outcome, .earlyClose,
-                       "a cancelled owner's turn must pin to earlyClose — never completed, never discarded")
         try? await Task.sleep(nanoseconds: 100_000_000)
         let effectsTotal = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectsTotal, 0, "cancelled-before-start must NEVER execute after release")

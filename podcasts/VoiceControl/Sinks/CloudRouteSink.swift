@@ -30,76 +30,6 @@ struct CloudRouteResult: Equatable {
 }
 
 /// Lock-guarded one-way flag: set synchronously from a cancellation handler, read from any task.
-/// Unbounded-in-practice but BOUNDED-by-transport event queue: the producer drains whatever is
-/// readable from the stream WITHOUT suspending behind held work, so a cancelled owner can retire
-/// the registration promptly even while held work parks a later consume. `finish` closes it; a
-/// waiting consumer wakes on the next enqueue or on finish. No cancellation path exists here —
-/// only events and explicit close release waiters.
-private final class TurnEventQueue: @unchecked Sendable {
-    private let lock = NSLock()
-    private var items: [CloudRouteEvent] = []
-    private var closed = false
-    private var waiter: CheckedContinuation<Void, Never>?
-
-    func enqueue(_ event: CloudRouteEvent) {
-        var w: CheckedContinuation<Void, Never>?
-        lock.lock()
-        if !closed {
-            items.append(event)
-            w = waiter
-            waiter = nil
-        }
-        lock.unlock()
-        w?.resume()
-    }
-
-    func finish() {
-        var w: CheckedContinuation<Void, Never>?
-        lock.lock()
-        closed = true
-        w = waiter
-        waiter = nil
-        lock.unlock()
-        w?.resume()
-    }
-
-    /// Next event, or nil once the queue is closed and drained. CANCELLATION-OPAQUE: this
-    /// suspension wakes ONLY on enqueue/finish. `withTaskCancellationHandler` cancels the
-    /// enclosing task when the stream's `onTermination` fires, so a cancelling owner would
-    /// otherwise end the drain through THIS await and reach the loop-exit retirement — an
-    /// end-run that made the immediate-retirement control pass without the handler's own
-    /// cleanup (measured). Owning-task cancellation is observed via the flag/handler instead.
-    func nextUnowned() async -> CloudRouteEvent? {
-        while true {
-            lock.lock()
-            if !items.isEmpty {
-                let item = items.removeFirst()
-                lock.unlock()
-                return item
-            }
-            if closed {
-                lock.unlock()
-                return nil
-            }
-            if waiter != nil {
-                lock.unlock()
-                fatalError("TurnEventQueue consumed by exactly one turn loop")
-            }
-            lock.unlock()
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                lock.lock()
-                if items.isEmpty && !closed {
-                    waiter = cont
-                    lock.unlock()
-                } else {
-                    lock.unlock()
-                    cont.resume()
-                }
-            }
-        }
-    }
-}
-
 final class OwnerCancelFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var flagged = false
@@ -162,31 +92,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let conversationSelectionProvider: () -> CloudConversationSelection
     /// The origin the turn runs under, so a resume cannot cross an ended window.
 
-    /// Optional pre-effect hold used ONLY by controls to strike cancellation deterministically
-    /// between claim and effect. Production never sets it; nil means no pause. INVOKED
-    /// SYNCHRONOUSLY immediately after the durable claim commits, so no await exists between
-    /// claim and park — the control's "claimed while held" check is race-free. The gate suspends
-    /// until EXPLICIT release only (never on cancellation); its completion handler resumes the
-    /// consumer from the cancelling thread or any other context.
-    /// Control-only pre-effect hold (OPTIONAL): nil in production, so the boundary is inert
-    /// unless a control wires BOTH it and `turnOwnerTaskForControl`. Production never sets it.
-    var effectGate: ((@escaping @Sendable () -> Void, _ operationId: String) -> Void)?
-    /// Control-only arming hook: invoked synchronously right AFTER the durable claim commits
-    /// and right BEFORE the gate parks. Production never sets it.
-    var effectEntered: (() -> Void)?
-    /// Control harness: the Task whose cancellation releases the consumer's post-gate suspension.
-    /// Nil => the gate boundary is inert (production never wires it and never sets effectGate).
-    /// `nonisolated` so the control-only boundary can read it from a Sendable context without
-    /// hopping to the main actor; production never writes it after assembly.
-    nonisolated(unsafe) var turnOwnerTaskForControl: Task<CloudRouteResult, Never>?
-    /// Control-only: invoked by the gate to land the deterministic cancellation ON the owning
-    /// task. `nonisolated` so it is callable from the Sendable gate closure exactly as a control
-    /// would call `owner.cancel()` from outside. Production never sets it.
-    nonisolated(unsafe) var controlCancelOwner: (@Sendable () -> Void)?
-    /// Identity handed at the claim boundary, read back after release.
-    private var pendingHeldOperationId: String?
-
-    private var turnOwnerTask: Task<CloudRouteResult, Never>? { turnOwnerTaskForControl }
+    /// ONE pre-effect hold, used ONLY by controls to strike cancellation deterministically between
+    /// the durable claim and the effect. Production never sets it (nil = no pause). The hold is
+    /// AWAITED, so the OWNER really suspends here — "the consumer is held" is a fact about the
+    /// owner, not about some detached task. Its implementation must be cancellation-INSENSITIVE
+    /// (explicit release only), so owner cancellation cannot open it; the caller performs the
+    /// ordinary post-suspension cancellation check once it returns.
+    var effectGate: ((_ operationId: String) async -> Void)?
     /// The CURRENT turn's cancellation mark, installed by the owning task's handler. Held work
     /// reads it after any suspension; cleared when the turn ends.
     private var currentOwnerCancelFlag: OwnerCancelFlag?
@@ -443,40 +355,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // claimed-but-unfinished operation stays `.in_progress` on disk, so a restart
         // reconstructs `unknown` — never a fabricated `cancelled`.
         let resultSocket = routed.resultSocket
-        // DRAIN-INTO-QUEUE: the producer's readable events move into a local queue WITHOUT
-        // suspending behind held work. A bounded poll (5 ms) keeps draining while a consume is
-        // parked, and the drain STOPS at the first terminal event (done/error) — mirroring the
-        // transport's own rule that a terminal ends the turn — so no spurious connection_lost is
-        // synthesized after a normal close. Consequence for cancellation: when the owning Task is
-        // cancelled while held work parks, nothing about the ORIGINAL registration depends on the
-        // consumer reaching its next await; the handler retires immediately and the queue simply
-        // holds buffered events for admission checks to refuse.
-        let eventQueue = TurnEventQueue()
-        let drain = Task { [stream = routed.stream] in
-            var iterator = stream.makeAsyncIterator()
-            while true {
-                // DRAIN IS OWNER-OPAQUE: `withTaskCancellationHandler` cancels this task via the
-                // stream's onTermination when the OWNER is cancelled, and a cancelled
-                // `iterator.next()` returns nil — ending the drain, finishing the queue, and
-                // letting the consumer reach loop-exit retirement WITHOUT the handler having
-                // acted (the measured end-run that made the immediate-retirement control pass as
-                // a mutant). The drain therefore keeps iterating after its own cancellation:
-                // only transport-level retirement (which wakes a parked receive and ends the
-                // stream) may finish it.
-                guard let event = await iterator.next() else { break }
-                eventQueue.enqueue(event)
-                // Stop at the first terminal — mirrors the transport's own rule that a terminal
-                // ends the turn; no spurious connection_lost is synthesized after a normal close.
-                switch event {
-                case .done, .error:
-                    eventQueue.finish()
-                    return
-                default:
-                    break
-                }
-            }
-            eventQueue.finish()
-        }
         // The watcher runs on its OWN task, so it must observe the OWNER's cancellation directly
         // (control-armed box) alongside the turn token: a consumer suspended inside action
         // handling never reaches a throwing suspension point, and without this the registration
@@ -497,21 +375,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // before the loop can return normally on a cancelled turn.
         let ownerCancelledFlag = OwnerCancelFlag()
         currentOwnerCancelFlag = ownerCancelledFlag
-        let cancelWatch = Task { [weak resultSocket, weak self] in
-            while !turnToken.isCancelled && !Task.isCancelled {
-                let cancelledNow = ownerCancelledFlag.isSet
-                if cancelledNow { break }
-                try? await Task.sleep(nanoseconds: 20_000_000)
-            }
-            resultSocket?.finishTurn()
-        }
 
         // ONE turn-wide cleanup covering EVERY exit — normal end, break, early return, error,
-        // token cancellation: stop the watcher AND retire the registration idempotently. Never
-        // per-action: a second action, audio, and done must all keep riding the same live socket.
+        // token cancellation: retire the registration idempotently. Never per-action: a second
+        // action, audio, and done must all keep riding the same live socket. Prompt retirement on
+        // OWNER cancellation is NOT delivered by a poller here — it is performed synchronously by
+        // the owning task's cancellation handler below (the only legal observation of another
+        // task's cancellation), so no unstructured polling task exists to mask it.
         defer {
-            cancelWatch.cancel()
-            drain.cancel()
             routed.resultSocket.finishTurn()
             currentOwnerCancelFlag = nil
         }
@@ -524,8 +395,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var turnResult: CloudRouteOutcome?
         var turnResponse: VoiceResponse = .silent
         await withTaskCancellationHandler {
-            turnLoop: while true {
-                guard let event = await eventQueue.nextUnowned() else { break turnLoop }
+            turnLoop: for await event in routed.stream {
                 // Superseded mid-stream: stop consuming so this turn cannot execute
                 // late actions or overwrite the new turn's state. The stream's own
                 // termination closes the transport. (`break turnLoop` — a bare
@@ -714,58 +584,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // still held in action handling) and the claimed-but-unexecuted operation stays durably
         // IN PROGRESS — no settlement here: this process reports `unknown`, and a restart
         // reconstructs the same honest unknown. Never a replay, never a fabricated outcome.
-        if let effectGate, turnOwnerTaskForControl != nil {
-            // DETERMINISTIC CLAIM BOUNDARY (control-only): the durable claim above has COMMITTED.
-            // Hand the already-claimed operation to the gate with its identity; the gate parks
-            // until EXPLICIT release. The consumer's suspension is CANCELLATION-OPAQUE: the hold
-            // is released ONLY by explicit `release()`, never by this task's own cancellation —
-            // which is what lets a control cancel the OWNER mid-hold without the hold silently
-            // opening. Cancellation is observed through the owner-cancel handler (flag + prompt
-            // retirement), so there is exactly ONE owner-cancellation observation point and the
-            // control's "claimed while held" read is race-free (the claim committed first).
-            pendingHeldOperationId = operationId
-            // Control-only arming point: fires SYNCHRONOUSLY immediately after the claim
-            // committed, BEFORE the hold parks. Lets a control install its transport park at
-            // the exact boundary instead of racing it from outside.
-            effectEntered?()
-            if let controlCancel = controlCancelOwner {
-                effectGate(controlCancel, operationId)
-            } else {
-                effectGate({}, operationId)
-            }
-            let heldOperationId = pendingHeldOperationId ?? operationId
-            pendingHeldOperationId = nil
-            if ownerCancelledNowForCurrentTurn {
-                // Cancelled-before-start: NEVER execute. Retire now and report persisted unknown;
-                // the record stays in progress for honest reconstruction.
-                activeResultSocket?.finishTurn()
-                await reportResult(
-                    OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight),
-                    operationId: heldOperationId, capabilityVersion: capabilityVersion
-                )
-                return
-            }
-            // Released UNCANCELLED: re-check the journal — still claimed-in-progress by this turn;
-            // proceed to the effect exactly once (never double-execute).
-            switch operationJournal?.claim(heldOperationId) ?? .claimed {
-            case .claimed:
-                break
-            case .inProgress, .interrupted:
-                await reportResult(
-                    OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight),
-                    operationId: heldOperationId, capabilityVersion: capabilityVersion
-                )
-                return
-            case .alreadyRun(let recorded):
-                await reportResult(recorded, operationId: heldOperationId, capabilityVersion: capabilityVersion)
-                return
-            case .persistenceUnavailable:
-                await reportResult(
-                    OperationResult.nonSuccess(.refused, reason: OperationReason.persistenceUnavailable),
-                    operationId: heldOperationId, capabilityVersion: capabilityVersion
-                )
-                return
-            }
+        // DETERMINISTIC CLAIM BOUNDARY (control-only): the durable claim above has COMMITTED.
+        // The OWNER awaits the hold here, so the suspension is the owner's own and "held" is a
+        // fact about the owner rather than about a detached task. Cancellation is observed by the
+        // ordinary post-suspension check below, once this returns.
+        if let effectGate {
+            await effectGate(operationId)
         }
         if Task.isCancelled || ownerCancelledNowForCurrentTurn {
             // Immediate, synchronous retirement of the ORIGINAL registration (idempotent; the

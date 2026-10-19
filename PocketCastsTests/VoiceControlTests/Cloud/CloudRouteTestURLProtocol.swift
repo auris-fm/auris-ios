@@ -252,7 +252,9 @@ final class ControlCanceller: @unchecked Sendable {
     private let lock = NSLock()
 
     func bind<Success>(_ task: Task<Success, Never>) {
-        lock.lock(); cancelBox = { task.cancel() }; lock.unlock()
+        lock.lock()
+        cancelBox = { task.cancel() }
+        lock.unlock()
     }
 
     private var cancelBox: (() -> Void)?
@@ -266,6 +268,41 @@ final class ControlCanceller: @unchecked Sendable {
 /// EXPLICIT-RELEASE-ONLY effect hold. Deliberately has NO task-cancellation handling of any
 /// kind (unlike `Gate`): owner cancellation can NEVER release it — only `release()` does.
 /// Controls assert `released` to probe that the waiter is still held before explicit release.
+/// A one-shot promise: resolves exactly once, from whichever task gets there first. Used so a
+/// bounded wait can be raced against an unbounded suspension WITHOUT leaving a task-group child
+/// blocked on that suspension (the group would then never drain).
+final class Promise<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value?
+    private var waiter: CheckedContinuation<Value, Never>?
+
+    func resolve(_ value: Value) {
+        lock.lock()
+        guard self.value == nil, waiter != nil || true, !resolvedFlag else { lock.unlock(); return }
+        resolvedFlag = true
+        self.value = value
+        let w = waiter
+        waiter = nil
+        lock.unlock()
+        w?.resume(returning: value)
+    }
+
+    private var resolvedFlag = false
+
+    func value() async -> Value {
+        await withCheckedContinuation { (cont: CheckedContinuation<Value, Never>) in
+            lock.lock()
+            if let v = value {
+                lock.unlock()
+                cont.resume(returning: v)
+            } else {
+                waiter = cont
+                lock.unlock()
+            }
+        }
+    }
+}
+
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
