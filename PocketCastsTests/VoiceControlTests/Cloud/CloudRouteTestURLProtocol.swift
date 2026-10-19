@@ -405,7 +405,25 @@ final class HoldLatch: @unchecked Sendable {
 final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
-    private var resume: ((Result<Void, Error>) -> Void)?
+
+    /// TICKET-STATE WAITERS. Every `wait` gets its own ticket; ALL of a ticket's mutable state is
+    /// touched only under the gate lock, which makes three previously racy transitions exact:
+    ///
+    ///   - CANCELLATION BEFORE REGISTRATION: `withTaskCancellationHandler` may run `onCancel`
+    ///     before the operation body has registered its continuation. A single stored `resume`
+    ///     would be nil there, cancellation would be missed, and the later-registered continuation
+    ///     would wait forever. A ticket flips its `cancelled` flag under the lock in that window,
+    ///     and the body observes the flag at registration time and throws instead of parking.
+    ///   - TIMED-OUT OBSERVER LEAKS: a bounded wait's loser is cancelled, and cancellation removes
+    ///     that loser's OWN ticket from the waiters table. `release()` then resumes only tickets
+    ///     still present, so no timed-out observer is retained (or double-resumed).
+    ///   - RELEASE vs CANCELLATION: whichever transition removes the ticket from the table first
+    ///     owns the single resume; the other observes the absence and does nothing.
+    private final class Ticket {
+        var cancelled = false
+        var continuation: CheckedContinuation<Void, Error>?
+    }
+    private var waiters: [ObjectIdentifier: Ticket] = [:]
 
     /// Waits for the latch to open. Throws `CancellationError` if the waiting
     /// task is cancelled — a transport that ignores cancellation cannot be
@@ -428,40 +446,68 @@ final class Gate: @unchecked Sendable {
         }
     }
 
-    /// Waits for release WITHOUT polling. The continuation is registered UNDER the same lock
+    /// Waits for release WITHOUT polling. The ticket is registered UNDER the same lock
     /// that guards `isOpen`, so a release that lands between the state check and registration
-    /// cannot be lost (cancel-before-continuation race closed). Throws `CancellationError` on
-    /// task cancellation; `untilCancelled` lets a parked transport wake on external retirement.
+    /// cannot be lost. Throws `CancellationError` on task cancellation (including cancellation
+    /// that arrived BEFORE registration — the ticket flag closes that window); `untilCancelled`
+    /// lets a parked transport wake on external retirement.
     func wait(untilCancelled isExternallyCancelled: (@Sendable () -> Bool)?) async throws {
+        let ticket = Ticket()
+        let ticketID = ObjectIdentifier(ticket)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 lock.lock()
                 if isOpen {
                     lock.unlock()
                     cont.resume()
-                } else if let f = isExternallyCancelled, f() {
+                    return
+                }
+                if ticket.cancelled {
+                    // Cancellation landed before this registration ran: honor it NOW instead of
+                    // parking a waiter that would never be woken.
+                    lock.unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                if let f = isExternallyCancelled, f() {
                     lock.unlock()
                     cont.resume(throwing: URLError(.cancelled))
-                } else {
-                    resume = cont.resume   // registered atomically with the open check
-                    lock.unlock()
+                    return
                 }
+                ticket.continuation = cont
+                waiters[ticketID] = ticket
+                lock.unlock()
             }
         } onCancel: {
-            var r: ((Result<Void, Error>) -> Void)?
-            lock.lock(); r = resume; resume = nil; lock.unlock()
-            r?(.failure(CancellationError()))
+            lock.lock()
+            ticket.cancelled = true
+            // Remove OUR ticket only: an observer whose own cancellation fired must not release
+            // anyone else, and a released gate has already emptied the table.
+            if let t = waiters.removeValue(forKey: ticketID) {
+                let c = t.continuation
+                t.continuation = nil
+                lock.unlock()
+                c?.resume(throwing: CancellationError())
+            } else {
+                lock.unlock()
+            }
         }
     }
 
     func release() {
-        var r: ((Result<Void, Error>) -> Void)?
         lock.lock()
         isOpen = true
-        r = resume
-        resume = nil
+        let pending = waiters
+        waiters = [:]
+        var resumes: [CheckedContinuation<Void, Error>] = []
+        for t in pending.values {
+            if let c = t.continuation {
+                resumes.append(c)
+                t.continuation = nil
+            }
+        }
         lock.unlock()
-        r?(.success(()))
+        for c in resumes { c.resume(returning: ()) }
     }
 
     var released: Bool {

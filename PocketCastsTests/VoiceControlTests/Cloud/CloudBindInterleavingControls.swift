@@ -166,3 +166,53 @@ final class CloudBindInterleavingControls: XCTestCase {
         )
     }
 }
+// MARK: - Gate ticket-state controls
+
+extension CloudBindInterleavingControls {
+    /// CANCELLATION BEFORE REGISTRATION. The task is cancelled before it has run a single
+    /// instruction, so `withTaskCancellationHandler` fires `onCancel` before the operation body
+    /// registers its continuation. A gate that stores a single resumable slot misses that
+    /// cancellation entirely and then reports SUCCESS on release — a cancelled waiter must never
+    /// be told the gate opened. The ticket-state gate flips its cancelled flag under the lock and
+    /// the body honors it at registration time.
+    func testCancellationBeforeRegistrationThrowsInsteadOfSucceedingOnRelease() async throws {
+        let gate = Gate()
+        let waiter = Task {
+            try await gate.wait()
+        }
+        waiter.cancel()
+        let outcome = await waiter.result
+        if case .success = outcome {
+            XCTFail("a waiter cancelled before registration must not be told the gate opened")
+        }
+        // The gate itself is still closed: the cancelled waiter did not release it.
+        XCTAssertFalse(gate.released, "a cancelled waiter must not open the gate")
+        // And a later release still works for a fresh waiter.
+        let late = Task { try await gate.wait() }
+        gate.release()
+        _ = try? await late.value
+        XCTAssertTrue(gate.released)
+    }
+
+    /// TIMED-OUT OBSERVERS DO NOT LEAK OR CONSUME THE RELEASE. A bounded wait that loses to its
+    /// own alarm removes its ticket; the subsequent release is delivered to waiters still
+    /// present — and only once each. If a timed-out observer were retained, the release would be
+    /// consumed (or double-delivered) and this fresh second waiter would be the control that
+    /// catches it.
+    func testTimedOutObserverDoesNotConsumeOrLeakTheRelease() async throws {
+        let gate = Gate()
+        // Bounded wait with an unopened gate: times out.
+        do {
+            try await gate.wait(timeout: 0.05)
+            XCTFail("the bounded wait must time out against a closed gate")
+        } catch { /* expected */ }
+        XCTAssertFalse(gate.released, "a timed-out observer must not open the gate")
+        // A fresh waiter is woken exactly once by the real release.
+        let fresh = Task { try await gate.wait() }
+        // Give the fresh waiter a moment to register, then release.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        gate.release()
+        _ = try? await fresh.value
+        XCTAssertTrue(gate.released, "the real release must reach the fresh waiter")
+    }
+}
