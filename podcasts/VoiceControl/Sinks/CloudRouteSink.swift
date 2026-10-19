@@ -359,7 +359,27 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // extra stop request would only shift confirmed-stop identities under existing deferral
         // records.
         if let playbackPredecessor, audioPlayer.hasOutstandingOutput {
+            // CLEANUP BEFORE THE FIRST AWAIT (review 05d27ddb): this turn already acquired its
+            // token, playback ownership, and the admitted hold. A return from INSIDE this block
+            // (timeout or superseded-while-waiting) bypasses the turn-wide defer below, so the
+            // scoped defer here retires exactly what this turn acquired — never a strand.
+            defer {
+                if activeTurn === turnToken { activeTurn = nil }
+                // Playback ownership reverts to the predecessor: this turn admitted nothing, so
+                // the next successor must gate on the SAME outstanding output this turn saw.
+                if playbackOwner === turnToken { playbackOwner = playbackPredecessor }
+                // Release the hold THIS turn acquired (the predecessor's was already ended at
+                // the atomic transfer above).
+                if let acquired = heldPlaybackToken, acquired === admittedHold {
+                    heldPlaybackToken = nil
+                    onGracePlaybackHoldEnd?(acquired)
+                }
+            }
             let retireEpoch = audioPlayer.cancel()
+            // REAP (review 05d27ddb): only the immediate predecessor's entry is meaningful — an
+            // older suspended turn's identity is covered by resumeStopWaiters(upTo:) monotonic
+            // confirmation, so dropping its entry cannot strand it.
+            pendingRetireStops.removeAll()
             pendingRetireStops[playbackPredecessor] = retireEpoch
             var quiesced = false
             for _ in 0..<8 {

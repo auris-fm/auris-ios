@@ -1889,6 +1889,159 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
+    /// QUEUED-STOP VISIBILITY (review 05d27ddb): a stop that is queued but not yet processed is
+    /// invisible to buffer/isPlaying — a THIRD turn (C) superseding B must still wait, because
+    /// the queued stop would shed anything C admits. With A buffered and the runner parked, B
+    /// and C both queue stops; neither may complete before the runner processes them.
+    func testThirdTurnAdmissionWaitsForTheQueuedStopsItCannotSee() async throws {
+        await MainActor.run { } // keep symmetry with sibling controls
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"slow"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let sink = makeSink()
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(true)
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aBuffered = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aBuffered = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aBuffered, "A's audio is buffered under the drain hold")
+        // B supersedes A (retire E1 queued behind the parked runner), then C supersedes B
+        // (retire E2): with the queued stop invisible to buffer/isPlaying, only the explicit
+        // queued-stop signal can hold C.
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 60_000_000)
+        // B is suspended on E1's confirmation BEFORE C even starts.
+        let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
+        XCTAssertFalse(bFinishedEarly, "B is suspended on E1's confirmation")
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"C"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        // C may not complete while the queued stops are unprocessed.
+        let cFinished = try await timeoutProbe(c, nanoseconds: 200_000_000)
+        XCTAssertFalse(cFinished, "C is suspended: the queued stop it cannot see holds its admission")
+        // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        let cResult = await c.value
+        XCTAssertEqual(cResult.outcome, .completed, "C completes once the queued stops are processed")
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .earlyClose, "B was superseded while waiting and is an incomplete turn")
+        var resumes = 0
+        for _ in 0..<60 {
+            resumes = playback.calls.filter { $0 == .resume }.count
+            if resumes == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(resumes, 1, "only C restores the window")
+    }
+
+    /// NETWORK-COMPLETED PREDECESSOR (review ea755ba1/05d27ddb): A finished its NETWORK work
+    /// (done returned, deferral recorded) with playback still pending under the drain hold. B's
+    /// admission must still await A's quiescence — playback ownership outlives the Task.
+    func testAdmissionAwaitsQuiescenceOfANetworkCompletedPredecessor() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let sink = makeSink()
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(true)
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let aResult = await a.value
+        XCTAssertEqual(aResult.outcome, .completed, "A completed its network work")
+        let aPending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+        XCTAssertTrue(aPending, "A's playback is still pending (network-complete ≠ quiescent)")
+        // B supersedes the network-COMPLETED A: its admission must await A's quiescence.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"B"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
+        XCTAssertFalse(bFinishedEarly, "B is suspended: A's pending playback must quiesce first")
+        // Process the queued retire stop, then confirm it.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+        }
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes once A is quiescent")
+        var resumes = 0
+        for _ in 0..<60 {
+            resumes = playback.calls.filter { $0 == .resume }.count
+            if resumes == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(resumes, 1, "only B restores the window")
+        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
+        XCTAssertFalse(pending, "no audio survives")
+    }
+
     /// CAPTURED RETIRE IDENTITY (review 14f66b72): the superseded turn's cleanup awaits the
     /// identity captured for ITS token at the transfer — never the shared latest counter. A
     /// test-injected stop (E2) moves the counter AFTER B's admission; A must still resolve on
@@ -1953,11 +2106,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await Task.sleep(nanoseconds: 150_000_000)
         await MainActor.run { box.deliverOldest() }
         let bResult = await fast.value
+        print("DIAG2 pending=\(await MainActor.run { box.pendingCount() }) confirmed=\(await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }) cancels=\(await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 })")
         XCTAssertEqual(bResult.outcome, .completed, "B completes after E1 quiescence")
         // Withheld confirmations exist (E2 among them — B's own drain may also be captured);
-        // E2 is definitely not confirmed yet.
-        XCTAssertGreaterThanOrEqual(box.pendingCount(), 1,
-                                    "the injected stop's confirmation is withheld")
+        // E2 is definitely not confirmed yet. Bounded wait: notification capture hops to main,
+        // so under load it may land a beat after B's frames flow.
+        var withheldAny = false
+        for _ in 0..<200 {
+            if box.pendingCount() >= 1 { withheldAny = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(withheldAny, "the injected stop's confirmation is withheld")
         // Release A's producer: its cleanup reads the CAPTURED identity (E1, already
         // confirmed) and returns WITHOUT waiting on E2.
         aGate.signal()

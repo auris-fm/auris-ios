@@ -83,6 +83,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// schedule, so the deferral would wait on an identity that is not its own.
     @discardableResult
     func finish() -> Int {
+        stopRequestQueued()
         runnerLock.lock()
         drainEpoch += 1
         let allocated = drainEpoch
@@ -111,6 +112,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private(set) var cancelRequestCountForTesting = 0
     @discardableResult
     func cancel() -> Int {
+        stopRequestQueued()
         cancelRequestCountForTesting += 1
         bufferLock.lock()
         buffer.removeAll()
@@ -649,12 +651,34 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var renderStopDeadline: Date?
 
     private(set) var isPlaying = false
+    /// Stop requests queued but not yet processed by the runner (review 14f66b72/05d27ddb):
+    /// a queued stop is INVISIBLE to buffer/isPlaying once the buffer is cleared but before the
+    /// runner acts — a successor that skips its quiescence wait on that window would be shed by
+    /// the queued stop. Incremented by every cancel/finish (each is followed by exactly one
+    /// stop notification); decremented when that notification is issued.
+    private let stopCounterLock = NSLock()
+    private var queuedStopRequests = 0
+    var hasQueuedStop: Bool {
+        stopCounterLock.lock()
+        defer { stopCounterLock.unlock() }
+        return queuedStopRequests > 0
+    }
+    private func stopRequestQueued() {
+        stopCounterLock.lock()
+        queuedStopRequests += 1
+        stopCounterLock.unlock()
+    }
+    private func stopRequestSettled() {
+        stopCounterLock.lock()
+        queuedStopRequests = max(0, queuedStopRequests - 1)
+        stopCounterLock.unlock()
+    }
     /// Outstanding-output signal for admission gating (review 14f66b72): frames buffered OR the
     /// engine still up — a queued-but-unprocessed stop keeps `isPlaying` true until the runner
     /// processes it, so a successor can detect "a stop is still in flight" and must not skip
     /// its quiescence await.
     var hasOutstandingOutput: Bool {
-        hasPendingAudio || isPlaying
+        hasPendingAudio || isPlaying || hasQueuedStop
     }
     private var paused = false
 
@@ -1120,6 +1144,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Report that output has stopped, so the caller can restore what the turn
     /// ducked. Delivered on the main queue like the other delegate callbacks.
     private func notifyDidStop(epoch: Int) {
+        stopRequestSettled()
         guard delegate != nil || capturedStopNotification != nil else { return }
         DispatchQueue.main.async {
             // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
