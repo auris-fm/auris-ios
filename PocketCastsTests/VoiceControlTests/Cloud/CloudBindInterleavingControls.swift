@@ -177,20 +177,31 @@ extension CloudBindInterleavingControls {
     /// the body honors it at registration time.
     func testCancellationBeforeRegistrationThrowsInsteadOfSucceedingOnRelease() async throws {
         let gate = Gate()
+        // The task is cancelled BEFORE it has run a single instruction, so the cancellation
+        // handler fires before the operation body can register — the exact window pinned here.
         let waiter = Task {
             try await gate.wait()
         }
         waiter.cancel()
         let outcome = await waiter.result
-        if case .success = outcome {
-            XCTFail("a waiter cancelled before registration must not be told the gate opened")
+        // EXPLICIT, no try? swallowing: the failure must be exactly CancellationError — the
+        // ticket flag honored at registration. A success here is the pre-fix defect.
+        guard case .failure(let error) = outcome else {
+            XCTFail("a waiter cancelled before registration must fail; it succeeded")
+            return
         }
+        XCTAssertTrue(error is CancellationError,
+                      "expected CancellationError, got \(error)")
         // The gate itself is still closed: the cancelled waiter did not release it.
         XCTAssertFalse(gate.released, "a cancelled waiter must not open the gate")
-        // And a later release still works for a fresh waiter.
+        // SURVIVING DELIVERY, no try?: a fresh waiter still receives the release as success.
         let late = Task { try await gate.wait() }
+        try await Task.sleep(nanoseconds: 50_000_000)
         gate.release()
-        _ = try? await late.value
+        let lateOutcome = await late.result
+        if case .failure(let error) = lateOutcome {
+            XCTFail("the surviving waiter must be delivered the release; got \(error)")
+        }
         XCTAssertTrue(gate.released)
     }
 
@@ -207,12 +218,40 @@ extension CloudBindInterleavingControls {
             XCTFail("the bounded wait must time out against a closed gate")
         } catch { /* expected */ }
         XCTAssertFalse(gate.released, "a timed-out observer must not open the gate")
-        // A fresh waiter is woken exactly once by the real release.
+        // A fresh waiter is woken exactly once by the real release — no try? swallowing.
         let fresh = Task { try await gate.wait() }
         // Give the fresh waiter a moment to register, then release.
         try await Task.sleep(nanoseconds: 50_000_000)
         gate.release()
-        _ = try? await fresh.value
+        let freshOutcome = await fresh.result
+        if case .failure(let error) = freshOutcome {
+            XCTFail("the fresh waiter must be delivered the release; got \(error)")
+        }
         XCTAssertTrue(gate.released, "the real release must reach the fresh waiter")
+    }
+
+    /// THE OUTER SOCKET REGISTRY, not just the gate: a timed-out `awaitCancellation` observer
+    /// removes its OWN closure from `StubWebSocketTask.cancellationWaiters`, the registry is
+    /// empty after it, and a SURVIVING observer registered afterwards still fires on the real
+    /// cancel and is delivered true — no leaked closures, no consumed cancellation.
+    func testTimedOutCancellationObserverIsRemovedFromTheSocketRegistryAndSurvivorIsDelivered() async throws {
+        let task = StubWebSocketTask(textFrames: [])
+        // Timed-out observer: no cancellation happens within the window.
+        let timedOut = await task.awaitCancellation(timeout: 0.05)
+        XCTAssertFalse(timedOut, "nothing cancelled, so the bounded wait must report false")
+        // The ACTUAL registry inspection: the timed-out observer is gone.
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 0,
+                       "a timed-out observer must leave the socket cancellation registry empty")
+        // A SURVIVING observer registered afterwards is still delivered the cancellation.
+        let survivor = Task { await task.awaitCancellation(timeout: 5) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 1,
+                       "the surviving observer must actually be registered")
+        task.cancel(with: .goingAway, reason: nil)
+        let delivered = await survivor.value
+        XCTAssertTrue(delivered, "the surviving observer must be delivered the cancellation")
+        // And the registry drained when the cancel fired it.
+        XCTAssertEqual(task.cancellationWaiterCountForTesting, 0,
+                       "cancel drains the registry it fires")
     }
 }

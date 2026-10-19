@@ -535,8 +535,13 @@ extension StubWebSocketTask {
             snapshotLock.unlock()
             return true
         }
-        cancellationWaiters.append({ [gate] in gate.release() })
+        let token = ObjectIdentifier(gate)
+        cancellationWaiters.append(CancellationWaiter(token: token, fire: { [gate] in gate.release() }))
         snapshotLock.unlock()
+        // OWNERSHIP-BASED REMOVAL: however this wait ends — cancellation, timeout, or group
+        // teardown — THIS observer's closure leaves the registry. The registry can therefore
+        // never accumulate timed-out observers.
+        defer { removeCancellationWaiter(token: token) }
         return await withTaskGroup(of: Bool.self) { group in
             group.addTask {
                 _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
@@ -702,7 +707,29 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         return incoming.removeFirst()
     }
 
-    fileprivate var cancellationWaiters: [@Sendable () -> Void] = []
+    /// Cancellation observers with OWNERSHIP. Each entry carries its token so the observer that
+    /// registered it can remove its own closure when its wait ends by TIMEOUT rather than by
+    /// cancellation — a timed-out observer that stayed registered would retain its gate and fire
+    /// on a much later cancel. `cancel(with:)` drains the registry it fires; a surviving
+    /// observer registered afterwards is unaffected.
+    fileprivate struct CancellationWaiter {
+        let token: ObjectIdentifier
+        let fire: @Sendable () -> Void
+    }
+    fileprivate var cancellationWaiters: [CancellationWaiter] = []
+
+    /// Test-side inspection of the ACTUAL registry: how many observers are still registered.
+    var cancellationWaiterCountForTesting: Int {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return cancellationWaiters.count
+    }
+
+    private func removeCancellationWaiter(token: ObjectIdentifier) {
+        snapshotLock.lock()
+        cancellationWaiters.removeAll { $0.token == token }
+        snapshotLock.unlock()
+    }
 
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         snapshotLock.lock()
@@ -710,7 +737,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         let waiters = cancellationWaiters
         cancellationWaiters = []
         snapshotLock.unlock()
-        for w in waiters { w() }
+        for w in waiters { w.fire() }
         retiredParkNotifier?()
     }
 
