@@ -187,7 +187,7 @@ class GracePeriodSignal: ObservableObject {
         return generation
     }
 
-    private func startOrResetOnMain(trigger: String, opensGeneration: Bool = false) {
+    private func startOrResetOnMain(trigger: String, opensGeneration: Bool = false, renewingAllowance: Bool = true) {
         // Publish first, then log. Logging while `isActive` still held the old
         // value let Combine condition refreshes resolve the wrong listening mode.
         let becameActive = !isActive
@@ -195,10 +195,17 @@ class GracePeriodSignal: ObservableObject {
             generation += 1   // a window belongs to a generation
         }
         isActive = true
-        // The allowance is restored for this window, so a refusal in it is new
-        // information again and must speak (PR #23 review).
-        refusalToneGeneration = nil
-        escalationClaimed = false
+        // GRACE CONTRACT: under a same-generation hold the window is NOT re-armed — and it is
+        // not renewed either. Reviewer 7fc40b74 defect 1: a completion or fallback extension
+        // while the answer is pending must leave the spent allowance/tone decision exactly as
+        // it was; the interval the hold resumes is the SAME window, still spent.
+        let suppressedByHold = playbackHolds.contains(where: { $0.generation == generation })
+        if renewingAllowance && !suppressedByHold {
+            // The allowance is restored for this window, so a refusal in it is new
+            // information again and must speak (PR #23 review).
+            refusalToneGeneration = nil
+            escalationClaimed = false
+        }
         if becameActive {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
@@ -208,7 +215,7 @@ class GracePeriodSignal: ObservableObject {
         // wake resets all preserve their allowance/state here, and the expiry resumes exactly
         // once when the last hold releases. Holds of OTHER (older) generations do not bind this
         // window: a successor wake must time out normally.
-        if !playbackHolds.contains(where: { $0.generation == generation }) {
+        if !suppressedByHold {
             let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
                 self?.deactivate(trigger: "timeout")
             }
@@ -261,11 +268,20 @@ class GracePeriodSignal: ObservableObject {
     private func endPlaybackHoldOnMain(_ token: PlaybackHoldToken) {
         guard let index = playbackHolds.firstIndex(of: token) else { return }
         playbackHolds.remove(at: index)
-        guard playbackHolds.isEmpty else { return }
+        // CURRENT-GENERATION counting: only holds belonging to the LIVE window keep its expiry
+        // suspended. A stale hold from an older generation neither delays this release nor can
+        // its later end repair (or disturb) this window — it is retired here so it can never
+        // suppress a successor's clock. (Reviewer 7fc40b74 defect 2: an old outstanding hold
+        // used to leave a released successor hold-free AND timer-free.)
+        playbackHolds.removeAll { $0.generation != self.generation }
+        guard !playbackHolds.contains(where: { $0.generation == self.generation }) else { return }
         // Only the LIVE window resumes: a hold whose window was closed (privacy close, expiry of
         // a later interval) is dropped without re-arming anything.
         guard isActive, self.generation == token.generation else { return }
-        startOrResetOnMain(trigger: "playback drained")
+        // DEFECT 1 (reviewer 7fc40b74): the resume arms the clock WITHOUT renewal. This window
+        // already spent its escalation allowance and tone decision before the hold; a drained
+        // playback resumes the SAME interval, it does not open a fresh one.
+        startOrResetOnMain(trigger: "playback drained", renewingAllowance: false)
     }
 
     private func deactivate(trigger: String) {

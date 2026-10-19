@@ -624,6 +624,106 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
+    // MARK: - Typed journal persistence/replay + action-outcome propagation
+
+    /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
+    /// captured transport.
+    private func awaitResultFrame(operationId: String, timeout: TimeInterval = 5) async throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let frame: [String: Any]? = await MainActor.run {
+                capturedTask?.sentTextFrames.compactMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+                }.first { ($0["type"] as? String) == "app_operation_result" && ($0["operation_id"] as? String) == operationId }
+            }
+            if let frame { return frame }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw XCTSkip("no result frame arrived") // replaced by a hard failure below
+    }
+
+    /// FULL TYPED REPLAY control: the same server-issued operation_id delivered across two turns
+    /// is answered from the durable journal on the second delivery — the recorded outcome rides
+    /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
+    /// resulting state (wire contract §3): a replayed success is not a bare outcome.
+    func testRedeliveredIdentifiedOperationReplaysTheRecordedOutcomeWithoutReExecution() async throws {
+        // seek_to, not pause: the turn's own auto-duck also pauses, which would
+        // contaminate a pause-call count. A seek has no such second writer.
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-redeliver-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("replay-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+
+        // Turn 1: executes and settles succeeded with the typed state.
+        let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let firstFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
+        XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
+        let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any], "a success frame carries the resulting state")
+        XCTAssertNotNil(firstState["position_seconds"])
+        XCTAssertNotNil(firstState["playing"])
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1)
+
+        // Turn 2: the SAME operation_id redelivered through a FRESH sink sharing the durable
+        // store. Answered from the journal: same recorded outcome, typed state still reported,
+        // and the effect never runs again.
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-redeliver-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let replayFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
+        XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
+        let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success still carries the actual resulting state")
+        XCTAssertNotNil(replayState["position_seconds"])
+        XCTAssertNotNil(replayState["playing"])
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1, "the effect never runs twice")
+    }
+
+    /// ACTION-OUTCOME PROPAGATION: an unknown action under the runtime gate is a REFUSAL
+    /// (unsupported_operation) with nothing executed and no fabricated success — the server
+    /// reads an honest outcome for an operation it identified.
+    func testUnknownIdentifiedActionIsRefusedUnsupportedOperationNotFabricatedSuccess() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-unknown-1","capability_version":"v1","tool":"playback","action":"teleport","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unknown-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+
+        XCTAssertTrue(playback.calls.isEmpty, "an unknown action executes nothing")
+        let frame = try await awaitResultFrame(operationId: "op-unknown-1")
+        XCTAssertEqual(frame["outcome"] as? String, "refused", "the server is not told an unknown action succeeded")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation)
+        XCTAssertNil(frame["state"], "a refusal carries no state")
+        // The refusal is also the journal's record: a redelivery replays the refusal.
+        if case .alreadyRun(let recorded) = journal.claim("op-unknown-1") {
+            XCTAssertEqual(recorded.outcome, .refused)
+        } else {
+            XCTFail("the refusal was not durably recorded")
+        }
+    }
+
     /// A known, NONZERO offset: the mapped position is used and it is not the raw reference
     /// value. A mapping that returned its input would satisfy an equality check by accident, so
     /// the offset is deliberate.

@@ -619,6 +619,126 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "successor window expires normally")
     }
 
+    /// REVIEW 7fc40b74 DEFECT 2 — CURRENT-generation release counting: an OLD generation's
+    /// outstanding hold must neither delay the successor's resume nor let its later end disturb
+    /// the successor. B's final release resumes B's clock BEFORE old A's end; A's end is a no-op.
+    @MainActor
+    func testSuccessorReleaseResumesItsClockDespiteAnOutstandingOlderHold() async throws {
+        let signal = GracePeriodSignal(timeout: 0.5)
+        objc_setAssociatedObject(self, "graceauditoverlap_sig", signal, .OBJC_ASSOCIATION_RETAIN)
+        signal.onWakeWordDetected()
+        let genA = signal.currentGeneration()
+        let holdA = try XCTUnwrap(
+            signal.beginPlaybackHold(forGeneration: genA),
+            "A's live hold refused"
+        )
+        // Successor wake while A's hold is still outstanding.
+        signal.onWakeWordDetected()
+        let genB = signal.currentGeneration()
+        XCTAssertNotEqual(genA, genB)
+        // B's own startOrReset must arm despite A's hold (old hold never binds the successor).
+        let holdB = try XCTUnwrap(
+            signal.beginPlaybackHold(forGeneration: genB),
+            "B's live hold refused"
+        )
+        // B's FINAL release: the clock must resume NOW, not wait for A's end.
+        signal.endPlaybackHold(holdB)
+        let expiryDeadline = Date().addingTimeInterval(2)
+        while Date() < expiryDeadline, signal.isActive { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertFalse(signal.isActive, "B's window expires on B's own release despite A's outstanding hold")
+        // Old A's late end: mismatch with the live (closed) world — a no-op that must not
+        // reopen or extend anything.
+        signal.endPlaybackHold(holdA)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(signal.isActive, "the stale end never reopens the expired successor")
+    }
+
+    /// REVIEW 7fc40b74 DEFECT 1 — the resumed clock does NOT renew the allowance: a fallback/
+    /// command whose pending drain ran out under the hold resumes SPENT, and a failed/earlyClose
+    /// release does not renew either.
+    @MainActor
+    func testResumedClockKeepsTheSpentAllowanceAndTerminalPathsDoNotRenew() async throws {
+        let signal = GracePeriodSignal(timeout: 0.5)
+        objc_setAssociatedObject(self, "graceauditspent_sig", signal, .OBJC_ASSOCIATION_RETAIN)
+        signal.onWakeWordDetected()
+        let gen = signal.currentGeneration()
+        // Spend the escalation allowance inside this window (as a fallback extension would).
+        signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
+        signal.claimEscalationBudget()
+        XCTAssertTrue(signal.escalationClaimedForTesting(), "allowance spent before the hold")
+        let hold = try XCTUnwrap(signal.beginPlaybackHold(forGeneration: gen))
+        signal.recognizeCommandIfCurrentWindow(gen)  // a completion under the hold must not renew
+        XCTAssertTrue(signal.escalationClaimedForTesting(), "completion under the hold does not renew")
+        signal.endPlaybackHold(hold)  // the real stop resumes the clock
+        XCTAssertTrue(
+            signal.escalationClaimedForTesting(),
+            "the resumed interval is the SAME window: its allowance is still spent"
+        )
+        // And the failed/earlyClose-style close (deactivate) records no renewal either: a NEW
+        // window is new information, but the old one never regains anything.
+        signal.onWakeWordDetected()
+        let gen2 = signal.currentGeneration()
+        XCTAssertFalse(signal.escalationClaimedForTesting(), "a genuinely new window starts fresh")
+        _ = gen2
+    }
+
+    /// REVIEW 7fc40b74 DEFECT 3 — truncation stops OWNED output before releasing the host
+    /// playback and the hold: no enqueued cloud audio plays under the resumed episode.
+    @MainActor
+    func testTruncatedStreamStopsOwnedOutputBeforeReleasingTheHold() async throws {
+        let playback = RecordingPlaybackSink()
+        let defaults = UserDefaults(suiteName: "graceaudittrunc_\(UUID().uuidString)")!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        objc_setAssociatedObject(self, "graceaudittrunc_cfg", (defaults, fixtureConfig), .OBJC_ASSOCIATION_RETAIN)
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult = "<|tool_call_start|>[cloud_route(request='play something upbeat')]<|tool_call_end|>"
+        let modelManager = ModelManager(
+            storageDir: FileManager.default.temporaryDirectory
+                .appendingPathComponent("lfm_seed_\(UUID().uuidString)")
+        )
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        // Frames arrive, then the stream ENDS without done: truncation with pending audio.
+        let audioBlock = String(repeating: "AAAA", count: 80)
+        let truncatedFixture = "event: connected\ndata: {\"codec\":\"pcm16\"}\n\n"
+            + "event: audio\ndata: {\"audio\":\"" + audioBlock + "\"}\n\n"
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: auditAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: FakeAudioCapture(),
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    fixture: truncatedFixture,
+                    audioPayloads: []
+                ).client
+            },
+            playbackSink: playback,
+            graceTimeout: 5.0,
+            cloudConfig: fixtureConfig,
+            asrBackend: { FakeAsrBackend() }
+        )
+        guard let service else { XCTFail("no service"); return }
+        service.startIfAllowed()
+        try await waitForListening(service)
+        try await waitForRouter(service)
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let gen = service.gracePeriodSignalForTesting.currentGeneration()
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord),
+            origin: gen
+        )
+        try await Task.sleep(nanoseconds: 800_000_000)
+        // The truncation released the hold exactly once and left NO owned output behind.
+        XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
+        let pending = await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.hasPendingAudio ?? false
+        }
+        XCTAssertFalse(pending, "owned output is stopped BEFORE the host playback resumes")
+    }
+
     @MainActor
     private func provenanceConditionMonitor() -> LiveConditionMonitor {
         let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())

@@ -531,6 +531,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // completed would let a turn that was cancelled mid-stream reopen it.
             return CloudRouteResult(response: .silent, outcome: .earlyClose)
         }
+        // DEFECT 3 (reviewer 7fc40b74): stop THIS turn's OWNED output before releasing the host
+        // playback and the hold. A truncated stream can leave enqueued cloud audio in the
+        // player; resuming the episode under it would overlap two outputs. The cancel is
+        // successor-safe: it only touches audio this turn enqueued.
+        audioPlayer.cancel()
         restoreTransientAudioState()
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
