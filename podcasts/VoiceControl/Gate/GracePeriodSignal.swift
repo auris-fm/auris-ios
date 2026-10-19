@@ -128,7 +128,11 @@ class GracePeriodSignal: ObservableObject {
 
     private func recognizeCommandIfCurrentOnMain(_ generation: Int) -> Bool {
         guard isActive, self.generation == generation else { return false }
-        startOrResetOnMain(trigger: "cloud route")
+        // A RECOGNIZED command is a SELECTED renewal (the success model): the answer arrived, so
+        // the window's allowance is new information again — even while a playback hold keeps the
+        // clock from arming. Clock arming and explicit recognized renewal are separate concerns
+        // (review 24f236de): the hold suppresses ARMING only.
+        startOrResetOnMain(trigger: "cloud route", renewingAllowance: true)
         return true
     }
 
@@ -176,7 +180,7 @@ class GracePeriodSignal: ObservableObject {
         // two tones for one fact, which is what the claim exists to prevent.
         let claimed = escalationClaimed
         let toneClaimed = refusalToneGeneration
-        startOrResetOnMain(trigger: trigger)
+        startOrResetOnMain(trigger: trigger, renewingAllowance: false)
         escalationClaimed = claimed
         refusalToneGeneration = toneClaimed
     }
@@ -195,12 +199,9 @@ class GracePeriodSignal: ObservableObject {
             generation += 1   // a window belongs to a generation
         }
         isActive = true
-        // GRACE CONTRACT: under a same-generation hold the window is NOT re-armed — and it is
-        // not renewed either. Reviewer 7fc40b74 defect 1: a completion or fallback extension
-        // while the answer is pending must leave the spent allowance/tone decision exactly as
-        // it was; the interval the hold resumes is the SAME window, still spent.
-        let suppressedByHold = playbackHolds.contains(where: { $0.generation == generation })
-        if renewingAllowance && !suppressedByHold {
+        // Renewal is each caller's EXPLICIT decision (review 24f236de): a recognized command
+        // renews (success model); the fallback extension and the hold's plain release do not.
+        if renewingAllowance {
             // The allowance is restored for this window, so a refusal in it is new
             // information again and must speak (PR #23 review).
             refusalToneGeneration = nil
@@ -215,6 +216,7 @@ class GracePeriodSignal: ObservableObject {
         // wake resets all preserve their allowance/state here, and the expiry resumes exactly
         // once when the last hold releases. Holds of OTHER (older) generations do not bind this
         // window: a successor wake must time out normally.
+        let suppressedByHold = playbackHolds.contains(where: { $0.generation == generation })
         if !suppressedByHold {
             let timer = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
                 self?.deactivate(trigger: "timeout")

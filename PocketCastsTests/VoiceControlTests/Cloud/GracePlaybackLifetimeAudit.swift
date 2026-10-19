@@ -666,13 +666,19 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
         signal.claimEscalationBudget()
         XCTAssertTrue(signal.escalationClaimedForTesting(), "allowance spent before the hold")
+        // RECOGNIZED renewal (success model, review 24f236de): a recognized command under the
+        // hold RENEWS the allowance — it is a selected renewal — while the clock stays unarmed.
+        signal.recognizeCommandIfCurrentWindow(gen)
+        XCTAssertFalse(signal.escalationClaimedForTesting(), "a recognized success renews its allowance")
+        // Fallback extension spends again and the hold/resume cycle KEEPS it spent.
+        signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
+        signal.claimEscalationBudget()
+        XCTAssertTrue(signal.escalationClaimedForTesting(), "allowance spent again for the fallback")
         let hold = try XCTUnwrap(signal.beginPlaybackHold(forGeneration: gen))
-        signal.recognizeCommandIfCurrentWindow(gen)  // a completion under the hold must not renew
-        XCTAssertTrue(signal.escalationClaimedForTesting(), "completion under the hold does not renew")
         signal.endPlaybackHold(hold)  // the real stop resumes the clock
         XCTAssertTrue(
             signal.escalationClaimedForTesting(),
-            "the resumed interval is the SAME window: its allowance is still spent"
+            "the resumed interval is the SAME window: a plain release never renews"
         )
         // And the failed/earlyClose-style close (deactivate) records no renewal either: a NEW
         // window is new information, but the old one never regains anything.
