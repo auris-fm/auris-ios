@@ -386,6 +386,20 @@ class VoiceAsrEngine {
             return
         }
 
+        // NON-CONTENT OUTPUT (task #78, spec 77eacc9b): a transcript with NO Unicode letter or
+        // number carries no command — whitespace-only, punctuation-only, or any other non-content
+        // the recogniser returns. It is discarded SILENTLY, before translation, the router, the
+        // dialog, or any cloud work. No minimum length: a short MEANINGFUL utterance ("yes", "停",
+        // "嗯", digits, text-with-punctuation) contains a letter or number and survives; only text
+        // with neither is rejected. Silence is correct here — the user said nothing a machine can
+        // act on, so it must not consume a dialog, speak an error, or extend grace.
+        if Self.isNonContent(trimmedText) {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms ut=\(utteranceId) lang=\(asrResult.detectedLanguage ?? "?") '\(trimmedText)'\(trimNote.map { " \($0)" } ?? "") → drop (non-content)"
+            )
+            return
+        }
+
         // Translate to English when the ASR backend did not already translate and the
         // detected language is not English (the SenseVoice CJK path). Trim first so we
         // only translate the command remainder (matches Android).
@@ -449,6 +463,16 @@ class VoiceAsrEngine {
             selection: selection,
             utteranceId: utteranceId
         )
+    }
+
+    /// True when the text carries NO Unicode letter or number — i.e. no content a machine can
+    /// act on (task #78, spec 77eacc9b). Uses Unicode character classes, so every script counts:
+    /// CJK, Hangul, Arabic, digits in any script. Punctuation and whitespace alone do not qualify.
+    /// Deliberately NOT a length rule: "yes", "停", "嗯" and "3" all pass.
+    static func isNonContent(_ text: String) -> Bool {
+        // `.letters` and `.decimalDigits` are the two Unicode classes the spec names. Any match
+        // means the utterance has content; no match at all is non-content.
+        text.unicodeScalars.contains { CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0) } == false
     }
 
     /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop / no-stage notes drop.

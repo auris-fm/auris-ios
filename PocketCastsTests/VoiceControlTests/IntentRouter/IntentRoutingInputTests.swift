@@ -136,6 +136,68 @@ final class IntentRoutingInputTests: XCTestCase {
         )
     }
 
+    // MARK: - Task #78: NON-CONTENT ASR OUTPUT
+
+    /// PRODUCTION-ENTRY REJECTION (task #78, spec 77eacc9b). A transcript with no Unicode letter or
+    /// number is discarded SILENTLY after wake trim and before ANY downstream work — no routing
+    /// input, no translation, no unroutable feedback, no wake-only callback. The rule is
+    /// content-based, NOT length-based: short meaningful utterances still route.
+    func test_nonContentTranscriptIsSilentlyDiscardedBeforeAnyDownstreamWork() async throws {
+        let backend = QueueingAsrBackend(results: [
+            AsrResult(text: ".", detectedLanguage: "en"),
+            AsrResult(text: "   ", detectedLanguage: "en"),
+            AsrResult(text: "。！？", detectedLanguage: "zh"),
+            AsrResult(text: "…", detectedLanguage: "en"),
+            // Then a MEANINGFUL utterance on the SAME engine: it must still work.
+            AsrResult(text: "pause", detectedLanguage: "en"),
+        ])
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation)
+
+        var inputs: [IntentRoutingInput] = []
+        var unroutable = 0
+        var wakeOnly = 0
+        engine.onRoutingInput = { inputs.append($0) }
+        engine.onUnroutable = { unroutable += 1 }
+        engine.onWakeOnly = { wakeOnly += 1 }
+
+        for _ in 0..<5 {
+            await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
+        }
+
+        XCTAssertEqual(
+            inputs.count, 1,
+            "only the meaningful utterance reached routing; non-content was discarded BEFORE routing"
+        )
+        XCTAssertEqual(inputs.first?.routerTranscript, "pause")
+        XCTAssertEqual(
+            unroutable, 0,
+            "non-content is SILENT — it must not produce unroutable/error feedback"
+        )
+        XCTAssertEqual(wakeOnly, 0, "non-content is not a wake confirmation either")
+        XCTAssertEqual(
+            backend.transcribeCalls, 5,
+            "premise: every capture WAS recognised (the discards happened after ASR, not before)"
+        )
+    }
+
+    /// The rejection rule is CONTENT, not LENGTH: short meaningful utterances in several scripts
+    /// and any digit survive, while punctuation/whitespace alone do not.
+    func test_contentRulePreservesShortMeaningfulUtterancesAcrossScripts() {
+        for meaningful in ["yes", "停", "嗯", "3", "ok", "No.", "3分", "بلى", "네"] {
+            XCTAssertFalse(
+                VoiceAsrEngine.isNonContent(meaningful),
+                "\(meaningful.debugDescription) has Unicode content and must NOT be discarded"
+            )
+        }
+        for nonContent in ["", " ", "\n", ".", "...", "。", "？！", "…", "  ,  ", "-"] {
+            XCTAssertTrue(
+                VoiceAsrEngine.isNonContent(nonContent),
+                "\(nonContent.debugDescription) has no letter or number and must be discarded"
+            )
+        }
+    }
+
     private func makeEngine(
         backend: AsrBackend,
         translation: TranslationStage,
@@ -197,6 +259,31 @@ private final class StubAsrBackend: AsrBackend {
     func ensureReady() async -> Result<Void, Error> { .success(()) }
 
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult { result }
+
+    func release() {}
+}
+
+/// A backend that returns a DIFFERENT recognised result per call, so a control can prove both the
+/// discard and that the NEXT meaningful utterance still works on the same engine.
+private final class QueueingAsrBackend: AsrBackend {
+    private var results: [AsrResult]
+    private(set) var transcribeCalls = 0
+
+    init(results: [AsrResult]) { self.results = results }
+
+    var requiredModel: ModelSpec { ModelSpec(id: "queueing", files: [], targetDir: "queueing") }
+
+    var capabilities: AsrCapabilities {
+        AsrCapabilities(languages: ["zh", "en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+    }
+
+    func ensureReady() async -> Result<Void, Error> { .success(()) }
+
+    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        transcribeCalls += 1
+        if results.isEmpty { return AsrResult(text: "", detectedLanguage: nil) }
+        return results.removeFirst()
+    }
 
     func release() {}
 }
