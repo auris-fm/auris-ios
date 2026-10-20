@@ -35,6 +35,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
@@ -2173,6 +2174,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
         }
         let bDone = Flag()
+        // Host PLAYBACK is what a host resume acts on: the user was hearing an episode.
+        playback.setPlaying(true)
+        // A REAL output graph: the physical stop must run against a live engine, and the
+        // successor's audio must be renderable (an engine that never existed admits nothing).
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         // A plays with the buffer held: frames accumulate, the engine STARTS (premise).
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
         let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
@@ -2235,18 +2241,41 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             if bDone.isSet { bDoneEarly = true; break }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        XCTAssertTrue(parked, "the REAL stop operation is parked at the gate (no B completion first: \(bDoneEarly))")
+        XCTAssertTrue(parked, "the REAL stop operation reached the armed gate and parked (no B completion first: \(bDoneEarly))")
         // WHILE PARKED: nothing has been confirmed, B has not been admitted/settled.
         let confirmedWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         XCTAssertLessThan(confirmedWhileParked, 2, "no stop is confirmed before the physical stop ran")
         XCTAssertFalse(bDone.isSet, "B has not completed (indeed not been admitted) while the stop is parked")
-        // Release: the physical stop RUNS, confirms, B admits and streams its own audio.
+        let resumesWhileParked: Int = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
+        XCTAssertEqual(resumesWhileParked, 0, "no host resume precedes the physical stop")
+        // Release: the physical stop RUNS, confirms, B admits its OWN audio, and the host
+        // resume settles (asserted below) — successor AUDIO admission, not merely a completed
+        // turn, is the observable counterpart of the physical stop.
         await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
+        // Successor ADMISSION is observable as the ENGINE RUNNING again AFTER the stop: the
+        // physical stop took the engine down, so a live engine now can only be B's own audio
+        // being rendered. (The turn's completion is asserted separately below and is NOT the
+        // same thing.)
+        var bEngineUp = false
+        for _ in 0..<600 {
+            let playing: Bool = await MainActor.run { sink.audioPlayerForTesting?.isPlaying ?? false }
+            if playing { bEngineUp = true; break }
+            if bDone.isSet { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(bEngineUp, "B's successor audio is admitted (engine running again) once the physical stop ran")
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
         let confirmed = box.snapshot
         XCTAssertFalse(confirmed.isEmpty, "the physical stop produced a real confirmation")
         XCTAssertEqual(confirmed.first ?? -1, 2, "the confirmed identity is the retire cancel's (2), got \(confirmed.first ?? -1)")
+        var resumesAfter = 0
+        for _ in 0..<100 {
+            resumesAfter = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
+            if resumesAfter >= 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(resumesAfter, 1, "the host resumed only after the physical stop ran")
     }
 
     /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
