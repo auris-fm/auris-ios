@@ -4172,6 +4172,46 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     /// refusal turn, a DUPLICATE of the same utterance, and a terminal-close variant. The user must
     /// hear the daily-limit line EXACTLY ONCE, and a refused turn must not extend grace.
     @MainActor
+    /// E2E REQUEST-ID PROPAGATION (reviewer d16c0246): the utterance-admitted identity must
+    /// reach the wire VERBATIM. ASR mints the id at admission, the sink prepares the conversation
+    /// with it, and the socket auth frame presents THAT literal string — no hop downstream may
+    /// mint a fresh one. A duplicate dispatch of the SAME utterance observes the settled outcome
+    /// and never opens a second wire dispatch under a second identity.
+    func test_admittedUtteranceIdReachesTheWireVerbatimAndDuplicateNeverMintsAnother() async throws {
+        self.pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let context = PlaybackContext(
+            episodeId: "ep", podcastId: "pod",
+            referencePositionMs: 1_000, clientPositionMs: 1_100,
+            recentReferencePositions: [], previousReferencePositionMs: nil
+        )
+        let sink = makeSink()
+        let owner = await sink.routeToCloud(
+            request: "play the news", tier: .free, context: context,
+            origin: cloudTestOrigin, selection: nil, utteranceId: "ut-e2e-42"
+        )
+        let ownerFrame = try XCTUnwrap(capturedTask?.sentAuthFrame)
+        XCTAssertEqual(
+            ownerFrame["request_id"] as? String, "ut-e2e-42",
+            "the wire request_id is the ADMITTED utterance id, not a freshly minted UUID"
+        )
+
+        // Duplicate of the SAME utterance: the settled result, no new dispatch, no second id.
+        capturedTask = nil
+        let duplicate = await sink.routeToCloud(
+            request: "play the news", tier: .free, context: context,
+            origin: cloudTestOrigin, selection: nil, utteranceId: "ut-e2e-42"
+        )
+        XCTAssertEqual(duplicate, owner, "the duplicate observes the owner's settled outcome")
+        XCTAssertNil(
+            capturedTask?.sentAuthFrame,
+            "a settled duplicate must not open a second wire dispatch"
+        )
+    }
+
     func test_dailyLimitFeedbackRendersExactlyOnceAcrossDuplicateAndTerminalClose() async throws {
         let grace = GracePeriodSignal()
         grace.onWakeWordDetected()
