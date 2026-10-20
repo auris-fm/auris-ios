@@ -289,13 +289,35 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): one logical dispatch per utterance.
-    // A duplicate invocation (repeated callback) while a dispatch for the SAME utterance is
-    // in flight JOINS it — it awaits that dispatch's result instead of sending a second wire
-    // request. Independent utterances dispatch independently.
+    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 39beabc7): one logical dispatch
+    // per utterance. A duplicate invocation for the SAME utterance joins the owner (in flight)
+    // or observes its settled result — never a second wire request. INDEPENDENT utterances
+    // dispatch independently.
+    //
+    // RETENTION (one coherent rule across preparation, dispatch and effects): a completed
+    // utterance's result is retained for exactly the WINDOW's lifetime, with NO cap and NO
+    // eviction — an evicted entry would let a retained duplicate re-enter `routeToCloudOwned`,
+    // minting another client and cancelling its predecessor. The map is emptied when the
+    // window's origin changes (the same lifecycle the manager's retention follows).
     private let ownershipLock = NSLock()
     private var inFlightByUtteranceId: [String: [CheckedContinuation<CloudRouteResult, Never>]] = [:]
     private var settledByUtteranceId: [String: CloudRouteResult] = [:]
+    /// The window identity the retained results belong to. Changing it retires them wholesale.
+    private var retainedOrigin: Int?
+
+    /// Retires the retained dispatch results when the grace window changes (or ends). Called by
+    /// the production origin binding, so dispatch retention follows the same lifecycle as
+    /// preparation retention.
+    func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
+        ownershipLock.lock()
+        if origin != retainedOrigin {
+            settledByUtteranceId.removeAll()
+            inFlightByUtteranceId.removeAll()
+            effectClaimedUtteranceIds.removeAll()
+        }
+        retainedOrigin = origin
+        ownershipLock.unlock()
+    }
 
     func routeToCloud(
         request: String,
@@ -336,17 +358,30 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
             sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
         )
-        // Settle: publish to joiners, cache briefly (bounded), release ownership.
+        // Settle: publish to joiners and retain for the WINDOW's lifetime (no eviction), then
+        // release ownership.
         ownershipLock.lock()
         settledByUtteranceId[utteranceId] = result
-        if settledByUtteranceId.count > 16 {
-            settledByUtteranceId.removeValue(forKey: settledByUtteranceId.keys.first!)
-        }
         let waiters = inFlightByUtteranceId.removeValue(forKey: utteranceId) ?? []
         ownershipLock.unlock()
         waiters.forEach { $0.resume(returning: result) }
         return result
     }
+
+    /// Grants EFFECT ownership for an utterance exactly once, BEFORE the dispatch begins. The
+    /// caller that OWNS the dispatch wins; a joiner/duplicate never does — so effects cannot be
+    /// won by whichever caller happens to finish first, and no lifecycle is inferred from
+    /// completion arrival order.
+    func claimDispatchEffects(utteranceId: String?) -> Bool {
+        guard let utteranceId else { return true }  // no identity: legacy per-call effects
+        ownershipLock.lock()
+        defer { ownershipLock.unlock() }
+        if effectClaimedUtteranceIds.contains(utteranceId) { return false }
+        effectClaimedUtteranceIds.insert(utteranceId)
+        return true
+    }
+
+    private var effectClaimedUtteranceIds: Set<String> = []
 
     private func routeToCloudOwned(
         request: String,

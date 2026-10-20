@@ -19,5 +19,9 @@ protocol VoiceCloudRouteSink {
         sourceLanguage: String?
     ) async -> CloudRouteResult
 
+    /// Grants effect ownership for an utterance exactly once, BEFORE its dispatch: the caller
+    /// that owns the dispatch wins its effects; joiners/duplicates never do.
+    func claimDispatchEffects(utteranceId: String?) -> Bool
+
 
 }

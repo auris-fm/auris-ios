@@ -153,6 +153,115 @@ final class CloudBindInterleavingControls: XCTestCase {
                        "no action may be admitted on a lifetime that rejected the bind")
     }
 
+    // MARK: - Control 3: the bind→send publication is synchronized
+
+    /// THE BIND→SEND PUBLICATION. The transport binds the registration on the PRODUCER's task
+    /// while the consumer sends a result on ITS OWN task. If `boundIdentity` were published
+    /// unsynchronized, a send could read a stale/nil identity for a turn that IS live and report
+    /// `undelivered`, or a torn value. Here many sends are dispatched CONCURRENTLY from a
+    /// different task than the bind, after the bind is known published: every one must observe
+    /// `submitted` (the registration IS live), and after close every later one must be
+    /// `undelivered` — no send straddles the close to a fabricated success.
+    func testSendsFromADifferentTaskObserveTheSynchronizedBindAndRetirement() async throws {
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let client = makeClient(task: task)
+        let turn = CloudTurnEnvelope.make(
+            capabilities: [], routeHint: nil, recentConversation: []
+        )
+        let routed = client.routeWithResultSocket(
+            request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        let socket = routed.resultSocket
+
+        let boundFlag = Promise<Void>()
+        client.onFrameReceived = { boundFlag.resolve(()) }
+        let consume = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in routed.stream { events.append(event) }
+            return events
+        }
+        await boundFlag.value()
+        XCTAssertNotNil(socket.boundIdentity, "premise: the bind is published before the sends")
+
+        let frame = try XCTUnwrap(AppOperationResultFrame(
+            operationId: "op-bind", outcome: .unknown, reason: OperationReason.interruptedInFlight
+        ))
+        // Sends issued from a SEPARATE task than the producer's bind: each must observe the
+        // synchronized bind and report a real submission while the turn is live.
+        let reports = await Task.detached { () -> [CloudRouteClient.AppOperationResultSendReport] in
+            var result: [CloudRouteClient.AppOperationResultSendReport] = []
+            for _ in 0..<8 { result.append(await client.sendOperationResult(frame, via: socket)) }
+            return result
+        }.value
+        XCTAssertEqual(reports.count, 8)
+        XCTAssertTrue(reports.allSatisfy { $0 == .submitted },
+                      "every cross-task send on a LIVE turn observes the synchronized bind")
+
+        socket.finishTurn()
+        let late = await client.sendOperationResult(frame, via: socket)
+        XCTAssertEqual(late, .undelivered, "after close, sends are undelivered — never submitted")
+        consume.cancel()
+        _ = await consume.result
+    }
+
+    // MARK: - Control 4: per-registration isolation for a reused request id
+
+    /// REUSED request id: a second turn registers the SAME `request_id` while the first is still
+    /// live (a supersede). Ownership is PER REGISTRATION, so the successor's bind must not be
+    /// removed by the predecessor's close, and the predecessor's close must not retire the
+    /// successor's socket. The successor's own send stays `submitted`.
+    func testAReusedRequestIdKeepsItsOwnRegistrationAcrossThePredecessorsClose() async throws {
+        let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let client = makeClient(task: taskA)
+        let turn = CloudTurnEnvelope.make(
+            capabilities: [], routeHint: nil, recentConversation: []
+        )
+        let a = client.routeWithResultSocket(
+            request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        let boundFlagA = Promise<Void>()
+        client.onFrameReceived = { boundFlagA.resolve(()) }
+        let consumeA = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in a.stream { events.append(event) }
+            return events
+        }
+        await boundFlagA.value()
+        let identityA = try XCTUnwrap(a.resultSocket.boundIdentity)
+
+        // The successor reuses the SAME request_id with its own socket. Its bind lands on the
+        // transport's task, so wait for B's first frame (the bind is published by then) rather
+        // than reading an unbound handle.
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let boundFlagB = Promise<Void>()
+        client.onFrameReceived = { boundFlagB.resolve(()) }
+        let routedB = client.routeWithResultSocket(
+            request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        let socketB = routedB.resultSocket
+        await boundFlagB.value()
+        XCTAssertNotNil(socketB.boundIdentity, "premise: the successor's bind is published")
+        XCTAssertNotEqual(socketB.boundIdentity, identityA, "each registration has its OWN identity")
+        let consumeB = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in routedB.stream { events.append(event) }
+            return events
+        }
+
+        // The PREDECESSOR closes — its close must retire ONLY its own registration.
+        a.resultSocket.finishTurn()
+        let frame = try XCTUnwrap(AppOperationResultFrame(
+            operationId: "op-bind", outcome: .unknown, reason: OperationReason.interruptedInFlight
+        ))
+        let reportB = await client.sendOperationResult(frame, via: socketB)
+        XCTAssertEqual(reportB, .submitted,
+                       "the successor keeps its registration across the predecessor's close")
+
+        socketB.finishTurn()
+        _ = await consumeA.value
+        _ = await consumeB.value
+    }
+
     // MARK: - Helpers
 
     private func sampleContext() -> PlaybackContext {

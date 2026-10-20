@@ -128,6 +128,12 @@ class VoiceIntentExecutor {
     /// producer the app built rather than constructing its own.
     var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
 
+    /// Retires the sink's retained dispatches on the window boundary (production wiring).
+    @MainActor
+    func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
+        (cloudRouteSink as? CloudRouteSink)?.retireRetainedDispatchesIfWindowChanged(to: origin)
+    }
+
     /// TEST-ONLY: forwarded to the sink for the NEXT dispatch, so a case observes the identity
     /// prepared for ITS turn rather than a sink-wide "last prepared" value.
     private let playbackContextProvider: PlaybackContextProvider
@@ -164,20 +170,6 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
-    /// Effect ownership for a cloud utterance: true for the FIRST caller (the owner), false
-    /// for duplicates. See the cloud branch in `execute` for the retention rule.
-    private var effectClaimedGeneration: Int?
-    private var effectClaimedUtterances: Set<String> = []
-    private func claimEffectOwnership(_ utteranceId: String, generation: Int?) -> Bool {
-        if generation != effectClaimedGeneration {
-            effectClaimedGeneration = generation
-            effectClaimedUtterances = []
-        }
-        if effectClaimedUtterances.contains(utteranceId) { return false }
-        effectClaimedUtterances.insert(utteranceId)
-        return true
-    }
-
     func execute(
         _ intent: any VoiceIntent,
         /// REQUEST-SCOPED, carried on THIS dispatch alongside its request. Storing it on the shared
@@ -206,6 +198,10 @@ class VoiceIntentExecutor {
             // context rather than as an invented episode and position. Refusing here is what
             // made the discovery turn unreachable on the client.
             let context = playbackContextProvider.current() ?? PlaybackContext.absent
+            // EFFECT OWNERSHIP IS CLAIMED BEFORE THE DISPATCH (reviewer 39beabc7): the caller
+            // that owns this utterance wins its effects; a joiner/duplicate arriving later — or
+            // completing first — never does. No lifecycle is inferred from completion order.
+            let ownsEffects = cloudRouteSink.claimDispatchEffects(utteranceId: cr.utteranceId)
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
@@ -223,12 +219,9 @@ class VoiceIntentExecutor {
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes
             // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or
-            // rendered feedback (reviewer 0c546ce5 item 4). The claim is keyed by generation
-            // because duplicates carry the IDENTICAL captured intent — same utterance id AND
-            // same generation; a new generation therefore implies every older duplicate has
-            // already had its one effect opportunity.
-            if let utteranceId = cr.utteranceId, !claimEffectOwnership(utteranceId, generation: cr.generation) {
-                FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(utteranceId)")
+            // rendered feedback (reviewer 0c546ce5 item 4).
+            if !ownsEffects {
+                FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(cr.utteranceId ?? "?")")
                 return .silent
             }
             response = result.response

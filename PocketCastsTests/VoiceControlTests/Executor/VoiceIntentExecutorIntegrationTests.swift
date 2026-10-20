@@ -225,6 +225,7 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }
 
+    func claimDispatchEffects(utteranceId: String?) -> Bool { true }
 }
 
 private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {

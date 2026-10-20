@@ -64,13 +64,22 @@ struct AppOperationResultFrame: Equatable {
 /// from a retired turn is `undelivered`, never routed onto a successor's socket.
 final class AppOperationResultSocket: @unchecked Sendable {
     let requestId: String
-    /// Bound by the client at socket registration; read by the send path.
-    var boundIdentity: UUID?
+    /// Bound by the client at socket registration; read by the send path. Guarded by
+    /// `bindingLock`: the registration write and the send-path read are on different tasks
+    /// (transport vs consumer), so a cross-thread optional must not be published unsynchronized
+    /// — otherwise a send could read a stale nil and report a live turn `undelivered`.
+    private let bindingLock = NSLock()
+    private var _boundIdentity: UUID?
     private var _closeHook: (() -> Void)?
     private var _claimHook: (() -> Void)?
 
     init(requestId: String) {
         self.requestId = requestId
+    }
+
+    var boundIdentity: UUID? {
+        get { bindingLock.lock(); defer { bindingLock.unlock() }; return _boundIdentity }
+        set { bindingLock.lock(); _boundIdentity = newValue; bindingLock.unlock() }
     }
 }
 

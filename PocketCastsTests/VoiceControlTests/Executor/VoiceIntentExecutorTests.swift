@@ -117,8 +117,12 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "play something", tier: .unknown,
             utteranceId: "utterance-dup", origin: .modelCall, generation: generation
         )
+        // The REAL executor path with the sink's once-per-utterance effect claim (the mock's
+        // default): the first call owns, later calls for the same id are duplicates.
         _ = await executor.execute(owner)
         XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "the OWNER's completion renews the window")
+        XCTAssertEqual(mockCloudRouteSink.claimObservedBeforeDispatch, [true],
+                       "effect ownership is claimed BEFORE the dispatch — a joiner cannot win it")
         // Re-arm the observable: the owner's renewal cleared the refusal-tone claim, so holding
         // it again gives the duplicate a detectable renewal to (NOT) perform.
         XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the re-armed refusal is announced")
@@ -140,6 +144,46 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(
             gracePeriodSignal.windowIsRenewedForTesting(),
             "an independent utterance is not quieted by the duplicate rule"
+        )
+    }
+
+    /// CROSS-GENERATION INTERLEAVING (reviewer 39beabc7): completions can interleave — A(gen1)
+    /// completes, B(gen2) completes, then a DELAYED A duplicate completes. Effects are granted
+    /// by the request owner at dispatch, not inferred from a generation change, so A's late
+    /// duplicate cannot replay A's effects, and it cannot disturb B's.
+    func test_execute_delayedDuplicateFromAnEarlierGenerationCannotReplayEffects() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generationA = gracePeriodSignal.currentGeneration()
+
+        let intentA = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
+        )
+        _ = await executor.execute(intentA)  // A owns its effects
+
+        // A NEW window: generation B.
+        gracePeriodSignal.onWakeWordDetected()
+        let generationB = gracePeriodSignal.currentGeneration()
+        XCTAssertNotEqual(generationB, generationA, "premise: a new generation")
+        let intentB = CloudRouteIntent(
+            request: "skip forward", tier: .unknown,
+            utteranceId: "utterance-B", origin: .modelCall, generation: generationB
+        )
+        _ = await executor.execute(intentB)  // B owns its effects
+        XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "B renewed its own window")
+
+        // The DELAYED duplicate of A arrives last. It must be quiet: no renewal of B's window.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "re-arm the observable for B's window")
+        let lateA = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
+        )
+        let lateAResponse = await executor.execute(lateA)
+        XCTAssertEqual(lateAResponse, .silent, "the delayed duplicate renders nothing")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a delayed duplicate from an earlier generation cannot replay effects into the current window"
         )
     }
 
@@ -626,6 +670,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         sourceTranscript: String?, sourceLanguage: String?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
+        dispatchInProgress = true
         lastRequest = request
         lastContext = context
         lastOrigin = origin
@@ -633,6 +678,25 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         return CloudRouteResult(response: response, outcome: outcome)
     }
 
+    /// Effect ownership follows the mock's configured policy: by default the FIRST caller owns
+    /// (stand-in for the real sink's once-per-utterance claim), with `effectOwnerForTesting`
+    /// overriding for the duplicate controls.
+    var effectOwnerForTesting: ((String?) -> Bool)?
+    /// ORDER EVIDENCE (reviewer 39beabc7): was the effect claim taken BEFORE the dispatch began?
+    /// Effects must be granted by the owner at dispatch time, not after the await — otherwise a
+    /// joiner the dispatch awaits can win them. The claim records whether routeToCloud had
+    /// already run; the control asserts this stayed true.
+    private(set) var claimObservedBeforeDispatch: [Bool] = []
+    private var claimedUtteranceIds: Set<String> = []
+    private var dispatchInProgress = false
+    func claimDispatchEffects(utteranceId: String?) -> Bool {
+        claimObservedBeforeDispatch.append(!dispatchInProgress)
+        if let effectOwnerForTesting { return effectOwnerForTesting(utteranceId) }
+        guard let utteranceId else { return true }
+        if claimedUtteranceIds.contains(utteranceId) { return false }
+        claimedUtteranceIds.insert(utteranceId)
+        return true
+    }
 }
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {

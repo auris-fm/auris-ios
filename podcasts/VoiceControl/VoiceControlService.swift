@@ -63,6 +63,18 @@ class VoiceControlService: ObservableObject {
         // The sink is main-actor-isolated, so reach its manager on the main actor.
         CloudConversationManager.bindLiveOrigin(to: gracePeriodSignal, on: liveOriginManager)
             .store(in: &cancellables)
+        // ONE coherent retention/retirement rule across preparation, dispatch and effects: the
+        // sink's retained dispatch results (and effect claims) retire on the SAME window boundary
+        // the manager's prepared requests do. Driven by the real window state, not a counter.
+        gracePeriodSignal.$isActive
+            .sink { [weak self] active in
+                guard let self else { return }
+                let origin: Int? = active ? self.gracePeriodSignal.currentGeneration() : nil
+                Task { @MainActor in
+                    self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
+                }
+            }
+            .store(in: &cancellables)
     }
 
     private func wireEchoFilterRoute() {

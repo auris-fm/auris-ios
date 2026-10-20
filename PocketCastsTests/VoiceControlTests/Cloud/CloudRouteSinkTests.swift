@@ -440,6 +440,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let hold = HoldLatch()
         pendingProducerHold = hold
         let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let clientBefore = clientCreationCount
 
         let shared = "utterance-shared"
         let duplicate = Task { await sink.routeToCloud(
@@ -467,12 +468,43 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             joined, first,
             "a duplicate dispatch held in flight must join the SAME wire request and observe its result"
         )
-        // Exactly TWO wires were dialled: one for the shared utterance (joined by its duplicate)
-        // and one for the independent utterance.
+        // Exactly TWO wires were dialled for the three invocations: one for the shared utterance
+        // (joined by its duplicate) and one for the independent utterance.
         XCTAssertEqual(
-            clientCreationCount, 2,
+            clientCreationCount - clientBefore, 2,
             "one wire per OWNED utterance: the shared duplicate joins, the independent dispatches"
         )
+    }
+
+    /// RETENTION BOUNDARY (reviewer 39beabc7): the sink's settled results are retained for the
+    /// whole WINDOW — no cap. More than 16 settled utterances, then a RETAINED id is delivered
+    /// again: it must be served from the retained result with NO new client, NO new admission
+    /// and NO predecessor cancellation. An evicting cache would re-enter the owner path here.
+    @MainActor
+    func testRetainedSettledDispatchIsReplayedWithoutANewClientOrAdmission() async throws {
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let clientBefore = clientCreationCount
+
+        // 20 independent utterances settle — deliberately more than any 16-cap.
+        for index in 0..<20 {
+            _ = await sink.routeToCloud(
+                request: "turn \(index)", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-\(index)"
+            )
+        }
+        let clientAfterSettled = clientCreationCount
+        XCTAssertEqual(clientAfterSettled - clientBefore, 20, "premise: 20 owns dialled 20 wires")
+
+        // Re-deliver the FIRST (oldest) retained id: it must be a settled replay, not a new owner.
+        let replayed = await sink.routeToCloud(
+            request: "turn 0", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-0"
+        )
+        XCTAssertEqual(
+            clientCreationCount, clientAfterSettled,
+            "a retained settled id is replayed with NO new client (no eviction-triggered re-dispatch)"
+        )
+        XCTAssertNotNil(replayed.response, "the retained result is returned")
     }
 
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
