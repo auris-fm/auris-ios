@@ -226,7 +226,7 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }
 
-    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership { .owner(.init(utteranceId: utteranceId ?? "", instance: UUID())) }
+    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership { .owner(.init(utteranceId: utteranceId ?? "", instance: UUID(), record: nil)) }
 }
 
 private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {

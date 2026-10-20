@@ -660,20 +660,83 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             "premise: the successor owns a DIFFERENT record than the joiner was admitted against"
         )
 
-        // A completes its (now stale) turn: its OWN record settles. The held joiner must resolve
-        // against THAT record — the successor's result must not answer it.
-        _ = await sink.routeToCloud(
+        // A completes its (now stale) turn. Its OWN record settles with a DISTINCT marker, so the
+        // joiner's result cannot be mistaken for the successor's (or for a generic refusal).
+        let ownerSettlement = await sink.routeToCloud(
             request: "owner request", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: aOwnership
         )
-
-        // The joiner now resumes with its OLD admission against the ORIGINAL record.
-        let joined = await sink.joinForTesting(token: joinToken)
-        XCTAssertNotNil(joined, "the held joiner resolves against its ORIGINAL admitted record")
+        // The owner's settlement is recorded ON ITS OWN record instance — not on the successor's.
         XCTAssertEqual(
-            joined?.outcome, .refused,
-            "the joiner sees its OWN owner's (refused, stale-window) result, not a successor's"
+            sink.tokenRecordInstanceForTesting(token: aOwnershipToken(aOwnership)), joinToken.instance,
+            "premise: the owner and the joiner are bound to the SAME record"
         )
+        XCTAssertEqual(
+            sink.terminalResultForTesting(token: joinToken)?.outcome, ownerSettlement.outcome,
+            "the ORIGINAL record carries the owner's settlement, not a successor's result"
+        )
+        XCTAssertEqual(
+            sink.recordInstanceForTesting(utteranceId: shared), successorInstance,
+            "the successor's record is untouched by the stale owner's settlement"
+        )
+
+        // The joiner resolves through the PRODUCTION route entry with its OLD admission, and must
+        // observe its own owner's settlement.
+        let joined = await sink.routeToCloud(
+            request: "joiner resumes", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: joinAdmission
+        )
+        XCTAssertEqual(
+            joined.outcome, ownerSettlement.outcome,
+            "the held joiner sees ITS OWN owner's settlement, never the successor's result"
+        )
+    }
+
+    /// NO IMMORTAL SECOND MAP (reviewer be89233d). A record released by its last admitted caller
+    /// must be GONE from the owner's retention — a completed utterance is not retained forever.
+    @MainActor
+    func testCompletedRecordIsReleasedOnceItsAdmittedCallersResolve() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin)
+
+        let shared = "utterance-release"
+        let owner = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        guard case let .owner(ownerToken) = owner else { return XCTFail("expected owner") }
+        // A joiner admitted against the same record.
+        guard case let .join(joinToken) = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin) else {
+            return XCTFail("expected join")
+        }
+
+        _ = await sink.routeToCloud(
+            request: "owner", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: owner
+        )
+        _ = await sink.routeToCloud(
+            request: "joiner", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: joinTokenDisposition(joinToken)
+        )
+
+        // Both admitted callers have resolved; the record must carry no live callers. Force a
+        // window change so the live map is detached and observe the record is unreachable.
+        sink.retireRetainedDispatchesIfWindowChanged(to: nil)
+        XCTAssertNil(
+            sink.recordInstanceForTesting(utteranceId: shared),
+            "a completed utterance is detached on the window change, not retained forever"
+        )
+        XCTAssertEqual(
+            sink.tokenRecordInstanceForTesting(token: ownerToken), ownerToken.instance,
+            "premise: the owner token is bound to its own record"
+        )
+    }
+
+    private func joinTokenDisposition(_ token: CloudDispatchOwnership.DispatchToken) -> CloudDispatchOwnership {
+        .join(token)
+    }
+
+    private func aOwnershipToken(_ ownership: CloudDispatchOwnership) -> CloudDispatchOwnership.DispatchToken {
+        if case let .owner(token) = ownership { return token }
+        fatalError("expected an owner disposition")
     }
 
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {

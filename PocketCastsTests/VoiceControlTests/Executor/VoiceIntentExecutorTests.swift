@@ -694,11 +694,11 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
         claimObservedBeforeDispatch.append(!dispatchInProgress)
         if let effectOwnerForTesting, !effectOwnerForTesting(utteranceId) {
-            return .join(.init(utteranceId: utteranceId ?? "", instance: UUID()))
+            return .join(.init(utteranceId: utteranceId ?? "", instance: UUID(), record: nil))
         }
-        guard let utteranceId else { return .owner(.init(utteranceId: "", instance: UUID())) }
+        guard let utteranceId else { return .owner(.init(utteranceId: "", instance: UUID(), record: nil)) }
         if let owner = ownerTokens[utteranceId] { return .join(owner) }
-        let token = CloudDispatchOwnership.DispatchToken(utteranceId: utteranceId, instance: UUID())
+        let token = CloudDispatchOwnership.DispatchToken(utteranceId: utteranceId, instance: UUID(), record: nil)
         ownerTokens[utteranceId] = token
         return .owner(token)
     }

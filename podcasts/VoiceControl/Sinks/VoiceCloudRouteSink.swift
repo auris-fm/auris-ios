@@ -15,6 +15,18 @@ enum CloudDispatchOwnership: Equatable {
     struct DispatchToken: Equatable, Hashable {
         let utteranceId: String
         let instance: UUID
+        /// The record this token was admitted against. Carried so the token can resolve against
+        /// ITS OWN record even after a window change, and so the record is released when its last
+        /// admitted caller resolves (reviewer be89233d). Nil only for the legacy no-identity case.
+        let record: CloudRouteSink.UtteranceRecord?
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.utteranceId == rhs.utteranceId && lhs.instance == rhs.instance
+        }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(utteranceId)
+            hasher.combine(instance)
+        }
     }
 
     var ownsDispatch: Bool { if case .owner = self { return true }; return false }
