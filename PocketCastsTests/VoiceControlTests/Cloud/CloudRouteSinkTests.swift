@@ -4166,6 +4166,81 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
     }
 
+    /// SERVICE-TO-RENDERER, DUPLICATE AND TERMINAL-CLOSE (spec a8580c0c). An executor return
+    /// value from an always-owner mock does not establish exactly-once USER FEEDBACK, so this
+    /// runs the whole path against the REAL sink and the REAL AudioFeedbackRenderer: an owner
+    /// refusal turn, a DUPLICATE of the same utterance, and a terminal-close variant. The user must
+    /// hear the daily-limit line EXACTLY ONCE, and a refused turn must not extend grace.
+    @MainActor
+    func test_dailyLimitFeedbackRendersExactlyOnceAcrossDuplicateAndTerminalClose() async throws {
+        let grace = GracePeriodSignal()
+        grace.onWakeWordDetected()
+        let generation = grace.currentGeneration()
+        XCTAssertTrue(grace.claimRefusalTone(), "a refusal was announced (window spent)")
+
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"limit_exceeded","message":"this turn was not admitted"}
+
+            """
+        let sink = makeSink()
+        let executor = VoiceIntentExecutor(
+            playbackSink: NoOpCloudPlaybackSink(),
+            effectsSink: NoOpCloudEffectsSink(),
+            volumeSink: NoOpCloudVolumeSink(),
+            sleepSink: NoOpCloudSleepSink(),
+            chapterSink: NoOpCloudChapterSink(),
+            bookmarkSink: NoOpCloudBookmarkSink(),
+            queueSink: NoOpCloudQueueSink(),
+            playbackQuerySink: NoOpCloudPlaybackQuerySink(),
+            statsQuerySink: NoOpCloudStatsQuerySink(),
+            cloudRouteSink: sink,
+            playbackContextProvider: NoOpCloudPlaybackContextProvider(),
+            gracePeriodSignal: grace
+        )
+        let tts = CountingDailyLimitTtsEngine()
+        let renderer = AudioFeedbackRenderer(
+            earconPlayer: SilentCloudEarconPlayer(), ttsEngine: tts, ducker: NoOpCloudDucker()
+        )
+
+        let utterance = "limit-utterance-\(UUID().uuidString)"
+        // OWNER turn: renders the daily-limit line.
+        let owner = await executor.execute(CloudRouteIntent(
+            request: "play something", tier: .free,
+            utteranceId: utterance, origin: .modelCall, generation: generation
+        ))
+        renderer.render(owner)
+        XCTAssertEqual(
+            owner,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow.")
+        )
+        // DUPLICATE of the SAME utterance: the sink settles it and the executor renders nothing.
+        let duplicate = await executor.execute(CloudRouteIntent(
+            request: "play something", tier: .free,
+            utteranceId: utterance, origin: .modelCall, generation: generation
+        ))
+        renderer.render(duplicate)
+        // TERMINAL CLOSE on a FRESH utterance (stream ends without a terminal frame).
+        self.pendingFixture = ""
+        let closeResponse = await executor.execute(CloudRouteIntent(
+            request: "play something", tier: .free,
+            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation
+        ))
+        renderer.render(closeResponse)
+
+        // Let any late render land, then assert the TOTAL is exactly one.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(
+            tts.dailyLimitUtterances, 1,
+            "the daily-limit line must be rendered EXACTLY ONCE across owner, duplicate and close"
+        )
+        XCTAssertFalse(
+            grace.windowIsRenewedForTesting(),
+            "a refused turn must not extend the grace window"
+        )
+    }
+
     /// EVERY SUPPORTED RESPONSE LANGUAGE CARRIES THE DAILY-LIMIT KEY (spec c259dc64). The scope is
     /// exactly en/de/es/fr/ja/ko/zh/yue: an English entry alone does not satisfy localized
     /// daily-limit feedback, and a Chinese turn must not be answered by an English earcon. This
@@ -4468,4 +4543,134 @@ final class SettlementFailingOperationRecordStore: OperationRecordStore {
         return true
     }
     func loadResult() -> OperationRecordLoadResult { .loaded(load()) }
+}
+
+
+// MARK: - Service-to-renderer helpers (spec a8580c0c)
+
+/// Counts daily-limit utterances so "exactly once" is measured, not inferred from a substring.
+private final class CountingDailyLimitTtsEngine: TtsEngineProtocol {
+    private(set) var dailyLimitUtterances = 0
+    func warmUp(language: String) {}
+    func speak(text: String, language: String) async {
+        if text.contains("Auris") && text.contains("daily limit") { dailyLimitUtterances += 1 }
+    }
+    func cancel() {}
+    func releaseEngine() {}
+}
+
+/// A silent earcon player: the daily-limit response is SPOKEN, so no earcon asset is needed and
+/// no audio graph is built.
+private final class SilentCloudEarconPlayer: EarconPlayer {
+    init() { super.init(engine: nil) }
+    override func hasEarcon(_ id: EarconId) -> Bool { false }
+    override func play(_ id: EarconId) {}
+}
+
+private struct NoOpCloudDucker: AudioSessionDucking {
+    func duck() {}
+    func unduck() {}
+}
+
+private struct NoOpCloudPlaybackContextProvider: PlaybackContextProvider {
+    func current() -> PlaybackContext? {
+        PlaybackContext(
+            episodeId: "ep", podcastId: "pod", referencePositionMs: 0, clientPositionMs: 0,
+            recentReferencePositions: [], previousReferencePositionMs: nil
+        )
+    }
+}
+
+private final class NoOpCloudPlaybackSink: VoicePlaybackSink {
+    var isPlaying: Bool { false }
+    func pause() -> VoiceResponse { .silent }
+    func resume() -> VoiceResponse { .silent }
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse { .silent }
+    func seekTo(positionSeconds: Int) -> VoiceResponse { .silent }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse { .silent }
+    func nextEpisode() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudEffectsSink: VoiceEffectsSink {
+    func setSpeed(_ speed: Double) -> VoiceResponse { .silent }
+    func adjustSpeed(delta: Double) -> VoiceResponse { .silent }
+    func setTrimMode(_ mode: TrimMode) -> VoiceResponse { .silent }
+    func setVolumeBoost(enabled: Bool) -> VoiceResponse { .silent }
+    func queryEffects() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudVolumeSink: VoiceVolumeSink {
+    func setVolume(_ volume: Int) -> VoiceResponse { .silent }
+    func adjustVolume(delta: Int) -> VoiceResponse { .silent }
+    func queryVolume() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudSleepSink: VoiceSleepSink {
+    func set(minutes: Int) -> VoiceResponse { .silent }
+    func endOfEpisode() -> VoiceResponse { .silent }
+    func endOfChapter() -> VoiceResponse { .silent }
+    func addTime(minutes: Int) -> VoiceResponse { .silent }
+    func cancel() -> VoiceResponse { .silent }
+    func query() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudChapterSink: VoiceChapterSink {
+    func next() -> VoiceResponse { .silent }
+    func previous() -> VoiceResponse { .silent }
+    func byIndex(_ index: Int) -> VoiceResponse { .silent }
+    func byTitle(_ title: String) -> VoiceResponse { .silent }
+    func openLink(index: Int?, query: String?) -> VoiceResponse { .silent }
+    func queryList() -> VoiceResponse { .silent }
+    func queryCurrent() -> VoiceResponse { .silent }
+    func queryCount() -> VoiceResponse { .silent }
+    func queryNext() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudBookmarkSink: VoiceBookmarkSink {
+    func add(title: String?) -> VoiceResponse { .silent }
+    func rename(ref: String, title: String) -> VoiceResponse { .silent }
+    func play(ref: String) -> VoiceResponse { .silent }
+    func delete(ref: String) -> VoiceResponse { .silent }
+    func deleteAll() -> VoiceResponse { .silent }
+    func queryList() -> VoiceResponse { .silent }
+    func queryCount() -> VoiceResponse { .silent }
+    func queryNearby() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudQueueSink: VoiceQueueSink {
+    func addTop(episode: String) -> VoiceResponse { .silent }
+    func addBottom(episode: String) -> VoiceResponse { .silent }
+    func remove(episode: String) -> VoiceResponse { .silent }
+    func moveToTop(episode: String) -> VoiceResponse { .silent }
+    func moveToBottom(episode: String) -> VoiceResponse { .silent }
+    func clear() -> VoiceResponse { .silent }
+    func removeByPodcast(podcast: String) -> VoiceResponse { .silent }
+    func sort(sortOrder: podcasts.SortOrder) -> VoiceResponse { .silent }
+    func queryContents() -> VoiceResponse { .silent }
+    func queryNext() -> VoiceResponse { .silent }
+    func queryLength() -> VoiceResponse { .silent }
+    func queryIsQueued(episode: String) -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudPlaybackQuerySink: VoicePlaybackQuerySink {
+    func whatsPlaying() -> VoiceResponse { .silent }
+    func position() -> VoiceResponse { .silent }
+    func timeRemaining() -> VoiceResponse { .silent }
+    func episodeDuration() -> VoiceResponse { .silent }
+    func publishDate() -> VoiceResponse { .silent }
+    func episodeDescription() -> VoiceResponse { .silent }
+    func downloadStatus() -> VoiceResponse { .silent }
+    func episodeTitle() -> VoiceResponse { .silent }
+}
+
+private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
+    func listeningTime(period: String?) -> VoiceResponse { .silent }
+    func topPodcasts(period: String?) -> VoiceResponse { .silent }
+    func episodesFinished(period: String?) -> VoiceResponse { .silent }
+    func listeningStreak() -> VoiceResponse { .silent }
+    func subscriptionCount() -> VoiceResponse { .silent }
+    func unplayedTotal() -> VoiceResponse { .silent }
+    func downloadStats() -> VoiceResponse { .silent }
+    func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
+    func timeSinceLastListen() -> VoiceResponse { .silent }
 }
