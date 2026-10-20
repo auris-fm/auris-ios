@@ -262,6 +262,9 @@ class VoiceControlService: ObservableObject {
         // Same lifetime reasoning: the manager must learn about windows for as long as the service
         // lives, not only until the assembly's build call returns.
         wireLiveOriginBinding()
+        // The ASR/router callbacks, including the serial capture path a dialog `new_command`
+        // re-processes through (spec 0443b70).
+        wireAsrCallbacks()
     }
 
     func startIfAllowed() {
@@ -327,7 +330,16 @@ class VoiceControlService: ObservableObject {
         .store(in: &cancellables)
 
         asrEngine.onRoutingInput = { [weak self] input in
-            guard let self else { return }
+            self?.enqueueRoutingInput(input, origin: nil)
+        }
+    }
+
+    /// Enqueues one utterance onto the serial routing chain — the single capture path for ASR
+    /// callbacks AND for a dialog `new_command` value queued by a completing turn (spec 0443b70).
+    /// `origin: nil` means "capture the live window at enqueue time"; a caller that already holds
+    /// the dispatch origin (the draining turn) passes it so the re-processed command belongs to the
+    /// same window it was spoken in.
+    private func enqueueRoutingInput(_ input: IntentRoutingInput, origin: Int? = nil) {
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
             guard self.isListening else {
@@ -342,7 +354,7 @@ class VoiceControlService: ObservableObject {
             // wait, which is the attribution error this exists to prevent: a turn that queued
             // behind earlier work would be stamped with whatever window is current by the time it
             // runs, and classified by the window state then rather than by what selected it.
-            let capturedOrigin = self.gracePeriodSignal.currentGeneration()
+            let capturedOrigin = origin ?? self.gracePeriodSignal.currentGeneration()
             // The INPUT's own provenance, not a live read. `isActive` cannot tell a wake that
             // fired during grace from a follow-up inside the same grace — both arrive with grace
             // active — so the answer has to come from the gate decision that produced this input.
@@ -406,8 +418,10 @@ class VoiceControlService: ObservableObject {
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
-        }
+    }
 
+    /// Wires the ASR/router callbacks (the pre-existing registration block, now a named step).
+    private func wireAsrCallbacks() {
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
@@ -635,6 +649,19 @@ class VoiceControlService: ObservableObject {
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
                 audioRenderer.render(response)
+            } else if let reprocessValue = dialogResult.reprocessValue {
+                // REPROCESS vs SPEAK (spec 0443b70): a `new_command` control cancels the dialog
+                // and re-processes its value as a FRESH transcript — the value is a command the
+                // user gave ("what they said, taken back"), not an answer to speak. Merely
+                // rendering it as prose answered nothing and executed nothing. The value is
+                // ENQUEUED as its own chain link — never routed inline from this turn, which
+                // would re-enter `handleRoutingInput` from inside the serial chain — under THIS
+                // capture's admitted identity (the value is not a new utterance: no new admission
+                // happened) and the window it was spoken in.
+                enqueueRoutingInput(
+                    .english(transcript: reprocessValue, selection: nil, utteranceId: input.utteranceId),
+                    origin: capturedOrigin
+                )
             } else if let question = dialogResult.question {
                 audioRenderer.render(.spoken(question))
             }
