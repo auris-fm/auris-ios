@@ -47,8 +47,9 @@ final class CloudConversationManager {
 
     /// The conversation opened in the live origin.
     private var current: OpenConversation?
-    /// REQUEST OWNERSHIP: utterance id -> already-prepared logical request. A repeated callback
-    /// for the same utterance reuses its wire request identity (bounded per window).
+    /// REQUEST OWNERSHIP: utterance id -> prepared logical request, for utterances prepared in
+    /// the LIVE window. Retired wholesale with the window (registerLiveOrigin change) — one
+    /// entry per real utterance, never evicted mid-window.
     private var preparedByUtteranceId: [String: CloudPreparedConversation] = [:]
 
     private struct OpenConversation {
@@ -73,10 +74,24 @@ final class CloudConversationManager {
         retryingRequestId: String? = nil,
         utteranceId: String? = nil
     ) -> CloudPreparedConversation? {
-        // A retry reuses the prepared logical request rather than rebuilding it, so the wire
-        // `request_id` is the one the original attempt used.
+        // Origin validated BEFORE every reuse path (reviewer 0c546ce5 item 3): a stale
+        // callback — including one carrying a retained utterance identity or a retry id — can
+        // never bypass the live-window check.
+        guard let origin, origin == liveOrigin else { return nil }
+
+        // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): a repeated callback for the SAME
+        // utterance reuses its retained logical request. RETENTION RULE: every utterance
+        // prepared inside the live window is retained for exactly the WINDOW's lifetime — no
+        // cap, no eviction — so a duplicate can never become a fresh dispatch; the window's
+        // close (registerLiveOrigin to nil or a new generation) retires the whole map.
+        if let utteranceId, let prepared = preparedByUtteranceId[utteranceId] {
+            return prepared
+        }
+
         if let retryingRequestId,
+           case .wakeWord = selection,
            let existing = current,
+           existing.origin == origin,
            existing.creationRequestId == retryingRequestId {
             return CloudPreparedConversation(
                 requestId: retryingRequestId,
@@ -85,45 +100,31 @@ final class CloudConversationManager {
             )
         }
 
-        // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): a repeated callback for the SAME
-        // utterance reuses the already-prepared logical request — one wire request identity per
-        // utterance. Independent utterances (different ids) each prepare their own.
-        if let utteranceId,
-           let prepared = preparedByUtteranceId[utteranceId] {
-            return prepared
-        }
-
-        // No live origin means no claim on any conversation. Refuse rather than create: a
-        // replacement would be a conversation the user never opened, and it would also take
-        // the place of the live window's own conversation.
-        guard let origin, origin == liveOrigin else { return nil }
-
+        var prepared: CloudPreparedConversation
         if case .followUp = selection, let existing = current, existing.origin == origin {
-            return CloudPreparedConversation(
+            prepared = CloudPreparedConversation(
                 requestId: UUID().uuidString,
                 conversationId: existing.id,
                 mode: Self.resume
             )
-        }
+        } else {
 
-        let requestId = UUID().uuidString
-        let conversationId = UUID().uuidString
-        current = OpenConversation(
-            id: conversationId,
-            origin: origin,
-            creationRequestId: requestId
-        )
-        let prepared = CloudPreparedConversation(
-            requestId: requestId,
-            conversationId: conversationId,
-            mode: Self.create
-        )
+            let requestId = UUID().uuidString
+            let conversationId = UUID().uuidString
+            current = OpenConversation(
+                id: conversationId,
+                origin: origin,
+                creationRequestId: requestId
+            )
+            prepared = CloudPreparedConversation(
+                requestId: requestId,
+                conversationId: conversationId,
+                mode: Self.create
+            )
+        }
+        // Both create AND resume preparations are retained under the utterance identity.
         if let utteranceId {
             preparedByUtteranceId[utteranceId] = prepared
-            // Bound the map: identities are per utterance, so a windowed history is enough.
-            if preparedByUtteranceId.count > 32 {
-                preparedByUtteranceId.removeValue(forKey: preparedByUtteranceId.keys.first!)
-            }
         }
         return prepared
     }
@@ -153,6 +154,11 @@ final class CloudConversationManager {
     /// live when a request was dispatched but has since been replaced — or whose window has
     /// closed — cannot.
     func registerLiveOrigin(_ origin: Int?) {
+        if origin != liveOrigin {
+            // The owning window ended (or a new one opened): retained preparations belong to
+            // the request/conversation lifecycle of THAT window and retire with it.
+            preparedByUtteranceId.removeAll()
+        }
         liveOrigin = origin
     }
 

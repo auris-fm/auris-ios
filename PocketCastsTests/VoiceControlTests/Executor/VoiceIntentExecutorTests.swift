@@ -102,6 +102,47 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// it was issued under. Completing after a privacy close and a new wake must
     /// not reset whatever window is current — that would re-arm a session this
     /// turn never belonged to.
+    /// QUIET DUPLICATES (reviewer 0c546ce5 item 4): a duplicate of an utterance the executor
+    /// already completed — the joined or settled copy the sink hands back — observes completion
+    /// WITHOUT repeating the owner's effects. The grace renewal happens exactly once (the
+    /// duplicate cannot restore a spent allowance), the duplicate's response renders nothing,
+    /// and analytics record the command once. Two independent utterances both count.
+    func test_execute_duplicateUtteranceIsQuietToGraceAndAnalytics() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "a refusal is announced (spent)")
+
+        let owner = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-dup", origin: .modelCall, generation: generation
+        )
+        _ = await executor.execute(owner)
+        XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "the OWNER's completion renews the window")
+        // Re-arm the observable: the owner's renewal cleared the refusal-tone claim, so holding
+        // it again gives the duplicate a detectable renewal to (NOT) perform.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the re-armed refusal is announced")
+
+        // The duplicate: identical captured intent (same utterance id + generation).
+        let duplicate = await executor.execute(owner)
+        XCTAssertEqual(duplicate, .silent, "a duplicate renders nothing")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "the duplicate must NOT renew the window again (a joined copy cannot re-arm a spent allowance)"
+        )
+
+        // An INDEPENDENT utterance in the same window still gets its effects.
+        let independent = CloudRouteIntent(
+            request: "skip forward", tier: .unknown,
+            utteranceId: "utterance-ind", origin: .modelCall, generation: generation
+        )
+        _ = await executor.execute(independent)
+        XCTAssertTrue(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "an independent utterance is not quieted by the duplicate rule"
+        )
+    }
+
     func test_execute_modelChosenRouteFromAnEndedWindowCannotResetTheNewOne() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()

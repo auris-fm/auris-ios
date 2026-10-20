@@ -75,16 +75,11 @@ class VoiceControlAssembly {
         gracePeriodSignal.playbackContextAvailable = playbackContextAvailable
         let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(
             gracePeriodSignal: gracePeriodSignal,
-            // Real context changes: a track change (episode loaded/cleared) or playback ending.
-            // Each event re-samples the ACTUAL provider rather than assuming a direction.
-            playbackContextPublisher: Publishers.Merge(
-                NotificationCenter.default.publisher(for: Constants.Notifications.playbackTrackChanged).map { _ in () },
-                NotificationCenter.default.publisher(for: Constants.Notifications.playbackEnded).map { _ in () }
-            )
-            .map { _ in playbackContextAvailable() }
-            .prepend(playbackContextAvailable())
-            .removeDuplicates()
-            .eraseToAnyPublisher()
+            // Real context changes through the SHARED production publisher: a track change
+            // (episode loaded/cleared) or playback ending re-samples the ACTUAL provider rather
+            // than assuming a direction.
+            playbackContextPublisher: PlaybackContextConditionSource
+                .production(provider: playbackContextAvailable).publisher
         )
         let interruptionHandler = AudioSessionInterruptionHandler()
 

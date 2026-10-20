@@ -27,6 +27,11 @@ class GracePeriodSignal: ObservableObject {
     /// the authority for capture either way.
     var playbackContextAvailable: (() -> Bool)?
 
+    /// Whether the app is currently foreground. Driven by the production foreground source
+    /// (`ForegroundConditionSource`); context loss is only a RETIREMENT event when the
+    /// foreground is already gone — in the foreground, foreground alone is still context.
+    private(set) var isForegroundAllowed = true
+
     init(timeout: TimeInterval = 30.0) {
         self.timeout = timeout
     }
@@ -59,16 +64,32 @@ class GracePeriodSignal: ObservableObject {
     /// Capture is a separate gate concern: the gate still decides whether the microphone may be
     /// used. This only governs the window's lifetime.
     func onAppBackgrounded() {
-        // Preservation is decided ONLY by an INDEPENDENT context source (spec 3893cd55): an
-        // actual eligible playback context (episode loaded, playing or paused). A hold alone is
-        // NOT a context and grace must not self-sustain through its own hold — the same
-        // grace-as-context defect Android removed. With no real context, backgrounding ends the
-        // window; a turn completing afterwards is judged against its RETIRED generation.
-        if playbackContextAvailable?() == true {
-            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: preserved (backgrounded with playback context)")
+        isForegroundAllowed = false
+        // Preservation requires BOTH (reviewer 0c546ce5; spec 3893cd55): a live hold (work worth
+        // preserving) AND an INDEPENDENT playback context (an eligible episode loaded, playing
+        // or paused — a real source that keeps capture allowed). Neither alone suffices: a hold
+        // alone manufactures nothing (grace must not self-sustain), and context alone means
+        // there is no held work to preserve.
+        if hasActiveHold, playbackContextAvailable?() == true {
+            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: preserved (backgrounded: live hold + playback context)")
             return
         }
         deactivate(trigger: "backgrounded")
+    }
+
+    func onAppForegrounded() {
+        isForegroundAllowed = true
+    }
+
+    /// The playback context changed (real production path: the playback publisher re-samples
+    /// the provider on each playback event). LOSING the last context while the foreground is
+    /// ALREADY gone retires the window — no further lifecycle notification is needed, and
+    /// `deactivate` bumps the generation, releases holds, and (via the origin binding) clears
+    /// the live origin. A hold does NOT save the window: preservation is hold AND context, so
+    /// with the context gone nothing independently sustains it.
+    func onPlaybackContextChanged(_ available: Bool) {
+        guard !available, !isForegroundAllowed else { return }  // foreground alone is still context
+        deactivate(trigger: "playback context lost")
     }
 
     private func startOrReset(trigger: String, opensGeneration: Bool = false) {

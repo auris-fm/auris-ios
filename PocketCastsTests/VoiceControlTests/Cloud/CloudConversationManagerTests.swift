@@ -37,6 +37,34 @@ final class CloudConversationManagerTests: XCTestCase {
         )
     }
 
+    /// RETENTION RULE (reviewer 0c546ce5 item 3): EVERY utterance prepared inside the live
+    /// window — create AND follow-up (resume) alike — is retained for exactly the window's
+    /// lifetime, with no cap and no eviction, so a duplicate can never become a fresh dispatch.
+    /// The window's close retires the whole retention, and origin is validated BEFORE every
+    /// reuse, so a stale callback can never ride a retained identity.
+    func testFollowUpPreparationIsRetainedPerUtteranceAndRetiredWithTheWindow() throws {
+        // A follow-up utterance's preparation is retained and reused by its duplicate.
+        _ = manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1")
+        let followUp = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-2"))
+        XCTAssertEqual(followUp.mode, "resume")
+        let followUpDuplicate = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-2"))
+        XCTAssertEqual(followUpDuplicate.requestId, followUp.requestId, "a follow-up duplicate reuses the retained resume")
+        XCTAssertEqual(followUpDuplicate.conversationId, followUp.conversationId)
+
+        // Later utterances do NOT evict earlier ones: every retained duplicate still joins.
+        _ = manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-3")
+        let stillRetained = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-2"))
+        XCTAssertEqual(stillRetained.requestId, followUp.requestId,
+                       "no eviction: a retained duplicate of an earlier utterance still joins its request")
+
+        // The window's close retires the retention; a stale callback cannot ride the old id.
+        manager.registerLiveOrigin(nil)
+        XCTAssertNil(
+            manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-3"),
+            "origin is validated BEFORE every reuse: a stale window cannot prepare at all"
+        )
+    }
+
     func testFirstTurnCreates() throws {
         let prepared = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
         XCTAssertEqual(prepared.mode, "create")

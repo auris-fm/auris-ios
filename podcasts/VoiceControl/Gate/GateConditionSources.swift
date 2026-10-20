@@ -92,6 +92,9 @@ class ForegroundConditionSource: GateConditionSource {
     var publisher: AnyPublisher<GateCondition, Never> {
         NotificationCenter.default
             .publisher(for: UIApplication.didBecomeActiveNotification)
+            .handleEvents(receiveOutput: { [weak self] _ in
+                self?.gracePeriodSignal.onAppForegrounded()
+            })
             .merge(with: NotificationCenter.default
                 .publisher(for: UIApplication.willResignActiveNotification)
                 .handleEvents(receiveOutput: { [weak self] _ in
@@ -107,6 +110,22 @@ class ForegroundConditionSource: GateConditionSource {
 /// Not a hold, and not a grace window: the owning spec allows context only from real sources.
 struct PlaybackContextConditionSource {
     let publisher: AnyPublisher<Bool, Never>
+
+    /// The PRODUCTION publisher: re-samples the REAL provider on real playback events (track
+    /// change = episode loaded/cleared; playback ended). Assembly and controls share this one
+    /// construction so the tested path is the shipped path.
+    static func production(provider: @escaping () -> Bool) -> PlaybackContextConditionSource {
+        PlaybackContextConditionSource(
+            publisher: Publishers.Merge(
+                NotificationCenter.default.publisher(for: Constants.Notifications.playbackTrackChanged).map { _ in () },
+                NotificationCenter.default.publisher(for: Constants.Notifications.playbackEnded).map { _ in () }
+            )
+            .map { _ in provider() }
+            .prepend(provider())
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+        )
+    }
 }
 
 class LiveConditionMonitor: ObservableObject {
@@ -128,6 +147,9 @@ class LiveConditionMonitor: ObservableObject {
     private let castingSource = CastingConditionSource()
     private let otherAppPlayingSource = OtherAppPlayingConditionSource()
     private let foregroundSource: ForegroundConditionSource
+    /// Kept for the context-loss retirement path: the gate resolving to `.none` retires the
+    /// grace window through the signal (no separate lifecycle notification exists for it).
+    private let gracePeriodSignal: GracePeriodSignal
     private let playbackContextSource: PlaybackContextConditionSource?
 
     private var cancellables = Set<AnyCancellable>()
@@ -147,6 +169,7 @@ class LiveConditionMonitor: ObservableObject {
 
     init(gracePeriodSignal: GracePeriodSignal, playbackContextPublisher: AnyPublisher<Bool, Never>? = nil) {
         self.foregroundSource = ForegroundConditionSource(gracePeriodSignal: gracePeriodSignal)
+        self.gracePeriodSignal = gracePeriodSignal
         self.playbackContextSource = playbackContextPublisher.map { PlaybackContextConditionSource(publisher: $0) }
         bind()
     }
@@ -218,11 +241,22 @@ class LiveConditionMonitor: ObservableObject {
                                 playbackContextAvailable: playbackAvailable)
         }
         .removeDuplicates()
-        .sink { [weak self] in
-            FileLog.shared.addMessage("[VoicePipeline] Context: \($0)")
-            self?.context = $0
-        }
+        .sink(receiveValue: { [weak self] newContext in
+            FileLog.shared.addMessage("[VoicePipeline] Context: \(newContext)")
+            self?.context = newContext
+        })
         .store(in: &cancellables)
+
+        // The LAST genuine context is gone while the foreground is already lost (reviewer
+        // 0c546ce5 item 2): the playback publisher tells the signal directly, so backgrounding
+        // that was preserved under a playback context retires when that context disappears —
+        // no separate lifecycle notification exists for it. The signal judges the foreground
+        // itself; a loss while foreground holds is not a retirement.
+        playbackPublisher
+            .sink { [weak self] available in
+                self?.gracePeriodSignal.onPlaybackContextChanged(available)
+            }
+            .store(in: &cancellables)
     }
 
     func updateModelsReady(_ condition: GateCondition) {

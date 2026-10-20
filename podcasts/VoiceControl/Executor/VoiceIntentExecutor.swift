@@ -164,6 +164,20 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
+    /// Effect ownership for a cloud utterance: true for the FIRST caller (the owner), false
+    /// for duplicates. See the cloud branch in `execute` for the retention rule.
+    private var effectClaimedGeneration: Int?
+    private var effectClaimedUtterances: Set<String> = []
+    private func claimEffectOwnership(_ utteranceId: String, generation: Int?) -> Bool {
+        if generation != effectClaimedGeneration {
+            effectClaimedGeneration = generation
+            effectClaimedUtterances = []
+        }
+        if effectClaimedUtterances.contains(utteranceId) { return false }
+        effectClaimedUtterances.insert(utteranceId)
+        return true
+    }
+
     func execute(
         _ intent: any VoiceIntent,
         /// REQUEST-SCOPED, carried on THIS dispatch alongside its request. Storing it on the shared
@@ -207,6 +221,16 @@ class VoiceIntentExecutor {
                 sourceTranscript: cr.sourceTranscript,
                 sourceLanguage: cr.sourceLanguage
             )
+            // A duplicate (a joined or settled copy of the owner's dispatch) observes
+            // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or
+            // rendered feedback (reviewer 0c546ce5 item 4). The claim is keyed by generation
+            // because duplicates carry the IDENTICAL captured intent — same utterance id AND
+            // same generation; a new generation therefore implies every older duplicate has
+            // already had its one effect opportunity.
+            if let utteranceId = cr.utteranceId, !claimEffectOwnership(utteranceId, generation: cr.generation) {
+                FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(utteranceId)")
+                return .silent
+            }
             response = result.response
             // Carried out of the switch rather than inferred from `response` below: the
             // rendered feedback cannot say what happened (a spoken error and a silent
