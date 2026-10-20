@@ -29,8 +29,13 @@ final class FakeLfmInference: LfmInference {
 
     var lastError: String { lastErrorMessage }
 
+    /// LIFECYCLE OBSERVER (spec 6b45a5d2): counts real `inference.load` calls so a control can
+    /// pin WHEN the router load happens (first arm, not construction).
+    private(set) var loadCount = 0
+
     func load(modelPath: String, classifierPath: String, labelMapPath: String, nCtx: Int) -> Bool {
-        loadResult
+        loadCount += 1
+        return loadResult
     }
 
     func tokenize(_ text: String, addBos: Bool) throws -> [Int] {

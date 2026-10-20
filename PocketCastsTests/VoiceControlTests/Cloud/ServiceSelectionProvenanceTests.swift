@@ -565,6 +565,44 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
+    /// ROUTER LOAD LIFECYCLE (spec 6b45a5d2, reviewer 0b5b4222): the LFM router load is armed at
+    /// the FIRST-ARM boundary (`startIfAllowed`), NOT at construction. Building the service must
+    /// perform zero `inference.load` calls; the load happens once the lifecycle arms.
+    @MainActor
+    func test_routerLoadIsArmedAtFirstArmNotAtConstruction() async throws {
+        let inference = FakeLfmInference()
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let capture = FakeAudioCapture()
+        let fakeBackend = FakeAsrBackend()
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            cloudConfig: CloudConfig(defaults: UserDefaults(suiteName: "router_load_lifecycle_\(UUID().uuidString)")!),
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+
+        XCTAssertEqual(
+            inference.loadCount, 0,
+            "construction performs NO eager router load — the model is paid at first arm"
+        )
+
+        service.startIfAllowed()
+        try await waitForRouter(service: service)
+
+        XCTAssertGreaterThanOrEqual(
+            inference.loadCount, 1,
+            "the first arm kicks the router load"
+        )
+    }
+
     /// SELECTION PRESERVATION THROUGH REPROCESS (reviewer 8cb24f13): a fresh WAKE capture that
     /// completes a dialog keeps its wakeWord selection through the reprocessed dispatch — the
     /// wire mode is create, not the live-state resume a dropped selection would fall back to.

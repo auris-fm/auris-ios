@@ -262,9 +262,6 @@ class VoiceControlService: ObservableObject {
         // Same lifetime reasoning: the manager must learn about windows for as long as the service
         // lives, not only until the assembly's build call returns.
         wireLiveOriginBinding()
-        // The ASR/router callbacks, including the serial capture path a dialog `new_command`
-        // re-processes through (spec 0443b70).
-        wireAsrCallbacks()
     }
 
     func startIfAllowed() {
@@ -329,9 +326,10 @@ class VoiceControlService: ObservableObject {
         }
         .store(in: &cancellables)
 
-        asrEngine.onRoutingInput = { [weak self] input in
-            self?.enqueueRoutingInput(input, origin: nil)
-        }
+        // The ASR/router callbacks, including the serial capture path a dialog `new_command`
+        // re-processes through (spec 0443b70) — armed at FIRST ARM, exactly as before the
+        // extraction: same lifecycle, only the function boundary moved.
+        wireAsrCallbacks()
     }
 
     /// Enqueues one utterance onto the serial routing chain — the single capture path for ASR
@@ -426,6 +424,10 @@ class VoiceControlService: ObservableObject {
 
     /// Wires the ASR/router callbacks (the pre-existing registration block, now a named step).
     private func wireAsrCallbacks() {
+        asrEngine.onRoutingInput = { [weak self] input in
+            self?.enqueueRoutingInput(input, origin: nil)
+        }
+
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
