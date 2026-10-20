@@ -186,8 +186,8 @@ final class IntentRoutingInputTests: XCTestCase {
     /// the wake phrase never leaks to routing, and CLEANUP means no translation-stage work,
     /// no unroutable feedback, and no wake-only confirmation for the junk remainder.
     func test_wakePositiveTrimLeavingNonContentRemainderIsSilentlyDiscardedWithNoTranslationWork() async throws {
-        let backend = StubAsrBackend(
-            result: AsrResult(
+        let backend = QueueingAsrBackend(results: [
+            AsrResult(
                 text: "hey auris !!!",
                 detectedLanguage: "en",
                 tokens: [
@@ -195,11 +195,21 @@ final class IntentRoutingInputTests: XCTestCase {
                     AsrToken(text: "!!!", startMs: 400, endMs: 700),       // the remainder
                 ]
             ),
-            canTranslate: false
-        )
+            // The NEXT capture on the SAME running engine must work normally: the discard
+            // left no wedged pipeline state (reviewer f03b9cf1).
+            AsrResult(
+                text: "hey auris pause",
+                detectedLanguage: "en",
+                tokens: [
+                    AsrToken(text: "hey auris", startMs: 0, endMs: 300),
+                    AsrToken(text: " pause", startMs: 400, endMs: 700),
+                ]
+            ),
+        ])
         let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
         let engine = makeEngine(backend: backend, translation: translation, wake: DetectingWakeStub())
-        engine.utteranceIdGeneratorForTesting = { "adm-trim-1" }
+        var minted = ["adm-trim-1", "adm-trim-2"]
+        engine.utteranceIdGeneratorForTesting = { minted.removeFirst() }
 
         var inputs: [IntentRoutingInput] = []
         var unroutable = 0
@@ -208,6 +218,7 @@ final class IntentRoutingInputTests: XCTestCase {
         engine.onUnroutable = { unroutable += 1 }
         engine.onWakeOnly = { wakeOnly += 1 }
 
+        let generationBefore = engine.gracePeriodSignalForTesting.currentGeneration()
         await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
 
         XCTAssertTrue(inputs.isEmpty, "the non-content remainder never reaches routing")
@@ -217,6 +228,19 @@ final class IntentRoutingInputTests: XCTestCase {
             translation.ensureReadyCalls, 0,
             "CLEANUP: the discarded utterance performs NO translation-stage work"
         )
+        XCTAssertEqual(
+            engine.gracePeriodSignalForTesting.currentGeneration(), generationBefore,
+            "CLEANUP: the discard neither opened nor renewed a grace window — no generation change"
+        )
+
+        // CLEANUP, part 2: the engine is STILL HEALTHY — the next meaningful capture routes
+        // normally on the same instance, with its own admitted identity.
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+
+        XCTAssertEqual(inputs.count, 1, "the next capture routes after the discard")
+        XCTAssertEqual(inputs.first?.routerTranscript, "pause", "only the command remainder routes")
+        XCTAssertEqual(inputs.first?.utteranceId, "adm-trim-2", "the next capture has its own admitted identity")
+        XCTAssertEqual(wakeOnly, 0, "the follow-up is routable, not wake-only")
     }
 
     /// WAKE-POSITIVE trim leaving NOTHING is the wake-only path: the capture confirms the wake

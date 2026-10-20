@@ -148,6 +148,10 @@ class VoiceAsrEngine {
     /// is the ADMITTED one rather than a value rebuilt downstream (spec delta3b1def9).
     var utteranceIdGeneratorForTesting: (() -> String)?
 
+    /// TEST SEAM: the engine's live grace signal, so controls can prove a discarded capture did
+    /// NOT renew the window (generation unchanged) — cleanup, not consumption (reviewer 1f2c96ce).
+    var gracePeriodSignalForTesting: GracePeriodSignal { gracePeriodSignal }
+
     /// Forwards the immutable routing envelope (source + English router text).
     var onRoutingInput: ((IntentRoutingInput) -> Void)?
     /// Called on every positive detection so the service can reset grace and
