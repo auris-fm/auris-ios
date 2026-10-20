@@ -50,8 +50,23 @@ class GracePeriodSignal: ObservableObject {
         deactivate(trigger: "route changed")
     }
 
-    /// App backgrounding breaks the grace period — privacy fails closed.
+    /// App backgrounding's effect on grace is CONDITIONAL (owner delta 8fe04cd/0aa4480).
+    ///
+    /// Privacy fails closed by default: with no active cloud/answer hold, backgrounding ends the
+    /// window immediately. But while a hold is live — an admitted turn whose answer/audio is still
+    /// running — foreground loss must PRESERVE the window so the background answer can finish;
+    /// this is why the reset uses LOCAL audio completion rather than server `done`.
+    ///
+    /// Capture is a separate gate concern: the gate still decides whether the microphone may be
+    /// used. This only governs the window's lifetime.
     func onAppBackgrounded() {
+        // A live hold on the CURRENT generation is active work: do not retire it here.
+        // (`playbackHolds` is only ever populated for the live generation at acquisition, and
+        // stale-generation holds are retired in `endPlaybackHoldOnMain`.)
+        if playbackHolds.contains(where: { $0.generation == generation }) {
+            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: preserved (backgrounded with active hold)")
+            return
+        }
         deactivate(trigger: "backgrounded")
     }
 
@@ -134,6 +149,17 @@ class GracePeriodSignal: ObservableObject {
         // (review 24f236de): the hold suppresses ARMING only.
         startOrResetOnMain(trigger: "cloud route", renewingAllowance: true)
         return true
+    }
+
+    /// Whether an active cloud/answer playback hold is keeping THIS window open — the condition
+    /// that lets foreground loss preserve the window (owner delta 8fe04cd/0aa4480).
+    var hasActiveHold: Bool {
+        if Thread.isMainThread { return hasActiveHoldOnMain() }
+        return DispatchQueue.main.sync { hasActiveHoldOnMain() }
+    }
+
+    private func hasActiveHoldOnMain() -> Bool {
+        isActive && playbackHolds.contains { $0.generation == generation }
     }
 
     /// Whether this refusal should be audible. The first refusal in a generation

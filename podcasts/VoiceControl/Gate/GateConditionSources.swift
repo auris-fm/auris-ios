@@ -122,11 +122,21 @@ class LiveConditionMonitor: ObservableObject {
     private let castingSource = CastingConditionSource()
     private let otherAppPlayingSource = OtherAppPlayingConditionSource()
     private let foregroundSource: ForegroundConditionSource
+    private let gracePeriodSignal: GracePeriodSignal
 
     private var cancellables = Set<AnyCancellable>()
 
+    /// Foreground loss collapses the context to `.none` — EXCEPT while an active cloud/answer
+    /// hold keeps the window open (owner delta 8fe04cd/0aa4480): the answer must be able to finish
+    /// in the background, so the app still has a listening context. Capture permission itself is
+    /// the gate's `.isolated` decision, unchanged.
+    static func resolveContext(foregroundAllowed: Bool, holdActive: Bool) -> GateContext {
+        (foregroundAllowed || holdActive) ? .appInForeground : .none
+    }
+
     init(gracePeriodSignal: GracePeriodSignal) {
         self.foregroundSource = ForegroundConditionSource(gracePeriodSignal: gracePeriodSignal)
+        self.gracePeriodSignal = gracePeriodSignal
         bind()
     }
 
@@ -187,8 +197,9 @@ class LiveConditionMonitor: ObservableObject {
             foregroundSource.publisher,
             Just(GateContext.none) // playback context will be merged separately
         )
-        .map { foregroundCondition, _ in
-            foregroundCondition.isAllowed ? GateContext.appInForeground : GateContext.none
+        .map { [weak self] foregroundCondition, _ in
+            Self.resolveContext(foregroundAllowed: foregroundCondition.isAllowed,
+                                holdActive: self?.gracePeriodSignal.hasActiveHold ?? false)
         }
         .sink { [weak self] in
             FileLog.shared.addMessage("[VoicePipeline] Context: \($0)")
