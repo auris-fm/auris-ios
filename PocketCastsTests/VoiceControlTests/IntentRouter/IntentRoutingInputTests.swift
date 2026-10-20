@@ -252,6 +252,90 @@ final class IntentRoutingInputTests: XCTestCase {
         XCTAssertEqual(wakeOnly, 0, "the follow-up is routable, not wake-only")
     }
 
+    /// PERMITTED WAKE RESET vs EXTRA TEXT-DRIVEN RENEWAL (reviewer eaf401cf): the SERVICE-composed
+    /// wake callback (`onWakeWordDetected` → `gracePeriodSignal.onWakeWordDetected()`) is the ONLY
+    /// legitimate renewal path around a discarded capture. A wake-positive junk capture fires it
+    /// EXACTLY ONCE (new window, one reset); a subsequent WAKE-NEGATIVE junk capture fires nothing
+    /// and must leave generation AND the scheduled expiry untouched — the discard itself performs
+    /// no renewal. A forbidden in-generation reset (`onCommandRecognized`-style) in the discard
+    /// path moves the fire date and is caught by the last assertion.
+    func test_aPermittedWakeResetFiresOncePerWakeAndTheDiscardAddsNoFurtherRenewal() async throws {
+        final class SwitchableWakeStub: WakeWordDetectorProtocol {
+            var detectWake = true
+            func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+                detectWake ? .detected(confidence: 0.9, completionSample: 250 * 16)
+                           : .notDetected(confidence: 0.1)
+            }
+            func release() {}
+        }
+        let wakeStub = SwitchableWakeStub()
+        let backend = QueueingAsrBackend(results: [
+            // Capture 1: WAKE-POSITIVE, trim leaves a non-content remainder → discarded.
+            AsrResult(
+                text: "hey auris !!!",
+                detectedLanguage: "en",
+                tokens: [
+                    AsrToken(text: "hey auris", startMs: 0, endMs: 300),
+                    AsrToken(text: "!!!", startMs: 400, endMs: 700),
+                ]
+            ),
+            // Capture 2: WAKE-NEGATIVE follow-up with a non-content remainder → discarded too.
+            AsrResult(
+                text: "!!!",
+                detectedLanguage: "en",
+                tokens: [AsrToken(text: "!!!", startMs: 0, endMs: 300)]
+            ),
+        ])
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation, wake: wakeStub)
+
+        // THE PERMITTED COMPOSITION: exactly what VoiceControlService wires in production.
+        var wakeCallbacks = 0
+        engine.onWakeWordDetected = { [weak engine] in
+            wakeCallbacks += 1
+            engine?.gracePeriodSignalForTesting.onWakeWordDetected()
+        }
+        engine.onRoutingInput = { _ in XCTFail("both captures are non-content and never route") }
+
+        let generationBefore = engine.gracePeriodSignalForTesting.currentGeneration()
+        let fireDateBefore = engine.gracePeriodSignalForTesting.timerFireDateForTesting
+
+        wakeStub.detectWake = true
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let generationAfterWake = engine.gracePeriodSignalForTesting.currentGeneration()
+        let fireDateAfterWake = engine.gracePeriodSignalForTesting.timerFireDateForTesting
+
+        XCTAssertEqual(wakeCallbacks, 1, "the wake-positive capture fired the permitted reset EXACTLY ONCE")
+        XCTAssertEqual(
+            generationAfterWake, generationBefore + 1,
+            "the permitted wake reset opens exactly ONE new generation"
+        )
+        XCTAssertNotNil(fireDateAfterWake)
+        XCTAssertGreaterThan(
+            fireDateAfterWake!, fireDateBefore!,
+            "the permitted wake reset renewed the scheduled expiry"
+        )
+
+        // Capture 2: NO wake detection → no permitted callback → NOTHING may renew.
+        wakeStub.detectWake = false
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(
+            wakeCallbacks, 1,
+            "a wake-negative capture fires no wake callback"
+        )
+        XCTAssertEqual(
+            engine.gracePeriodSignalForTesting.currentGeneration(), generationAfterWake,
+            "the discarded follow-up opened no new window"
+        )
+        XCTAssertEqual(
+            engine.gracePeriodSignalForTesting.timerFireDateForTesting, fireDateAfterWake,
+            "EXTRA-RENEWAL GUARD: the discard itself performed no in-generation reset — the scheduled expiry is untouched"
+        )
+    }
+
     /// WAKE-POSITIVE trim leaving NOTHING is the wake-only path: the capture confirms the wake
     /// and performs no downstream work at all.
     func test_wakePositiveTrimLeavingNothingIsWakeOnlyWithNoDownstreamWork() async throws {

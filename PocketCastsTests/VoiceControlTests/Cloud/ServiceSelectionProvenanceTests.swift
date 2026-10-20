@@ -425,6 +425,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let fakeBackend = FakeAsrBackend()
         var injectedTask: StubWebSocketTask?
         var factoryInvocations = 0
+        var reprocessedSelectionObserved: CloudConversationSelection?
+        var stubs: [StubWebSocketTask] = []
 
         let suite = "dialog_completion_\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -444,6 +446,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                     fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
                 )
                 injectedTask = built.task
+                stubs.append(built.task)
                 return built.client
             },
             cloudConfig: fixtureConfig,
@@ -453,9 +456,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 // cloud route — the completion's own dispatch. Swapped at the barrier, which runs
                 // BEFORE classification, so the swap is deterministic.
                 if input.routerTranscript == "what did the host say about the merger" {
-                    inference.classifyLabel = "cloud_route:"
+                    reprocessedSelectionObserved = input.selection
+                    inference.classifyLabel = "cloud_route:route"
                     inference.generateResult =
-                        "<|tool_call_start|>[cloud_route(request='what did the host say about the merger')]<|tool_call_end|>"
+                        "<|tool_call_start|>[cloud_route(request='what did the host say about the merger', tier='free')]<|tool_call_end|>"
                 }
             }
         ) else {
@@ -468,6 +472,34 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let generation = service.gracePeriodSignalForTesting.currentGeneration()
+
+        // Establish a LIVE conversation first: a wake-selected cloud turn prepares (and opens)
+        // it, so B's follow-up reprocess has a conversation to RESUME — the discriminator between
+        // the preserved followUp selection (resume) and a dropped selection (create).
+        inference.classifyLabel = "cloud_route:route"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what is this episode about', tier='free')]<|tool_call_end|>"
+        let warmId = "7d1c22ab-51e0-4c6a-9f30-8b44c1d2e001"
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "what is this episode about", selection: .wakeWord, utteranceId: warmId),
+            origin: generation
+        )
+        let warmDeadline = Date().addingTimeInterval(5)
+        while Date() < warmDeadline, injectedTask?.sentAuthFrame == nil {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let warmFrame = try XCTUnwrap(injectedTask?.sentAuthFrame, "premise: the warm-up turn dispatched")
+        XCTAssertEqual(warmFrame["request_id"] as? String, warmId)
+        XCTAssertEqual(warmFrame["conversation_mode"] as? String, "create", "premise: a live conversation now exists")
+        let warmConversationId = warmFrame["conversation_id"] as? String
+
+        // Let the 2s same-type command debounce window expire, so the reprocessed dispatch below
+        // is not suppressed as a duplicate of the warm-up cloud_route turn.
+        try? await Task.sleep(nanoseconds: 2_200_000_000)
+
+        inference.classifyLabel = "dialog_control:begin"
+        inference.generateResult =
+            "<|tool_call_start|>[dialog_control(action='begin', target_tool='bookmark', target_action='rename')]<|tool_call_end|>"
 
         // A: begins the dialog (local control, admission id A-plan).
         let aId = "3e91c40b-27af-4d5e-8c16-0b2f7a4d9e83"
@@ -484,7 +516,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             service.dialogManagerForTesting.pendingDialog,
             "A must have begun a dialog through the REAL router path"
         )
-        XCTAssertNil(injectedTask?.sentAuthFrame, "A's dialog control performs no wire dispatch")
+        XCTAssertEqual(stubs.count, 1, "A's dialog control performs no wire dispatch — the warm-up turn built the only client")
 
         // B: the model emits the REAL completion control (new_command) — the dialog closes
         // LOCALLY, and its value is re-processed as a fresh transcript.
@@ -503,16 +535,137 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "B's completion closes A's dialog — the dialog-origin context is consumed, not carried as B's identity"
         )
 
-        // The reprocessed value is enqueued as its own chain link — settle before asserting.
+        // The reprocessed value is enqueued as its own chain link — settle before asserting:
+        // wait for a SECOND client (the warm-up built the first) and its auth frame.
+        let dispatchDeadline = Date().addingTimeInterval(5)
+        while Date() < dispatchDeadline, stubs.count < 2 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(stubs.count, 2, "B's reprocessed turn reached the transport")
+        let frameDeadline = Date().addingTimeInterval(5)
+        while Date() < frameDeadline, stubs.last?.sentAuthFrame == nil {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let body = try XCTUnwrap(stubs.last?.sentAuthFrame, "B's turn was submitted")
+        XCTAssertEqual(
+            body["request_id"] as? String, bId,
+            "the completing utterance dispatches under ITS OWN admitted id, never A's dialog origin"
+        )
+        XCTAssertEqual(
+            reprocessedSelectionObserved, .followUp,
+            "the reprocessed turn keeps B's CAPTURED selection, not live-state continuation"
+        )
+        XCTAssertEqual(
+            body["conversation_mode"] as? String, "resume",
+            "B was a follow-up capture, so its reprocessed dispatch RESUMES the live conversation"
+        )
+        XCTAssertEqual(
+            body["conversation_id"] as? String, warmConversationId,
+            "the resumed dispatch is bound to the conversation the window opened"
+        )
+    }
+
+    /// SELECTION PRESERVATION THROUGH REPROCESS (reviewer 8cb24f13): a fresh WAKE capture that
+    /// completes a dialog keeps its wakeWord selection through the reprocessed dispatch — the
+    /// wire mode is create, not the live-state resume a dropped selection would fall back to.
+    @MainActor
+    func testAWakeCaptureCompletingADialogReprocessesUnderItsWakeSelection() async throws {
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "dialog_control:begin"
+        inference.generateResult =
+            "<|tool_call_start|>[dialog_control(action='begin', target_tool='bookmark', target_action='rename')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let capture = FakeAudioCapture()
+        let fakeBackend = FakeAsrBackend()
+        var injectedTask: StubWebSocketTask?
+        var factoryInvocations = 0
+        var reprocessedSelectionObserved: CloudConversationSelection?
+        var stubs: [StubWebSocketTask] = []
+
+        let suite = "dialog_completion_wake_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                factoryInvocations += 1
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                injectedTask = built.task
+                stubs.append(built.task)
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend },
+            testInputBarrier: { input in
+                if input.routerTranscript == "what did the host say about the merger" {
+                    reprocessedSelectionObserved = input.selection
+                    inference.classifyLabel = "cloud_route:route"
+                    inference.generateResult =
+                        "<|tool_call_start|>[cloud_route(request='what did the host say about the merger', tier='free')]<|tool_call_end|>"
+                }
+            }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try await waitForListening(service: service)
+        try await waitForRouter(service: service)
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let generation = service.gracePeriodSignalForTesting.currentGeneration()
+
+        // A begins the dialog; B is a FRESH WAKE capture during the live window that completes
+        // it with new_command.
+        let aId = "3e91c40b-27af-4d5e-8c16-0b2f7a4d9e83"
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "rename my bookmark", selection: .wakeWord, utteranceId: aId),
+            origin: generation
+        )
+        let dialogDeadline = Date().addingTimeInterval(5)
+        while Date() < dialogDeadline {
+            if service.dialogManagerForTesting.pendingDialog != nil { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotNil(service.dialogManagerForTesting.pendingDialog, "premise: A's dialog is pending")
+        XCTAssertEqual(stubs.count, 0, "A's dialog control performs no wire dispatch")
+
+        inference.classifyLabel = "dialog_control:new_command"
+        inference.generateResult =
+            "<|tool_call_start|>[dialog_control(action='new_command', value='what did the host say about the merger')]<|tool_call_end|>"
+        let bId = "8a2bf59d-6c31-4e08-b7d4-5c91f0e37a26"
+
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .wakeWord, utteranceId: bId),
+            origin: generation
+        )
+
         let dispatchDeadline = Date().addingTimeInterval(5)
         while Date() < dispatchDeadline, injectedTask?.sentAuthFrame == nil {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertGreaterThan(factoryInvocations, 0, "B's reprocessed turn reached the transport")
-        let body = try XCTUnwrap(injectedTask?.sentAuthFrame, "B's turn was submitted")
+        let body = try XCTUnwrap(injectedTask?.sentAuthFrame, "B's reprocessed turn was submitted")
         XCTAssertEqual(
             body["request_id"] as? String, bId,
-            "the completing utterance dispatches under ITS OWN admitted id, never A's dialog origin"
+            "the reprocessed dispatch carries B's admitted identity"
+        )
+        XCTAssertEqual(
+            reprocessedSelectionObserved, .wakeWord,
+            "B's wake selection survives the reprocess — it is NOT demoted to live-state continuation"
+        )
+        XCTAssertEqual(
+            body["conversation_mode"] as? String, "create",
+            "a wake capture completing a dialog dispatches as a NEW conversation, not a resume"
         )
     }
 
@@ -522,9 +675,11 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     @MainActor
     func testAModelChosenRouteDispatchesUnderTheAdmittedUtteranceIdentity() async throws {
         let inference = FakeLfmInference()
-        inference.classifyLabel = "cloud_route:"
+        // A full, well-formed label+call so the mapper SUCCEEDS: this exercises the ROUTED
+        // (model-chosen) stamping site, not the escalation fallback, which stamps elsewhere.
+        inference.classifyLabel = "cloud_route:route"
         inference.generateResult =
-            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark', tier='free')]<|tool_call_end|>"
         let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let capture = FakeAudioCapture()

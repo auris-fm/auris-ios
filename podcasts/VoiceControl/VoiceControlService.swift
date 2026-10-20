@@ -339,7 +339,11 @@ class VoiceControlService: ObservableObject {
     /// `origin: nil` means "capture the live window at enqueue time"; a caller that already holds
     /// the dispatch origin (the draining turn) passes it so the re-processed command belongs to the
     /// same window it was spoken in.
-    private func enqueueRoutingInput(_ input: IntentRoutingInput, origin: Int? = nil) {
+    private func enqueueRoutingInput(
+        _ input: IntentRoutingInput,
+        origin: Int? = nil,
+        selection: CloudConversationSelection? = nil
+    ) {
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
             guard self.isListening else {
@@ -358,7 +362,7 @@ class VoiceControlService: ObservableObject {
             // The INPUT's own provenance, not a live read. `isActive` cannot tell a wake that
             // fired during grace from a follow-up inside the same grace — both arrive with grace
             // active — so the answer has to come from the gate decision that produced this input.
-            let capturedSelection = input.selection
+            let capturedSelection = selection ?? input.selection
             let task = Task { [weak self] in
                 // THE TERMINAL ACKNOWLEDGEMENT IS UNCONDITIONAL: on EVERY exit the input's task
                 // reports HOW it ended, because "the queued input returned" is not the same claim as
@@ -658,9 +662,14 @@ class VoiceControlService: ObservableObject {
                 // would re-enter `handleRoutingInput` from inside the serial chain — under THIS
                 // capture's admitted identity (the value is not a new utterance: no new admission
                 // happened) and the window it was spoken in.
+                // The SAME admitted capture continues: preserve B's captured selection
+                // (wakeWord vs followUp) along with its origin and identity — a fresh wake B
+                // during an existing conversation must not silently fall back to live-state
+                // continuation just because its value was re-processed.
                 enqueueRoutingInput(
-                    .english(transcript: reprocessValue, selection: nil, utteranceId: input.utteranceId),
-                    origin: capturedOrigin
+                    .english(transcript: reprocessValue, selection: capturedSelection, utteranceId: input.utteranceId),
+                    origin: capturedOrigin,
+                    selection: capturedSelection
                 )
             } else if let question = dialogResult.question {
                 audioRenderer.render(.spoken(question))
