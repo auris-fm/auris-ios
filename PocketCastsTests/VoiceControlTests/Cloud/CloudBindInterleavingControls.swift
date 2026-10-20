@@ -255,14 +255,14 @@ final class CloudBindInterleavingControls: XCTestCase {
         // The successor reuses the SAME request_id with its OWN PHYSICAL socket (taskB, issued
         // by the factory for the second route). Its bind lands on the transport's task, so wait
         // for B's first frame (the bind is published by then).
-        let boundFlagB = Promise<Void>()
-        client.onFrameReceived = { boundFlagB.resolve(()) }
         let routedB = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
         let socketB = routedB.resultSocket
-        await boundFlagB.value()
-        XCTAssertNotNil(socketB.boundIdentity, "premise: the successor's bind is published")
+        // Poll for the SUCCESSOR'S OWN publication: a frame-level promise would resolve on the
+        // predecessor's trailing frame (the fixture has two), which says nothing about B's bind.
+        let published = waitForBoundIdentity(of: socketB, timeout: 5)
+        XCTAssertNotNil(published, "premise: the successor's bind is published")
         XCTAssertNotEqual(socketB.boundIdentity, identityA, "each registration has its OWN identity")
         let consumeB = Task { () -> [CloudRouteEvent] in
             var events: [CloudRouteEvent] = []
@@ -289,7 +289,116 @@ final class CloudBindInterleavingControls: XCTestCase {
         _ = await consumeB.value
     }
 
+    // MARK: - Control 5: the bind/close INTERLEAVING discriminator (reviewer a2723c92)
+
+    /// THE BIND/CLOSE INTERLEAVING, forced — not waited-for. Control 4 waits for each
+    /// publication before proceeding; that proves isolation of PUBLISHED registrations but never
+    /// races a close against a bind decision. Here the predecessor's close lands DETERMINISTICALLY
+    /// between the successor's route start and its bind decision: the successor's transport task
+    /// is parked at the `onBeforeBind` seam, the close runs to completion, and only then is the
+    /// bind allowed to decide. Per-registration ownership means the successor's bind must still
+    /// SUCCEED (the close retired only its own registration), its send must be submitted on ITS
+    /// OWN recorded task, and neither registration may retire the other's socket.
+    func testAPredecessorsCloseBeforeTheSuccessorsBindDecisionDoesNotRetireTheSuccessor() async throws {
+        let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let box = TaskBox([taskA, taskB])
+        let client = makeClient(box: box)
+        let turn = CloudTurnEnvelope.make(
+            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+
+        // Predecessor: route and wait until its bind is published.
+        let a = client.routeWithResultSocket(
+            request: "x-interleave", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        let boundFlagA = Promise<Void>()
+        client.onFrameReceived = { boundFlagA.resolve(()) }
+        let consumeA = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in a.stream { events.append(event) }
+            return events
+        }
+        await boundFlagA.value()
+        let identityA = try XCTUnwrap(a.resultSocket.boundIdentity)
+
+        // The predecessor's result send rides ITS recorded task while its turn is live.
+        let frame = try XCTUnwrap(AppOperationResultFrame(
+            operationId: "op-bind", outcome: .unknown, reason: OperationReason.interruptedInFlight
+        ))
+        let reportA = await client.sendOperationResult(frame, via: a.resultSocket)
+        XCTAssertEqual(reportA, .submitted, "premise: the predecessor's send is submitted on its live turn")
+
+        // Park the successor's bind decision at the seam; run the predecessor's close to
+        // completion while the decision is parked; then release.
+        let seamEntered = Promise<Void>()
+        let closeRequested = Promise<Void>()
+        client.onBeforeBind = { _ in
+            seamEntered.resolve(())
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline, !closeRequested.didClose { usleep(1_000) }
+        }
+
+        let boundFlagB = Promise<Void>()
+        client.onFrameReceived = { boundFlagB.resolve(()) }
+        let routedB = client.routeWithResultSocket(
+            request: "x-interleave", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        let socketB = routedB.resultSocket
+        let consumeB = Task { () -> [CloudRouteEvent] in
+            var events: [CloudRouteEvent] = []
+            for await event in routedB.stream { events.append(event) }
+            return events
+        }
+
+        // FORCED ORDER: close happens strictly before the bind decision resumes.
+        await seamEntered.value()
+        a.resultSocket.finishTurn()
+        XCTAssertTrue(taskA.isCancelledSocket, "the close retired the predecessor's own registration")
+        closeRequested.markClosed()
+
+        // The successor's bind decides AFTER the close — it must still succeed.
+        await boundFlagB.value()
+        let identityB = try XCTUnwrap(socketB.boundIdentity, "the successor's bind survives the predecessor's close")
+        XCTAssertNotEqual(identityB, identityA, "each registration keeps its own identity")
+
+        // The successor's send rides ITS OWN recorded task — distinct physical sockets, each
+        // send attributable to the registration that owns it.
+        let reportB = await client.sendOperationResult(frame, via: socketB)
+        XCTAssertEqual(reportB, .submitted, "the successor's send is submitted after the interleaved close")
+        XCTAssertEqual(box.issued.count, 2, "the factory issued exactly one socket per route")
+        XCTAssertTrue(box.issued[0] === taskA && box.issued[1] === taskB,
+                      "the predecessor and successor used DISTINCT recorded tasks")
+        XCTAssertFalse(taskB.isCancelledSocket, "the successor's socket survives the interleaved close")
+
+        socketB.finishTurn()
+        _ = await consumeA.value
+        _ = await consumeB.value
+    }
+
+    /// A client whose factory draws from a CONTROL-OWNED box, so the test can assert exactly
+    /// which physical sockets were issued, in order.
+    private func makeClient(box: TaskBox) -> CloudRouteClient {
+        CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_test",
+            requestTimeoutSeconds: 15,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in box.next() }
+        )
+    }
+
     // MARK: - Helpers
+
+    /// Bounded poll for a registration's published identity. Frame-count promises are ambiguous
+    /// when a predecessor's fixture emits a trailing frame; the identity itself is unambiguous.
+    private func waitForBoundIdentity(of socket: AppOperationResultSocket, timeout: TimeInterval) -> UUID? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let identity = socket.boundIdentity { return identity }
+            usleep(2_000)
+        }
+        return socket.boundIdentity
+    }
 
     private func sampleContext() -> PlaybackContext {
         PlaybackContext(
