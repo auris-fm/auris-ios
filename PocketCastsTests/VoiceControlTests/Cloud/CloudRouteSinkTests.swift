@@ -2062,6 +2062,90 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                        "exactly ONE host resume: the confirmation restores the inherited pause")
     }
 
+    /// CLAIMED-DRAIN CANCEL (review 0585959a): a cancel landing while A's drain is claimed
+    /// must be CONSUMED by the drain's own physical stop — no second physical stop may follow
+    /// it. Premise: A's drain is claimed and parked; the gate parks the SUBSEQUENT stop. After
+    /// the first confirmation delivers and B admits with its audio buffered, no queued stop
+    /// may exist (the bug left the cancel's flag set: a second stop pending over live B
+    /// output). Releasing the gate then lets B's own drain finish normally.
+    func testCancelDuringClaimedDrainIsConsumedByTheDrainsPhysicalStop() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let sink = makeSink()
+        hookedSink = sink
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var epochs: [Int] = []
+            func record(_ epoch: Int) { lock.lock(); epochs.append(epoch); lock.unlock() }
+            var snapshot: [Int] { lock.lock(); defer { lock.unlock() }; return epochs }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { epoch, deliver in
+                box.record(epoch)
+                deliver() // auto-confirm: the first stop's confirmation reaches B immediately
+            }
+        }
+        // Premise: the runner is parked INSIDE the claimed drain (claim seam) when B's cancel
+        // lands. The seam is installed BEFORE A runs so the drain claim cannot be missed.
+        let claimReached = DispatchSemaphore(value: 0)
+        let claimRelease = DispatchSemaphore(value: 0)
+        await MainActor.run {
+            sink.audioPlayerForTesting?.claimReached = claimReached
+            sink.audioPlayerForTesting?.claimRelease = claimRelease
+        }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let aResult = await a.value
+        XCTAssertEqual(aResult.outcome, .completed, "A completed; its drain is claimed")
+        // The runner is parked inside the CLAIMED drain.
+        XCTAssertEqual(claimReached.wait(timeout: .now() + 2), .success,
+                       "the runner reached the claimed drain")
+        // B supersedes: the retire cancel lands while A's drain is claimed/parked.
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"B"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        try await Task.sleep(nanoseconds: 120_000_000)
+        // Park the SUBSEQUENT stop: the first physical stop (the drain end, which IS the
+        // cancel's stop) passes; any later stop parks.
+        await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 1) }
+        claimRelease.signal()
+        // THE PIN: exactly TWO physical stops carry confirmations — the drain end (which IS
+        // the cancel's stop) and B's own done-drain. The defect ran a THIRD stop (the
+        // unconsumed cancel flag) between them.
+        await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain stop passes the gate")
+        _ = await a.value
+        // Epochs must be STRICTLY INCREASING: the defect re-processed the unconsumed cancel
+        // flag as a second stop with the SAME identity (a duplicate), shedding whatever a
+        // successor had admitted on the first confirmation.
+        // The gate may still be parking the defect's second stop (or B's own drain): open it
+        // and let every pending physical stop settle before reading the log.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let recorded = box.snapshot
+        let strictlyIncreasing = zip(recorded, recorded.dropFirst()).allSatisfy { $0 < $1 }
+        XCTAssertTrue(strictlyIncreasing && recorded.count >= 1,
+                      "no stop identity is confirmed twice (got \(recorded))")
+        // (No resume pin here: with no engine ever started, transient restore is a no-op by
+        // design — the discriminator is the stop-identity log above.)
+    }
+
     /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every

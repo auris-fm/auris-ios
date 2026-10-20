@@ -511,6 +511,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 // raced the writers in finish()/cancel().
                 let scheduledEpoch = drainEpoch
                 runnerLock.unlock()
+                physicalStopGateWait()
                 stopEngine()
                 isPlaying = false
                 paused = false
@@ -1165,11 +1166,55 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // unperformed identity. Read under runnerLock (the writers' domain).
         runnerLock.lock()
         let stoppedEpoch = drainEpoch
+        // CANONICAL QUIESCENCE AT THE DRAIN END (review 0585959a): a cancel that landed while
+        // this drain was claimed/playing bumped the identity and queued `stopRequested`. The
+        // physical stop below IS that cancel's stop — the epoch snapshot proves it — so the
+        // queued flag is consumed HERE. Leaving it set would run a SECOND physical stop after
+        // this one, shedding a successor admitted on this stop's confirmation.
+        stopRequested = false
         runnerLock.unlock()
+        physicalStopGateWait()
         stopEngine()
         isPlaying = false
         paused = false
         notifyDidStop(epoch: stoppedEpoch)
+    }
+
+    // TEST-ONLY (physical engine-stop evidence): when armed, the runner's physical stop
+    // operation passes the first `allow` stops and PARKS each subsequent one until the gate
+    // is opened. Lets a control hold the actual stop operation — not a notification — and
+    // prove what may and may not happen while it is pending.
+    private let physicalStopGateLock = NSLock()
+    private var physicalStopGateAllow = -1 // unarmed: every stop passes
+    private var physicalStopGateCondition = NSCondition()
+    func armPhysicalStopGateForTesting(allow: Int) {
+        physicalStopGateLock.lock()
+        physicalStopGateAllow = allow
+        physicalStopGateLock.unlock()
+    }
+    func openPhysicalStopGateForTesting() {
+        physicalStopGateLock.lock()
+        physicalStopGateAllow = Int.max
+        physicalStopGateCondition.broadcast()
+        physicalStopGateLock.unlock()
+    }
+    private func physicalStopGateWait() {
+        physicalStopGateLock.lock()
+        if physicalStopGateAllow < 0 {
+            physicalStopGateLock.unlock()
+            return
+        }
+        if physicalStopGateAllow > 0 {
+            physicalStopGateAllow -= 1
+            physicalStopGateLock.unlock()
+            return
+        }
+        physicalStopGateCondition.lock()
+        physicalStopGateLock.unlock()
+        while physicalStopGateAllow <= 0 {
+            physicalStopGateCondition.wait()
+        }
+        physicalStopGateCondition.unlock()
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
