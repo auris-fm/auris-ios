@@ -883,9 +883,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // would otherwise be "spoken" as silence, occupying the turn's
                     // only feedback channel (PR #19 review).
                     let serverMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let spoken = serverMessage.isEmpty
-                        ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
-                        : serverMessage
+                    // A LIMIT OF THE ASSISTANT (spec clarification 27ced9b): the client's own
+                    // localized template must be what the user hears, exactly once, naming Auris
+                    // and its daily allowance. The remote frame's `message` is DIAGNOSTIC-ONLY for
+                    // this code, so it does not override the template — a server that later words
+                    // a refusal differently, or generically, must not be able to strip the
+                    // explanation of WHICH limit was hit.
+                    let clientTemplate = spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
+                    let spoken: String
+                    if code == "limit_exceeded" {
+                        spoken = clientTemplate
+                    } else {
+                        spoken = serverMessage.isEmpty ? clientTemplate : serverMessage
+                    }
                     turnResult = .failed(code: code)
                     turnResponse = spoken.isEmpty ? .earcon(.error) : .spoken(spoken)
                     break turnLoop

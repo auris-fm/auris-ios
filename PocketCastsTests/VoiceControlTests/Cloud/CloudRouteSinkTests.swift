@@ -265,7 +265,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"text":"partial"}
 
             event: error
-            data: {"code":"limit_exceeded","message":"rate limited"}
+            data: {"code":"rate_limited","message":"rate limited"}
 
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
@@ -273,6 +273,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
 
+        // This case is about the ERROR PATH's buffer/seek rollback, not about limit wording, so it
+        // uses an ordinary server-coded error: a server-supplied message passes through unchanged.
         XCTAssertEqual(response.response, .spoken("rate limited"))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
         XCTAssertTrue(playback.calls.contains(.resume))
@@ -4023,6 +4025,108 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
         let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil)
         XCTAssertEqual(response.response, .spoken("Connection lost. Please try again."))
+    }
+}
+
+/// Spec clarification 27ced9b: a `limit_exceeded` turn must reach the user as the CLIENT's own
+/// localized daily-limit template, exactly once, naming Auris and its daily allowance — and the
+/// remote frame's `message` is DIAGNOSTIC-ONLY for this code, so it must not replace that
+/// explanation.
+final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_limit_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    private func makeSink() -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        // The test host's own bundle carries en.lproj/VoiceTemplates.strings.
+        let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+        return CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: enBundle),
+            conversationManager: testConversationManager()
+        )
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+
+    /// The refusal frame the server actually sends carries a GENERIC message ("this turn was not
+    /// admitted"). The user must still hear WHICH limit was hit, exactly once.
+    func testLimitExceededSpeaksTheClientTemplateNotTheGenericRemoteMessage() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"limit_exceeded","message":"this turn was not admitted"}
+
+            """
+        let response = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
+        )
+        XCTAssertEqual(
+            response.response,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
+            "limit_exceeded must speak the client's own template naming Auris and the daily limit"
+        )
+        // EXACTLY ONCE, not merely "contains": the response is a single .spoken value, and it is
+        // not the generic remote text.
+        guard case let .spoken(text) = response.response else {
+            return XCTFail("expected a single .spoken response, got \(response.response)")
+        }
+        XCTAssertNotEqual(text, "this turn was not admitted", "the remote diagnostic must not be spoken")
+        XCTAssertEqual(text.components(separatedBy: "Auris").count - 1, 1, "Auris is named exactly once")
+    }
+
+    /// A client-authored code reaches the user as a failed turn, never a completion (the
+    /// pre-existing regression guard, re-asserted for this code).
+    func testLimitExceededIsAFailedTurnNotACompletion() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"limit_exceeded","message":""}
+
+            """
+        let response = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
+        )
+        XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
+    }
+
+    /// The template ships with the app, so it resolves through the SAME code-keyed route every
+    /// other client failure uses (no special-case lookup that could go missing).
+    func testLimitExceededTemplateResolvesThroughTheCodeKeyedRoute() {
+        let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+        let resolver = SpokenTemplateResolver(localeBundle: enBundle)
+        XCTAssertEqual(
+            resolver.resolveForUserLocale("cloud_error_limit_exceeded"),
+            "You have reached your Auris free daily limit. Please try again tomorrow."
+        )
     }
 }
 
