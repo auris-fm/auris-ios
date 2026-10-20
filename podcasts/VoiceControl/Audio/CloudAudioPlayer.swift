@@ -500,6 +500,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // Cancelled: drop everything and stop the engine, without draining.
             if stopRequested {
                 stopRequested = false
+                // CANONICAL QUIESCENCE (review 9a093876/d2561f9b): a cancel stop SUPERSEDES any
+                // queued drain — a finish that landed after the cancel re-queued
+                // `drainRemaining` while `stopRequested` was still true; leaving it set would
+                // make the runner run a SECOND stop after this one, and a successor admitted on
+                // this stop's confirmation would be shed by that second stop. The cancel's stop
+                // IS the quiescent end of everything queued before it.
+                drainRemaining = false
                 // Snapshot the identity WHILE HOLDING runnerLock: reading it after the unlock
                 // raced the writers in finish()/cancel().
                 let scheduledEpoch = drainEpoch

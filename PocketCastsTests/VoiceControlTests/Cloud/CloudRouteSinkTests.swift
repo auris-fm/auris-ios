@@ -2270,6 +2270,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             private var deliveries: [() -> Void] = []
             func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
             func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+            func pendingCount() -> Int { lock.lock(); defer { lock.unlock() }; return deliveries.count }
         }
         let box = Box()
         await MainActor.run {
@@ -2297,15 +2298,27 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended: A's pending playback must quiesce first")
-        // Process the queued retire stop, then confirm it.
-        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // MIXED FLAGS (spec d2561f9b): A's finish (drain) was queued FIRST and B's retire-
+        // cancel SECOND — the one processed stop must be the CANONICAL end: no second drain
+        // stop may follow B's admission. From here every stop is recorded and delivered
+        // immediately, so the total count over the rest of the test is exact.
         await MainActor.run {
-            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
-            box.deliverAll()
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+                deliver()
+            }
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(false)
         }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once A is quiescent")
+        _ = await a.value
+        // THE PIN: the coalesced stop (A's finish + B's retire share ONE processing) plus at
+        // most B's own done-drain — two recorded stops. Under the bug a SECOND drain stop ran
+        // right after the cancel's stop: three. (B's done-drain exists only if frames were
+        // still pending at its done; either way the bug's extra stop is not among them.)
+        let recordedStops = box.pendingCount()
+        XCTAssertTrue(recordedStops == 1 || recordedStops == 2,
+                      "the cancel's stop canonically supersedes the queued drain: no extra physical stop (got \(recordedStops))")
         var resumes = 0
         for _ in 0..<60 {
             resumes = playback.calls.filter { $0 == .resume }.count
