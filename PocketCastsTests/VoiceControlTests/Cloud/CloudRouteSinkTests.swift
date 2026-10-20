@@ -2146,6 +2146,109 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // design — the discriminator is the stop-identity log above.)
     }
 
+    /// PHYSICAL ENGINE-QUiescence (spec, review chain): the stop NOTIFICATION is not the
+    /// physical contract — the actual `stopEngine()` operation is. A's engine is UP with
+    /// output outstanding when B supersedes; the gate holds the runner's REAL stop operation
+    /// before it runs. Premise (measured, not assumed): the gate arrival count grows while
+    /// no stop has been confirmed and B has NOT completed — no successor admission or host
+    /// settlement can precede the parked physical stop. Releasing the gate proves actual
+    /// settlement (confirmed identity) and then successor audio admission.
+    func testSuccessorAdmissionWaitsForThePhysicalEngineStopItself() async throws {
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"A"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let sink = makeSink()
+        hookedSink = sink
+        final class Flag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = false
+            func set() { lock.lock(); value = true; lock.unlock() }
+            var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        }
+        let bDone = Flag()
+        // A plays with the buffer held: frames accumulate, the engine STARTS (premise).
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var engineUp = false
+        for _ in 0..<600 {
+            let playing: Bool = await MainActor.run { sink.audioPlayerForTesting?.isPlaying ?? false }
+            if playing { engineUp = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(engineUp, "premise: A's engine is up with output outstanding")
+        let aResult = await a.value
+        XCTAssertEqual(aResult.outcome, .completed, "A completed; its drain stop is queued")
+        // Confirmations are intercepted and delivered immediately once issued.
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var epochs: [Int] = []
+            func record(_ epoch: Int) { lock.lock(); epochs.append(epoch); lock.unlock() }
+            var snapshot: [Int] { lock.lock(); defer { lock.unlock() }; return epochs }
+        }
+        let box = Box()
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { epoch, deliver in
+                box.record(epoch)
+                deliver()
+            }
+        }
+        // Arm the gate FIRST: the very next physical stop parks.
+        await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 0) }
+        self.nextTurnFixture =
+            """
+            event: token
+            data: {"text":"B"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        let b = Task {
+            let result = await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            bDone.set()
+            return result
+        }
+        // B's retire cancel must LAND before the drain runs: wait for the cancel request.
+        var cancelled = false
+        for _ in 0..<600 {
+            let count: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? 0 }
+            if count >= 1 { cancelled = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(cancelled, "B's retire cancel landed while the drain is still held")
+        // Release the held buffer: the runner reaches the claimed drain and its REAL
+        // stopEngine() call parks at the gate.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        var parked = false
+        var bDoneEarly = false
+        for _ in 0..<600 {
+            let arrivals: Int = await MainActor.run { sink.audioPlayerForTesting?.physicalStopGateArrivalsForTesting ?? 0 }
+            if arrivals >= 1 { parked = true; break }
+            if bDone.isSet { bDoneEarly = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(parked, "the REAL stop operation is parked at the gate (no B completion first: \(bDoneEarly))")
+        // WHILE PARKED: nothing has been confirmed, B has not been admitted/settled.
+        let confirmedWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
+        XCTAssertLessThan(confirmedWhileParked, 2, "no stop is confirmed before the physical stop ran")
+        XCTAssertFalse(bDone.isSet, "B has not completed (indeed not been admitted) while the stop is parked")
+        // Release: the physical stop RUNS, confirms, B admits and streams its own audio.
+        await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
+        let bResult = await b.value
+        XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
+        let confirmed = box.snapshot
+        XCTAssertFalse(confirmed.isEmpty, "the physical stop produced a real confirmation")
+        XCTAssertEqual(confirmed.first ?? -1, 2, "the confirmed identity is the retire cancel's (2), got \(confirmed.first ?? -1)")
+    }
+
     /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every

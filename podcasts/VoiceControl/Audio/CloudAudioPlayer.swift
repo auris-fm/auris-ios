@@ -1184,37 +1184,52 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // operation passes the first `allow` stops and PARKS each subsequent one until the gate
     // is opened. Lets a control hold the actual stop operation — not a notification — and
     // prove what may and may not happen while it is pending.
-    private let physicalStopGateLock = NSLock()
+    //
+    // ONE NSCondition owns BOTH the predicate (`allow`) and the waiting: arm/open mutate the
+    // predicate under the condition's lock and broadcast; the waiter checks and waits on the
+    // SAME lock — no lost-wake window between a predicate write and a parked waiter. Arrival
+    // is published BEFORE waiting so a control can assert a real stop is actually parked;
+    // the wait is bounded so the runner can never wedge past the bound.
+    private let physicalStopGate = NSCondition()
     private var physicalStopGateAllow = -1 // unarmed: every stop passes
-    private var physicalStopGateCondition = NSCondition()
+    private var physicalStopGateArrivals = 0 // stops that reached an ARMED gate
+
     func armPhysicalStopGateForTesting(allow: Int) {
-        physicalStopGateLock.lock()
+        physicalStopGate.lock()
         physicalStopGateAllow = allow
-        physicalStopGateLock.unlock()
+        physicalStopGate.broadcast()
+        physicalStopGate.unlock()
     }
+
     func openPhysicalStopGateForTesting() {
-        physicalStopGateLock.lock()
+        physicalStopGate.lock()
         physicalStopGateAllow = Int.max
-        physicalStopGateCondition.broadcast()
-        physicalStopGateLock.unlock()
+        physicalStopGate.broadcast()
+        physicalStopGate.unlock()
     }
+
+    /// Stops that reached an ARMED gate (parked or admitted). A control asserts this grew
+    /// BEFORE checking successor state, so the premise "a real stop is held" is measured,
+    /// not assumed.
+    var physicalStopGateArrivalsForTesting: Int {
+        physicalStopGate.lock()
+        defer { physicalStopGate.unlock() }
+        return physicalStopGateArrivals
+    }
+
     private func physicalStopGateWait() {
-        physicalStopGateLock.lock()
+        let deadline = Date().addingTimeInterval(5)
+        physicalStopGate.lock()
         if physicalStopGateAllow < 0 {
-            physicalStopGateLock.unlock()
+            physicalStopGate.unlock()
             return
         }
-        if physicalStopGateAllow > 0 {
-            physicalStopGateAllow -= 1
-            physicalStopGateLock.unlock()
-            return
-        }
-        physicalStopGateCondition.lock()
-        physicalStopGateLock.unlock()
+        physicalStopGateArrivals += 1
         while physicalStopGateAllow <= 0 {
-            physicalStopGateCondition.wait()
+            if !physicalStopGate.wait(until: deadline) { break } // bounded: never wedge the runner
         }
-        physicalStopGateCondition.unlock()
+        if physicalStopGateAllow > 0 && physicalStopGateAllow < Int.max { physicalStopGateAllow -= 1 }
+        physicalStopGate.unlock()
     }
 
     /// Report that output has stopped, so the caller can restore what the turn
