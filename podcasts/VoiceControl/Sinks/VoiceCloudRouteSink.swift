@@ -13,6 +13,7 @@ protocol VoiceCloudRouteSink {
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?,
+        utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?,
         sourceLanguage: String?

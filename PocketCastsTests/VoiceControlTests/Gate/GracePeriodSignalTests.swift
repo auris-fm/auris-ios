@@ -79,54 +79,60 @@ final class GracePeriodSignalTests: XCTestCase {
     /// calls `recognizeCommandIfCurrentWindow` directly and constructs NO service, NO engine callback,
     /// and NO `CloudRouteIntent` — so it shows the SIGNAL refuses a retired generation, not that any
     /// installed path passes the right generation to it. That carriage is a separate subject.
-    /// OWNER DELTA 8fe04cd/0aa4480 (spec): foreground loss WITHOUT an active cloud/answer hold
-    /// invalidates the window; WITH one, it PRESERVES it so a background answer can finish.
-    ///
-    /// This control is the SIGNAL unit seam: it drives the signal directly (no service, no gate,
-    /// no engine). The production carriage — that the gate keeps capture open through the hold
-    /// while the app is backgrounded — is a separate subject asserted elsewhere.
+    /// OWNER DELTA 8fe04cd/0aa4480, CORRECTED (spec 3893cd55 / reviewer 724db1e8): a hold alone
+    /// does NOT preserve the window through foreground loss — preservation requires an
+    /// INDEPENDENT playback context (an eligible episode). Grace must not self-sustain.
     @MainActor
-    func testBackgroundingPreservesAWindowHeldByActiveWork() async throws {
+    func testForegroundLossWithRealPlaybackContextPreservesTheWindow() async throws {
         let signal = GracePeriodSignal()
+        let episodeLoaded = { true }
+        signal.playbackContextAvailable = episodeLoaded
         signal.onWakeWordDetected()
         let generation = signal.currentGeneration()
-        // A cloud/answer turn admits: it holds this window's expiry open.
-        let hold = signal.beginPlaybackHold(forGeneration: generation)
-        XCTAssertNotNil(hold, "the live window accepts a hold")
-        XCTAssertTrue(signal.isActive, "the window is open and held")
+        _ = signal.beginPlaybackHold(forGeneration: generation)
 
-        // FOREGROUND LOSS while the hold is live: the window must SURVIVE.
         signal.onAppBackgrounded()
-        XCTAssertTrue(
-            signal.isActive,
-            "backgrounding with an active cloud/answer hold must preserve the window"
-        )
+        XCTAssertTrue(signal.isActive, "backgrounding with a real playback context preserves the window")
+        XCTAssertTrue(signal.recognizeCommandIfCurrentWindow(generation), "the generation is still current")
 
-        // The held window still belongs to the turn that owns it.
-        XCTAssertTrue(
-            signal.recognizeCommandIfCurrentWindow(generation),
-            "the same generation remains current after a hold-preserved backgrounding"
-        )
-
-        // Releasing the hold settles normally (no crash, window still live pre-timeout).
-        signal.endPlaybackHold(hold)
-        XCTAssertTrue(signal.isActive, "releasing the hold does not close the preserved window")
+        // LOSING the last genuine context: clear the episode, then background. Fails closed.
+        signal.playbackContextAvailable = { false }
+        signal.onAppBackgrounded()
+        XCTAssertFalse(signal.isActive, "backgrounding with NO real context ends the window")
+        XCTAssertNotEqual(signal.currentGeneration(), generation, "the ended window's generation is retired")
     }
 
-    /// The SAME backgrounding event still invalidates when NO hold is live (fail closed).
+    /// A hold with NO independent playback context: backgrounding still ends the window
+    /// (grace-as-context defect). The turn's own completion is judged on its retired generation.
+    @MainActor
+    func testForegroundLossWithOnlyAHoldEndsTheWindow() async throws {
+        let signal = GracePeriodSignal()
+        signal.playbackContextAvailable = { false }
+        signal.onWakeWordDetected()
+        let generation = signal.currentGeneration()
+        let hold = signal.beginPlaybackHold(forGeneration: generation)
+        XCTAssertNotNil(hold, "the live window accepts a hold")
+
+        signal.onAppBackgrounded()
+        XCTAssertFalse(signal.isActive, "a hold alone must not preserve the window")
+        XCTAssertFalse(
+            signal.recognizeCommandIfCurrentWindow(generation),
+            "a completion under the retired generation is not applied to anything"
+        )
+    }
+
+    /// No hold at all: backgrounding ends the window (fail closed, unchanged).
     @MainActor
     func testBackgroundingWithoutAHoldStillInvalidatesTheWindow() async throws {
         let signal = GracePeriodSignal()
+        signal.playbackContextAvailable = { false }
         signal.onWakeWordDetected()
         let generation = signal.currentGeneration()
         XCTAssertTrue(signal.isActive)
 
         signal.onAppBackgrounded()
-        XCTAssertFalse(signal.isActive, "no active hold: backgrounding must end the window")
-        XCTAssertNotEqual(
-            signal.currentGeneration(), generation,
-            "the retired generation must not remain current"
-        )
+        XCTAssertFalse(signal.isActive, "no context: backgrounding must end the window")
+        XCTAssertNotEqual(signal.currentGeneration(), generation)
     }
 
     @MainActor

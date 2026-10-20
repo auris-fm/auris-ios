@@ -15,6 +15,28 @@ final class CloudConversationManagerTests: XCTestCase {
         manager.registerLiveOrigin(1)
     }
 
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 724db1e8): duplicate
+    /// preparation for the SAME utterance reuses the prepared wire request identity; an
+    /// independent utterance mints its own. This is the duplicate-dispatch protection the
+    /// removed window budget was replaced by — asserted at the ACTUAL request owner.
+    func testDuplicatePreparationForTheSameUtteranceReusesTheWireIdentity() throws {
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))
+        let duplicate = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))
+        XCTAssertEqual(
+            duplicate.requestId, first.requestId,
+            "a repeated callback for the SAME utterance must reuse the prepared wire request id"
+        )
+        XCTAssertEqual(duplicate.conversationId, first.conversationId)
+        XCTAssertEqual(duplicate.mode, first.mode)
+
+        // An independent utterance (different id) mints a DIFFERENT request.
+        let independent = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-2"))
+        XCTAssertNotEqual(
+            independent.requestId, first.requestId,
+            "an independent utterance in the same window dispatches its own request"
+        )
+    }
+
     func testFirstTurnCreates() throws {
         let prepared = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1))
         XCTAssertEqual(prepared.mode, "create")

@@ -289,15 +289,75 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
+    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): one logical dispatch per utterance.
+    // A duplicate invocation (repeated callback) while a dispatch for the SAME utterance is
+    // in flight JOINS it — it awaits that dispatch's result instead of sending a second wire
+    // request. Independent utterances dispatch independently.
+    private let ownershipLock = NSLock()
+    private var inFlightByUtteranceId: [String: [CheckedContinuation<CloudRouteResult, Never>]] = [:]
+    private var settledByUtteranceId: [String: CloudRouteResult] = [:]
+
     func routeToCloud(
         request: String,
         tier: CloudTier,
         context: PlaybackContext,
         origin: Int?,
         selection: CloudConversationSelection?,
+        utteranceId: String? = nil,
         preparedObserver: PreparedObserver? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil
+    ) async -> CloudRouteResult {
+        guard let utteranceId else {
+            return await routeToCloudOwned(
+                request: request, tier: tier, context: context, origin: origin,
+                selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+            )
+        }
+        // Join or own.
+        ownershipLock.lock()
+        if let settledResult = settledByUtteranceId[utteranceId] {
+            ownershipLock.unlock()
+            return settledResult
+        }
+        if inFlightByUtteranceId[utteranceId] != nil {
+            // A dispatch for this utterance is in flight: JOIN it, do not send another.
+            return await withCheckedContinuation { (continuation: CheckedContinuation<CloudRouteResult, Never>) in
+                inFlightByUtteranceId[utteranceId]!.append(continuation)
+                ownershipLock.unlock()
+            }
+        }
+        inFlightByUtteranceId[utteranceId] = []
+        ownershipLock.unlock()
+
+        let result = await routeToCloudOwned(
+            request: request, tier: tier, context: context, origin: origin,
+            selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
+            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+        )
+        // Settle: publish to joiners, cache briefly (bounded), release ownership.
+        ownershipLock.lock()
+        settledByUtteranceId[utteranceId] = result
+        if settledByUtteranceId.count > 16 {
+            settledByUtteranceId.removeValue(forKey: settledByUtteranceId.keys.first!)
+        }
+        let waiters = inFlightByUtteranceId.removeValue(forKey: utteranceId) ?? []
+        ownershipLock.unlock()
+        waiters.forEach { $0.resume(returning: result) }
+        return result
+    }
+
+    private func routeToCloudOwned(
+        request: String,
+        tier: CloudTier,
+        context: PlaybackContext,
+        origin: Int?,
+        selection: CloudConversationSelection?,
+        utteranceId: String?,
+        preparedObserver: PreparedObserver?,
+        sourceTranscript: String?,
+        sourceLanguage: String?
     ) async -> CloudRouteResult {
         // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -330,7 +390,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // fallback for callers that did not, which is the late-reading behaviour this
                 // replaces.
                 selection: effectiveSelection,
-                origin: origin
+                origin: origin,
+                // REQUEST OWNERSHIP: a repeated callback for the SAME utterance reuses the
+                // already-prepared wire identity instead of minting another request.
+                utteranceId: utteranceId
             ) else {
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }

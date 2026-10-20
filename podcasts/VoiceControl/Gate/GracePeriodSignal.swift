@@ -22,6 +22,11 @@ class GracePeriodSignal: ObservableObject {
     /// a second tone carries no new information; a new window gets one again.
     private var refusalToneGeneration: Int?
 
+    /// Injected source of the REAL playback context (an eligible episode exists — playing or
+    /// paused). Nil in unit contexts without playback wiring; the gate's own context decision is
+    /// the authority for capture either way.
+    var playbackContextAvailable: (() -> Bool)?
+
     init(timeout: TimeInterval = 30.0) {
         self.timeout = timeout
     }
@@ -54,11 +59,13 @@ class GracePeriodSignal: ObservableObject {
     /// Capture is a separate gate concern: the gate still decides whether the microphone may be
     /// used. This only governs the window's lifetime.
     func onAppBackgrounded() {
-        // A live hold on the CURRENT generation is active work: do not retire it here.
-        // (`playbackHolds` is only ever populated for the live generation at acquisition, and
-        // stale-generation holds are retired in `endPlaybackHoldOnMain`.)
-        if playbackHolds.contains(where: { $0.generation == generation }) {
-            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: preserved (backgrounded with active hold)")
+        // Preservation is decided ONLY by an INDEPENDENT context source (spec 3893cd55): an
+        // actual eligible playback context (episode loaded, playing or paused). A hold alone is
+        // NOT a context and grace must not self-sustain through its own hold — the same
+        // grace-as-context defect Android removed. With no real context, backgrounding ends the
+        // window; a turn completing afterwards is judged against its RETIRED generation.
+        if playbackContextAvailable?() == true {
+            FileLog.shared.addMessage("[VoicePipeline] GracePeriod: preserved (backgrounded with playback context)")
             return
         }
         deactivate(trigger: "backgrounded")

@@ -59,9 +59,34 @@ class VoiceControlAssembly {
         // the manager unaware of every window that opens.
 
         let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
-        let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
-        let interruptionHandler = AudioSessionInterruptionHandler()
         let playbackManager = PlaybackManager.shared
+        // REAL playback context (an eligible episode exists, playing or paused) — the independent
+        // source both the gate's context and the grace signal's backgrounding decision consult.
+        // A cloud/grace hold is never a context source (spec 3893cd55).
+        let playbackContextAvailable: () -> Bool = { [weak playbackManager] in
+            guard let playbackManager else { return false }
+            let context = DefaultPlaybackContextProvider(
+                playbackState: playbackManager,
+                fingerprintMapper: FingerprintTimingManager.shared,
+                cloudPlaybackContextState: CloudPlaybackContextState()
+            ).current()
+            return context != nil
+        }
+        gracePeriodSignal.playbackContextAvailable = playbackContextAvailable
+        let conditionMonitor = conditionMonitor ?? LiveConditionMonitor(
+            gracePeriodSignal: gracePeriodSignal,
+            // Real context changes: a track change (episode loaded/cleared) or playback ending.
+            // Each event re-samples the ACTUAL provider rather than assuming a direction.
+            playbackContextPublisher: Publishers.Merge(
+                NotificationCenter.default.publisher(for: Constants.Notifications.playbackTrackChanged).map { _ in () },
+                NotificationCenter.default.publisher(for: Constants.Notifications.playbackEnded).map { _ in () }
+            )
+            .map { _ in playbackContextAvailable() }
+            .prepend(playbackContextAvailable())
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+        )
+        let interruptionHandler = AudioSessionInterruptionHandler()
 
         let locale = Locale.current
         guard let asrBackend = resolveAsrBackend(locale: locale, override: injectedBackend) else {

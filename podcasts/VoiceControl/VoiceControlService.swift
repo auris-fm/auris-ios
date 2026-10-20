@@ -561,6 +561,8 @@ class VoiceControlService: ObservableObject {
                     // replace the original on the wire (core b6eafe25).
                     sourceTranscript: input.sourceTranscript,
                     sourceLanguage: input.sourceLanguage,
+                    // REQUEST OWNERSHIP: the captured utterance's identity travels with the turn.
+                    utteranceId: input.utteranceId,
                     origin: route.origin,
                     // The origin captured with the INPUT, not read here: this point is after the
                     // routing work, so a live read would attribute the turn to whichever window
@@ -680,6 +682,8 @@ class VoiceControlService: ObservableObject {
                         // the original utterance and its actual language when the input has them.
                         sourceTranscript: input.sourceTranscript,
                         sourceLanguage: input.sourceLanguage,
+                        // REQUEST OWNERSHIP: the fallback carries the same utterance identity.
+                        utteranceId: input.utteranceId,
                         origin: .routingFailure,
                         generation: dispatchGeneration,
                         // The turn's own provenance, carried as it is on the model-chosen path.

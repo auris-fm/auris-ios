@@ -200,6 +200,9 @@ class VoiceIntentExecutor {
                 // window and the selection it was issued under.
                 origin: cr.generation,
                 selection: cr.selection,
+                // REQUEST OWNERSHIP: the captured utterance's identity, so a duplicate
+                // callback joins the in-flight request instead of minting another.
+                utteranceId: cr.utteranceId,
                 preparedObserver: preparedObserver,
                 sourceTranscript: cr.sourceTranscript,
                 sourceLanguage: cr.sourceLanguage

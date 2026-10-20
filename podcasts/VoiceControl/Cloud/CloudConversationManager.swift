@@ -47,6 +47,9 @@ final class CloudConversationManager {
 
     /// The conversation opened in the live origin.
     private var current: OpenConversation?
+    /// REQUEST OWNERSHIP: utterance id -> already-prepared logical request. A repeated callback
+    /// for the same utterance reuses its wire request identity (bounded per window).
+    private var preparedByUtteranceId: [String: CloudPreparedConversation] = [:]
 
     private struct OpenConversation {
         let id: String
@@ -67,7 +70,8 @@ final class CloudConversationManager {
     func prepare(
         selection: CloudConversationSelection,
         origin: Int?,
-        retryingRequestId: String? = nil
+        retryingRequestId: String? = nil,
+        utteranceId: String? = nil
     ) -> CloudPreparedConversation? {
         // A retry reuses the prepared logical request rather than rebuilding it, so the wire
         // `request_id` is the one the original attempt used.
@@ -79,6 +83,14 @@ final class CloudConversationManager {
                 conversationId: existing.id,
                 mode: Self.create
             )
+        }
+
+        // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): a repeated callback for the SAME
+        // utterance reuses the already-prepared logical request — one wire request identity per
+        // utterance. Independent utterances (different ids) each prepare their own.
+        if let utteranceId,
+           let prepared = preparedByUtteranceId[utteranceId] {
+            return prepared
         }
 
         // No live origin means no claim on any conversation. Refuse rather than create: a
@@ -101,11 +113,19 @@ final class CloudConversationManager {
             origin: origin,
             creationRequestId: requestId
         )
-        return CloudPreparedConversation(
+        let prepared = CloudPreparedConversation(
             requestId: requestId,
             conversationId: conversationId,
             mode: Self.create
         )
+        if let utteranceId {
+            preparedByUtteranceId[utteranceId] = prepared
+            // Bound the map: identities are per utterance, so a windowed history is enough.
+            if preparedByUtteranceId.count > 32 {
+                preparedByUtteranceId.removeValue(forKey: preparedByUtteranceId.keys.first!)
+            }
+        }
+        return prepared
     }
 
     /// Binds a grace-window signal to this manager's live origin, and returns the cancellable

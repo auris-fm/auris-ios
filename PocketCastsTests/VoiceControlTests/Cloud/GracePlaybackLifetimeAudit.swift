@@ -457,11 +457,14 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
     }
 
     /// BLOCKER CONTROL 3 — FOREGROUND LOSS with a cloud turn in progress (owner delta
-    /// 8fe04cd/0aa4480): the active hold is PRESERVED while capture remains allowed;
-    /// backgrounding alone does not end grace or retire the turn. The later real stop must not
-    /// create a second window, and host playback still restores exactly once.
+    /// 8fe04cd/0aa4480, corrected by spec 3893cd55): preservation requires an INDEPENDENT
+    /// playback context; a hold alone never manufactures one. In this environment no episode is
+    /// loaded, so backgrounding ends the window, the in-flight turn completes under its RETIRED
+    /// generation without reopening anything, and the drain still restores host playback exactly
+    /// once. (The preserve-with-real-playback-context case is the signal unit control
+    /// `testForegroundLossWithRealPlaybackContextPreservesTheWindow`.)
     @MainActor
-    func testForegroundLossUnderALiveHoldPreservesTheWindowAndTheLaterStopDoesNotReopenIt() async throws {
+    func testForegroundLossWithOnlyAHoldEndsTheWindowAndTheTurnNeverReopensIt() async throws {
         let playback = RecordingPlaybackSink()
         let defaults = UserDefaults(suiteName: "graceauditpriv_\(UUID().uuidString)")!
         defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
@@ -514,15 +517,13 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
         service.gracePeriodSignalForTesting.onAppBackgrounded()
         try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertTrue(
+        let retiredGeneration = service.gracePeriodSignalForTesting.currentGeneration()
+        XCTAssertFalse(
             service.gracePeriodSignalForTesting.isActive,
-            "foreground loss DURING a cloud turn preserves the hold while capture remains allowed"
+            "a hold alone is not a context: with no independent playback context, foreground loss ends the window"
         )
-        XCTAssertEqual(
-            service.gracePeriodSignalForTesting.currentGeneration(), liveGeneration,
-            "backgrounding alone does not retire the turn's window"
-        )
-        gate.signal()  // turn completes + drain releases
+        XCTAssertNotEqual(retiredGeneration, liveGeneration - 1, "sanity: the generation advanced exactly once")
+        gate.signal()  // turn completes + drain releases AFTER the close
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting
@@ -531,14 +532,11 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(playback.resumeCalls, 1, "the drain still restored exactly once")
-        // The stop resumed the SAME window (no reopen); and with no hold left, a later
-        // foreground loss would end it (the no-hold rule).
-        service.gracePeriodSignalForTesting.onAppBackgrounded()
         XCTAssertFalse(
             service.gracePeriodSignalForTesting.isActive,
-            "with no hold remaining, foreground loss ends the window"
+            "the retired turn's completion must not reopen the closed window"
         )
+        XCTAssertEqual(playback.resumeCalls, 1, "the drain still restored exactly once")
     }
 
     /// BLOCKER CONTROL 4 — SUCCESSOR LIVE, stale predecessor completion: a predecessor's late

@@ -419,6 +419,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// Optional cancellation-insensitive park installed on the stub task BEFORE the client is
     /// constructed, so the producer's FIRST receive parks — no race with stream end.
     private var pendingProducerHold: HoldLatch?
+    /// How many wires the sink actually dialled — the OWNERSHIP observable for request controls.
+    private var clientCreationCount = 0
     /// Optional one-shot PRODUCTION-boundary park: armed onto the stub at construction; the sink
     /// installs it synchronously at the claim→effect seam via `effectEntered` (see
     /// `StubWebSocketTask.armReceiveHoldOnEntered`).
@@ -427,6 +429,51 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// frames must be served before it engages.
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
+
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 724db1e8): while a dispatch for
+    /// an utterance is genuinely HELD in flight, a duplicate invocation for the SAME utterance
+    /// joins it — no second wire request is sent — and both callers observe the identical
+    /// result once the held dispatch settles: the held-dispatch control. An INDEPENDENT
+    /// utterance dispatches its own request concurrently.
+    @MainActor
+    func testDuplicateDispatchWhileOneIsHeldJoinsItAndIndependentUtterancesDispatchSeparately() async throws {
+        let hold = HoldLatch()
+        pendingProducerHold = hold
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+
+        let shared = "utterance-shared"
+        let duplicate = Task { await sink.routeToCloud(
+            request: "same", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: shared) }
+        // Wait until the owner is actually inside the held producer, then invoke the duplicate.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let joiner = Task { await sink.routeToCloud(
+            request: "same", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: shared) }
+        // An independent utterance must NOT be blocked by the held one.
+        let independent = Task { await sink.routeToCloud(
+            request: "other", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: "utterance-independent") }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        hold.release()
+        let first = await duplicate.value
+        let joined = await joiner.value
+        _ = await independent.value
+
+        // The held dispatch is the OWNER: exactly one wire request was minted, and the joining
+        // duplicate returned THAT dispatch's result rather than starting its own.
+        XCTAssertEqual(
+            joined, first,
+            "a duplicate dispatch held in flight must join the SAME wire request and observe its result"
+        )
+        // Exactly TWO wires were dialled: one for the shared utterance (joined by its duplicate)
+        // and one for the independent utterance.
+        XCTAssertEqual(
+            clientCreationCount, 2,
+            "one wire per OWNED utterance: the shared duplicate joins, the independent dispatches"
+        )
+    }
 
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
@@ -470,6 +517,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                     Task { await declaredPark?.wait(untilRetired: { task.isCancelledSocket }) }
                 }
                 self.capturedTask = built.task
+                self.clientCreationCount += 1
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },

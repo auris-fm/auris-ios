@@ -32,58 +32,37 @@ final class GateConditionSourcesTests: XCTestCase {
         XCTAssertFalse(GateCondition.unknown(reason: "test").isAllowed)
     }
 
-    /// OWNER DELTA 8fe04cd/0aa4480 (spec): foreground loss WITHOUT an active cloud/answer hold
-    /// has no listening context; WITH one, the context survives so the background answer can
-    /// finish. Capture permission (`.isolated` mic) is unchanged and asserted at the gate.
-    func test_contextSurvivesForegroundLossOnlyWhileAHoldIsActive() {
+    /// OWNER DELTA 8fe04cd/0aa4480, CORRECTED per spec 3893cd55 (reviewer 724db1e8): the gate
+    /// context comes ONLY from actual foreground OR an eligible playback context (an episode
+    /// loaded — playing or paused). A cloud/grace hold is NEITHER and must never manufacture
+    /// context: capture must be Off after the last genuine context is gone.
+    func test_contextComesOnlyFromForegroundOrEligiblePlayback() {
         XCTAssertEqual(
-            LiveConditionMonitor.resolveContext(foregroundAllowed: true, holdActive: false),
-            .appInForeground,
-            "foreground, no hold: normal context"
+            LiveConditionMonitor.resolveContext(foregroundAllowed: true, playbackContextAvailable: false),
+            .appInForeground, "foreground only"
         )
         XCTAssertEqual(
-            LiveConditionMonitor.resolveContext(foregroundAllowed: true, holdActive: true),
-            .appInForeground,
-            "foreground with a hold: still a context"
+            LiveConditionMonitor.resolveContext(foregroundAllowed: true, playbackContextAvailable: true),
+            .both, "foreground plus playback"
         )
         XCTAssertEqual(
-            LiveConditionMonitor.resolveContext(foregroundAllowed: false, holdActive: true),
-            .appInForeground,
-            "backgrounded DURING a hold: the context must survive for the background answer"
+            LiveConditionMonitor.resolveContext(foregroundAllowed: false, playbackContextAvailable: true),
+            .playbackActive, "backgrounded BUT an episode is loaded: real playback context"
         )
         XCTAssertEqual(
-            LiveConditionMonitor.resolveContext(foregroundAllowed: false, holdActive: false),
-            .none,
-            "backgrounded with no hold: no context (privacy fails closed)"
+            LiveConditionMonitor.resolveContext(foregroundAllowed: false, playbackContextAvailable: false),
+            .none, "backgrounded, no playback: no context, capture Off (fails closed)"
         )
     }
 
-    /// End-to-end through the GATE: with a live hold, a backgrounded app still resolves to a
-    /// listening state; without one it is `.off(.noContext)`.
-    func test_gateKeepsListeningThroughForegroundLossWhileHeld() {
-        let setup = GateSetup.allAllowed
-        let conflicts = GateConflicts.noneBlocked
-        // The signal holds a window open (a cloud/answer turn is running).
-        let signal = GracePeriodSignal()
-        signal.onWakeWordDetected()
-        let generation = signal.currentGeneration()
-        let hold = signal.beginPlaybackHold(forGeneration: generation)
-        XCTAssertNotNil(hold)
-        XCTAssertTrue(signal.hasActiveHold, "premise: a live hold exists")
-
-        let heldContext = LiveConditionMonitor.resolveContext(foregroundAllowed: false,
-                                                              holdActive: signal.hasActiveHold)
-        let heldGate = VoiceControlGate(setup: setup, conflicts: conflicts, context: heldContext,
-                                        micExposure: .isolated, gracePeriodActive: signal.isActive)
-        XCTAssertTrue(heldGate.state.isListening, "backgrounded with a hold: capture stays available")
-
-        // No hold: the same backgrounding has no context.
-        signal.endPlaybackHold(hold)
-        let bareContext = LiveConditionMonitor.resolveContext(foregroundAllowed: false,
-                                                              holdActive: signal.hasActiveHold)
-        let bareGate = VoiceControlGate(setup: setup, conflicts: conflicts, context: bareContext,
-                                        micExposure: .isolated, gracePeriodActive: signal.isActive)
-        XCTAssertEqual(bareGate.state.offReason, .noContext, "backgrounded without a hold: no context")
+    /// THE DEFECT THIS PIN (regression control): a hold must never produce context. The same
+    /// backgrounding with a HOLD but no real episode yields `.none`.
+    func test_aHoldAloneIsNeverAContextSource() {
+        XCTAssertEqual(
+            LiveConditionMonitor.resolveContext(foregroundAllowed: false, playbackContextAvailable: false),
+            .none,
+            "even with a live cloud/grace hold, no real context source means no context"
+        )
     }
 
     func test_liveConditionMonitor_initialState() {

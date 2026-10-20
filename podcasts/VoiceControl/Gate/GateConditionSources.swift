@@ -103,6 +103,12 @@ class ForegroundConditionSource: GateConditionSource {
     }
 }
 
+/// Publishes whether an ELIGIBLE playback context exists (an episode loaded — playing or paused).
+/// Not a hold, and not a grace window: the owning spec allows context only from real sources.
+struct PlaybackContextConditionSource {
+    let publisher: AnyPublisher<Bool, Never>
+}
+
 class LiveConditionMonitor: ObservableObject {
     @Published var setup: GateSetup = .init(
         enabledByUser: .allowed,
@@ -122,21 +128,26 @@ class LiveConditionMonitor: ObservableObject {
     private let castingSource = CastingConditionSource()
     private let otherAppPlayingSource = OtherAppPlayingConditionSource()
     private let foregroundSource: ForegroundConditionSource
-    private let gracePeriodSignal: GracePeriodSignal
+    private let playbackContextSource: PlaybackContextConditionSource?
 
     private var cancellables = Set<AnyCancellable>()
 
-    /// Foreground loss collapses the context to `.none` — EXCEPT while an active cloud/answer
-    /// hold keeps the window open (owner delta 8fe04cd/0aa4480): the answer must be able to finish
-    /// in the background, so the app still has a listening context. Capture permission itself is
-    /// the gate's `.isolated` decision, unchanged.
-    static func resolveContext(foregroundAllowed: Bool, holdActive: Bool) -> GateContext {
-        (foregroundAllowed || holdActive) ? .appInForeground : .none
+    /// The owning core spec: the gate context comes from ACTUAL foreground OR a current ELIGIBLE
+    /// playback context (an episode loaded, playing or paused) — nothing else. A cloud/grace hold
+    /// is NEITHER: it must not manufacture foreground, or capture would stay allowed after the
+    /// last genuine context is gone (spec 3893cd55; the same grace-as-context defect Android
+    /// removed). Foreground loss is therefore preserved only while an independent playback
+    /// context still allows capture.
+    static func resolveContext(foregroundAllowed: Bool, playbackContextAvailable: Bool) -> GateContext {
+        if foregroundAllowed && playbackContextAvailable { return .both }
+        if playbackContextAvailable { return .playbackActive }
+        if foregroundAllowed { return .appInForeground }
+        return .none
     }
 
-    init(gracePeriodSignal: GracePeriodSignal) {
+    init(gracePeriodSignal: GracePeriodSignal, playbackContextPublisher: AnyPublisher<Bool, Never>? = nil) {
         self.foregroundSource = ForegroundConditionSource(gracePeriodSignal: gracePeriodSignal)
-        self.gracePeriodSignal = gracePeriodSignal
+        self.playbackContextSource = playbackContextPublisher.map { PlaybackContextConditionSource(publisher: $0) }
         bind()
     }
 
@@ -193,14 +204,20 @@ class LiveConditionMonitor: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Context = actual foreground OR an eligible playback context. The playback publisher is
+        // merged so a context change (episode loaded/cleared, paused or playing) refreshes the
+        // gate — a hold must never be the source.
+        let playbackPublisher = playbackContextSource?.publisher
+            ?? Just(false).eraseToAnyPublisher()
         Publishers.CombineLatest(
             foregroundSource.publisher,
-            Just(GateContext.none) // playback context will be merged separately
+            playbackPublisher
         )
-        .map { [weak self] foregroundCondition, _ in
+        .map { foregroundCondition, playbackAvailable in
             Self.resolveContext(foregroundAllowed: foregroundCondition.isAllowed,
-                                holdActive: self?.gracePeriodSignal.hasActiveHold ?? false)
+                                playbackContextAvailable: playbackAvailable)
         }
+        .removeDuplicates()
         .sink { [weak self] in
             FileLog.shared.addMessage("[VoicePipeline] Context: \($0)")
             self?.context = $0

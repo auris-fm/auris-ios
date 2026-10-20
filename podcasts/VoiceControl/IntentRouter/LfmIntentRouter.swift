@@ -205,7 +205,10 @@ final class LfmIntentRouter {
                     sourceLanguage: input.sourceLanguage,
                     routerTranscript: trimmed,
                     translationKind: input.translationKind,
-                    selection: input.selection
+                    selection: input.selection,
+                    // REQUEST OWNERSHIP: trimming is a view of the SAME utterance, so the id
+                    // travels — a duplicate callback joins the same request, not a new one.
+                    utteranceId: input.utteranceId
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)

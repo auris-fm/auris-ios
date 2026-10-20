@@ -8,6 +8,27 @@ struct IntentRoutingInput: Equatable {
     let sourceLanguage: String?
     let routerTranscript: String
     let translationKind: TranslationKind
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the identity of the captured utterance
+    /// this input carries. Duplicate callbacks re-emitting the SAME utterance carry the SAME id,
+    /// so the request owner can join/reuse one prepared wire request; an independent utterance
+    /// has its own id and dispatches its own request, even inside one grace window.
+    let utteranceId: String
+
+    init(
+        sourceTranscript: String?,
+        sourceLanguage: String?,
+        routerTranscript: String,
+        translationKind: TranslationKind,
+        selection: CloudConversationSelection?,
+        utteranceId: String = UUID().uuidString
+    ) {
+        self.sourceTranscript = sourceTranscript
+        self.sourceLanguage = sourceLanguage
+        self.routerTranscript = routerTranscript
+        self.translationKind = translationKind
+        self.selection = selection
+        self.utteranceId = utteranceId
+    }
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
     ///

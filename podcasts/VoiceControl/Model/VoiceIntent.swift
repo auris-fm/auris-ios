@@ -119,6 +119,10 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// The ASR pipeline's actual detected language (LID). Unknown stays nil and is OMITTED on
     /// the wire — never the OS locale, never a default. Preserves yue vs zh.
     var sourceLanguage: String? = nil
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the captured utterance's identity, so
+    /// duplicate preparation/callbacks join one wire request instead of minting another.
+    /// `nil` keeps the legacy per-call identity for constructions without an utterance.
+    var utteranceId: String? = nil
     /// Why this dispatch exists. A dispatch from a routing failure is a *fallback*
     /// rather than a command the user gave, and the two must not be treated alike
     /// by the grace window: handling a fallback continues the window but must not
@@ -148,6 +152,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         tier: CloudTier,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
+        utteranceId: String? = nil,
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
         selection: CloudConversationSelection? = nil
@@ -156,6 +161,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         self.tier = tier
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
+        self.utteranceId = utteranceId
         self.origin = origin
         self.generation = generation
         self.selection = selection
