@@ -42,14 +42,16 @@ struct IntentRoutingInput: Equatable {
     static func english(
         transcript: String,
         language: String? = nil,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        utteranceId: String = UUID().uuidString
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
             sourceLanguage: language,
             routerTranscript: transcript,
             translationKind: .none,
-            selection: selection
+            selection: selection,
+            utteranceId: utteranceId
         )
     }
 

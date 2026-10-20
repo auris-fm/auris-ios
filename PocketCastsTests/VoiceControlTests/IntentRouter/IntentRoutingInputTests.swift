@@ -97,7 +97,50 @@ final class IntentRoutingInputTests: XCTestCase {
         XCTAssertEqual(unroutable, 1)
     }
 
-    private func makeEngine(backend: AsrBackend, translation: TranslationStage) -> VoiceAsrEngine {
+    /// ONE IDENTITY FROM ADMISSION (spec delta3b1def9). The id is minted at utterance admission
+    /// and carried on EVERY routing input the engine emits; two independent utterances carry
+    /// different identities. (The trim itself is exercised elsewhere; what this pins is that the
+    /// admitted identity, not a freshly minted one, is what the input carries.)
+    func test_admittedUtteranceIdSurvivesTrimAndDiffersAcrossUtterances() async throws {
+        let backend = StubAsrBackend(
+            result: AsrResult(text: "hey auris pause", detectedLanguage: "en"),
+            canTranslate: false
+        )
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation, wake: DetectingWakeStub())
+        // Known admission ids, so the control can prove the input carries the ADMITTED id.
+        var minted = ["adm-1", "adm-2"]
+        engine.utteranceIdGeneratorForTesting = { minted.removeFirst() }
+
+        var inputs: [IntentRoutingInput] = []
+        engine.onRoutingInput = { inputs.append($0) }
+        engine.onWakeOnly = { XCTFail("the command remainder is routable, not wake-only") }
+
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
+
+        XCTAssertEqual(inputs.count, 2, "both utterances reached routing")
+        XCTAssertFalse(inputs[0].utteranceId.isEmpty, "the admitted id is carried on the input")
+        XCTAssertFalse(inputs[1].utteranceId.isEmpty, "the admitted id is carried on the input")
+        XCTAssertEqual(
+            inputs[0].translationKind, inputs[1].translationKind,
+            "both utterances went the same preparation path"
+        )
+        XCTAssertEqual(
+            inputs[0].utteranceId, "adm-1",
+            "the routing input carries the id MINTED AT ADMISSION, not one rebuilt downstream"
+        )
+        XCTAssertEqual(
+            inputs[1].utteranceId, "adm-2",
+            "two independent utterances carry their own admitted identities"
+        )
+    }
+
+    private func makeEngine(
+        backend: AsrBackend,
+        translation: TranslationStage,
+        wake: WakeWordDetectorProtocol? = nil
+    ) -> VoiceAsrEngine {
         let grace = GracePeriodSignal()
         grace.onCommandRecognized()
         let engine = VoiceAsrEngine(
@@ -105,7 +148,7 @@ final class IntentRoutingInputTests: XCTestCase {
             segmenter: NativeVadSegmenter(),
             backend: backend,
             signalFilter: SignalFilter(),
-            wakeWordDetector: ContinuousWakeStub(),
+            wakeWordDetector: wake ?? ContinuousWakeStub(),
             gracePeriodSignal: grace,
             translationStage: translation
         )
@@ -115,6 +158,16 @@ final class IntentRoutingInputTests: XCTestCase {
 }
 
 // MARK: - Stubs (shared with TranslateDropTests shape)
+
+/// Detects the wake so the wake-word TRIM runs on the command remainder.
+private final class DetectingWakeStub: WakeWordDetectorProtocol {
+    let completionSample: Int
+    init(completionSample: Int = 250 * 16) { self.completionSample = completionSample }
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        .detected(confidence: 0.9, completionSample: completionSample)
+    }
+    func release() {}
+}
 
 private final class ContinuousWakeStub: WakeWordDetectorProtocol {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {

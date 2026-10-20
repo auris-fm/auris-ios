@@ -143,6 +143,10 @@ class VoiceAsrEngine {
         return max(0, nowOffset - latencySamples)
     }
     var listeningMode: ListeningMode = .wakeWord
+    /// INJECTABLE for controls: mints the utterance identity at ADMISSION. Production uses a fresh
+    /// UUID; a control can supply a known sequence so it can prove the id the routing input carries
+    /// is the ADMITTED one rather than a value rebuilt downstream (spec delta3b1def9).
+    var utteranceIdGeneratorForTesting: (() -> String)?
 
     /// Forwards the immutable routing envelope (source + English router text).
     var onRoutingInput: ((IntentRoutingInput) -> Void)?
@@ -272,6 +276,12 @@ class VoiceAsrEngine {
     /// Exposed for focused translate-drop tests (`@testable`).
     func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
         stageTimer.mark() // VAD segment ready
+        // ONE IDENTITY FROM ADMISSION (spec delta3b1def9): the utterance is admitted HERE, so its
+        // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
+        // capture carry this id; an independent utterance has its own. It flows unchanged through
+        // trimming, router diagnostics, the prepared wire request_id and server diagnostics.
+        let utteranceId = utteranceIdGeneratorForTesting?() ?? UUID().uuidString
+        FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
 
         if echoFilterRoute.appliesCorrelationWindow,
            signalFilter.isPlaybackBleed(
@@ -362,13 +372,13 @@ class VoiceAsrEngine {
         )
         let trimNote: String? = {
             guard isWakePositive, asrResult.text != trimmedText else { return nil }
-            return "trim '\(asrResult.text)' → '\(trimmedText)'"
+            return "trim[ut=\(utteranceId)] '\(asrResult.text)' → '\(trimmedText)'"
         }()
 
         if trimmedText.isEmpty {
             let reason = isWakePositive ? "wake-only" : "empty"
             FileLog.shared.addMessage(
-                "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(asrResult.detectedLanguage ?? "?") '\(asrResult.text)'\(trimNote.map { " \($0)" } ?? "") → drop (\(reason))"
+                "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms ut=\(utteranceId) lang=\(asrResult.detectedLanguage ?? "?") '\(asrResult.text)'\(trimNote.map { " \($0)" } ?? "") → drop (\(reason))"
             )
             if isWakePositive {
                 onWakeOnly?()
@@ -383,7 +393,7 @@ class VoiceAsrEngine {
         let (finalized, translateNote) = await maybeTranslate(trimmedResult, backend: backend)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         FileLog.shared.addMessage(
-            "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
+            "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms ut=\(utteranceId) lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
         )
         if Self.isNonEnglishTranslateFailure(translateNote) {
             // Don't feed untranslated CJK into the English-only intent model.
@@ -395,7 +405,8 @@ class VoiceAsrEngine {
             source: trimmedResult,
             routerText: finalized.text,
             translateNote: translateNote,
-            selection: selection
+            selection: selection,
+            utteranceId: utteranceId
         ))
     }
 
@@ -405,7 +416,8 @@ class VoiceAsrEngine {
         source: AsrResult,
         routerText: String,
         translateNote: String?,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        utteranceId: String = UUID().uuidString
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
@@ -413,7 +425,8 @@ class VoiceAsrEngine {
                 sourceLanguage: source.detectedLanguage,
                 routerTranscript: routerText,
                 translationKind: .backend,
-                selection: selection
+                selection: selection,
+                utteranceId: utteranceId
             )
         }
         if let translateNote,
@@ -424,7 +437,8 @@ class VoiceAsrEngine {
                 sourceLanguage: source.detectedLanguage,
                 routerTranscript: routerText,
                 translationKind: .platform,
-                selection: selection
+                selection: selection,
+                utteranceId: utteranceId
             )
         }
         // NO FABRICATED LANGUAGE: an unknown LID stays nil on the input (and is omitted on the
@@ -432,7 +446,8 @@ class VoiceAsrEngine {
         return IntentRoutingInput.english(
             transcript: routerText,
             language: source.detectedLanguage,
-            selection: selection
+            selection: selection,
+            utteranceId: utteranceId
         )
     }
 
