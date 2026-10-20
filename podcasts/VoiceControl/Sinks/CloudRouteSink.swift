@@ -82,6 +82,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func tokenRecordInstanceForTesting(token: CloudDispatchOwnership.DispatchToken) -> UUID? {
         token.record?.instance
     }
+    /// A WEAK handle on the record a token was admitted against, so a control can prove the record
+    /// is actually DEALLOCATED once the live-map entry and every token are gone (reviewer
+    /// f3492082). Selecting `Live` here is what keeps the control honest about ARC.
+    func weakRecordForTesting(token: CloudDispatchOwnership.DispatchToken) -> () -> UtteranceRecord? {
+        weak var weakRecord = token.record
+        return { weakRecord }
+    }
     /// Whether the STALE owner started a wire turn: counted through the client factory.
     @MainActor var wireDispatchCountForTesting: Int { clientCreationCountForTesting }
     @MainActor var clientCreationCountForTesting: Int = 0
@@ -331,29 +338,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let ownershipLock = NSLock()
 
     /// One OWNERSHIP RECORD per utterance dispatch. It carries the ownership INSTANCE that
-    /// admission tokens bind to, ONE terminal state, and an explicit reference count of the
-    /// admitted callers that still need its result — so a detached record is released as soon as
-    /// no admitted caller needs it, with no immortal second map (reviewer be89233d).
+    /// admission tokens bind to and ONE terminal state. LIFETIME IS ARC: the sink's live map holds
+    /// the record until retirement detaches it, and each ADMITTED CALLER'S TOKEN holds it while
+    /// that caller is still resolving (`DispatchToken.record`). A detached record is therefore
+    /// deallocated exactly when its live-map entry and its last outstanding token are both gone —
+    /// no counter, no second map (reviewer be89233d/f3492082).
     final class UtteranceRecord {
         let origin: Int?
         let instance = UUID()
         /// The record's ONE terminal state: nil until it settles, then the result it settled with.
         /// A retired record keeps its terminal result for its admitted joiners.
         var terminalResult: CloudRouteResult?
-        /// Admitted callers (owner + joiners) that have NOT yet resolved. The record leaves the
-        /// live map on retirement, and is RELEASED (dropped from its owner's retention) once this
-        /// reaches zero AND the record is terminal.
-        var outstandingCallers: Int = 0
         /// Admitted callers parked awaiting this record's terminal result.
         var waiters: [CheckedContinuation<CloudRouteResult, Never>] = []
-        /// True once the OWNER has begun `routeToCloudOwned`; before that the record exists only
-        /// because the owner claimed it, and the claiming caller is still the owner.
-        var dispatchStarted = false
         /// True when retirement detached this record from the live map. A detached record answers
         /// only its admitted callers and never stands in for a successor's map entry.
         var detached = false
         init(origin: Int?) { self.origin = origin }
-        var isTerminal: Bool { terminalResult != nil }
     }
     private var recordsByUtteranceId: [String: UtteranceRecord] = [:]
     /// Retirement detaches records from the live map; each record is held ONLY by the ownership
@@ -398,13 +399,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         guard let origin, origin == conversationManager.liveOriginForTesting else { return .refused }
         if let record = recordsByUtteranceId[utteranceId] {
             if let terminal = record.terminalResult { return .settled(terminal) }
-            // A JOINER: it is an admitted caller of THIS record, so it takes a reference and must
-            // resolve before the record can be released.
-            record.outstandingCallers += 1
+            // A JOINER: its token holds this record for as long as it is resolving.
             return .join(.init(utteranceId: utteranceId, instance: record.instance, record: record))
         }
         let record = UtteranceRecord(origin: origin)
-        record.outstandingCallers = 1
         recordsByUtteranceId[utteranceId] = record
         return .owner(.init(utteranceId: utteranceId, instance: record.instance, record: record))
     }
@@ -474,17 +472,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 ownershipLock.unlock()
             }
         }
-        releaseCaller(record)
         return result
-    }
-
-    /// Releases ONE admitted caller's reference. When the record is terminal and no admitted
-    /// caller remains, the record is dropped — it is no longer reachable from the live map (it was
-    /// detached on retirement) nor from any token (every token has resolved).
-    private func releaseCaller(_ record: UtteranceRecord) {
-        ownershipLock.lock()
-        record.outstandingCallers -= 1
-        ownershipLock.unlock()
     }
 
     /// Runs the WIRE TURN for the token owner. Liveness is decided against the LIVE MAP, not the
@@ -509,7 +497,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let isLive: Bool = {
             ownershipLock.lock(); defer { ownershipLock.unlock() }
             guard recordsByUtteranceId[utteranceId] === record else { return false }
-            record.dispatchStarted = true
             return true
         }()
         guard isLive else {
@@ -527,8 +514,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
         )
         settle(record, with: result)
-        // The owner's own reference is released now that it has resolved.
-        releaseCaller(record)
         return result
     }
 

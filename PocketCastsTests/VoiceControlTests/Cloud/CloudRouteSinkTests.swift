@@ -692,8 +692,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// NO IMMORTAL SECOND MAP (reviewer be89233d). A record released by its last admitted caller
-    /// must be GONE from the owner's retention — a completed utterance is not retained forever.
+    /// NO IMMORTAL SECOND MAP (reviewer be89233d) AND NO PRETENDED REFCOUNT (reviewer f3492082).
+    /// (a) A completed utterance is DETACHED from the live map on a window change — not retained
+    /// forever. (b) LIFETIME IS ARC: once the retiring detaches the map entry and EVERY reference
+    /// to the record is gone, the record is DEALLOCATED — proved with a weak handle, not inferred
+    /// from a counter. The `admitAndResolve` helper guarantees its token locals are dead before the
+    /// assertion (Swift may keep frame locals alive to scope end, so the tokens live in a callee).
     @MainActor
     func testCompletedRecordIsReleasedOnceItsAdmittedCallersResolve() async throws {
         let manager = testConversationManager()
@@ -701,12 +705,35 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin)
 
         let shared = "utterance-release"
+        // The helper admits an owner AND a joiner, drives both through the production route entry,
+        // takes a weak handle, then RETURNS — so no token local of ours holds the record.
+        let weakRecord = try await admitResolveAndAbandon(shared: shared, sink: sink, manager: manager)
+        XCTAssertNotNil(weakRecord(), "premise: the record is still reachable from the live map")
+
+        // The window change DETACHES the live map entry (the record is not retained forever), and
+        // with no reference left it is DEALLOCATED.
+        sink.retireRetainedDispatchesIfWindowChanged(to: nil)
+        XCTAssertNil(
+            sink.recordInstanceForTesting(utteranceId: shared),
+            "a completed utterance is detached on the window change, not retained forever"
+        )
+        XCTAssertNil(
+            weakRecord(),
+            "the record is deallocated once the map entry and every caller's reference are gone"
+        )
+    }
+
+    /// Admits an owner and a joiner for `shared`, resolves BOTH through the production route entry,
+    /// and returns a weak handle to the record. Its token locals die when it returns.
+    @MainActor
+    private func admitResolveAndAbandon(
+        shared: String, sink: CloudRouteSink, manager: CloudConversationManager
+    ) async throws -> () -> CloudRouteSink.UtteranceRecord? {
         let owner = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
-        guard case let .owner(ownerToken) = owner else { return XCTFail("expected owner") }
-        // A joiner admitted against the same record.
-        guard case let .join(joinToken) = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin) else {
-            return XCTFail("expected join")
-        }
+        guard case let .owner(ownerToken) = owner else { throw XCTSkip("expected owner") }
+        let join = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        guard case let .join(joinToken) = join else { throw XCTSkip("expected join") }
+        let weakRecord = sink.weakRecordForTesting(token: ownerToken)
 
         _ = await sink.routeToCloud(
             request: "owner", tier: .free, context: sampleContext(),
@@ -714,23 +741,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
         _ = await sink.routeToCloud(
             request: "joiner", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: joinTokenDisposition(joinToken)
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared,
+            ownership: .join(joinToken)
         )
-
-        // Both admitted callers have resolved; the record must carry no live callers. Force a
-        // window change so the live map is detached and observe the record is unreachable.
-        sink.retireRetainedDispatchesIfWindowChanged(to: nil)
-        XCTAssertNil(
-            sink.recordInstanceForTesting(utteranceId: shared),
-            "a completed utterance is detached on the window change, not retained forever"
-        )
-        XCTAssertEqual(
-            sink.tokenRecordInstanceForTesting(token: ownerToken), ownerToken.instance,
-            "premise: the owner token is bound to its own record"
-        )
+        XCTAssertNotNil(weakRecord(), "still held while the admitted tokens are alive")
+        return weakRecord
     }
 
-    private func joinTokenDisposition(_ token: CloudDispatchOwnership.DispatchToken) -> CloudDispatchOwnership {
+    /// Holds an admission token in a box so a control can drop the LAST reference explicitly and    private func joinTokenDisposition(_ token: CloudDispatchOwnership.DispatchToken) -> CloudDispatchOwnership {
         .join(token)
     }
 
