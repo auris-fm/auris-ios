@@ -200,10 +200,13 @@ class VoiceIntentExecutor {
             // context rather than as an invented episode and position. Refusing here is what
             // made the discovery turn unreachable on the client.
             let context = playbackContextProvider.current() ?? PlaybackContext.absent
-            // EFFECT OWNERSHIP IS CLAIMED BEFORE THE DISPATCH (reviewer 39beabc7): the caller
-            // that owns this utterance wins its effects; a joiner/duplicate arriving later — or
-            // completing first — never does. No lifecycle is inferred from completion order.
-            let ownsEffects = cloudRouteSink.claimDispatchEffects(utteranceId: cr.utteranceId, origin: cr.generation)
+            // ONE AUTHORITATIVE ADMISSION decides both wire and effect ownership (reviewer
+            // b2c09394): `beginDispatch` returns an ownership TOKEN fenced by the live origin,
+            // and that SAME token is passed to the dispatch. Only the token owner runs the wire
+            // turn and repeats its effects; a duplicate whose admission is refused can never
+            // start the owner's turn even if it reaches the sink.
+            let ownership = cloudRouteSink.beginDispatch(utteranceId: cr.utteranceId, origin: cr.generation)
+            let ownsEffects = ownership.ownsDispatch
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
@@ -217,7 +220,8 @@ class VoiceIntentExecutor {
                 utteranceId: cr.utteranceId,
                 preparedObserver: preparedObserver,
                 sourceTranscript: cr.sourceTranscript,
-                sourceLanguage: cr.sourceLanguage
+                sourceLanguage: cr.sourceLanguage,
+                ownership: ownership
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes
             // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or

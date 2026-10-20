@@ -667,7 +667,8 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         selection: CloudConversationSelection?,
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
-        sourceTranscript: String?, sourceLanguage: String?
+        sourceTranscript: String?, sourceLanguage: String?,
+        ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
         dispatchInProgress = true
@@ -689,13 +690,13 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     private(set) var claimObservedBeforeDispatch: [Bool] = []
     private var claimedUtteranceIds: Set<String> = []
     private var dispatchInProgress = false
-    func claimDispatchEffects(utteranceId: String?, origin: Int?) -> Bool {
+    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
         claimObservedBeforeDispatch.append(!dispatchInProgress)
-        if let effectOwnerForTesting { return effectOwnerForTesting(utteranceId) }
-        guard let utteranceId else { return true }
-        if claimedUtteranceIds.contains(utteranceId) { return false }
+        if let effectOwnerForTesting, !effectOwnerForTesting(utteranceId) { return .join }
+        guard let utteranceId else { return .owner(.init(utteranceId: "", instance: UUID())) }
+        if claimedUtteranceIds.contains(utteranceId) { return .join }
         claimedUtteranceIds.insert(utteranceId)
-        return true
+        return .owner(.init(utteranceId: utteranceId, instance: UUID()))
     }
 }
 

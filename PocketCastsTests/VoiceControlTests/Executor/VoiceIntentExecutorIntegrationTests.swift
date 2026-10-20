@@ -220,12 +220,13 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
         selection: CloudConversationSelection?,
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
-        sourceTranscript: String?, sourceLanguage: String?
+        sourceTranscript: String?, sourceLanguage: String?,
+        ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)
     }
 
-    func claimDispatchEffects(utteranceId: String?, origin: Int?) -> Bool { true }
+    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership { .owner(.init(utteranceId: utteranceId ?? "", instance: UUID())) }
 }
 
 private struct IntegrationPlaybackContextProvider: PlaybackContextProvider {

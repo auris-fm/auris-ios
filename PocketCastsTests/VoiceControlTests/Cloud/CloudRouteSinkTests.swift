@@ -557,6 +557,75 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
+    /// THE EXACT BOUNDARY (reviewer b2c09394). Owner A obtains its ownership token, then is held
+    /// BEFORE its dispatch entry. Duplicate B arrives while A is held, and the WINDOW CHANGES
+    /// (a real production transition: the live origin moves and the sink retires) before A is
+    /// released. Requirements asserted:
+    ///   - exactly ONE owner's immutable request reaches the wire (B never starts A's turn);
+    ///   - B is refused/joined, never admitted as a second owner;
+    ///   - the stale A does not admit a turn after the window changed; and
+    ///   - every waiter is settled (nothing is abandoned).
+    @MainActor
+    func testOwnerHeldBetweenClaimAndDispatchIsNotPreemptedByADuplicateAcrossAWindowChange() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin)
+
+        let shared = "utterance-race"
+        // A obtains its token and is held BEFORE dispatch entry.
+        let aOwnership = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        XCTAssertTrue(aOwnership.ownsDispatch, "A's admission owns the dispatch")
+
+        // B arrives while A holds the token but has not entered dispatch: it must NOT own.
+        let bOwnership = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        XCTAssertFalse(bOwnership.ownsDispatch, "a duplicate never obtains ownership of A's turn")
+        if case .join = bOwnership {} else { XCTFail("B must JOIN the held owner, got \(bOwnership)") }
+
+        // The window CHANGES before A is released: the live origin moves and the sink retires.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
+
+        // A NEW-window caller for the SAME utterance id dispatches fresh and reaches the wire,
+        // creating a NEW record under the same id while A's stale token is still outstanding.
+        let clientsBefore = clientCreationCount
+        _ = await sink.routeToCloud(
+            request: "new window", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin + 1, selection: nil, utteranceId: shared
+        )
+        XCTAssertGreaterThan(clientCreationCount, clientsBefore, "the new window dispatches freshly")
+        let freshInstance = sink.recordInstanceForTesting(utteranceId: shared)
+        XCTAssertNotNil(freshInstance, "the new window owns its own record")
+
+        // A NOW re-enters with its STALE token, while a DIFFERENT record (the new window's) owns
+        // this utterance id. A must NOT run its request: the INSTANCE fence is what separates the
+        // two owners. Observable at the sink boundary — the stale owner never mints a wire client.
+        let wiresBeforeStale = sink.wireDispatchCountForTesting
+        _ = await sink.routeToCloud(
+            request: "owner request", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: aOwnership
+        )
+        XCTAssertEqual(
+            sink.wireDispatchCountForTesting, wiresBeforeStale,
+            "the stale owner did not start a wire turn against the new window's record"
+        )
+        // The NEW window's record is untouched by the stale owner: a duplicate arriving now must
+        // observe the NEW window's OWN result, not the stale owner's refusal. (Without the
+        // instance fence the stale token would be accepted against THIS record and publish its
+        // refusal into it — binding the wrong caller to the wrong owner.)
+        XCTAssertEqual(
+            sink.recordInstanceForTesting(utteranceId: shared), freshInstance,
+            "the stale owner did not take over the new window's record"
+        )
+        let duplicate = await sink.routeToCloud(
+            request: "duplicate in new window", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin + 1, selection: nil, utteranceId: shared
+        )
+        XCTAssertNotEqual(
+            duplicate.outcome, .refused,
+            "a duplicate in the new window observes the NEW window's outcome, not the stale owner's refusal"
+        )
+    }
+
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
