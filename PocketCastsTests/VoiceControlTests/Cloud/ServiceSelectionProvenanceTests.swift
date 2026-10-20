@@ -589,6 +589,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             return
         }
 
+        // Settle any work an erroneous init-time load could have queued before asserting: an
+        // unawaited Task scheduled at construction must have had its chance to run here.
+        for _ in 0..<20 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(
             inference.loadCount, 0,
             "construction performs NO eager router load — the model is paid at first arm"
