@@ -2147,18 +2147,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // design — the discriminator is the stop-identity log above.)
     }
 
-    /// PHYSICAL ENGINE-QUiescence (spec ea755ba1; reviewer 6453dfaa/3d4f5619): the stop
-    /// NOTIFICATION is not the physical contract — the actual `stopEngine()` operation is, and
-    /// the successor's AUDIO (not merely its completion) is what must not precede it.
+    /// PHYSICAL STOP OPERATION HELD (spec ea755ba1; reviewer 6453dfaa/3d4f5619/76215282):
+    /// the stop NOTIFICATION is not the physical contract — the actual `stopEngine()` operation
+    /// is, so this control parks the REAL stop and asserts the ordering that falls out of it.
     ///
-    /// Measured premise (this control, from an earlier failing run): with the drain hold set
-    /// BEFORE the turn, the runner parks inside the CLAIMED drain and the frames stay BUFFERED
-    /// and UNSCHEDULED (`buffered=40`, `scheduled=0`). So the physical evidence is taken in the
-    /// order the requirement states it: the stop is queued and its REAL operation parked FIRST,
-    /// and only then does B supersede. While parked, no stop is confirmed, no host resume
-    /// happens, and no output has been scheduled; on release the stop runs, the host resume
-    /// settles (host playback was running, so the hold auto-paused it), and B admits its OWN
-    /// audio (scheduled frames grow).
+    /// WHAT THIS CONTROL MEASURES (scoped honestly, per reviewer 76215282 and spec 43f8f003):
+    ///   * the stop operation reaches the armed gate and genuinely PARKS (`allow == 0`, arrival
+    ///     recorded) — the ordering is "stop queued and parked FIRST, then B supersedes";
+    ///   * while parked: no stop is CONFIRMED, B does not COMPLETE, and the host is not resumed;
+    ///   * on release the park ends by RELEASE, not bound expiry (`outcome == .released`);
+    ///   * the parked stop confirms the retire identity (2), and exactly one host resume follows.
+    ///
+    /// WHAT IT DOES NOT MEASURE, and does not claim: that B SCHEDULED or RENDERED audio. In this
+    /// test host with the drain hold set before the turn, the runner parks inside the claimed
+    /// drain and frames stay BUFFERED and UNSCHEDULED (`buffered=40 scheduled=0` measured), so no
+    /// occupied-frame premise holds and there is no synchronized publish path for the
+    /// runner-owned scheduling counter. A live-engine/B-output proof needs a device integration
+    /// check; the confirmation identity here is evidence of the STOP, not of audio.
     func testSuccessorAdmissionWaitsForThePhysicalEngineStopItself() async throws {
         self.nextTurnFixture =
             """
@@ -2253,11 +2258,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // release below — asserting it here would read a value that cannot exist yet.
         let allowWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.physicalStopGateAllowProbeForTesting ?? -99 }
         XCTAssertEqual(allowWhileParked, 0, "the gate is still armed and parking (allow=\(allowWhileParked))")
-        await MainActor.run { sink.audioPlayerForTesting?.publishRunnerSnapshotForTesting() }
-        let scheduledParked: Int = await MainActor.run { sink.audioPlayerForTesting?.scheduledFramesProbeForTesting ?? -1 }
+        // While parked, NOTHING is admitted or confirmed. (No scheduled-frame reading here: the
+        // runner-owned scheduling counter has no synchronized publish path, so a cross-thread
+        // read would be unsynchronized evidence — see reviewer 76215282.)
         let confirmedParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         let resumesParked: Int = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
-        XCTAssertEqual(scheduledParked, 0, "no audio has been scheduled while the stop is parked")
         XCTAssertLessThan(confirmedParked, 2, "no stop is confirmed before the physical stop ran")
         XCTAssertFalse(bDone.isSet, "B has not completed while the stop is parked")
         XCTAssertEqual(resumesParked, 0, "no host resume precedes the physical stop")
@@ -2265,10 +2270,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
-        let confirmedFinal: Int = await MainActor.run {
-            sink.audioPlayerForTesting?.publishRunnerSnapshotForTesting()
-            return sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1
-        }
+        let confirmedFinal: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         XCTAssertEqual(confirmedFinal, 2, "the physical stop confirmed the retire cancel's identity (2); got \(confirmedFinal)")
         // Gate-exit cause (reviewer 6453dfaa): the park ended because the gate was RELEASED,
         // not because its bound expired and the runner proceeded anyway.
@@ -2291,7 +2293,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(resumes, 1, "the host resumed exactly once, after the physical stop ran")
     }
 
-    /// COALESCED STOP ACCOUNTING (review 4fc59e2c):    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
+    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every
     /// later admission; transition-only accounting settles to zero and D runs normally.

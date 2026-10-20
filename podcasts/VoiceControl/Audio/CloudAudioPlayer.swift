@@ -1197,7 +1197,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// other field in this region; a test reads it through the lock-guarded probe below rather
     /// than hopping to the main actor (that hop would queue behind the park being observed).
     private var scheduledFrameCountForTesting = 0
-    private let runnerProbeLock = NSLock()
     private var probeScheduledFrames = 0
     private var probeNodeAlive = false
 
@@ -1205,24 +1204,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// the frames handed to the output node and whether an output node exists (i.e. the engine
     /// is up for THIS incarnation). Called by the runner at the gate's arrival — the moment the
     /// control needs the parked state — and by the control itself for the settled state.
-    func publishRunnerSnapshotForTesting() {
-        runnerProbeLock.lock()
-        probeScheduledFrames = scheduledFrameCountForTesting
-        probeNodeAlive = playerNode != nil
-        runnerProbeLock.unlock()
-    }
-
-    /// TEST-ONLY: frames handed to the output node so far.
-    var scheduledFramesProbeForTesting: Int {
-        runnerProbeLock.lock(); defer { runnerProbeLock.unlock() }
-        return probeScheduledFrames
-    }
-    /// TEST-ONLY: whether an output node exists — the engine-up boundary for this incarnation.
-    var nodeAliveProbeForTesting: Bool {
-        runnerProbeLock.lock(); defer { runnerProbeLock.unlock() }
-        return probeNodeAlive
-    }
-
     // TEST-ONLY (physical engine-stop evidence): when armed, the runner's physical stop
     // operation passes the first `allow` stops and PARKS each subsequent one until the gate
     // is opened. Lets a control hold the actual stop operation — not a notification — and
@@ -1292,13 +1273,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
             return
         }
         physicalStopGateArrivals += 1
-        // Publish the parked state BEFORE the wait: this is the only moment a control can see
-        // what the runner's stop path holds while it is genuinely parked on the physical stop.
-        publishRunnerSnapshotForTesting()
         if physicalStopGateAllow > 0 {
-            // Admitted immediately: the gate allowed this many stops through.
-            if physicalStopGateAllow < Int.max { physicalStopGateAllow -= 1 }
-            physicalStopGateOutcome = .admitted
+            // Admitted immediately. An OPENED gate (Int.max) must NOT restamp the outcome: the
+            // record of the park that the control released would be overwritten by a later stop
+            // taking this fast path, erasing the `released`/`timedOut` evidence.
+            if physicalStopGateAllow < Int.max {
+                physicalStopGateAllow -= 1
+                physicalStopGateOutcome = .admitted
+            }
             physicalStopGate.unlock()
             return
         }
@@ -1306,6 +1288,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
             if !physicalStopGate.wait(until: deadline) { break } // bounded: never wedge the runner
         }
         // An OPENED gate is Int.max (never decremented); a timed-out park keeps allow 0.
+        // Only record an outcome if we actually SAT on a parked wait — a stop that arrived at an
+        // already-opened gate returned above and must not restamp this record.
         physicalStopGateOutcome = physicalStopGateAllow > 0 ? .released : .timedOut
         physicalStopGate.unlock()
     }
