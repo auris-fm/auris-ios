@@ -338,8 +338,6 @@ final class CloudBindInterleavingControls: XCTestCase {
             while Date() < deadline, !closeRequested.didClose { usleep(1_000) }
         }
 
-        let boundFlagB = Promise<Void>()
-        client.onFrameReceived = { boundFlagB.resolve(()) }
         let routedB = client.routeWithResultSocket(
             request: "x-interleave", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -356,9 +354,15 @@ final class CloudBindInterleavingControls: XCTestCase {
         XCTAssertTrue(taskA.isCancelledSocket, "the close retired the predecessor's own registration")
         closeRequested.markClosed()
 
-        // The successor's bind decides AFTER the close — it must still succeed.
-        await boundFlagB.value()
-        let identityB = try XCTUnwrap(socketB.boundIdentity, "the successor's bind survives the predecessor's close")
+        // The successor's bind decides AFTER the close — it must still succeed. Observed through
+        // the successor's OWN published identity (bounded poll), never a frame promise: the
+        // predecessor's trailing fixture frame would satisfy a frame promise and say nothing
+        // about the successor's bind.
+        await seamReleasedWait()
+        let identityB = try XCTUnwrap(
+            waitForBoundIdentity(of: socketB, timeout: 5),
+            "the successor's bind survives the predecessor's close"
+        )
         XCTAssertNotEqual(identityB, identityA, "each registration keeps its own identity")
 
         // The successor's send rides ITS OWN recorded task — distinct physical sockets, each
@@ -388,6 +392,13 @@ final class CloudBindInterleavingControls: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Lets the released transport task actually run its bind before the poll: a yield hop so
+    /// the observation is of the POST-release decision, not a pre-release accident.
+    private func seamReleasedWait() async {
+        for _ in 0..<10 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
 
     /// Bounded poll for a registration's published identity. Frame-count promises are ambiguous
     /// when a predecessor's fixture emits a trailing frame; the identity itself is unambiguous.
