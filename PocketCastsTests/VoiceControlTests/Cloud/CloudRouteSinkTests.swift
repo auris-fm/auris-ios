@@ -273,9 +273,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
 
-        // This case is about the ERROR PATH's buffer/seek rollback, not about limit wording, so it
-        // uses an ordinary server-coded error: a server-supplied message passes through unchanged.
-        XCTAssertEqual(response.response, .spoken("rate limited"))
+        // This case is about the ERROR PATH's buffer/seek rollback. The remote `message` is never
+        // spoken (spec 961fab07) and `rate_limited` has no local template, so the user hears the
+        // error earcon; the subject here is the buffer/seek/pause outcome below, not the wording.
+        XCTAssertEqual(response.response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
         XCTAssertTrue(playback.calls.contains(.resume))
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
@@ -1504,14 +1505,15 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testSpokenServerErrorReportsFailureNotCompletion() async {
-        // An error with a localized line renders as .spoken — the response shape that
-        // the executor previously read as a completed cloud route.
+        // An error frame is a FAILED turn — never the completion shape the executor once read.
+        // The code has no local template, so it renders as the error earcon; the subject here is
+        // the OUTCOME, not the wording.
         self.pendingFixture = """
         event: error
         data: {"code":"rate_limited","message":"slow down"}
 
         """
-        defaults.set("de", forKey: "AppleLanguages")   // a locale with a spoken template
+        defaults.set("de", forKey: "AppleLanguages")
         let result = await makeSink().routeToCloud(
             request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
         XCTAssertNotEqual(
@@ -4101,6 +4103,52 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         }
         XCTAssertNotEqual(text, "this turn was not admitted", "the remote diagnostic must not be spoken")
         XCTAssertEqual(text.components(separatedBy: "Auris").count - 1, 1, "Auris is named exactly once")
+    }
+
+    /// THE REMOTE MESSAGE IS NEVER SPOKEN (spec 961fab07) — and not only for `limit_exceeded`.
+    /// A non-limit code whose frame carries a nonempty `message` must NOT speak that text: the
+    /// old pass-through behaviour is superseded by the diagnostic-only contract.
+    func testNonLimitRemoteMessageIsNotSpoken() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream 502 from model-vendor-a"}
+
+            """
+        let response = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
+        )
+        // `provider_error` is Generic with no local template ⇒ the error earcon. What must NOT
+        // happen is the operator diagnostic reaching the speaker.
+        XCTAssertEqual(
+            response.response, .earcon(.error),
+            "a remote operator diagnostic must never be spoken"
+        )
+        if case let .spoken(text) = response.response {
+            XCTAssertFalse(
+                text.contains("model-vendor-a"),
+                "the remote message leaked into speech: \(text)"
+            )
+        }
+    }
+
+    /// An UNKNOWN code (not in the vocabulary) follows the same local feedback policy: never the
+    /// remote text.
+    func testUnknownRemoteCodeNeverSpeaksTheRemoteMessage() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"some_unmapped_code","message":"secret operator detail 42"}
+
+            """
+        let response = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
+        )
+        XCTAssertEqual(response.response, .earcon(.error), "an unknown code gets local feedback, not remote text")
+        if case let .spoken(text) = response.response {
+            XCTAssertFalse(text.contains("42"), "the remote message leaked into speech: \(text)")
+        }
+        XCTAssertEqual(response.outcome, .failed(code: "some_unmapped_code"))
     }
 
     /// A client-authored code reaches the user as a failed turn, never a completion (the

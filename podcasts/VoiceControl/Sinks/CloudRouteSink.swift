@@ -848,7 +848,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnResult = .completed
                     turnResponse = .silent
                     break turnLoop
-                case let .error(_, code, message):
+                case let .error(_, code, _):
                     // A cancelled owner (cloud-token supersession OR the caller's own
                     // Task.cancel) classifies as an incomplete turn via the owner-cancel path
                     // below — never as a connection failure it did not observe.
@@ -874,28 +874,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         }
                     }
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
-                    // A server-supplied message passes through (localising it is the
-                    // server's job). When the client generated the diagnostic it
-                    // carries a code and an empty message instead of English prose:
-                    // resolve a localized template for that code if one exists, and
-                    // fall back to the error earcon when it doesn't (PR #19 review).
-                    // Whitespace-only counts as absent: a server message of spaces
-                    // would otherwise be "spoken" as silence, occupying the turn's
-                    // only feedback channel (PR #19 review).
-                    let serverMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // A LIMIT OF THE ASSISTANT (spec clarification 27ced9b): the client's own
-                    // localized template must be what the user hears, exactly once, naming Auris
-                    // and its daily allowance. The remote frame's `message` is DIAGNOSTIC-ONLY for
-                    // this code, so it does not override the template — a server that later words
-                    // a refusal differently, or generically, must not be able to strip the
-                    // explanation of WHICH limit was hit.
-                    let clientTemplate = spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
-                    let spoken: String
-                    if code == "limit_exceeded" {
-                        spoken = clientTemplate
-                    } else {
-                        spoken = serverMessage.isEmpty ? clientTemplate : serverMessage
-                    }
+                    // THE REMOTE MESSAGE IS NEVER SPOKEN (cloud-assistant.md, spec 961fab07): the
+                    // wire `message` is bounded OPERATOR DIAGNOSTICS — "never spoken or used to
+                    // select client feedback". So `message` is deliberately NOT read here. What the
+                    // user hears is resolved LOCALLY from the stable code: every code maps to its
+                    // own `cloud_error_<code>` template in the user's own locale. A code with no
+                    // template in that locale (a Required code whose translation is missing is an
+                    // observable client GAP, not permission to substitute generic feedback) falls
+                    // back to the error earcon — never to English prose, and never to the remote
+                    // text. `limit_exceeded` (spec 27ced9b) is Required and names Auris and its
+                    // daily allowance; it is one of these templates, not a special case.
+                    let spoken = spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     turnResult = .failed(code: code)
                     turnResponse = spoken.isEmpty ? .earcon(.error) : .spoken(spoken)
                     break turnLoop

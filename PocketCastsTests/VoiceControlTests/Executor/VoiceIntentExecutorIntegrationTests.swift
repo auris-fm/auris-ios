@@ -65,6 +65,36 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
+    /// EXACTLY-ONCE FEEDBACK FOR A REFUSED LOGICAL TURN (reviewer 98fb4c64). A string assertion is
+    /// not a feedback check: this drives a refused cloud turn through the REAL executor and asserts
+    /// the executor renders ONE daily-limit response for that logical turn AND does not extend the
+    /// grace window for a refusal.
+    func test_execute_refusedLimitTurnRendersOneDailyLimitResponseWithoutGraceExtension() async {
+        let grace = GracePeriodSignal()
+        grace.onWakeWordDetected()
+        let generation = grace.currentGeneration()
+        // The window is SPENT (a refusal was announced); only a completion could renew it.
+        XCTAssertTrue(grace.claimRefusalTone(), "a refusal was announced")
+
+        let sink = LimitRefusalCloudRouteSink(code: "limit_exceeded")
+        let executor = makeExecutor(cloudRouteSink: sink, gracePeriodSignal: grace)
+
+        let rendered = await executor.execute(CloudRouteIntent(
+            request: "play something", tier: .free, origin: .modelCall, generation: generation
+        ))
+
+        XCTAssertEqual(
+            rendered,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
+            "one daily-limit response is rendered for the refused logical turn"
+        )
+        XCTAssertEqual(sink.routeCallCount, 1, "the logical turn dispatched exactly once")
+        XCTAssertFalse(
+            grace.windowIsRenewedForTesting(),
+            "a REFUSED turn must not extend the grace window"
+        )
+    }
+
     // MARK: - Analytics Wiring
 
     func test_execute_recordsAnalytics() async {
@@ -139,7 +169,8 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         playbackSink: VoicePlaybackSink = IntegrationPlaybackSink(currentPosition: 0, episodeDuration: 0),
         cloudRouteSink: VoiceCloudRouteSink = IntegrationCloudRouteSink(),
         playbackContextProvider: PlaybackContextProvider = IntegrationPlaybackContextProvider(),
-        analytics: VoiceAnalytics? = nil
+        analytics: VoiceAnalytics? = nil,
+        gracePeriodSignal: GracePeriodSignal? = nil
     ) -> VoiceIntentExecutor {
         VoiceIntentExecutor(
             playbackSink: playbackSink,
@@ -153,13 +184,9 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
             statsQuerySink: NoOpStatsQuerySink(),
             cloudRouteSink: cloudRouteSink,
             playbackContextProvider: playbackContextProvider,
-            gracePeriodSignal: gracePeriodSignal,
+            gracePeriodSignal: gracePeriodSignal ?? GracePeriodSignal(),
             analytics: analytics
         )
-    }
-
-    private var gracePeriodSignal: GracePeriodSignal {
-        GracePeriodSignal()
     }
 }
 
@@ -212,6 +239,37 @@ private final class IntegrationPlaybackSink: VoicePlaybackSink {
         return .silent
     }
     func nextEpisode() -> VoiceResponse { .spoken("Playing next episode") }
+}
+
+/// A cloud sink that refuses a turn with a specific code and renders the response the CLIENT
+/// resolves for that code (the en VoiceTemplates table), so the executor-level control measures
+/// the production code-to-template path rather than a hand-written string.
+private final class LimitRefusalCloudRouteSink: VoiceCloudRouteSink {
+    let code: String
+    private(set) var routeCallCount = 0
+
+    init(code: String) { self.code = code }
+
+    func routeToCloud(
+        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
+        selection: CloudConversationSelection?,
+        utteranceId: String?,
+        preparedObserver: CloudRouteSink.PreparedObserver?,
+        sourceTranscript: String?, sourceLanguage: String?,
+        ownership: CloudDispatchOwnership?
+    ) async -> CloudRouteResult {
+        routeCallCount += 1
+        let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+        let spoken = SpokenTemplateResolver(localeBundle: enBundle).resolveForUserLocale("cloud_error_\(code)")
+        return CloudRouteResult(
+            response: spoken.isEmpty ? .earcon(.error) : .spoken(spoken),
+            outcome: .failed(code: code)
+        )
+    }
+
+    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
+        .owner(.init(utteranceId: utteranceId ?? "", instance: UUID(), record: nil))
+    }
 }
 
 private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
