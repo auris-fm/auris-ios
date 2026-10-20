@@ -62,7 +62,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "What did she mean?",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-1")
 
         XCTAssertEqual(response.response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertTrue(playback.calls.contains(.pause))
@@ -89,7 +89,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "summarize",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-2")
 
         XCTAssertEqual(response.response, .silent, "cloud answers are played as audio, not spoken")
         XCTAssertEqual(playback.calls.first, .pause)
@@ -116,7 +116,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "what was that about",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-3")
 
         XCTAssertEqual(response.response, .silent)
         XCTAssertFalse(playback.calls.contains(.pause), "the user's own pause is not ours to retake")
@@ -134,7 +134,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
 
-        _ = await makeSink().routeToCloud(request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await makeSink().routeToCloud(request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-4")
 
         XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "the turn takes one hold")
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "and releases it on done")
@@ -160,7 +160,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "play that",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-5")
 
         XCTAssertEqual(response.response, .silent)
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
@@ -187,7 +187,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "forward 15 seconds",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-6")
 
         XCTAssertEqual(response.response, .silent)
         XCTAssertTrue(playback.calls.contains(.seekRelative(15, .forward)))
@@ -210,7 +210,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         _ = await makeSink().routeToCloud(
             request: "go back",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-7")
 
         // No delta manufactured — direction preserved as nil.
         XCTAssertTrue(playback.calls.contains(.seekRelative(nil, .backward)))
@@ -231,7 +231,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         _ = await makeSink().routeToCloud(
             request: "skip forward",
             tier: .free,
-            context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-8")
 
         // Neither stated → (nil, FORWARD) so the sink applies its default interval.
         XCTAssertTrue(playback.calls.contains(.seekRelative(nil, .forward)))
@@ -251,7 +251,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
 
-        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-9")
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
@@ -271,7 +271,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [100.0: 110.0]
         playback.setPositionMs(50_000)
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
 
         // This case is about the ERROR PATH's buffer/seek rollback. The remote `message` is never
         // spoken (spec 961fab07) and `rate_limited` has no local template, so the user hears the
@@ -296,7 +296,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         // No mapping at all: the ordinary form must not depend on one.
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-11")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(95)))
         let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
@@ -315,7 +315,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-12")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
         let rejection = await MainActor.run { sink.lastSeekRejection }
@@ -335,7 +335,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-13")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
         let rejection = await MainActor.run { sink.lastSeekRejection }
@@ -355,7 +355,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-14")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
         let rejection = await MainActor.run { sink.lastSeekRejection }
@@ -377,7 +377,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-15")
 
         XCTAssertFalse(
             playback.calls.contains { if case .seekTo = $0 { return true }; return false },
@@ -400,7 +400,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-16")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
         let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
@@ -835,7 +835,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-17")
 
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refused app_operation_result for one unmapped seek; got \(consumer.consumed)")
@@ -854,7 +854,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-18")
 
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.malformedSeekTarget)
@@ -873,7 +873,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-19")
 
         XCTAssertFalse(
             playback.calls.contains { if case .seekTo = $0 { return true }; return false },
@@ -908,7 +908,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-20")
         XCTAssertEqual(consumer.consumed.first?.result.reason, OperationReason.malformedSeekTarget,
                        "diagnostic: the refusal reached the consumer surface")
 
@@ -946,7 +946,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-21")
 
         XCTAssertFalse(
             playback.calls.contains { if case .seekTo = $0 { return true }; return false },
@@ -1003,7 +1003,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         // Turn 1: executes and settles succeeded with the typed state.
         let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
         let firstFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
         XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
         let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any], "a success frame carries the resulting state")
@@ -1020,7 +1020,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-23")
         _ = try await awaitResultFrame(operationId: "op-unrelated-b")
         // T: unrelated live drift AFTER A settled.
         playback.setPositionMs(9999_000)
@@ -1038,7 +1038,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let reloadedJournal = OperationJournal(store: FileOperationRecordStore(url: url))
         let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: reloadedJournal)
-        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-24")
         let replayFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
         let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success carries A's SETTLED state")
@@ -1069,7 +1069,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             .appendingPathComponent("unknown-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-25")
 
         // The turn's own auto-duck may pause/resume; the unknown action itself must effect nothing.
         let effectCalls = playback.calls.filter { switch $0 { case .pause, .resume: return false; default: return true } }
@@ -1110,7 +1110,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             operationJournal: journal,
             episodeAvailable: { false }
         )
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-26")
         let frame = try await awaitResultFrame(operationId: "op-seek-noep")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
@@ -1136,7 +1136,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-27")
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refusal for the reference-form seek")
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
@@ -1156,7 +1156,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-28")
         // The ACTION refused durably (the turn's own host-playback restore is separate
         // machinery and not observable here — the action-level outcome is what matters).
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
@@ -1179,7 +1179,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSinkWithConsumer(consumer, playbackManager: PlaybackManager.shared)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        // ESTABLISH the premise against the REAL production state: the shared queue must have
+        // no current episode. The test host's shared container can legitimately carry one from
+        // launch, so the premise is established through the production queue API — never assumed.
+        PlaybackManager.shared.queue.removeAllEpisodes()
+        XCTAssertNil(PlaybackManager.shared.currentEpisode, "premise: no current episode after the reset")
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-29")
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "the production manager's absent episode refuses")
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
@@ -1220,7 +1225,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 delivery.store(deliver)
             }
         }
-        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let turn = Task { await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-30") }
         // The turn cannot finish while the stop is unconfirmed: no resume, no confirmed epoch.
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
@@ -1263,7 +1268,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             .appendingPathComponent("pq-noref-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-31")
         let frame = try await awaitResultFrame(operationId: "op-pq-noref")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
@@ -1290,7 +1295,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             .appendingPathComponent("sq-nosave-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-32")
         let frame = try await awaitResultFrame(operationId: "op-sq-nosave")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
@@ -1316,7 +1321,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-33")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(215)))
         XCTAssertFalse(playback.calls.contains(.seekTo(200)), "the raw reference value is not the target")
@@ -1338,7 +1343,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-34")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(215)))
         XCTAssertFalse(playback.calls.contains(.seekTo(200)))
@@ -1362,7 +1367,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-35")
         XCTAssertTrue(playback.calls.contains(.seekTo(510)))
 
         // Turn 2 (same sink): stop_quote without play_quote must be a no-op seek-wise.
@@ -1376,7 +1381,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        _ = await sink.routeToCloud(request: "stop", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "stop", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-36")
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
@@ -1393,7 +1398,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
 
-        _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await makeSink().routeToCloud(request: "what did they say?", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88")
 
         let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         let requestId = try XCTUnwrap(body["request_id"] as? String)
@@ -1413,7 +1418,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         _ = await makeSink(rendersStructuredResults: true, routeHint: CloudRouteHint(
             operation: "search_spoken_content",
             arguments: ["query": .string("climate")]
-        )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        )).routeToCloud(request: "find the climate bit", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-38")
 
         let body = try XCTUnwrap(capturedTask?.sentAuthFrame)
         XCTAssertEqual(body["capabilities"] as? [String], ["search_results_v1"])
@@ -1500,7 +1505,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         """
         let result = await makeSink().routeToCloud(
-            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-39")
         XCTAssertEqual(result.outcome, .completed)
     }
 
@@ -1515,7 +1520,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         """
         defaults.set("de", forKey: "AppleLanguages")
         let result = await makeSink().routeToCloud(
-            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-40")
         XCTAssertNotEqual(
             result.outcome, .completed,
             "a spoken server error was reported as a completed turn"
@@ -1531,7 +1536,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         """
         let result = await makeSink().routeToCloud(
-            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-41")
         // The client surfaces a truncated stream as an explicit transport failure, so the
         // outcome may be `failed(connection_lost)` rather than a bare early close. What
         // must hold either way is that it is NOT a completion: an ended stream that never
@@ -1577,7 +1582,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             conversationManager: testConversationManager()
         )
         let result = await sink.routeToCloud(
-            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-42")
         XCTAssertEqual(
             result.outcome, .refused,
             "the coming-soon refusal was reported as a completed cloud turn"
@@ -1653,7 +1658,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
 
         let owner = Task {
-            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-43")
         }
         ownerRef.bind(owner)
         // Wait until the OWNER is provably inside the awaited hold: the suspension is the owner's.
@@ -1709,7 +1714,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testConfiguredTransportFailureReportsConnectionLossNotRefusal() async {
         self.pendingFixture = ""   // configured stub whose socket closes before any event
         let result = await makeSink().routeToCloud(
-            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-44")
         XCTAssertEqual(result.outcome, .failed(code: "connection_lost"),
                        "a configured route with a dead connection reports transport failure")
     }
@@ -1731,7 +1736,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let journal = OperationJournal(store: InMemoryOperationRecordStore())
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
         let owner = Task {
-            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-45")
         }
         try await Task.sleep(nanoseconds: 150_000_000)
         owner.cancel()
@@ -1768,7 +1773,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
         let owner = Task {
-            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-46")
         }
         // Deterministic premise WITHOUT a verification-side claim: wait until the durable store
         // itself shows the operation's record (in progress or already finished), so the cancel
@@ -1846,7 +1851,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             """
         let journal = OperationJournal(store: AlwaysFailingOperationRecordStore())
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-47")
         let effectCount = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectCount, 0, "a failed claim write must prevent the effect entirely")
     }
@@ -1903,7 +1908,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-48")
 
         // The effect must NOT have run: no seek reached playback.
         XCTAssertFalse(
@@ -2113,7 +2118,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         let gate = holdNextTurn()
         let sink = makeSink()
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-49") }
         try await Task.sleep(nanoseconds: 200_000_000)
         // B supersedes A FIRST: A's cleanup must observe the transfer (still no stop is
         // requested — A owned no pending playback at supersession).
@@ -2123,7 +2128,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-50")
         gate.release()
         let aResult = await slow.value
         XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
@@ -2163,7 +2168,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let box = Box()
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-51") }
         var aEnqueued = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2188,7 +2193,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
-        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-52") }
         // B must be SUSPENDED at admission: no client built, no completion.
         let bFinishedEarly = try await timeoutProbe(fast, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended at admission while A's stop is unconfirmed")
@@ -2257,7 +2262,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 box.store(deliver)
             }
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-53") }
         var aBuffered = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2281,7 +2286,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             // fired — an early-return-style rollback here would be a second.
             Self.successSnapshot.bump(holdCounters?.end.value ?? -1)
         }
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-54") }
         // Confirm A's stop so B is admitted for real: the runner must leave its park to
         // process the retire stop, then the withheld notification is delivered.
         try await Task.sleep(nanoseconds: 120_000_000)
@@ -2351,7 +2356,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 box.store(deliver)
             }
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-55") }
         var aBuffered = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2367,7 +2372,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-56") }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .earlyClose, "B's admission times out and rolls back")
         // THE PIN: exactly two ends have fired — the nil-predecessor transfer at A's admission
@@ -2439,7 +2444,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             sink.audioPlayerForTesting?.claimReached = claimReached
             sink.audioPlayerForTesting?.claimRelease = claimRelease
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-57") }
         let aResult = await a.value
         XCTAssertEqual(aResult.outcome, .completed, "A completed; its drain is claimed")
         // The runner is parked inside the CLAIMED drain.
@@ -2456,7 +2461,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-58") }
         try await Task.sleep(nanoseconds: 120_000_000)
         // Park the SUBSEQUENT stop: the first physical stop (the drain end, which IS the
         // cancel's stop) passes; any later stop parks.
@@ -2531,7 +2536,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 0) }
         // A's drain hold keeps the runner away from A's stop until the cancel has landed.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-59") }
         var aBuffered = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2553,7 +2558,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
         let b = Task {
-            let result = await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+            let result = await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-60")
             bDone.set()
             return result
         }
@@ -2663,7 +2668,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 box.store(deliver)
             }
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-61") }
         var aBuffered = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2678,10 +2683,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnFixture = plainDone
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-62") }
         try await Task.sleep(nanoseconds: 80_000_000)
         self.nextTurnFixture = plainDone
-        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-63") }
         try await Task.sleep(nanoseconds: 150_000_000)
         // Process the coalesced stop: ONE notification for B's and C's queued requests.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
@@ -2716,7 +2721,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(settled, "stop accounting settles after the coalesced pair")
         let cancelsBeforeD: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
-        let d = Task { await sink.routeToCloud(request: "D", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let d = Task { await sink.routeToCloud(request: "D", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-64") }
         let dResult = await d.value
         XCTAssertEqual(dResult.outcome, .completed, "a later admission is not refused by stranded stop accounting")
         // Settled accounting: D's admission sees nothing outstanding and issues NO stop request.
@@ -2757,7 +2762,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 box.store(deliver)
             }
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-65") }
         var aBuffered = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2776,7 +2781,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-66") }
         try await Task.sleep(nanoseconds: 60_000_000)
         // B is suspended on E1's confirmation BEFORE C even starts.
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
@@ -2791,7 +2796,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
-        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let c = Task { await sink.routeToCloud(request: "C", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-67") }
         // C may not complete while the queued stops are unprocessed — and in particular not
         // while the runner is still parked (a C that "completed" here admitted over the stop
         // the runner has not yet processed).
@@ -2851,7 +2856,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 box.store(deliver)
             }
         }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-68") }
         let aResult = await a.value
         XCTAssertEqual(aResult.outcome, .completed, "A completed its network work")
         let aPending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2867,7 +2872,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
-        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-69") }
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended: A's pending playback must quiesce first")
         // MIXED FLAGS (spec d2561f9b): A's finish (drain) was queued FIRST and B's retire-
@@ -2932,7 +2937,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let box = Box()
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-70") }
         var aEnqueued = false
         for _ in 0..<600 {
             let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
@@ -2958,7 +2963,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // B's FIRST-frame hook injects a test stop (E2) — only once B is actually admitted,
         // i.e. strictly after E1's confirmation.
         self.cancelPlayerOnFirstFrameForNextBuild = true
-        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-71") }
         try await Task.sleep(nanoseconds: 200_000_000)
         // Release the drain hold so the runner processes the retire stop, then deliver E1:
         // B is admitted and its FIRST-frame hook injects E2.
@@ -3005,7 +3010,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         let gate = holdNextTurn()
         let sink = makeSink()
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-72") }
 
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
@@ -3018,7 +3023,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-73")
         _ = await slow.value
 
         // Exactly one resume: the superseding turn's. A must not restore after B.
@@ -3055,7 +3060,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         let gate = holdNextTurn()
         let sink = makeSink()
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-74") }
         try? await Task.sleep(nanoseconds: 200_000_000)
         gate.release()
 
@@ -3065,7 +3070,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-75")
         _ = await slow.value
 
         let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
@@ -3086,7 +3091,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         let gate = holdNextTurn()
         let sink = makeSink()
-        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-76") }
 
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
@@ -3099,7 +3104,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-77")
         _ = await slow.value
 
         XCTAssertTrue(playback.isPlaying, "the winning turn must release the hold taken for the superseded one")
@@ -3279,7 +3284,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "live", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .wakeWord
-            )
+            , utteranceId: "u-78")
         }
         // Give the live turn time to reach the socket and hold there. `Task.yield()` is not
         // enough: the turn has to get through the pause hold and into the socket, which the
@@ -3297,7 +3302,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let staleResult = await sink.routeToCloud(
             request: "stale", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .followUp
-        )
+        , utteranceId: "u-79")
 
         XCTAssertEqual(staleResult.outcome, .refused)
 
@@ -3331,7 +3336,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         _ = await sink.routeToCloud(
             request: "solo", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord
-        )
+        , utteranceId: "u-80")
         XCTAssertTrue(
             playback.calls.contains(.seekTo(110)),
             "the fixture must produce a real seek when the turn is not superseded, otherwise the "
@@ -3357,7 +3362,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "A", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .wakeWord
-            )
+            , utteranceId: "u-81")
         }
         let maybeHeld = await waitForHeldTurn()
         let heldA = try XCTUnwrap(maybeHeld, "turn A never reached the socket")
@@ -3369,7 +3374,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "B", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .followUp
-            )
+            , utteranceId: "u-82")
         }
         // EXPLICIT BARRIER on B'S OWN TASK, read INSIDE the poll.
         // NOTE: `CloudRouteTestURLProtocol.requestCount` is NOT usable here — it counts
@@ -3465,7 +3470,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         _ = await sink.routeToCloud(
             request: "audio", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord
-        )
+        , utteranceId: "u-83")
 
         // The player must have been given audio: the enqueue path ran, and by the end of the turn
         // the audio has drained rather than been dropped.
@@ -3498,7 +3503,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "live", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .wakeWord
-            )
+            , utteranceId: "u-84")
         }
         let maybeHeld = await waitForHeldTurn()
         _ = try XCTUnwrap(maybeHeld, "the live turn never reached the socket")
@@ -3508,7 +3513,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let staleResult = await sink.routeToCloud(
             request: "stale", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .followUp
-        )
+        , utteranceId: "u-85")
         XCTAssertEqual(staleResult.outcome, .refused, "the stale turn must be refused")
 
         gate.release()
@@ -3566,7 +3571,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "live", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .wakeWord
-            )
+            , utteranceId: "u-86")
         }
 
         // BARRIER: the live turn acquired its hold.
@@ -3582,7 +3587,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let staleResult = await sink.routeToCloud(
             request: "stale", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .followUp
-        )
+        , utteranceId: "u-87")
         XCTAssertEqual(staleResult.outcome, .refused, "the stale turn must be refused")
 
         // THE REFUSED REQUEST CHANGED NEITHER THE HOLD NOR THE COUNTS.
@@ -3642,7 +3647,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let result = await sink.routeToCloud(
             request: "audio", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord
-        )
+        , utteranceId: "u-88")
 
         // IDENTITY: the turn that ran is the turn this case built, named by its own prepared frame.
         let task = try XCTUnwrap(capturedTask, "the turn must have built its own transport task")
@@ -3708,7 +3713,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let a = await sink.routeToCloud(
             request: "A", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord
-        )
+        , utteranceId: "u-89")
         XCTAssertEqual(a.outcome, .completed, "turn A returns")
         XCTAssertEqual(
             playback.calls.filter { $0 == .resume }.count, 0,
@@ -3729,7 +3734,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             await sink.routeToCloud(
                 request: "B", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .followUp
-            )
+            , utteranceId: "u-90")
         }
         let maybeHeldB = await waitForHeldTurn()
         let heldB = try XCTUnwrap(maybeHeldB, "turn B must be in flight and holding")
@@ -3786,7 +3791,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let a = await sink.routeToCloud(
             request: "A", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord
-        )
+        , utteranceId: "u-91")
         XCTAssertEqual(a.outcome, .completed, "turn A returns")
         await MainActor.run { player.setDrainHoldForTesting(false) }
         try await waitUntil("A produced its stop notification") { !capturedNotifications.isEmpty }
@@ -3800,7 +3805,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = await sink.routeToCloud(
             request: "B", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .followUp
-        )
+        , utteranceId: "u-92")
         XCTAssertEqual(b.outcome, .completed, "turn B returns")
         let resumesBeforeA = playback.calls.filter { $0 == .resume }.count
 
@@ -3849,8 +3854,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let a = await sink.routeToCloud(
             request: "A", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord,
-            preparedObserver: { prepared in preparedA = prepared }
-        )
+            utteranceId: "u-93",
+            preparedObserver: { prepared in preparedA = prepared })
         XCTAssertEqual(a.outcome, .completed, "turn A completes")
 
         // B: a second dispatch on the SAME sink, with its OWN observer.
@@ -3858,8 +3863,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = await sink.routeToCloud(
             request: "B", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .followUp,
-            preparedObserver: { prepared in preparedB = prepared }
-        )
+            utteranceId: "u-94",
+            preparedObserver: { prepared in preparedB = prepared })
         XCTAssertEqual(b.outcome, .completed, "turn B completes")
 
         // The two observations DIFFER, which proves they are distinct observations. It does NOT
@@ -3903,7 +3908,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"connection_lost","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-95")
 
         XCTAssertEqual(response.response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
     }
@@ -3915,7 +3920,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"invalid_response","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil)
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-96")
 
         XCTAssertEqual(response.response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
     }
@@ -4007,7 +4012,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
         let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
-        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil)
+        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-97")
         XCTAssertEqual(response.response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
     }
 
@@ -4025,7 +4030,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         stubError(code: "connection_lost")
         // The test host's own bundle carries the en.lproj translation.
         let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
-        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil)
+        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-98")
         XCTAssertEqual(response.response, .spoken("Connection lost. Please try again."))
     }
 }
@@ -4090,7 +4095,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(
             request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
-        )
+        , utteranceId: "u-99")
         XCTAssertEqual(
             response.response,
             .spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
@@ -4117,7 +4122,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(
             request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
-        )
+        , utteranceId: "u-100")
         // `provider_error` is Generic with no local template ⇒ the error earcon. What must NOT
         // happen is the operator diagnostic reaching the speaker.
         XCTAssertEqual(
@@ -4143,7 +4148,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(
             request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
-        )
+        , utteranceId: "u-101")
         XCTAssertEqual(response.response, .earcon(.error), "an unknown code gets local feedback, not remote text")
         if case let .spoken(text) = response.response {
             XCTAssertFalse(text.contains("42"), "the remote message leaked into speech: \(text)")
@@ -4162,7 +4167,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             """
         let response = await makeSink().routeToCloud(
             request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
-        )
+        , utteranceId: "u-102")
         XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
     }
 
@@ -4191,19 +4196,19 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         let sink = makeSink()
         let owner = await sink.routeToCloud(
             request: "play the news", tier: .free, context: context,
-            origin: cloudTestOrigin, selection: nil, utteranceId: "ut-e2e-42"
+            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
         )
         let ownerFrame = try XCTUnwrap(capturedTask?.sentAuthFrame)
         XCTAssertEqual(
-            ownerFrame["request_id"] as? String, "ut-e2e-42",
-            "the wire request_id is the ADMITTED utterance id, not a freshly minted UUID"
+            ownerFrame["request_id"] as? String, "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
+            "the wire request_id is the ADMITTED utterance UUID, not a freshly minted one"
         )
 
         // Duplicate of the SAME utterance: the settled result, no new dispatch, no second id.
         capturedTask = nil
         let duplicate = await sink.routeToCloud(
             request: "play the news", tier: .free, context: context,
-            origin: cloudTestOrigin, selection: nil, utteranceId: "ut-e2e-42"
+            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
         )
         XCTAssertEqual(duplicate, owner, "the duplicate observes the owner's settled outcome")
         XCTAssertNil(
@@ -4411,7 +4416,7 @@ final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
         )
         let context = PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
 
-        let response = await sink.routeToCloud(request: "x", tier: .free, context: context, origin: cloudTestOrigin, selection: nil)
+        let response = await sink.routeToCloud(request: "x", tier: .free, context: context, origin: cloudTestOrigin, selection: nil, utteranceId: "u-103")
 
         XCTAssertEqual(response.response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
     }

@@ -99,7 +99,16 @@ final class CloudRouteClient {
         route(
             request: request,
             context: context,
-            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+            turn: CloudTurnEnvelope.make(
+                capabilities: [],
+                routeHint: nil,
+                recentConversation: [],
+                conversation: CloudPreparedConversation(
+                    requestId: UUID().uuidString,
+                    conversationId: UUID().uuidString,
+                    mode: "create"
+                )
+            )
         )
     }
 

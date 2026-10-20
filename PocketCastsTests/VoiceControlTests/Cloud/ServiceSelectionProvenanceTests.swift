@@ -379,7 +379,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         // No window yet: a turn carrying any generation must be refused.
         XCTAssertNil(
-            manager.prepare(selection: .wakeWord, origin: 1),
+            manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"),
             "with no window open, no captured origin is live"
         )
 
@@ -390,7 +390,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let deadline = Date().addingTimeInterval(3)
         var admitted = false
         while Date() < deadline {
-            if manager.prepare(selection: .wakeWord, origin: generation) != nil { admitted = true; break }
+            if manager.prepare(selection: .wakeWord, origin: generation, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88") != nil { admitted = true; break }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertTrue(

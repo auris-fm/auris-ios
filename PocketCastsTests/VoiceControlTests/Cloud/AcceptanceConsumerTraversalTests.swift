@@ -28,7 +28,7 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
             capabilities: [],
             routeHint: nil,
             recentConversation: [],
-            conversation: CloudPreparedConversation(requestId: "", conversationId: conversationId, mode: "create")
+            conversation: testPreparedConversation(conversationId: conversationId)
         )
     }
 

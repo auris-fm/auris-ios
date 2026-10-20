@@ -78,8 +78,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: []
-        )
+            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -132,8 +131,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: []
-        )
+            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
 
         let closeRequested = Promise<Void>()
         let seamOpened = Promise<Void>()
@@ -192,8 +190,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: []
-        )
+            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -241,8 +238,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(tasks: [taskA, taskB])
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: []
-        )
+            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let a = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )

@@ -173,6 +173,17 @@ class SocketCapturingTestCase: XCTestCase {
     var capturedTask: StubWebSocketTask?
 }
 
+/// A valid prepared conversation for envelope construction in tests. Each call
+/// mints a FRESH admitted id unless a literal is supplied — mirroring the
+/// production rule that every turn carries its own admitted UUID identity.
+func testPreparedConversation(
+    requestId: String = UUID().uuidString,
+    conversationId: String = UUID().uuidString,
+    mode: String = "create"
+) -> CloudPreparedConversation {
+    CloudPreparedConversation(requestId: requestId, conversationId: conversationId, mode: mode)
+}
+
 // MARK: - Per-case fixture handoff
 
 /// Lets a case keep its `event:`/`data:` fixture literal while the transport it

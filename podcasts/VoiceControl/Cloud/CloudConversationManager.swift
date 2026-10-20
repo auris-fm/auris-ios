@@ -79,12 +79,18 @@ final class CloudConversationManager {
         // never bypass the live-window check.
         guard let origin, origin == liveOrigin else { return nil }
 
+        // ONE IDENTITY ON THE WIRE (contract delta f47e972, reviewer 9ab31c6d): the turn's
+        // `request_id` IS the admitted utterance's identity. A dispatch without one has no
+        // identity to present and is refused here — the manager never mints a stand-in UUID,
+        // so no turn can reach the wire under a fabricated identity.
+        guard let utteranceId else { return nil }
+
         // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): a repeated callback for the SAME
         // utterance reuses its retained logical request. RETENTION RULE: every utterance
         // prepared inside the live window is retained for exactly the WINDOW's lifetime — no
         // cap, no eviction — so a duplicate can never become a fresh dispatch; the window's
         // close (registerLiveOrigin to nil or a new generation) retires the whole map.
-        if let utteranceId, let prepared = preparedByUtteranceId[utteranceId] {
+        if let prepared = preparedByUtteranceId[utteranceId] {
             return prepared
         }
 
@@ -100,20 +106,16 @@ final class CloudConversationManager {
             )
         }
 
-        // ONE IDENTITY ON THE WIRE (contract delta f47e972): `request_id` is REQUIRED and
-        // client-owned, and it IS the admitted utterance's identity — the same ID the engine minted
-        // at admission and the diagnostics carry. A follow-up with no utterance id (legacy callers)
-        // still mints a fresh UUID so the server's required-ID rule never sees a fabricated value.
         var prepared: CloudPreparedConversation
         if case .followUp = selection, let existing = current, existing.origin == origin {
             prepared = CloudPreparedConversation(
-                requestId: utteranceId ?? UUID().uuidString,
+                requestId: utteranceId,
                 conversationId: existing.id,
                 mode: Self.resume
             )
         } else {
 
-            let requestId = utteranceId ?? UUID().uuidString
+            let requestId = utteranceId
             let conversationId = UUID().uuidString
             current = OpenConversation(
                 id: conversationId,
@@ -127,9 +129,7 @@ final class CloudConversationManager {
             )
         }
         // Both create AND resume preparations are retained under the utterance identity.
-        if let utteranceId {
-            preparedByUtteranceId[utteranceId] = prepared
-        }
+        preparedByUtteranceId[utteranceId] = prepared
         return prepared
     }
 

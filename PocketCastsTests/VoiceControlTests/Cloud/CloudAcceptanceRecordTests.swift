@@ -43,7 +43,8 @@ final class CloudAcceptanceRecordTests: XCTestCase {
         let outgoing = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
-            recentConversation: [RecentConversationTurn(role: .user, text: "NONCE-42")]
+            recentConversation: [RecentConversationTurn(role: .user, text: "NONCE-42")],
+            conversation: testPreparedConversation()
         )
         XCTAssertFalse(outgoing.recentConversation.isEmpty, "the fixture must carry outgoing context")
 

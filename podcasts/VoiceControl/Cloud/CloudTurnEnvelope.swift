@@ -24,14 +24,20 @@ struct CloudTurnEnvelope: Equatable {
     /// Builds an envelope for one logical turn: a fresh `request_id` (reuse the
     /// returned envelope for transport retries of the same turn) and a bounded
     /// recent-conversation context.
+    /// Builds the envelope for one logical turn. The prepared conversation is REQUIRED: the
+    /// envelope's single identity IS the admitted utterance's `requestId` — the id the ASR
+    /// pipeline minted at admission and the manager prepared. There is no fallback mint here:
+    /// a turn without an admitted identity is refused upstream (sink), never re-identifed.
+    /// Keeping ONE identity on the type means every consumer — wire frame, socket/result
+    /// registration, bind callbacks, diagnostics — binds the same value (reviewer 9ab31c6d).
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
         recentConversation: [RecentConversationTurn],
-        conversation: CloudPreparedConversation? = nil
+        conversation: CloudPreparedConversation
     ) -> CloudTurnEnvelope {
         CloudTurnEnvelope(
-            requestId: UUID().uuidString,
+            requestId: conversation.requestId,
             capabilities: capabilities,
             routeHint: routeHint,
             recentConversation: RecentConversation.bounded(recentConversation),
@@ -170,11 +176,10 @@ enum CloudRouteRequestBuilder {
         var payload: [String: Any] = [
             "request": runtimeRequest,
             "context": contextObject,
-            // The PREPARED request id when there is one. A retry of the same logical turn must
-            // present the same `request_id`, so minting a fresh one here would make the server
-            // see a second logical turn — which is what the manager's retry branch exists to
-            // avoid, and it would be defeated at the last step.
-            "request_id": turn.conversation?.requestId ?? turn.requestId,
+            // The turn's ONE identity: the admitted utterance id the envelope was built with.
+            // A retry of the same logical turn must present the same `request_id`, so minting
+            // a fresh one here would make the server see a second logical turn.
+            "request_id": turn.requestId,
         ]
         // The admission contract requires both on EVERY turn, first included. Carried at
         // the top level rather than inside `context`, and independent of episode

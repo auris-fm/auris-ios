@@ -76,7 +76,7 @@ final class CloudRouteClientTests: XCTestCase {
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in liveTask }
         )
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
         let resultSocket = routed.resultSocket
@@ -149,7 +149,7 @@ final class CloudRouteClientTests: XCTestCase {
             }
         )
         // BOTH turns deliberately share one request_id (the reuse the rules guard).
-        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         // SERIALIZE the turn starts (the factory hands out sockets in call order, so concurrent
         // starts could swap A/B): start A, wait for its submission, then start B.
         let routedA = client.routeWithResultSocket(request: "a", context: sampleContext, turn: sharedTurn)
@@ -613,7 +613,7 @@ extension CloudRouteClientTests {
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in task }
         )
-        return (client, CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: []), task)
+        return (client, CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()), task)
     }
 
     private func resultFrame(operationId: String) -> AppOperationResultFrame {

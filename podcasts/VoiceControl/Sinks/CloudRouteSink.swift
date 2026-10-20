@@ -554,6 +554,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
             lastOriginForTesting = origin
         }
+        // MISSING-ID REFUSAL (reviewer 9ab31c6d): a dispatch without an admitted utterance
+        // identity has no honest `request_id` to present, so it is refused BEFORE prepare,
+        // before any client creation, and before touching successor-owned state — the sink
+        // never lets the turn reach the wire under a fabricated identity.
+        guard let utteranceId else {
+            return CloudRouteResult(response: .silent, outcome: .refused)
+        }
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
