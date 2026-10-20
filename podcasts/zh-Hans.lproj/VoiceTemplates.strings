@@ -1,0 +1,4 @@
+/* Cloud assistant — free daily limit reached (spec 27ced9b / c259dc64).
+   Names the assistant (Auris) and the free daily allowance; no invented reset
+   time. "try again tomorrow" is the approved template wording. */
+"cloud_error_limit_exceeded" = "你已达到 Auris 的免费每日使用上限。请明天再试。";

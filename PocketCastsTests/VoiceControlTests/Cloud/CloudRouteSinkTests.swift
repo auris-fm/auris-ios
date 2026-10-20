@@ -4166,6 +4166,50 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
     }
 
+    /// EVERY SUPPORTED RESPONSE LANGUAGE CARRIES THE DAILY-LIMIT KEY (spec c259dc64). The scope is
+    /// exactly en/de/es/fr/ja/ko/zh/yue: an English entry alone does not satisfy localized
+    /// daily-limit feedback, and a Chinese turn must not be answered by an English earcon. This
+    /// uses the REAL resolver's own locale discovery (`SpokenTemplateResolver(locale:)`), not a
+    /// forced en bundle.
+    func test_dailyLimitKeyResolvesInEverySupportedResponseLanguage() {
+        // Every locale name the resolver can be handed. "zh" is covered by zh-Hans/zh-Hant.
+        let cases: [(locale: String, bundleName: String)] = [
+            ("en", "en"), ("de", "de"), ("es", "es"), ("fr", "fr"),
+            ("ja", "ja"), ("ko", "ko"), ("zh-Hans", "zh-Hans"), ("zh-Hant", "zh-Hant"),
+            ("yue", "yue"),
+        ]
+        for c in cases {
+            guard let bundle = Bundle.main.path(forResource: c.bundleName, ofType: "lproj").flatMap({ Bundle(path: $0) }) else {
+                XCTFail("\(c.bundleName).lproj is missing from the app bundle")
+                continue
+            }
+            let resolver = SpokenTemplateResolver(localeBundle: bundle)
+            let text = resolver.resolveForUserLocale("cloud_error_limit_exceeded")
+            XCTAssertFalse(
+                text.isEmpty,
+                "\(c.locale) has no daily-limit template: a non-English user would hear only an earcon"
+            )
+            XCTAssertTrue(
+                text.contains("Auris"),
+                "\(c.locale) daily-limit text must name Auris (got: \(text))"
+            )
+        }
+    }
+
+    /// The RESOLVER FINDS each of those languages from the user's own locale — the production
+    /// discovery path, not an injected bundle.
+    func test_dailyLimitKeyIsFoundByRealLocaleDiscovery() {
+        for identifier in ["en", "de", "es", "fr", "ja", "ko", "zh-Hans", "yue"] {
+            let resolver = SpokenTemplateResolver(locale: Locale(identifier: identifier))
+            let text = resolver.resolveForUserLocale("cloud_error_limit_exceeded")
+            XCTAssertFalse(
+                text.isEmpty,
+                "the resolver did not discover a daily-limit template for \(identifier)"
+            )
+            XCTAssertTrue(text.contains("Auris"), "\(identifier) text must name Auris: \(text)")
+        }
+    }
+
     /// The template ships with the app, so it resolves through the SAME code-keyed route every
     /// other client failure uses (no special-case lookup that could go missing).
     func testLimitExceededTemplateResolvesThroughTheCodeKeyedRoute() {

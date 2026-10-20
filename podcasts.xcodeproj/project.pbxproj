@@ -2067,6 +2067,14 @@
 		9AF646942E5E081400627836 /* PlaylistDetailViewController+TableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlaylistDetailViewController+TableView.swift"; sourceTree = "<group>"; };
 		9AF646962E5E0BB700627836 /* PlaylistDetailViewController+Search.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlaylistDetailViewController+Search.swift"; sourceTree = "<group>"; };
 		AA0C375526D831E3008B36A1 /* en */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000001 /* de */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = de; path = de.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000002 /* es */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000003 /* fr */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = fr; path = fr.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000004 /* ja */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000005 /* ko */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = ko; path = ko.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000006 /* "zh-Hans" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+		AB0C000000000000000007 /* "zh-Hant" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+		AB0C000000000000000008 /* yue */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = yue; path = yue.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
 		A13200320100000000000003 /* SetSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000004 /* MigratedSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigratedSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000006 /* PocketCastsAppShortcutsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketCastsAppShortcutsProvider.swift; sourceTree = "<group>"; };
@@ -6797,6 +6805,8 @@
 				"fr-CA",
 				"es-MX",
 				ca,
+				ko,
+				yue,
 			);
 			mainGroup = BDBD53E317019B290048C8C5;
 			packageReferences = (
@@ -8659,6 +8669,14 @@
 			isa = PBXVariantGroup;
 			children = (
 				AA0C375526D831E3008B36A1 /* en */,
+				AB0C000000000000000001 /* de */,
+				AB0C000000000000000002 /* es */,
+				AB0C000000000000000003 /* fr */,
+				AB0C000000000000000004 /* ja */,
+				AB0C000000000000000005 /* ko */,
+				AB0C000000000000000006 /* "zh-Hans" */,
+				AB0C000000000000000007 /* "zh-Hant" */,
+				AB0C000000000000000008 /* yue */,
 			);
 			name = VoiceTemplates.strings;
 			sourceTree = "<group>";
