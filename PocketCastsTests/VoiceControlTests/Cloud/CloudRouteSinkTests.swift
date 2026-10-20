@@ -730,9 +730,15 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         shared: String, sink: CloudRouteSink, manager: CloudConversationManager
     ) async throws -> () -> CloudRouteSink.UtteranceRecord? {
         let owner = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
-        guard case let .owner(ownerToken) = owner else { throw XCTSkip("expected owner") }
+        guard case let .owner(ownerToken) = owner else {
+            XCTFail("admission must OWN the first dispatch; got \(owner)")
+            return { nil }
+        }
         let join = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
-        guard case let .join(joinToken) = join else { throw XCTSkip("expected join") }
+        guard case let .join(joinToken) = join else {
+            XCTFail("the duplicate must JOIN a held owner; got \(join)")
+            return { nil }
+        }
         let weakRecord = sink.weakRecordForTesting(token: ownerToken)
 
         _ = await sink.routeToCloud(
@@ -746,10 +752,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
         XCTAssertNotNil(weakRecord(), "still held while the admitted tokens are alive")
         return weakRecord
-    }
-
-    /// Holds an admission token in a box so a control can drop the LAST reference explicitly and    private func joinTokenDisposition(_ token: CloudDispatchOwnership.DispatchToken) -> CloudDispatchOwnership {
-        .join(token)
     }
 
     private func aOwnershipToken(_ ownership: CloudDispatchOwnership) -> CloudDispatchOwnership.DispatchToken {
