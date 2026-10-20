@@ -68,6 +68,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         ownershipLock.lock(); defer { ownershipLock.unlock() }
         return recordsByUtteranceId[utteranceId].map { !$0.retired } ?? false
     }
+    /// Await a joiner's resolution against an admission token, for controls (reviewer 8501bd91).
+    func joinForTesting(token: CloudDispatchOwnership.DispatchToken) async -> CloudRouteResult? {
+        await joinRecord(token: token)
+    }
     /// Whether the STALE owner started a wire turn: counted through the client factory.
     @MainActor var wireDispatchCountForTesting: Int { clientCreationCountForTesting }
     @MainActor var clientCreationCountForTesting: Int = 0
@@ -328,6 +332,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         /// True once the OWNER has begun `routeToCloudOwned`; before that the record exists only
         /// because the owner claimed it, and the claiming caller is still the owner.
         var dispatchStarted = false
+        /// A record that has reached its terminal settlement. It stays resolvable by instance so a
+        /// joiner admitted earlier can read its result even after retirement (reviewer 8501bd91).
+        var terminal = false
         init(origin: Int?) { self.origin = origin }
     }
     private var recordsByUtteranceId: [String: UtteranceRecord] = [:]
@@ -373,15 +380,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         ownershipLock.lock()
         defer { ownershipLock.unlock() }
+        // The caller's LIVE ORIGIN is validated FIRST: a stale caller must not observe or join a
+        // successor's record merely because it reused the utterance id (reviewer 8501bd91).
+        guard let origin, origin == conversationManager.liveOriginForTesting else { return .refused }
         if let record = recordsByUtteranceId[utteranceId] {
             if let settled = record.settled { return .settled(settled) }
             if record.retired { return .refused }
-            return .join
+            return .join(.init(utteranceId: utteranceId, instance: record.instance))
         }
-        // A LIVE-ORIGIN fence, read from the AUTHORITATIVE owner (the conversation manager) so
-        // the fence cannot drift from the manager's own admission. An unregistered origin never
-        // admits a dispatch.
-        guard let origin, origin == conversationManager.liveOriginForTesting else { return .refused }
         let record = UtteranceRecord(origin: origin)
         record.effectsClaimed = true
         recordsByUtteranceId[utteranceId] = record
@@ -419,8 +425,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         switch disposition {
         case let .settled(result):
             return result
-        case .join:
-            return await joinRecord(utteranceId: utteranceId)
+        case let .join(token):
+            return await joinRecord(token: token)
         case .refused:
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
@@ -429,7 +435,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         case let .owner(token):
             guard token.utteranceId == utteranceId else {
-                return await joinRecord(utteranceId: utteranceId)
+                return await joinRecord(token: token)
             }
             return await ownDispatch(
                 token: token, request: request, tier: tier, context: context, origin: origin,
@@ -441,13 +447,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Awaits the owner's settlement of this utterance's record. A held joiner is never
     /// abandoned: a retired record's owner still settles it.
-    private func joinRecord(utteranceId: String) async -> CloudRouteResult {
+    private func joinRecord(token: CloudDispatchOwnership.DispatchToken) async -> CloudRouteResult {
+        // Resolve the EXACT record the admission bound this caller to — by INSTANCE, never by
+        // utterance id alone. A successor record that reuses the id is a different owner and must
+        // not receive this joiner (reviewer 8501bd91).
         let record: UtteranceRecord? = {
             ownershipLock.lock(); defer { ownershipLock.unlock() }
-            return recordsByUtteranceId[utteranceId]
+            guard let r = activeOwnerRecords[token.instance], r.instance == token.instance else { return nil }
+            return r
         }()
         guard let record else {
-            // Nothing to join: refuse as a turn with no conversation (never invent an owner).
+            // The owner's record is gone (already terminal and released): nothing to await.
             return CloudRouteResult(
                 response: .earcon(.error),
                 outcome: .refused
@@ -520,12 +530,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // (reviewer a2723c92 + b2c09394).
         ownershipLock.lock()
         let isLiveOwner = recordsByUtteranceId[utteranceId] === record && !record.retired
-        if isLiveOwner {
-            record.settled = result
-        } else if recordsByUtteranceId[utteranceId] === record {
+        // Publish the result on THIS record's instance either way: a detached (retired) record
+        // keeps its TERMINAL result so a joiner admitted against it before retirement still
+        // resolves, rather than being abandoned with no result (reviewer 8501bd91).
+        record.settled = result
+        record.terminal = true
+        if !isLiveOwner, recordsByUtteranceId[utteranceId] === record {
+            // The map entry is a DIFFERENT window's record now: do not let a stale owner's result
+            // stand in for the successor's.
             recordsByUtteranceId.removeValue(forKey: utteranceId)
         }
-        activeOwnerRecords.removeValue(forKey: token.instance)
         let waiters = record.waiters
         record.waiters = []
         ownershipLock.unlock()

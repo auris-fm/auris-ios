@@ -690,13 +690,17 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     private(set) var claimObservedBeforeDispatch: [Bool] = []
     private var claimedUtteranceIds: Set<String> = []
     private var dispatchInProgress = false
+    private var ownerTokens: [String: CloudDispatchOwnership.DispatchToken] = [:]
     func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
         claimObservedBeforeDispatch.append(!dispatchInProgress)
-        if let effectOwnerForTesting, !effectOwnerForTesting(utteranceId) { return .join }
+        if let effectOwnerForTesting, !effectOwnerForTesting(utteranceId) {
+            return .join(.init(utteranceId: utteranceId ?? "", instance: UUID()))
+        }
         guard let utteranceId else { return .owner(.init(utteranceId: "", instance: UUID())) }
-        if claimedUtteranceIds.contains(utteranceId) { return .join }
-        claimedUtteranceIds.insert(utteranceId)
-        return .owner(.init(utteranceId: utteranceId, instance: UUID()))
+        if let owner = ownerTokens[utteranceId] { return .join(owner) }
+        let token = CloudDispatchOwnership.DispatchToken(utteranceId: utteranceId, instance: UUID())
+        ownerTokens[utteranceId] = token
+        return .owner(token)
     }
 }
 

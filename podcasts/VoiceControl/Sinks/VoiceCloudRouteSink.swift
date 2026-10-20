@@ -3,8 +3,10 @@
 enum CloudDispatchOwnership: Equatable {
     /// This caller owns the dispatch, identified by an immutable token.
     case owner(DispatchToken)
-    /// Another caller owns a dispatch that has NOT settled: await it.
-    case join
+    /// Another caller owns a dispatch that has NOT settled: await ITS record. The disposition
+    /// carries the owner's immutable token, so a joiner that pauses before dispatch cannot later
+    /// attach to a SUCCESSOR record that reused the same utterance id (reviewer 8501bd91).
+    case join(DispatchToken)
     /// The dispatch already settled in this window: observe its retained result.
     case settled(CloudRouteResult)
     /// No dispatch may start for this caller in this window (stale origin, or a retired record).

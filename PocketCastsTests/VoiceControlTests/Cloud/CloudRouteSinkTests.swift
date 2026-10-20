@@ -626,6 +626,56 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
+    /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
+    /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
+    /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
+    /// ITS OWN admitted record, never the successor's — the token carries the instance precisely
+    /// so a reused id cannot be mistaken for the same owner.
+    @MainActor
+    func testAHeldJoinerResolvedAgainstItsOwnAdmissionNotASuccessorThatReusedTheId() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin)
+
+        let shared = "utterance-joiner"
+        let aOwnership = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        XCTAssertTrue(aOwnership.ownsDispatch, "A owns the first window's dispatch")
+
+        // The joiner admits against A and (in this control) holds its token before dispatch.
+        let joinAdmission = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
+        guard case let .join(joinToken) = joinAdmission else {
+            return XCTFail("the duplicate must JOIN the held owner, got \(joinAdmission)")
+        }
+
+        // The window CLOSES and REOPENS; a successor for the SAME id gets its OWN record.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
+        _ = await sink.routeToCloud(
+            request: "successor", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin + 1, selection: nil, utteranceId: shared
+        )
+        let successorInstance = sink.recordInstanceForTesting(utteranceId: shared)
+        XCTAssertNotEqual(
+            successorInstance, joinToken.instance,
+            "premise: the successor owns a DIFFERENT record than the joiner was admitted against"
+        )
+
+        // A completes its (now stale) turn: its OWN record settles. The held joiner must resolve
+        // against THAT record — the successor's result must not answer it.
+        _ = await sink.routeToCloud(
+            request: "owner request", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: aOwnership
+        )
+
+        // The joiner now resumes with its OLD admission against the ORIGINAL record.
+        let joined = await sink.joinForTesting(token: joinToken)
+        XCTAssertNotNil(joined, "the held joiner resolves against its ORIGINAL admitted record")
+        XCTAssertEqual(
+            joined?.outcome, .refused,
+            "the joiner sees its OWN owner's (refused, stale-window) result, not a successor's"
+        )
+    }
+
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
