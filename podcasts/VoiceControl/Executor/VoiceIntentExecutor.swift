@@ -128,7 +128,9 @@ class VoiceIntentExecutor {
     /// producer the app built rather than constructing its own.
     var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
 
-    /// Retires the sink's retained dispatches on the window boundary (production wiring).
+    /// Retires the sink's retained dispatches on the window boundary (production wiring). The
+    /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
+    /// transition is atomic with the manager's origin clear (reviewer a2723c92).
     @MainActor
     func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
         (cloudRouteSink as? CloudRouteSink)?.retireRetainedDispatchesIfWindowChanged(to: origin)
@@ -201,7 +203,7 @@ class VoiceIntentExecutor {
             // EFFECT OWNERSHIP IS CLAIMED BEFORE THE DISPATCH (reviewer 39beabc7): the caller
             // that owns this utterance wins its effects; a joiner/duplicate arriving later — or
             // completing first — never does. No lifecycle is inferred from completion order.
-            let ownsEffects = cloudRouteSink.claimDispatchEffects(utteranceId: cr.utteranceId)
+            let ownsEffects = cloudRouteSink.claimDispatchEffects(utteranceId: cr.utteranceId, origin: cr.generation)
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,

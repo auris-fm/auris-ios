@@ -44,6 +44,32 @@ final class CloudBindInterleavingControls: XCTestCase {
         )
     }
 
+    /// A client whose factory hands out a distinct socket per route, in order, recording them.
+    /// Needed to establish isolation between two PHYSICAL sockets (reviewer a2723c92).
+    private func makeClient(tasks: [StubWebSocketTask]) -> CloudRouteClient {
+        let box = TaskBox(tasks)
+        return CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: "user_test",
+            requestTimeoutSeconds: 15,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in box.next() }
+        )
+    }
+
+    private final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tasks: [StubWebSocketTask]
+        private(set) var issued: [StubWebSocketTask] = []
+        init(_ tasks: [StubWebSocketTask]) { self.tasks = tasks }
+        func next() -> StubWebSocketTask {
+            lock.lock(); defer { lock.unlock() }
+            let task = tasks.isEmpty ? StubWebSocketTask(textFrames: []) : tasks.removeFirst()
+            issued.append(task)
+            return task
+        }
+    }
+
     // MARK: - Control 1: bind precedes close (the ordinary order)
 
     /// The registration is published BEFORE the close, so the close retires it. This is the
@@ -212,7 +238,8 @@ final class CloudBindInterleavingControls: XCTestCase {
     /// successor's socket. The successor's own send stays `submitted`.
     func testAReusedRequestIdKeepsItsOwnRegistrationAcrossThePredecessorsClose() async throws {
         let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
-        let client = makeClient(task: taskA)
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let client = makeClient(tasks: [taskA, taskB])
         let turn = CloudTurnEnvelope.make(
             capabilities: [], routeHint: nil, recentConversation: []
         )
@@ -229,10 +256,9 @@ final class CloudBindInterleavingControls: XCTestCase {
         await boundFlagA.value()
         let identityA = try XCTUnwrap(a.resultSocket.boundIdentity)
 
-        // The successor reuses the SAME request_id with its own socket. Its bind lands on the
-        // transport's task, so wait for B's first frame (the bind is published by then) rather
-        // than reading an unbound handle.
-        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        // The successor reuses the SAME request_id with its OWN PHYSICAL socket (taskB, issued
+        // by the factory for the second route). Its bind lands on the transport's task, so wait
+        // for B's first frame (the bind is published by then).
         let boundFlagB = Promise<Void>()
         client.onFrameReceived = { boundFlagB.resolve(()) }
         let routedB = client.routeWithResultSocket(
@@ -256,6 +282,11 @@ final class CloudBindInterleavingControls: XCTestCase {
         let reportB = await client.sendOperationResult(frame, via: socketB)
         XCTAssertEqual(reportB, .submitted,
                        "the successor keeps its registration across the predecessor's close")
+        // The two turns used DISTINCT physical sockets: isolation is between real sockets, not a
+        // shared double.
+        XCTAssertFalse(taskA === taskB, "premise: the successor used its own physical socket")
+        XCTAssertTrue(taskA.isCancelledSocket, "the predecessor's close cancelled ITS socket")
+        XCTAssertFalse(taskB.isCancelledSocket, "the successor's socket survives the predecessor's close")
 
         socketB.finishTurn()
         _ = await consumeA.value

@@ -507,6 +507,56 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNotNil(replayed.response, "the retained result is returned")
     }
 
+    /// HELD OWNER + JOINER ACROSS A WINDOW CLOSE (reviewer a2723c92): an owner is held in
+    /// flight with a duplicate JOINER parked on it, then the window RETIRES (close) and a new
+    /// window opens, all before the owner completes. The retirement must NOT discard the held
+    /// joiner: releasing the old owner settles the JOINER with that owner's result, and the late
+    /// owner's completion must NOT publish into the new window's map (the next dispatch for the
+    /// SAME id in the new window is a fresh OWN, not a replay of the stale result).
+    @MainActor
+    func testHeldJoinerIsSettledByItsOwnerEvenAfterTheWindowRetires() async throws {
+        let hold = HoldLatch()
+        pendingProducerHold = hold
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+
+        let shared = "utterance-held"
+        let owner = Task { await sink.routeToCloud(
+            request: "owner", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: shared) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let joiner = Task { await sink.routeToCloud(
+            request: "duplicate", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: shared) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        // The window closes (old generation), then a NEW one opens — all while the owner is held.
+        sink.retireRetainedDispatchesIfWindowChanged(to: nil)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
+
+        hold.release()
+        let ownerResult = await owner.value
+        let joinerResult = await joiner.value
+        XCTAssertEqual(
+            joinerResult, ownerResult,
+            "the held joiner is settled by ITS owner even though the window retired mid-flight"
+        )
+        // The late owner must NOT have published into the NEW window: the SAME utterance id in
+        // the new window is a FRESH dispatch (a new owner), not a replay of the stale result —
+        // it must NOT return the stale owner's result. The new window is a live origin again.
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let clientsBefore = clientCreationCount
+        _ = await sink.routeToCloud(
+            request: "new window turn", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: shared
+        )
+        XCTAssertGreaterThan(
+            clientCreationCount, clientsBefore,
+            "the fresh dispatch DIALED (a new client) rather than replaying the stale result — "
+                + "a retained stale result would return before any client is minted"
+        )
+    }
+
     private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold

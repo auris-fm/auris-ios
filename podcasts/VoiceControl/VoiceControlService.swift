@@ -66,11 +66,19 @@ class VoiceControlService: ObservableObject {
         // ONE coherent retention/retirement rule across preparation, dispatch and effects: the
         // sink's retained dispatch results (and effect claims) retire on the SAME window boundary
         // the manager's prepared requests do. Driven by the real window state, not a counter.
+        // Retire atomically with the authoritative origin: the manager path is synchronous, so
+        // the sink clear must be too — a queued MainActor Task would let a new-window
+        // preparation/effect claim land before the clear and then be erased (reviewer a2723c92).
+        // The signal publishes on the main thread, so the sink transition runs inline.
+        // Retire atomically with the authoritative origin: the manager path is synchronous, so
+        // the sink clear must be too. The signal publishes on the main thread, so the transition
+        // runs inline — no queued hop that could let a new-window claim land first (a2723c92).
+        // The sink retirement itself is nonisolated (lock-guarded), so it needs no actor hop.
         gracePeriodSignal.$isActive
             .sink { [weak self] active in
                 guard let self else { return }
                 let origin: Int? = active ? self.gracePeriodSignal.currentGeneration() : nil
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
                 }
             }

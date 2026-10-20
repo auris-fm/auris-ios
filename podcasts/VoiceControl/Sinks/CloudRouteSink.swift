@@ -289,36 +289,74 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 39beabc7): one logical dispatch
-    // per utterance. A duplicate invocation for the SAME utterance joins the owner (in flight)
-    // or observes its settled result — never a second wire request. INDEPENDENT utterances
-    // dispatch independently.
+    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 39beabc7/a2723c92): one logical
+    // dispatch per utterance. A duplicate invocation for the SAME utterance joins the owner (in
+    // flight) or observes its settled result — never a second wire request. INDEPENDENT
+    // utterances dispatch independently.
     //
-    // RETENTION (one coherent rule across preparation, dispatch and effects): a completed
-    // utterance's result is retained for exactly the WINDOW's lifetime, with NO cap and NO
-    // eviction — an evicted entry would let a retained duplicate re-enter `routeToCloudOwned`,
-    // minting another client and cancelling its predecessor. The map is emptied when the
-    // window's origin changes (the same lifecycle the manager's retention follows).
+    // RETENTION. Per-utterance OWNERSHIP RECORDS live for the WINDOW's lifetime with no cap and
+    // no eviction. A window change does NOT destroy in-flight records: a held duplicate joiner
+    // must still be settled by its owner, so in-flight records survive retirement and are
+    // settled with that owner's result; only SETTLED records and effect claims retire. Each
+    // record carries an ownership INSTANCE, so a late owner completing after its window retired
+    // cannot publish into the successor's map — it settles its own waiters and stops.
     private let ownershipLock = NSLock()
-    private var inFlightByUtteranceId: [String: [CheckedContinuation<CloudRouteResult, Never>]] = [:]
-    private var settledByUtteranceId: [String: CloudRouteResult] = [:]
-    /// The window identity the retained results belong to. Changing it retires them wholesale.
+
+    private final class UtteranceRecord {
+        let origin: Int?
+        let instance = UUID()
+        /// Retired records no longer accept joiners or accept new settlements.
+        var retired = false
+        var settled: CloudRouteResult?
+        var waiters: [CheckedContinuation<CloudRouteResult, Never>] = []
+        /// Effects are granted to the OWNER once, at dispatch, and never again for this record.
+        var effectsClaimed = false
+        /// True once the OWNER has begun `routeToCloudOwned`; before that the record exists only
+        /// because the executor claimed it, and the claiming caller is still the owner.
+        var dispatchStarted = false
+        init(origin: Int?) { self.origin = origin }
+    }
+    private var recordsByUtteranceId: [String: UtteranceRecord] = [:]
+    /// The window identity the retained SETTLED results belong to.
     private var retainedOrigin: Int?
 
-    /// Retires the retained dispatch results when the grace window changes (or ends). Called by
-    /// the production origin binding, so dispatch retention follows the same lifecycle as
-    /// preparation retention.
+    /// Retires the retained dispatch state when the grace window changes (or ends). SETTLED
+    /// results and effect claims retire with the window — a new window starts clean. IN-FLIGHT
+    /// records are RETAINED so their held joiners are still settled by their owner; they accept
+    /// no new joiners and cannot publish into the new window.
     func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
         ownershipLock.lock()
         if origin != retainedOrigin {
-            settledByUtteranceId.removeAll()
-            inFlightByUtteranceId.removeAll()
-            effectClaimedUtteranceIds.removeAll()
+            for (id, record) in recordsByUtteranceId where record.settled != nil {
+                recordsByUtteranceId.removeValue(forKey: id)
+            }
+            for record in recordsByUtteranceId.values { record.retired = true }
         }
         retainedOrigin = origin
         ownershipLock.unlock()
     }
 
+    /// Claims EFFECT ownership for the utterance AND the ownership record for its dispatch in one
+    /// atomic step, fenced by the CAPTURED origin — the executor's single entry point before
+    /// `routeToCloud`. `ownsEffects` is true only for the caller that creates the record in a
+    /// LIVE window; a duplicate joining a held dispatch, a settled replay, and a stale caller
+    /// from a retired window all get false (and must not repeat the owner's effects). Called by
+    /// the executor BEFORE the dispatch, so ordering is the owner's, not the completion's.
+    func claimDispatchEffects(utteranceId: String?, origin: Int?) -> Bool {
+        guard let utteranceId else { return true }  // no identity: legacy per-call effects
+        ownershipLock.lock()
+        defer { ownershipLock.unlock() }
+        if let record = recordsByUtteranceId[utteranceId] {
+            return false  // already owned (in flight, settled or retired): never a fresh effect
+        }
+        guard origin == nil || origin == retainedOrigin || retainedOrigin == nil else { return false }
+        let record = UtteranceRecord(origin: origin)
+        record.effectsClaimed = true
+        recordsByUtteranceId[utteranceId] = record
+        return true
+    }
+    /// Public dispatch entry: one logical dispatch per utterance, resolved against the
+    /// utterance's ownership RECORD (join a held owner, replay a retained result, or own).
     func routeToCloud(
         request: String,
         tier: CloudTier,
@@ -337,51 +375,79 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
             )
         }
-        // Join or own.
-        ownershipLock.lock()
-        if let settledResult = settledByUtteranceId[utteranceId] {
-            ownershipLock.unlock()
-            return settledResult
+        // Join, replay, or own — resolved against the utterance's ownership RECORD.
+        enum JoinOutcome {
+            case settledNow(CloudRouteResult)
+            case join(UtteranceRecord)
         }
-        if inFlightByUtteranceId[utteranceId] != nil {
-            // A dispatch for this utterance is in flight: JOIN it, do not send another.
-            return await withCheckedContinuation { (continuation: CheckedContinuation<CloudRouteResult, Never>) in
-                inFlightByUtteranceId[utteranceId]!.append(continuation)
-                ownershipLock.unlock()
+        let outcome: JoinOutcome? = {
+            ownershipLock.lock()
+            defer { ownershipLock.unlock() }
+            guard let record = recordsByUtteranceId[utteranceId] else { return nil }
+            if let settled = record.settled { return .settledNow(settled) }
+            // A RETIRED record belongs to a closed window: it accepts no new joiners (its held
+            // waiters are still settled by its owner). This turn OWNS a fresh dispatch.
+            if record.retired { return nil }
+            // A record claimed by the executor but whose dispatch has NOT started is THIS
+            // caller's own — own it (do not join yourself).
+            if !record.dispatchStarted { return nil }
+            return .join(record)
+        }()
+        if let outcome {
+            switch outcome {
+            case let .settledNow(result):
+                return result
+            case let .join(record):
+                // JOIN: await the owner's settlement. If the record retired first (its window
+                // closed) the owner STILL settles it — a held joiner is never abandoned.
+                return await withCheckedContinuation { (continuation: CheckedContinuation<CloudRouteResult, Never>) in
+                    ownershipLock.lock()
+                    if let settled = record.settled {
+                        ownershipLock.unlock()
+                        continuation.resume(returning: settled)
+                    } else {
+                        record.waiters.append(continuation)
+                        ownershipLock.unlock()
+                    }
+                }
             }
         }
-        inFlightByUtteranceId[utteranceId] = []
-        ownershipLock.unlock()
+
+        // OWN: the executor has already claimed this record and its effects.
+        // OWN: reuse the record the executor claimed (or create one for an unwitnessed owner),
+        // and mark the dispatch STARTED so later duplicates join rather than own.
+        let record: UtteranceRecord = {
+            ownershipLock.lock(); defer { ownershipLock.unlock() }
+            if let existing = recordsByUtteranceId[utteranceId], !existing.retired {
+                existing.dispatchStarted = true
+                return existing
+            }
+            // No live record (fresh, or the previous one belongs to a retired window): a NEW
+            // record for THIS window replaces it — the retired record keeps its own waiters.
+            let created = UtteranceRecord(origin: origin)
+            created.effectsClaimed = true
+            created.dispatchStarted = true
+            recordsByUtteranceId[utteranceId] = created
+            return created
+        }()
 
         let result = await routeToCloudOwned(
             request: request, tier: tier, context: context, origin: origin,
             selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
             sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
         )
-        // Settle: publish to joiners and retain for the WINDOW's lifetime (no eviction), then
-        // release ownership.
+        // SETTLE every waiter, but PUBLISH the retained result ONLY while this record is still
+        // the live one for the utterance — a late owner completing after its window retired must
+        // not publish into the successor's map (reviewer a2723c92).
         ownershipLock.lock()
-        settledByUtteranceId[utteranceId] = result
-        let waiters = inFlightByUtteranceId.removeValue(forKey: utteranceId) ?? []
+        let isLiveOwner = recordsByUtteranceId[utteranceId] === record && !record.retired
+        if isLiveOwner { record.settled = result }
+        let waiters = record.waiters
+        record.waiters = []
         ownershipLock.unlock()
         waiters.forEach { $0.resume(returning: result) }
         return result
     }
-
-    /// Grants EFFECT ownership for an utterance exactly once, BEFORE the dispatch begins. The
-    /// caller that OWNS the dispatch wins; a joiner/duplicate never does — so effects cannot be
-    /// won by whichever caller happens to finish first, and no lifecycle is inferred from
-    /// completion arrival order.
-    func claimDispatchEffects(utteranceId: String?) -> Bool {
-        guard let utteranceId else { return true }  // no identity: legacy per-call effects
-        ownershipLock.lock()
-        defer { ownershipLock.unlock() }
-        if effectClaimedUtteranceIds.contains(utteranceId) { return false }
-        effectClaimedUtteranceIds.insert(utteranceId)
-        return true
-    }
-
-    private var effectClaimedUtteranceIds: Set<String> = []
 
     private func routeToCloudOwned(
         request: String,

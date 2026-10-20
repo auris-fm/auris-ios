@@ -689,7 +689,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     private(set) var claimObservedBeforeDispatch: [Bool] = []
     private var claimedUtteranceIds: Set<String> = []
     private var dispatchInProgress = false
-    func claimDispatchEffects(utteranceId: String?) -> Bool {
+    func claimDispatchEffects(utteranceId: String?, origin: Int?) -> Bool {
         claimObservedBeforeDispatch.append(!dispatchInProgress)
         if let effectOwnerForTesting { return effectOwnerForTesting(utteranceId) }
         guard let utteranceId else { return true }
