@@ -19,6 +19,27 @@ final class CloudConversationManagerTests: XCTestCase {
     /// preparation for the SAME utterance reuses the prepared wire request identity; an
     /// independent utterance mints its own. This is the duplicate-dispatch protection the
     /// removed window budget was replaced by — asserted at the ACTUAL request owner.
+    /// ONE IDENTITY ON THE WIRE (contract delta f47e972 + source delta3b1def9): `request_id` is
+    /// REQUIRED and client-owned, and it IS the admitted utterance's identity — for create AND
+    /// follow-up alike. The server refuses a missing/invalid ID before admission, so the client
+    /// must never send a fabricated one when it knows the utterance identity.
+    func testWireRequestIdIsTheAdmittedUtteranceIdentity() throws {
+        let create = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "adm-7"))
+        XCTAssertEqual(
+            create.requestId, "adm-7",
+            "a create preparation sends the ADMITTED utterance id as the wire request_id"
+        )
+        let followUp = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "adm-8"))
+        XCTAssertEqual(
+            followUp.requestId, "adm-8",
+            "a follow-up preparation sends ITS OWN admitted utterance id as the wire request_id"
+        )
+        // Legacy callers without an utterance identity still mint a valid UUID — never omit.
+        let legacy = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: nil))
+        XCTAssertFalse(legacy.requestId.isEmpty, "a legacy caller still sends a valid request_id")
+        UUID(uuidString: legacy.requestId).map { _ in } ?? XCTFail("legacy request_id must be a UUID")
+    }
+
     func testDuplicatePreparationForTheSameUtteranceReusesTheWireIdentity() throws {
         let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))
         let duplicate = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))

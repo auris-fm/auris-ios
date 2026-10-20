@@ -100,16 +100,20 @@ final class CloudConversationManager {
             )
         }
 
+        // ONE IDENTITY ON THE WIRE (contract delta f47e972): `request_id` is REQUIRED and
+        // client-owned, and it IS the admitted utterance's identity — the same ID the engine minted
+        // at admission and the diagnostics carry. A follow-up with no utterance id (legacy callers)
+        // still mints a fresh UUID so the server's required-ID rule never sees a fabricated value.
         var prepared: CloudPreparedConversation
         if case .followUp = selection, let existing = current, existing.origin == origin {
             prepared = CloudPreparedConversation(
-                requestId: UUID().uuidString,
+                requestId: utteranceId ?? UUID().uuidString,
                 conversationId: existing.id,
                 mode: Self.resume
             )
         } else {
 
-            let requestId = UUID().uuidString
+            let requestId = utteranceId ?? UUID().uuidString
             let conversationId = UUID().uuidString
             current = OpenConversation(
                 id: conversationId,
