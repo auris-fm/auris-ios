@@ -1858,7 +1858,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(bFinishedEarly, "B is suspended at admission while A's stop is unconfirmed")
         // A's frames were retired synchronously; nothing new is admitted while B waits.
         let pendingNow: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
-        XCTAssertFalse(pendingNow, "nothing is admitted while A's stop is unconfirmed")
+        XCTAssertFalse(pendingNow, "no successor audio is buffered while A's stop is unconfirmed")
         // Release the drain hold FIRST: the runner is parked inside the hold and must process
         // the queued retire stop (and issue its notification) before anything can confirm.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
@@ -2151,19 +2151,24 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// the stop NOTIFICATION is not the physical contract — the actual `stopEngine()` operation
     /// is, so this control parks the REAL stop and asserts the ordering that falls out of it.
     ///
-    /// WHAT THIS CONTROL MEASURES (scoped honestly, per reviewer 76215282 and spec 43f8f003):
+    /// WHAT THIS CONTROL MEASURES (scoped honestly, per reviewer 76215282/2542e2/wording and
+    /// spec 43f8f003):
     ///   * the stop operation reaches the armed gate and genuinely PARKS (`allow == 0`, arrival
-    ///     recorded) — the ordering is "stop queued and parked FIRST, then B supersedes";
+    ///     recorded) while B's supersede is in flight;
     ///   * while parked: no stop is CONFIRMED, B does not COMPLETE, and the host is not resumed;
     ///   * on release the park ends by RELEASE, not bound expiry (`outcome == .released`);
     ///   * the parked stop confirms the retire identity (2), and exactly one host resume follows.
     ///
+    /// ORDERING (precise): B is launched while the drain is HELD, so B's retire cancel lands
+    /// first; the hold is then released and the real stop parks. B is therefore already in flight
+    /// when the stop parks — this control does not claim "park first, then B", only that the
+    /// parked stop's settlement is not preceded by confirmation/completion/resume.
+    ///
     /// WHAT IT DOES NOT MEASURE, and does not claim: that B SCHEDULED or RENDERED audio. In this
     /// test host with the drain hold set before the turn, the runner parks inside the claimed
-    /// drain and frames stay BUFFERED and UNSCHEDULED (`buffered=40 scheduled=0` measured), so no
-    /// occupied-frame premise holds and there is no synchronized publish path for the
-    /// runner-owned scheduling counter. A live-engine/B-output proof needs a device integration
-    /// check; the confirmation identity here is evidence of the STOP, not of audio.
+    /// drain and frames stay BUFFERED and UNSCHEDULED (`buffered=40 scheduled=0` measured). A
+    /// live-engine/B-output proof is a device integration check (`physical-output-device-check.md`);
+    /// the confirmation identity here is evidence of the STOP, not of audio.
     func testSuccessorAdmissionWaitsForThePhysicalEngineStopItself() async throws {
         self.nextTurnFixture =
             """

@@ -975,9 +975,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
-        // Counted where the audio is ACTUALLY handed to the output node: `isPlaying` is a
-        // player flag that can be true while the graph carries nothing.
-        scheduledFrameCountForTesting += Int(pcmBuffer.frameLength)
     }
 
     /// The output node's rendered position, or nil when the node is not rendering.
@@ -1190,15 +1187,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         paused = false
         notifyDidStop(epoch: stoppedEpoch)
     }
-
-    /// Frames this player has handed to its output node since construction — the honest
-    /// "output was scheduled" signal, unlike `isPlaying`, which is a player flag that can be
-    /// true while the graph carries nothing. Written from the RUNNER thread only, like every
-    /// other field in this region; a test reads it through the lock-guarded probe below rather
-    /// than hopping to the main actor (that hop would queue behind the park being observed).
-    private var scheduledFrameCountForTesting = 0
-    private var probeScheduledFrames = 0
-    private var probeNodeAlive = false
 
     /// Snapshots what a control cannot read from the test thread while the runner is parked:
     /// the frames handed to the output node and whether an output node exists (i.e. the engine
