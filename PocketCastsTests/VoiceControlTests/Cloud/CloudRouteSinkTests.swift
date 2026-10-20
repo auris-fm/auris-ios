@@ -2147,13 +2147,18 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // design — the discriminator is the stop-identity log above.)
     }
 
-    /// PHYSICAL ENGINE-QUiescence (spec, review chain): the stop NOTIFICATION is not the
-    /// physical contract — the actual `stopEngine()` operation is. A's engine is UP with
-    /// output outstanding when B supersedes; the gate holds the runner's REAL stop operation
-    /// before it runs. Premise (measured, not assumed): the gate arrival count grows while
-    /// no stop has been confirmed and B has NOT completed — no successor admission or host
-    /// settlement can precede the parked physical stop. Releasing the gate proves actual
-    /// settlement (confirmed identity) and then successor audio admission.
+    /// PHYSICAL ENGINE-QUiescence (spec ea755ba1; reviewer 6453dfaa/3d4f5619): the stop
+    /// NOTIFICATION is not the physical contract — the actual `stopEngine()` operation is, and
+    /// the successor's AUDIO (not merely its completion) is what must not precede it.
+    ///
+    /// Measured premise (this control, from an earlier failing run): with the drain hold set
+    /// BEFORE the turn, the runner parks inside the CLAIMED drain and the frames stay BUFFERED
+    /// and UNSCHEDULED (`buffered=40`, `scheduled=0`). So the physical evidence is taken in the
+    /// order the requirement states it: the stop is queued and its REAL operation parked FIRST,
+    /// and only then does B supersede. While parked, no stop is confirmed, no host resume
+    /// happens, and no output has been scheduled; on release the stop runs, the host resume
+    /// settles (host playback was running, so the hold auto-paused it), and B admits its OWN
+    /// audio (scheduled frames grow).
     func testSuccessorAdmissionWaitsForThePhysicalEngineStopItself() async throws {
         self.nextTurnFixture =
             """
@@ -2174,39 +2179,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
         }
         let bDone = Flag()
-        // Host PLAYBACK is what a host resume acts on: the user was hearing an episode.
         playback.setPlaying(true)
-        // A REAL output graph: the physical stop must run against a live engine, and the
-        // successor's audio must be renderable (an engine that never existed admits nothing).
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        // A plays with the buffer held: frames accumulate, the engine STARTS (premise).
-        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
-        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
-        var engineUp = false
-        for _ in 0..<600 {
-            let playing: Bool = await MainActor.run { sink.audioPlayerForTesting?.isPlaying ?? false }
-            if playing { engineUp = true; break }
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertTrue(engineUp, "premise: A's engine is up with output outstanding")
-        let aResult = await a.value
-        XCTAssertEqual(aResult.outcome, .completed, "A completed; its drain stop is queued")
-        // Confirmations are intercepted and delivered immediately once issued.
-        final class Box: @unchecked Sendable {
-            private let lock = NSLock()
-            private var epochs: [Int] = []
-            func record(_ epoch: Int) { lock.lock(); epochs.append(epoch); lock.unlock() }
-            var snapshot: [Int] { lock.lock(); defer { lock.unlock() }; return epochs }
-        }
-        let box = Box()
-        await MainActor.run {
-            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { epoch, deliver in
-                box.record(epoch)
-                deliver()
-            }
-        }
         // Arm the gate FIRST: the very next physical stop parks.
         await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 0) }
+        // A's drain hold keeps the runner away from A's stop until the cancel has landed.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
+        let a = Task { await sink.routeToCloud(request: "A", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil) }
+        var aBuffered = false
+        for _ in 0..<600 {
+            let pending: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? false }
+            if pending { aBuffered = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aBuffered, "premise: A's audio is buffered")
+        let aResult = await a.value
+        XCTAssertEqual(aResult.outcome, .completed, "A completed; its drain stop is queued")
+        // B supersedes while the drain is still HELD: the retire cancel lands first.
         self.nextTurnFixture =
             """
             event: token
@@ -2222,7 +2211,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             bDone.set()
             return result
         }
-        // B's retire cancel must LAND before the drain runs: wait for the cancel request.
         var cancelled = false
         for _ in 0..<600 {
             let count: Int = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? 0 }
@@ -2230,8 +2218,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertTrue(cancelled, "B's retire cancel landed while the drain is still held")
-        // Release the held buffer: the runner reaches the claimed drain and its REAL
-        // stopEngine() call parks at the gate.
+        // Release the hold: the runner reaches the claimed drain and its REAL stop parks.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         var parked = false
         var bDoneEarly = false
@@ -2241,44 +2228,70 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             if bDone.isSet { bDoneEarly = true; break }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        XCTAssertTrue(parked, "the REAL stop operation reached the armed gate and parked (no B completion first: \(bDoneEarly))")
-        // WHILE PARKED: nothing has been confirmed, B has not been admitted/settled.
-        let confirmedWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
-        XCTAssertLessThan(confirmedWhileParked, 2, "no stop is confirmed before the physical stop ran")
-        XCTAssertFalse(bDone.isSet, "B has not completed (indeed not been admitted) while the stop is parked")
-        let resumesWhileParked: Int = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
-        XCTAssertEqual(resumesWhileParked, 0, "no host resume precedes the physical stop")
-        // Release: the physical stop RUNS, confirms, B admits its OWN audio, and the host
-        // resume settles (asserted below) — successor AUDIO admission, not merely a completed
-        // turn, is the observable counterpart of the physical stop.
-        await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
-        // Successor ADMISSION is observable as the ENGINE RUNNING again AFTER the stop: the
-        // physical stop took the engine down, so a live engine now can only be B's own audio
-        // being rendered. (The turn's completion is asserted separately below and is NOT the
-        // same thing.)
-        var bEngineUp = false
-        for _ in 0..<600 {
-            let playing: Bool = await MainActor.run { sink.audioPlayerForTesting?.isPlaying ?? false }
-            if playing { bEngineUp = true; break }
-            if bDone.isSet { break }
-            try await Task.sleep(nanoseconds: 5_000_000)
+        let arrivalsAtPark: Int = await MainActor.run { sink.audioPlayerForTesting?.physicalStopGateArrivalsForTesting ?? -1 }
+        let outcomeAtPark: String = await MainActor.run {
+            switch sink.audioPlayerForTesting?.physicalStopGateOutcomeForTesting {
+            case .released: return "released"
+            case .timedOut: return "timedOut"
+            case .admitted: return "admitted"
+            default: return "unarmed"
+            }
         }
-        XCTAssertTrue(bEngineUp, "B's successor audio is admitted (engine running again) once the physical stop ran")
+        XCTAssertTrue(parked, "premise: the REAL stop operation reached the armed gate and parked (no B completion first: \(bDoneEarly)) [arrivals=\(arrivalsAtPark) outcome=\(outcomeAtPark)]")
+        let outcomeParked: String = await MainActor.run {
+            switch sink.audioPlayerForTesting?.physicalStopGateOutcomeForTesting {
+            case .released: return "released"
+            case .timedOut: return "timedOut"
+            case .admitted: return "admitted"
+            default: return "unarmed"
+            }
+        }
+        // Bounded: the runner clears the gate flag AFTER the stop body completes (it needs the
+        // lock back), so the outcome may still read `.unarmed` at the instant of arrival.
+        // The parked premise IS the arrival: the gate is still armed and parking (allow == 0).
+        // The outcome only becomes `released` once the wait ENDS, so it is asserted AFTER the
+        // release below — asserting it here would read a value that cannot exist yet.
+        let allowWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.physicalStopGateAllowProbeForTesting ?? -99 }
+        XCTAssertEqual(allowWhileParked, 0, "the gate is still armed and parking (allow=\(allowWhileParked))")
+        await MainActor.run { sink.audioPlayerForTesting?.publishRunnerSnapshotForTesting() }
+        let scheduledParked: Int = await MainActor.run { sink.audioPlayerForTesting?.scheduledFramesProbeForTesting ?? -1 }
+        let confirmedParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
+        let resumesParked: Int = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
+        XCTAssertEqual(scheduledParked, 0, "no audio has been scheduled while the stop is parked")
+        XCTAssertLessThan(confirmedParked, 2, "no stop is confirmed before the physical stop ran")
+        XCTAssertFalse(bDone.isSet, "B has not completed while the stop is parked")
+        XCTAssertEqual(resumesParked, 0, "no host resume precedes the physical stop")
+        // Release: the physical stop RUNS and confirms the retire cancel's identity.
+        await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
-        let confirmed = box.snapshot
-        XCTAssertFalse(confirmed.isEmpty, "the physical stop produced a real confirmation")
-        XCTAssertEqual(confirmed.first ?? -1, 2, "the confirmed identity is the retire cancel's (2), got \(confirmed.first ?? -1)")
-        var resumesAfter = 0
+        let confirmedFinal: Int = await MainActor.run {
+            sink.audioPlayerForTesting?.publishRunnerSnapshotForTesting()
+            return sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1
+        }
+        XCTAssertEqual(confirmedFinal, 2, "the physical stop confirmed the retire cancel's identity (2); got \(confirmedFinal)")
+        // Gate-exit cause (reviewer 6453dfaa): the park ended because the gate was RELEASED,
+        // not because its bound expired and the runner proceeded anyway.
+        let outcomeFinal: String = await MainActor.run {
+            switch sink.audioPlayerForTesting?.physicalStopGateOutcomeForTesting {
+            case .released: return "released"
+            case .timedOut: return "timedOut"
+            case .admitted: return "admitted"
+            default: return "unarmed"
+            }
+        }
+        XCTAssertEqual(outcomeFinal, "released", "the parked stop ended by release, not a bound expiry (outcome=\(outcomeFinal))")
+        // EXACTLY ONE host resume, after the physical stop ran.
+        var resumes = 0
         for _ in 0..<100 {
-            resumesAfter = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
-            if resumesAfter >= 1 { break }
+            resumes = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
+            if resumes >= 1 { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertGreaterThanOrEqual(resumesAfter, 1, "the host resumed only after the physical stop ran")
+        XCTAssertEqual(resumes, 1, "the host resumed exactly once, after the physical stop ran")
     }
 
-    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
+    /// COALESCED STOP ACCOUNTING (review 4fc59e2c):    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every
     /// later admission; transition-only accounting settles to zero and D runs normally.

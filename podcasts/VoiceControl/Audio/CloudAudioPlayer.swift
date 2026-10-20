@@ -975,6 +975,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
+        // Counted where the audio is ACTUALLY handed to the output node: `isPlaying` is a
+        // player flag that can be true while the graph carries nothing.
+        scheduledFrameCountForTesting += Int(pcmBuffer.frameLength)
     }
 
     /// The output node's rendered position, or nil when the node is not rendering.
@@ -1020,8 +1023,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // A test host may supply an output by other means (an offline-rendering engine); the seam
         // is consulted first so the decision point stays in one place. See the override's note for
         // why this exists instead of node injection.
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
-           let override = audioOutputAvailabilityOverrideForTesting {
+        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        CloudAudioPlayer.observedTestHostForTesting = isTestHost
+        if isTestHost, let override = audioOutputAvailabilityOverrideForTesting {
+            CloudAudioPlayer.observedOutputAvailableForTesting = override
             return override
         }
         #if targetEnvironment(simulator)
@@ -1046,6 +1051,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// position still comes from `renderPosition(of:)`. Production never sets it, so production
     /// behaviour is unchanged.
     static var audioOutputAvailabilityOverrideForTesting: Bool? = nil
+    /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
+    /// whether the process reported itself as a test host at all (the override is consulted only
+    /// then) and what availability was decided. A control asserts this instead of assuming the
+    /// override took effect.
+    private(set) static var observedTestHostForTesting = false
+    private(set) static var observedOutputAvailableForTesting = false
 
     /// Mono Int16 PCM at `sampleRate` — the shape the negotiated `pcm_s16le`
     /// codec delivers.
@@ -1180,6 +1191,38 @@ final class CloudAudioPlayer: @unchecked Sendable {
         notifyDidStop(epoch: stoppedEpoch)
     }
 
+    /// Frames this player has handed to its output node since construction — the honest
+    /// "output was scheduled" signal, unlike `isPlaying`, which is a player flag that can be
+    /// true while the graph carries nothing. Written from the RUNNER thread only, like every
+    /// other field in this region; a test reads it through the lock-guarded probe below rather
+    /// than hopping to the main actor (that hop would queue behind the park being observed).
+    private var scheduledFrameCountForTesting = 0
+    private let runnerProbeLock = NSLock()
+    private var probeScheduledFrames = 0
+    private var probeNodeAlive = false
+
+    /// Snapshots what a control cannot read from the test thread while the runner is parked:
+    /// the frames handed to the output node and whether an output node exists (i.e. the engine
+    /// is up for THIS incarnation). Called by the runner at the gate's arrival — the moment the
+    /// control needs the parked state — and by the control itself for the settled state.
+    func publishRunnerSnapshotForTesting() {
+        runnerProbeLock.lock()
+        probeScheduledFrames = scheduledFrameCountForTesting
+        probeNodeAlive = playerNode != nil
+        runnerProbeLock.unlock()
+    }
+
+    /// TEST-ONLY: frames handed to the output node so far.
+    var scheduledFramesProbeForTesting: Int {
+        runnerProbeLock.lock(); defer { runnerProbeLock.unlock() }
+        return probeScheduledFrames
+    }
+    /// TEST-ONLY: whether an output node exists — the engine-up boundary for this incarnation.
+    var nodeAliveProbeForTesting: Bool {
+        runnerProbeLock.lock(); defer { runnerProbeLock.unlock() }
+        return probeNodeAlive
+    }
+
     // TEST-ONLY (physical engine-stop evidence): when armed, the runner's physical stop
     // operation passes the first `allow` stops and PARKS each subsequent one until the gate
     // is opened. Lets a control hold the actual stop operation — not a notification — and
@@ -1193,6 +1236,26 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private let physicalStopGate = NSCondition()
     private var physicalStopGateAllow = -1 // unarmed: every stop passes
     private var physicalStopGateArrivals = 0 // stops that reached an ARMED gate
+    /// How the gate wait ENDED: `released` is the only outcome that proves a stop parked and
+    /// then actually ran; a bound expiry (`timedOut`) must be observable, never silently treated
+    /// as "a stop ran".
+    enum PhysicalStopGateOutcome { case unarmed, admitted, released, timedOut }
+    private var physicalStopGateOutcome: PhysicalStopGateOutcome = .unarmed
+
+    /// TEST-ONLY: the gate predicate, so a control can see whether the gate is still armed
+    /// (`0` = parking) or has been opened (Int.max).
+    var physicalStopGateAllowProbeForTesting: Int {
+        physicalStopGate.lock()
+        defer { physicalStopGate.unlock() }
+        return physicalStopGateAllow
+    }
+
+    /// How the most recent armed gate wait ended.
+    var physicalStopGateOutcomeForTesting: PhysicalStopGateOutcome {
+        physicalStopGate.lock()
+        defer { physicalStopGate.unlock() }
+        return physicalStopGateOutcome
+    }
 
     func armPhysicalStopGateForTesting(allow: Int) {
         physicalStopGate.lock()
@@ -1221,14 +1284,29 @@ final class CloudAudioPlayer: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(5)
         physicalStopGate.lock()
         if physicalStopGateAllow < 0 {
+            // Only an armed gate's outcome is reportable: an unarmed call must not overwrite the
+            // evidence of an EARLIER armed park (the runner passes the gate again on B's own
+            // stop, which would erase the released/timedOut record the control asserts).
+            if physicalStopGateArrivals == 0 { physicalStopGateOutcome = .unarmed }
             physicalStopGate.unlock()
             return
         }
         physicalStopGateArrivals += 1
+        // Publish the parked state BEFORE the wait: this is the only moment a control can see
+        // what the runner's stop path holds while it is genuinely parked on the physical stop.
+        publishRunnerSnapshotForTesting()
+        if physicalStopGateAllow > 0 {
+            // Admitted immediately: the gate allowed this many stops through.
+            if physicalStopGateAllow < Int.max { physicalStopGateAllow -= 1 }
+            physicalStopGateOutcome = .admitted
+            physicalStopGate.unlock()
+            return
+        }
         while physicalStopGateAllow <= 0 {
             if !physicalStopGate.wait(until: deadline) { break } // bounded: never wedge the runner
         }
-        if physicalStopGateAllow > 0 && physicalStopGateAllow < Int.max { physicalStopGateAllow -= 1 }
+        // An OPENED gate is Int.max (never decremented); a timed-out park keeps allow 0.
+        physicalStopGateOutcome = physicalStopGateAllow > 0 ? .released : .timedOut
         physicalStopGate.unlock()
     }
 
