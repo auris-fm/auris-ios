@@ -1407,6 +1407,40 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(body["route_hint"], "free-text turns carry no hint")
     }
 
+    /// MISSING-ID BOUNDARY (reviewer c580c42b item 4): a dispatch with NO admitted utterance
+    /// identity is refused with NO wire frame, NO consumed result, and NO successor-state
+    /// contamination — the next admitted id dispatches as a clean first turn.
+    func testSinkRefusesAnUnidentifiedDispatchWithNoWireFrameAndCleanSuccessorState() async throws {
+        let consumer = RecordingResultConsumer()
+        self.pendingFixture = """
+            event: token
+            data: {"text":""}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(consumer)
+
+        let refused = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: nil
+        )
+        XCTAssertEqual(refused.outcome, .refused, "a missing identity is refused, never dispatched")
+        XCTAssertNil(capturedTask?.sentAuthFrame, "no identity, no client, no wire frame")
+        XCTAssertTrue(consumer.consumed.isEmpty, "nothing reaches the successor consumer")
+
+        // The refusal left NO half-built state: an admitted turn right after dispatches normally.
+        let admitted = "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
+        let result = await sink.routeToCloud(
+            request: "play the news", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: admitted
+        )
+        XCTAssertEqual(result.outcome, .completed, "the admitted turn after the refusal is a clean first dispatch")
+        let frame = try XCTUnwrap(capturedTask?.sentAuthFrame)
+        XCTAssertEqual(frame["request_id"] as? String, admitted, "the wire id is the admitted id, not something minted by the refused attempt")
+    }
+
     func testSinkAdvertisesSearchResultsV1OnlyWhenRendererAvailable() async throws {
         self.pendingFixture = 
             """

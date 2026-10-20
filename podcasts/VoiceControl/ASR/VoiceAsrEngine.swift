@@ -431,7 +431,7 @@ class VoiceAsrEngine {
         routerText: String,
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String = UUID().uuidString
+        utteranceId: String
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(

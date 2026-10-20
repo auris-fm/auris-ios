@@ -106,8 +106,8 @@ final class LfmIntentRouter {
     }
 
     /// Compatibility adapter: English-only envelope with `translationKind = none`.
-    func classify(transcript: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
-        classify(input: .english(transcript: transcript), pendingDialog: pendingDialog)
+    func classify(transcript: String, utteranceId: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
+        classify(input: .english(transcript: transcript, utteranceId: utteranceId), pendingDialog: pendingDialog)
     }
 
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {

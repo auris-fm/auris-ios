@@ -159,17 +159,31 @@ final class CloudConversationManagerTests: XCTestCase {
 
     // MARK: - Retry
 
-    /// A transport retry of the same logical turn must reuse the SAME wire `request_id`.
-    /// Preserving only the conversation UUID makes the server see a second logical turn.
-    func testRetryReusesTheOriginalWireRequestId() throws {
-        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-15"))
-        let retry = try XCTUnwrap(
-            manager.prepare(selection: .wakeWord, origin: 1, retryingRequestId: first.requestId, utteranceId: "u-16")
-        )
+    /// ONE IDENTITY (reviewer c580c42b): a transport retry of the SAME admitted utterance
+    /// passes the SAME id and is served from retention — same request id, same conversation.
+    func testRetryOfTheSameUtteranceReusesItsRetainedIdentity() throws {
+        let admitted = "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: admitted))
+        let retry = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: admitted))
 
-        XCTAssertEqual(retry.requestId, first.requestId, "the retry generated a new request_id")
+        XCTAssertEqual(retry.requestId, first.requestId, "the retry must not mint a new request_id")
+        XCTAssertEqual(retry.requestId, admitted, "the wire id IS the admitted utterance id")
         XCTAssertEqual(retry.conversationId, first.conversationId)
         XCTAssertEqual(retry.mode, "create")
+    }
+
+    /// An INDEPENDENT utterance in the same window dispatches its OWN identity; it can never
+    /// adopt a previously prepared request id (the old retryingRequestId adoption is removed).
+    func testIndependentUtteranceNeverAdoptsAnotherUtterancesIdentity() throws {
+        let first = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88")
+        )
+        let second = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "0d6f1e2a-93c4-4b57-8a20-5e1f7c9b3d44")
+        )
+
+        XCTAssertNotEqual(second.requestId, first.requestId, "a different admitted turn has its own id")
+        XCTAssertEqual(second.requestId, "0d6f1e2a-93c4-4b57-8a20-5e1f7c9b3d44")
     }
 
     /// A turn with no current episode must OMIT the episode fields, not send empty or zero

@@ -176,6 +176,26 @@ class SocketCapturingTestCase: XCTestCase {
 /// A valid prepared conversation for envelope construction in tests. Each call
 /// mints a FRESH admitted id unless a literal is supplied — mirroring the
 /// production rule that every turn carries its own admitted UUID identity.
+
+/// ONE IDENTITY (reviewer c580c42b): client tests that don't assert wire identity still must
+/// pass an EXPLICIT prepared turn — the convenience mint is gone from production.
+func testTurnEnvelope(
+    requestId: String = "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
+    conversationId: String = "1c4b9a70-6d2e-4f38-a511-9b7c2d0e54a3",
+    mode: String = "create"
+) -> CloudTurnEnvelope {
+    CloudTurnEnvelope.make(
+        capabilities: [],
+        routeHint: nil,
+        recentConversation: [],
+        conversation: CloudPreparedConversation(
+            requestId: requestId,
+            conversationId: conversationId,
+            mode: mode
+        )
+    )
+}
+
 func testPreparedConversation(
     requestId: String = UUID().uuidString,
     conversationId: String = UUID().uuidString,

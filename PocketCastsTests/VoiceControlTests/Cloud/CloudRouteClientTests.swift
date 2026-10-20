@@ -33,7 +33,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "What did she mean?", context: sampleContext))
+        let events = await collect(client().route(request: "What did she mean?", context: sampleContext, turn: testTurnEnvelope()))
 
         XCTAssertEqual(
             events,
@@ -204,7 +204,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "pause", context: sampleContext))
+        let events = await collect(client().route(request: "pause", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
@@ -227,7 +227,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "summarize", context: sampleContext))
+        let events = await collect(client().route(request: "summarize", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
@@ -251,7 +251,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [.error(source: .server, code: "limit_exceeded", message: "You've used 10/10 free requests today.")]
@@ -275,7 +275,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
@@ -295,7 +295,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(events.first, .token("partial"))
         guard case let .error(_, code, _)? = events.dropFirst().first else {
             XCTFail("Expected connection_lost after partial token, got \(events)")
@@ -317,7 +317,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let stream = client().route(request: "hello", context: sampleContext)
+        let stream = client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope())
         var received: [CloudRouteEvent] = []
         let collectTask = Task {
             for await event in stream {
@@ -417,7 +417,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"text":"hi"}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(_, code, message)? = events.last else {
             return XCTFail("expected a terminal error, got \(events)")
@@ -437,7 +437,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"code":"unauthorized","message":""}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
@@ -453,7 +453,7 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"code":"limit_exceeded","message":"Daily limit reached"}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
@@ -522,7 +522,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// Finishing silently leaves the user with no error and no outcome.
     func testMissingCredentialYieldsUnauthorizedError() async {
         let task = StubWebSocketTask([])
-        let events = await collect(client(task: task, token: nil).route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: nil).route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
         XCTAssertEqual(events.last, .error(source: .server, code: "unauthorized", message: ""),
                        "a turn with no credential must report the failure, not end silently")
@@ -540,7 +540,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
             .string(done)
         ])
 
-        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context(), turn: testTurnEnvelope()))
         XCTAssertEqual(events.count, 3, "connected, one audio frame, done — got \(events)")
         if case let .connected(codec) = events[0] {
             XCTAssertEqual(codec.base, "pcm_s16le")
@@ -560,7 +560,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// A stream that ends without a terminal event is reported, not silent.
     func testClosedWithoutTerminalYieldsConnectionLost() async {
         let task = StubWebSocketTask([.string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#)])
-        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
         guard case let .error(_, code, _)? = events.last else {
             return XCTFail("expected a terminal error, got \(String(describing: events.last))")
@@ -578,7 +578,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         task.receiveError = URLError(.cannotConnectToHost)
         let client = client(task: task, token: "tok")
 
-        let events = await collect(client.route(request: "hello", context: context()))
+        let events = await collect(client.route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
         guard case let .error(_, code, message)? = events.last else {
             return XCTFail("a failed upgrade must report an error, got \(events)")

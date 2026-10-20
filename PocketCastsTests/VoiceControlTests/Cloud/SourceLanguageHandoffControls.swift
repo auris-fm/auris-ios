@@ -142,7 +142,8 @@ final class SourceLanguageHandoffControls: XCTestCase {
             sourceLanguage: c.sourceLanguage,
             routerTranscript: c.routerTranscript,
             translationKind: c.sourceTranscript == nil ? .backend : .platform,
-            selection: selection
+            selection: selection,
+            utteranceId: "u-702"
         )
     }
 
@@ -266,7 +267,8 @@ final class SourceLanguageHandoffControls: XCTestCase {
             IntentRoutingInput.english(
                 transcript: "pause playback",
                 language: "en",
-                selection: .wakeWord
+                selection: .wakeWord,
+                utteranceId: "u-601",
             ),
             origin: service.gracePeriodSignalForTesting.currentGeneration(),
             parsedIntentObserver: { intent in intentBox.intents.append(intent) }

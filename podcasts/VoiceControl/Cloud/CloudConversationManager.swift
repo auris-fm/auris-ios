@@ -66,12 +66,12 @@ final class CloudConversationManager {
     ///   - selection: what selected this turn.
     ///   - origin: the generation the turn was DISPATCHED under. `nil` for an unstamped
     ///     dispatch: it belongs to no window, so it cannot create or continue one.
-    ///   - retryingRequestId: set when this is a transport retry of a turn that already
-    ///     created a conversation; the retry reuses that conversation AND its `request_id`.
+    ///   - utteranceId: the admitted utterance's identity. A transport retry of the SAME
+    ///     utterance passes the SAME id and is served from retention — it can never adopt
+    ///     a different identity, and a turn without an id is refused.
     func prepare(
         selection: CloudConversationSelection,
         origin: Int?,
-        retryingRequestId: String? = nil,
         utteranceId: String? = nil
     ) -> CloudPreparedConversation? {
         // Origin validated BEFORE every reuse path (reviewer 0c546ce5 item 3): a stale
@@ -92,18 +92,6 @@ final class CloudConversationManager {
         // close (registerLiveOrigin to nil or a new generation) retires the whole map.
         if let prepared = preparedByUtteranceId[utteranceId] {
             return prepared
-        }
-
-        if let retryingRequestId,
-           case .wakeWord = selection,
-           let existing = current,
-           existing.origin == origin,
-           existing.creationRequestId == retryingRequestId {
-            return CloudPreparedConversation(
-                requestId: retryingRequestId,
-                conversationId: existing.id,
-                mode: Self.create
-            )
         }
 
         var prepared: CloudPreparedConversation

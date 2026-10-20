@@ -20,7 +20,7 @@ struct IntentRoutingInput: Equatable {
         routerTranscript: String,
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
-        utteranceId: String = UUID().uuidString
+        utteranceId: String
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -43,7 +43,7 @@ struct IntentRoutingInput: Equatable {
         transcript: String,
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String = UUID().uuidString
+        utteranceId: String
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
@@ -52,17 +52,6 @@ struct IntentRoutingInput: Equatable {
             translationKind: .none,
             selection: selection,
             utteranceId: utteranceId
-        )
-    }
-
-    /// A copy carrying the selection, for a caller that learns it after construction.
-    func withSelection(_ selection: CloudConversationSelection?) -> IntentRoutingInput {
-        IntentRoutingInput(
-            sourceTranscript: sourceTranscript,
-            sourceLanguage: sourceLanguage,
-            routerTranscript: routerTranscript,
-            translationKind: translationKind,
-            selection: selection
         )
     }
 }

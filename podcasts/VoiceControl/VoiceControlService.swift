@@ -493,8 +493,8 @@ class VoiceControlService: ObservableObject {
     }
 
     /// Compatibility wrapper for tests that still pass a bare English transcript.
-    func handleTranscript(_ transcript: String) async {
-        await handleRoutingInput(.english(transcript: transcript))
+    func handleTranscript(_ transcript: String, utteranceId: String) async {
+        await handleRoutingInput(.english(transcript: transcript, utteranceId: utteranceId))
     }
 
     /// - Parameters:

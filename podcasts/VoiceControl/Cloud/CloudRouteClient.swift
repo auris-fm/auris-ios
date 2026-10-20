@@ -90,28 +90,6 @@ final class CloudRouteClient {
 
     // MARK: - Public API
 
-    /// Streams route events until `done`/`error` or connection close.
-    ///
-    /// A fresh `CloudTurnEnvelope` is minted per call — callers that issue
-    /// transport retries for the same logical turn must pass the envelope they
-    /// built for that turn so `request_id` stays stable (see `route(request:context:turn:)`).
-    func route(request: String, context: CloudRouteContext) -> AsyncStream<CloudRouteEvent> {
-        route(
-            request: request,
-            context: context,
-            turn: CloudTurnEnvelope.make(
-                capabilities: [],
-                routeHint: nil,
-                recentConversation: [],
-                conversation: CloudPreparedConversation(
-                    requestId: UUID().uuidString,
-                    conversationId: UUID().uuidString,
-                    mode: "create"
-                )
-            )
-        )
-    }
-
     /// Streams route events for one logical turn.
     ///
     /// `turn.requestId` is client-assigned and must be reused across transport
