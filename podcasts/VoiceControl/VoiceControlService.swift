@@ -641,7 +641,7 @@ class VoiceControlService: ObservableObject {
                 // would leave a gap in which a wake or a privacy close could land. A turn whose
                 // captured window has ended must consume NOTHING and dispatch NOTHING, rather than
                 // borrowing the allowance of the window that replaced it.
-                dispatchGeneration = gracePeriodSignal.claimEscalationBudget(
+                dispatchGeneration = gracePeriodSignal.claimDispatchOwnership(
                     capturedOrigin: capturedOrigin
                 )
             }

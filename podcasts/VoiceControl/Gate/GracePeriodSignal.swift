@@ -9,12 +9,6 @@ class GracePeriodSignal: ObservableObject {
     @Published private(set) var isActive = false
     private let timeout: TimeInterval
     private var timer: Timer?
-    /// Escalation budget for the current window (shared client contract: at most
-    /// one dispatch per grace window). Restored by anything that opens or resets
-    /// the window — a wake or a recognised command — and never by the escalation
-    /// attempt itself, so a run of routing failures inside one window dispatches
-    /// once instead of once per failure.
-    private var escalationClaimed = false
     /// The LIVE playback holds holding this window's expiry open. Ownership is a TOKEN, not the
     /// generation: repeated begins on one generation each get their own independently releasable
     /// hold, and an end clears only its own token — no overwrite, no clearing another owner.
@@ -84,38 +78,39 @@ class GracePeriodSignal: ObservableObject {
         }
     }
 
-    /// Consumes the window's escalation budget, returning the generation it was
-    /// claimed under — the dispatch hands that back on completion. `nil` when the
-    /// window is closed or the allowance is already spent, in which case the
-    /// caller keeps the turn local.
-    /// Test-only observation: whether the current window's escalation allowance is spent.
-    func escalationClaimedForTesting() -> Bool { escalationClaimed }
-
-    func claimEscalationBudget() -> Int? {
-        if Thread.isMainThread { return claimEscalationBudgetOnMain() }
-        return DispatchQueue.main.sync { claimEscalationBudgetOnMain() }
+    /// Queue a cloud dispatch for a turn, returning the generation it belongs to — the dispatch
+    /// hands that back on completion. `nil` only when there is no live window to own the turn.
+    ///
+    /// There is deliberately NO grace-window dispatch budget (owner delta 3484cbc/5eca874):
+    /// each independent utterance may dispatch its own request, including within one window.
+    /// Duplicate-dispatch protection lives with the per-utterance REQUEST OWNERSHIP
+    /// (`CloudConversationManager.prepare`), not here — so this must not refuse a second,
+    /// independent dispatch.
+    func claimDispatchOwnership() -> Int? {
+        if Thread.isMainThread { return claimDispatchOwnershipOnMain() }
+        return DispatchQueue.main.sync { claimDispatchOwnershipOnMain() }
     }
 
-    /// Claims this window's escalation allowance **on behalf of a turn that captured `origin`**,
-    /// and refuses without consuming anything when that origin is not the live window.
+    /// Claims dispatch ownership **on behalf of a turn that captured `origin`**, and refuses
+    /// without consuming anything when that origin is not the live window.
     ///
-    /// The comparison and the claim are ONE main-actor operation by construction: a separate
-    /// "is this origin current?" check followed by an unconditional claim leaves a gap in which a
-    /// wake or a privacy close could land, so a turn could still spend an allowance that was not
-    /// its own — or be refused against a window it never belonged to. `nil` means refused; the
+    /// The comparison is a single main-actor operation: a separate "is this origin current?"
+    /// check would leave a gap in which a wake or a privacy close could land, so a turn could be
+    /// dispatched against a window it never belonged to. The refusal here is WINDOW IDENTITY,
+    /// not a count — a live window may own many independent utterances. `nil` means refused; the
     /// caller must not consume, build a client, or act.
     ///
     /// `origin == nil` is a turn that captured nothing (no window identity of its own). That keeps
     /// the pre-existing policy: such a turn is judged by the live window exactly as before.
-    func claimEscalationBudget(capturedOrigin origin: Int?) -> Int? {
-        if Thread.isMainThread { return claimEscalationBudgetOnMain(capturedOrigin: origin) }
-        return DispatchQueue.main.sync { claimEscalationBudgetOnMain(capturedOrigin: origin) }
+    func claimDispatchOwnership(capturedOrigin origin: Int?) -> Int? {
+        if Thread.isMainThread { return claimDispatchOwnershipOnMain(capturedOrigin: origin) }
+        return DispatchQueue.main.sync { claimDispatchOwnershipOnMain(capturedOrigin: origin) }
     }
 
-    private func claimEscalationBudgetOnMain(capturedOrigin origin: Int?) -> Int? {
+    private func claimDispatchOwnershipOnMain(capturedOrigin origin: Int?) -> Int? {
         // A turn with no captured identity keeps the live-window policy.
         if let origin, origin != generation { return nil }
-        return claimEscalationBudgetOnMain()
+        return claimDispatchOwnershipOnMain()
     }
 
     /// The generation a turn is running under, for stamping an intent that was
@@ -129,7 +124,7 @@ class GracePeriodSignal: ObservableObject {
         return DispatchQueue.main.sync { generation }
     }
 
-    /// Restores the allowance for a completion that still belongs to its window,
+    /// Restores dispatch availability for a completion that still belongs to its window,
     /// as a single operation on the main queue.
     ///
     /// Checking "is this still current?" and then calling the reset separately
@@ -177,6 +172,15 @@ class GracePeriodSignal: ObservableObject {
         return true
     }
 
+    /// Whether the CURRENT window has been RENEWED since its last refused act — the observable
+    /// distinction between a completion that renews the window (a deliberate act) and one that
+    /// merely extends it without renewal (a fallback). `claimRefusalTone` returning true means the
+    /// window is in a renewed state (no announce is held for this generation).
+    func windowIsRenewedForTesting() -> Bool {
+        if Thread.isMainThread { return refusalToneGeneration != generation }
+        return DispatchQueue.main.sync { refusalToneGeneration != generation }
+    }
+
     /// Continues the window a dispatch was issued under, without restoring the
     /// allowance that permitted it.
     ///
@@ -200,20 +204,18 @@ class GracePeriodSignal: ObservableObject {
     }
 
     private func startOrResetOnMainKeepingBudget(trigger: String) {
-        // The allowance stays spent across this reset, so the refusal that spent
-        // it is still the latest news in this window: restore the tone claim with
-        // it, or the next refusal beeps again for the *same* spent allowance —
-        // two tones for one fact, which is what the claim exists to prevent.
-        let claimed = escalationClaimed
+        // No dispatch budget exists to preserve (owner delta 3484cbc/5eca874); the tone claim
+        // is preserved across this NON-renewing reset so a refusal already announced for this
+        // generation is not repeated as if it were a new fact.
         let toneClaimed = refusalToneGeneration
         startOrResetOnMain(trigger: trigger, renewingAllowance: false)
-        escalationClaimed = claimed
         refusalToneGeneration = toneClaimed
     }
 
-    private func claimEscalationBudgetOnMain() -> Int? {
-        guard isActive, !escalationClaimed else { return nil }
-        escalationClaimed = true
+    private func claimDispatchOwnershipOnMain() -> Int? {
+        // NO window budget: only a CLOSED window refuses. An open window owns every independent
+        // utterance that lands in it; request ownership (not a count) prevents duplicates.
+        guard isActive else { return nil }
         return generation
     }
 
@@ -231,7 +233,6 @@ class GracePeriodSignal: ObservableObject {
             // The allowance is restored for this window, so a refusal in it is new
             // information again and must speak (PR #23 review).
             refusalToneGeneration = nil
-            escalationClaimed = false
         }
         if becameActive {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")

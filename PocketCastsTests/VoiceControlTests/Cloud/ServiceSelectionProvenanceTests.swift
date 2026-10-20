@@ -726,7 +726,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// WHICH ROUTING PATH THIS EXERCISES, measured rather than assumed: the router reports
     /// `finalOutcome=outcomeNoIntent`, `failedStage=stageMapperDialog`,
     /// `reason=mapper_or_dialog_failed`, so the turn takes the **no-match / fallback ESCALATION**
-    /// path (`RouteFailureEscalationPolicy` -> `claimEscalationBudget`), NOT a model-chosen
+    /// path (`RouteFailureEscalationPolicy` -> `claimDispatchOwnership`), NOT a model-chosen
     /// `cloud_route`. Both paths share the same intent and executor by construction, so the
     /// retirement and allowance rules are the same; this case pins the escalation one.
     @MainActor
@@ -867,13 +867,14 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "be reading a state the case does not control. Finished inputs seen: \(finishedInputs)"
         )
 
-        // ONLY NOW, with A acknowledged: B's allowance is STILL CLAIMABLE, which is the property a
-        // consumed-then-checked assertion could not establish. Then it can be spent, and the case
-        // ends with B genuinely holding its own allowance.
-        XCTAssertNotNil(
-            signal.claimEscalationBudget(),
-            "B's fresh allowance must STILL BE CLAIMABLE after A completed; a nil here means A "
-                + "consumed or restored it, or that B was never fresh to begin with"
+        // ONLY NOW, with A acknowledged: B's window is STILL its own. (Dispatch ownership is per
+        // request — owner delta 3484cbc/5eca874 — so the observable is the window identity, not a
+        // window budget.)
+        XCTAssertTrue(signal.isActive, "B's window is still open after A completed")
+        XCTAssertEqual(
+            signal.currentGeneration(), windowB,
+            "A completing under its retired window must not RESET B's window; a new generation here "
+                + "means A re-armed the successor"
         )
 
         // ONLY NOW: A submitted nothing.
@@ -881,10 +882,6 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             turnsBuilt, 1,
             "A, queued when its window retired, must submit nothing; a second client means it acted "
                 + "under B"
-        )
-        XCTAssertNil(
-            signal.claimEscalationBudget(),
-            "B's fresh allowance must remain spent after A completed; a value here means A restored it"
         )
     }
 
@@ -1071,13 +1068,14 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "did not, the router did not MAP a cloud route and this is not the parsed path"
         )
 
-        // PRIVACY CLOSE, then a SUCCESSOR window. The successor SPENDS its allowance, so a
-        // completion that re-armed the old window would visibly restore it.
+        // PRIVACY CLOSE, then a SUCCESSOR window. The successor is its OWN window with its own
+        // generation; a stale completion must not reset it (owner delta 3484cbc/5eca874: dispatch
+        // ownership is per request, so the observable is the successor's window identity, not a
+        // window budget).
         signal.onAppBackgrounded()
         signal.onWakeWordDetected()
         let successor = signal.currentGeneration()
         XCTAssertNotEqual(turnWindow, successor, "the successor must be a different window")
-        XCTAssertNotNil(signal.claimEscalationBudget(), "the successor's allowance is spent here")
 
         // RELEASE the in-flight parsed turn. Its completion lands under a RETIRED window.
         gate.release()
@@ -1088,10 +1086,11 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // Let the completion's window decision run.
         try? await Task.sleep(nanoseconds: 500_000_000)
 
-        XCTAssertNil(
-            signal.claimEscalationBudget(),
-            "a parsed model-chosen route landing after its window was retired must NOT re-arm the "
-                + "successor's allowance; a value here means the successor was reset"
+        XCTAssertTrue(signal.isActive, "the successor's window is still live")
+        XCTAssertEqual(
+            signal.currentGeneration(), successor,
+            "a parsed model-chosen route landing after its window was retired must NOT reset the "
+                + "successor's window; a new generation here means the successor was reset"
         )
     }
 
@@ -1310,7 +1309,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
         // The successor's allowance is its own and untouched.
         XCTAssertEqual(
-            signal.claimEscalationBudget(),
+            signal.claimDispatchOwnership(),
             successor,
             "the successor's allowance must be unclaimed and still its own after A was refused"
         )

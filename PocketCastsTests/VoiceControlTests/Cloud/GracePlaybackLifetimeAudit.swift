@@ -175,8 +175,8 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             "the window generation must be unchanged through the real drain"
         )
         XCTAssertNotNil(
-            service.gracePeriodSignalForTesting.claimEscalationBudget(),
-            "the model-call completion must have restored the window's escalation allowance"
+            service.gracePeriodSignalForTesting.claimDispatchOwnership(),
+            "the live window still dispatches independently of the drain"
         )
     }
 
@@ -415,7 +415,10 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // Each caller runs under the hold; each must succeed and preserve its semantics.
         XCTAssertTrue(signal.recognizeCommandIfCurrentWindow(gen), "command recognized under the hold")
         XCTAssertTrue(signal.isActive, "recognition kept the window alive")
-        XCTAssertFalse(signal.escalationClaimedForTesting(), "allowance NOT consumed by recognition")
+        // NO window budget (owner delta 3484cbc/5eca874): recognition consumes nothing, and an
+        // independent dispatch is still available under the hold.
+        XCTAssertNotNil(signal.claimDispatchOwnership(capturedOrigin: gen),
+                        "no window budget: dispatch stays available under the hold")
         signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
         XCTAssertTrue(signal.isActive, "fallback extension kept the window alive")
         signal.onWakeWordDetected()  // wake reset for the SAME window semantics? No: opens a NEW generation
@@ -453,10 +456,12 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertFalse(signal.isActive, "last release resumes the interval exactly once; it expires")
     }
 
-    /// BLOCKER CONTROL 3 — PRIVACY CLOSE under a live hold: closing the window kills it and its
-    /// holds; the later real stop must NOT reopen it.
+    /// BLOCKER CONTROL 3 — FOREGROUND LOSS with a cloud turn in progress (owner delta
+    /// 8fe04cd/0aa4480): the active hold is PRESERVED while capture remains allowed;
+    /// backgrounding alone does not end grace or retire the turn. The later real stop must not
+    /// create a second window, and host playback still restores exactly once.
     @MainActor
-    func testPrivacyCloseUnderALiveHoldKillsTheWindowAndLaterStopDoesNotReopen() async throws {
+    func testForegroundLossUnderALiveHoldPreservesTheWindowAndTheLaterStopDoesNotReopenIt() async throws {
         let playback = RecordingPlaybackSink()
         let defaults = UserDefaults(suiteName: "graceauditpriv_\(UUID().uuidString)")!
         defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
@@ -506,10 +511,18 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             origin: gen
         )
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "turn admitted under its hold")
+        let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
         service.gracePeriodSignalForTesting.onAppBackgrounded()
         try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "privacy close ends the window under the hold")
-        gate.signal()  // turn completes + drain releases AFTER the close
+        XCTAssertTrue(
+            service.gracePeriodSignalForTesting.isActive,
+            "foreground loss DURING a cloud turn preserves the hold while capture remains allowed"
+        )
+        XCTAssertEqual(
+            service.gracePeriodSignalForTesting.currentGeneration(), liveGeneration,
+            "backgrounding alone does not retire the turn's window"
+        )
+        gate.signal()  // turn completes + drain releases
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting
@@ -518,8 +531,14 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertFalse(service.gracePeriodSignalForTesting.isActive, "the real stop must not reopen a closed window")
         XCTAssertEqual(playback.resumeCalls, 1, "the drain still restored exactly once")
+        // The stop resumed the SAME window (no reopen); and with no hold left, a later
+        // foreground loss would end it (the no-hold rule).
+        service.gracePeriodSignalForTesting.onAppBackgrounded()
+        XCTAssertFalse(
+            service.gracePeriodSignalForTesting.isActive,
+            "with no hold remaining, foreground loss ends the window"
+        )
     }
 
     /// BLOCKER CONTROL 4 — SUCCESSOR LIVE, stale predecessor completion: a predecessor's late
@@ -653,39 +672,32 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertFalse(signal.isActive, "the stale end never reopens the expired successor")
     }
 
-    /// REVIEW 7fc40b74 DEFECT 1 — the resumed clock does NOT renew the allowance: a fallback/
-    /// command whose pending drain ran out under the hold resumes SPENT, and a failed/earlyClose
-    /// release does not renew either.
+    /// REVIEW 7fc40b74 DEFECT 1 — the resumed clock is the SAME window: a hold release resumes the
+    /// interval without opening a new generation, and only a wake opens a new window. (The
+    /// dispatch BUDGET this case originally asserted is removed by owner delta 3484cbc/5eca874;
+    /// the window-identity invariant it also covered is asserted here instead.)
     @MainActor
-    func testResumedClockKeepsTheSpentAllowanceAndTerminalPathsDoNotRenew() async throws {
+    func testResumedClockStaysTheSameWindowAcrossARelease() async throws {
         let signal = GracePeriodSignal(timeout: 0.5)
         objc_setAssociatedObject(self, "graceauditspent_sig", signal, .OBJC_ASSOCIATION_RETAIN)
         signal.onWakeWordDetected()
         let gen = signal.currentGeneration()
-        // Spend the escalation allowance inside this window (as a fallback extension would).
+        // A fallback extension and a recognized success both keep the window alive.
         signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
-        signal.claimEscalationBudget()
-        XCTAssertTrue(signal.escalationClaimedForTesting(), "allowance spent before the hold")
-        // RECOGNIZED renewal (success model, review 24f236de): a recognized command under the
-        // hold RENEWS the allowance — it is a selected renewal — while the clock stays unarmed.
-        signal.recognizeCommandIfCurrentWindow(gen)
-        XCTAssertFalse(signal.escalationClaimedForTesting(), "a recognized success renews its allowance")
-        // Fallback extension spends again and the hold/resume cycle KEEPS it spent.
-        signal.extendWindowKeepingEscalationSpent(underGeneration: gen)
-        signal.claimEscalationBudget()
-        XCTAssertTrue(signal.escalationClaimedForTesting(), "allowance spent again for the fallback")
+        XCTAssertTrue(signal.recognizeCommandIfCurrentWindow(gen), "a recognized success keeps the window")
+        XCTAssertEqual(signal.currentGeneration(), gen, "no reset opened a new window")
+
         let hold = try XCTUnwrap(signal.beginPlaybackHold(forGeneration: gen))
         signal.endPlaybackHold(hold)  // the real stop resumes the clock
-        XCTAssertTrue(
-            signal.escalationClaimedForTesting(),
-            "the resumed interval is the SAME window: a plain release never renews"
+        XCTAssertTrue(signal.isActive, "the resumed interval is the same window")
+        XCTAssertEqual(
+            signal.currentGeneration(), gen,
+            "a plain release resumes the SAME window and never opens a new generation"
         )
-        // And the failed/earlyClose-style close (deactivate) records no renewal either: a NEW
-        // window is new information, but the old one never regains anything.
+
+        // A wake is what opens a new window.
         signal.onWakeWordDetected()
-        let gen2 = signal.currentGeneration()
-        XCTAssertFalse(signal.escalationClaimedForTesting(), "a genuinely new window starts fresh")
-        _ = gen2
+        XCTAssertNotEqual(signal.currentGeneration(), gen, "a wake opens a new generation")
     }
 
     /// REVIEW 7fc40b74 DEFECT 3 — truncation stops OWNED output before releasing the host

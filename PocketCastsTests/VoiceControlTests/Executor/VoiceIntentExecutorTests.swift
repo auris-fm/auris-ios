@@ -48,16 +48,19 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// The origin branch is what decides whether a dispatch re-arms the allowance
-    /// that permitted it. A fallback pays for its permission; a cloud route the
-    /// model chose is a deliberate act and does restore it. Asserting the pair is
-    /// what makes this a distinction rather than a blanket rule — and it fails if
-    /// the origin branch is removed.
-    func test_execute_fallbackCloudRouteKeepsTheAllowanceSpent() async {
+    /// The origin branch decides whether a completion RENEWS the window. Observable without a
+    /// window budget (owner delta 3484cbc/5eca874): announce a refusal (holding the tone claim for
+    /// this generation), run the completion, then check whether the window was renewed — only a
+    /// renewing completion clears the claim. A fallback pays for its permission; a model-chosen
+    /// cloud route is a deliberate act. Asserting the pair is what makes this a distinction rather
+    /// than a blanket rule, and it fails if the origin branch is removed.
+    func test_execute_fallbackCloudRouteDoesNotRenewTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        let generation = gracePeriodSignal.claimEscalationBudget()
-        XCTAssertNotNil(generation)
+        let generation = gracePeriodSignal.currentGeneration()
+        // A refusal in this window is announced once, holding the tone claim for this generation.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the refusal is announced")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(), "the window is not renewed while spent")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -67,17 +70,20 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "a fallback must not re-arm the allowance that let it happen")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a fallback extends the window WITHOUT renewing it"
+        )
     }
 
-    func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
+    func test_execute_modelChosenCloudRouteRenewsTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         // Stamped the way the service stamps it: a completion must carry the window
         // it ran under, so this test supplies one rather than relying on a default.
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "a refusal is announced")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(), "spent before the completion")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -86,8 +92,10 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(),
-                        "a cloud route the model chose is a deliberate act, so the window is refreshed")
+        XCTAssertTrue(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a cloud route the model chose is a deliberate act, so the window is RENEWED"
+        )
     }
 
     /// A model-chosen cloud route resets the allowance, but only inside the window
@@ -97,12 +105,15 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_modelChosenRouteFromAnEndedWindowCannotResetTheNewOne() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        let oldGeneration = gracePeriodSignal.claimEscalationBudget()
+        let oldGeneration = gracePeriodSignal.currentGeneration()
         XCTAssertNotNil(oldGeneration)
 
         await MainActor.run { gracePeriodSignal.onAppBackgrounded() }
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "the new window's allowance is spent here")
+        let newGeneration = gracePeriodSignal.currentGeneration()
+        XCTAssertNotEqual(oldGeneration, newGeneration, "a fresh wake opens a new window")
+        // Mark the NEW window spent so a stray reset would be visible.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the new window's refusal is announced")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -110,8 +121,14 @@ final class VoiceIntentExecutorTests: XCTestCase {
             generation: oldGeneration
         ))
 
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "the ended window's completion must not reset the current one")
+        XCTAssertEqual(
+            gracePeriodSignal.currentGeneration(), newGeneration,
+            "the ended window's completion must not reset the current one"
+        )
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "the ended window's completion must not renew the current one"
+        )
     }
 
     /// A cloud completion with no window identity cannot be attributed to any
@@ -120,7 +137,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_cloudCompletionWithoutAWindowLeavesGraceStateUntouched() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "this window's allowance is spent")
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -129,19 +146,21 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "an unattributable completion must not restore the allowance")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "an unattributable completion must not renew the window"
+        )
     }
 
     /// A cloud turn that failed but reports itself by SPEAKING must not restore the
     /// allowance. A spoken error and a silent success are both "no earcon", so the old
     /// response-shape rule read this exact turn as a completion and reopened the window
     /// for a turn that never happened.
-    func test_execute_spokenCloudErrorDoesNotRestoreTheAllowance() async {
+    func test_execute_spokenCloudErrorDoesNotRenewTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
 
         mockCloudRouteSink.response = .spoken("Connection lost. Please try again.")
         mockCloudRouteSink.outcome = .failed(code: "connection_lost")
@@ -152,17 +171,17 @@ final class VoiceIntentExecutorTests: XCTestCase {
             generation: generation
         ))
 
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "a spoken cloud error restored the allowance as a completed turn")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
+                       "a spoken cloud error was treated as a completed turn")
     }
 
     /// The coming-soon refusal is the same shape: it renders as `.spoken` and must not
     /// be recorded as a completed cloud route.
-    func test_execute_cloudRefusalDoesNotRestoreTheAllowance() async {
+    func test_execute_cloudRefusalDoesNotRenewTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
 
         mockCloudRouteSink.response = .spoken("Cloud processing is coming soon.")
         mockCloudRouteSink.outcome = .refused
@@ -173,8 +192,8 @@ final class VoiceIntentExecutorTests: XCTestCase {
             generation: generation
         ))
 
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "the coming-soon refusal was recorded as a completed cloud turn")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
+                       "the coming-soon refusal was recorded as a completed cloud turn")
     }
 
     /// The executor must hand the sink the origin the turn was DISPATCHED under. Without
@@ -186,7 +205,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertNotNil(gracePeriodSignal.claimDispatchOwnership())
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -236,7 +255,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertNotNil(gracePeriodSignal.claimDispatchOwnership())
 
         _ = await executor.execute(CloudRouteIntent(
             request: "and then",
