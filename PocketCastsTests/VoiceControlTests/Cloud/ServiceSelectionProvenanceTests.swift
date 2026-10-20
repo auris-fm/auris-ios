@@ -408,6 +408,91 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// fixture configuration; then the origin gate; only then is the client built and the request
     /// sent. The client factory is injected per-assembly, and the recorder observes the SUBMITTED
     /// text rather than the pre-guard sink entry.
+    /// DIALOG-TO-WIRE IDENTITY (spec 0443b70): with a dialog begun by an earlier utterance (A)
+    /// pending, the turn B that is routed while that dialog is open dispatches under B's OWN
+    /// admitted ID. A is dialog-origin correlation, never a replacement dispatch identity.
+    @MainActor
+    func testADialogPendingTurnDispatchesUnderItsOwnAdmittedIdentity() async throws {
+        // The suite's own seeded router pattern: a ready LFM that classifies the free-text as a cloud route.
+        let inference = FakeLfmInference()
+        inference.classifyLabel = "cloud_route:"
+        inference.generateResult =
+            "<|tool_call_start|>[cloud_route(request='what did the host mean by that remark')]<|tool_call_end|>"
+        let modelManager = ModelManager(storageDir: FileManager.default.temporaryDirectory.appendingPathComponent("lfm_seed_\(UUID().uuidString)"))
+        seedLfmAssetsForTestingForPositive(manager: modelManager)
+        let capture = FakeAudioCapture()
+        let fakeBackend = FakeAsrBackend()
+        var injectedTask: StubWebSocketTask?
+        var factoryInvocations = 0
+
+        let suite = "dialog_identity_\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        let fixtureConfig = CloudConfig(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: provenanceAudioSession(),
+            conditionMonitor: provenanceConditionMonitor(),
+            capture: capture,
+            inference: inference,
+            modelManager: modelManager,
+            clientFactory: {
+                factoryInvocations += 1
+                let built = CloudRouteClient.stubbed(
+                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                )
+                injectedTask = built.task
+                return built.client
+            },
+            cloudConfig: fixtureConfig,
+            asrBackend: { fakeBackend }
+        ) else {
+            XCTFail("the assembly built no service, so the case proves nothing")
+            return
+        }
+        service.startIfAllowed()
+        try await waitForListening(service: service)
+        try await waitForRouter(service: service)
+
+        // A's dialog, begun through the PRODUCTION handle path: the pending dialog is the
+        // dialog-origin context A created. It carries NO dispatch identity of its own.
+        let dialogOpened = service.dialogManagerForTesting.handle(.begin(targetTool: "bookmark", targetAction: "rename"))
+        XCTAssertNotNil(dialogOpened.question, "premise: A's dialog is pending with a question")
+
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
+
+        // B: a turn routed WHILE the dialog is pending. Its admitted identity is its own UUID.
+        let bId = "9c47e2a1-5d83-4b06-a7f2-1e8c90d43b57"
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(
+                transcript: "what did the host mean by that remark",
+                selection: .wakeWord,
+                utteranceId: bId,
+            ),
+            origin: liveGeneration
+        )
+
+        let deadline = Date().addingTimeInterval(5)
+        var frame: [String: Any]?
+        while Date() < deadline {
+            if let captured = injectedTask?.sentAuthFrame { frame = captured; break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertGreaterThan(factoryInvocations, 0, "B reached the controlled transport")
+        let body = try XCTUnwrap(frame, "B's turn was submitted")
+
+        XCTAssertEqual(
+            body["request_id"] as? String, bId,
+            "B's admitted ID is the WIRE identity — a pending dialog never replaces it"
+        )
+        XCTAssertNotNil(
+            service.dialogManagerForTesting.pendingDialog,
+            "A's dialog-origin correlation survives B's dispatch untouched"
+        )
+    }
+
     @MainActor
     func testTheServiceSubmitsTheRoutedRequestToTheControlledTransport() async throws {
         let capture = FakeAudioCapture()

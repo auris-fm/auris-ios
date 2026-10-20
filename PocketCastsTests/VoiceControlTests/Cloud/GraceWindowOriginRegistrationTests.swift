@@ -27,7 +27,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         let generation = signal.currentGeneration()
 
         XCTAssertNotNil(
-            manager.prepare(selection: .wakeWord, origin: generation),
+            manager.prepare(selection: .wakeWord, origin: generation, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"),
             "an active window must admit a turn carrying that window's generation"
         )
     }
@@ -51,11 +51,11 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         XCTAssertNotEqual(firstGeneration, secondGeneration, "the harness must actually move the generation")
 
         XCTAssertNil(
-            manager.prepare(selection: .followUp, origin: firstGeneration),
+            manager.prepare(selection: .followUp, origin: firstGeneration, utteranceId: "0d6f1e2a-93c4-4b57-8a20-5e1f7c9b3d44"),
             "a generation from a superseded window must not be admitted"
         )
         XCTAssertNotNil(
-            manager.prepare(selection: .wakeWord, origin: secondGeneration),
+            manager.prepare(selection: .wakeWord, origin: secondGeneration, utteranceId: "5b2c8d41-7ea9-4c06-b3f8-2a9d4e6c1f70"),
             "the current window's own generation must still be admitted"
         )
     }
@@ -78,7 +78,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         let generation = signal.currentGeneration()
         // Premise: while open, its own generation is admitted.
         XCTAssertNotNil(
-            manager.prepare(selection: .wakeWord, origin: generation),
+            manager.prepare(selection: .wakeWord, origin: generation, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"),
             "harness: the open window must admit its own generation before the close"
         )
 
@@ -86,11 +86,11 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         signal.onAppBackgrounded()
 
         XCTAssertNil(
-            manager.prepare(selection: .wakeWord, origin: generation),
+            manager.prepare(selection: .wakeWord, origin: generation, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"),
             "a closed window must not CREATE a conversation under its ended generation"
         )
         XCTAssertNil(
-            manager.prepare(selection: .followUp, origin: generation),
+            manager.prepare(selection: .followUp, origin: generation, utteranceId: "c3a91d27-6f84-4e5b-92a0-8d1b3c7e54f6"),
             "a closed window must not RESUME a conversation under its ended generation"
         )
     }
@@ -105,7 +105,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         signal.onWakeWordDetected()
 
         XCTAssertNil(
-            manager.prepare(selection: .wakeWord, origin: nil),
+            manager.prepare(selection: .wakeWord, origin: nil, utteranceId: "e8d42b16-9c57-4a30-8f61-7b0e2d94c853"),
             "a dispatch with no origin belongs to no window"
         )
     }

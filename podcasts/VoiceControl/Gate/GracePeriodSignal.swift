@@ -9,6 +9,11 @@ class GracePeriodSignal: ObservableObject {
     @Published private(set) var isActive = false
     private let timeout: TimeInterval
     private var timer: Timer?
+
+    /// TEST SEAM (reviewer 1f2c96ce): the live window's scheduled expiry, so controls can
+    /// distinguish a NEW window (generation bump) from a RENEWAL inside the same generation
+    /// (same generation, later fire date). A discarded capture must do NEITHER.
+    var timerFireDateForTesting: Date? { timer?.fireDate }
     /// The LIVE playback holds holding this window's expiry open. Ownership is a TOKEN, not the
     /// generation: repeated begins on one generation each get their own independently releasable
     /// hold, and an end clears only its own token — no overwrite, no clearing another owner.

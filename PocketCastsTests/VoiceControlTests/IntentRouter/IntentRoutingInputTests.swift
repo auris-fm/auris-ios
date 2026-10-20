@@ -219,7 +219,12 @@ final class IntentRoutingInputTests: XCTestCase {
         engine.onWakeOnly = { wakeOnly += 1 }
 
         let generationBefore = engine.gracePeriodSignalForTesting.currentGeneration()
+        let fireDateBefore = engine.gracePeriodSignalForTesting.timerFireDateForTesting
+        XCTAssertNotNil(fireDateBefore, "premise: a live window with a scheduled expiry")
         await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+        // Main-async hop: startOrReset schedules its timer reset off the caller thread, so give
+        // any (forbidden) renewal a chance to land before asserting it did not.
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertTrue(inputs.isEmpty, "the non-content remainder never reaches routing")
         XCTAssertEqual(unroutable, 0, "silently discarded — no error feedback")
@@ -230,7 +235,11 @@ final class IntentRoutingInputTests: XCTestCase {
         )
         XCTAssertEqual(
             engine.gracePeriodSignalForTesting.currentGeneration(), generationBefore,
-            "CLEANUP: the discard neither opened nor renewed a grace window — no generation change"
+            "CLEANUP: the discard did not OPEN a new window — generation unchanged"
+        )
+        XCTAssertEqual(
+            engine.gracePeriodSignalForTesting.timerFireDateForTesting, fireDateBefore,
+            "CLEANUP: the discard did not RENEW the same window — the scheduled expiry is untouched"
         )
 
         // CLEANUP, part 2: the engine is STILL HEALTHY — the next meaningful capture routes

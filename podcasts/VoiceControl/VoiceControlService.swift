@@ -96,6 +96,10 @@ class VoiceControlService: ObservableObject {
     /// The executor this service routes validated intents through.
     var executorForTesting: VoiceIntentExecutor { executor }
 
+    /// The dialog manager, so a control can BEGIN a dialog through the production `handle` path
+    /// and prove a dialog-pending turn keeps its OWN admitted identity on the wire (spec 0443b70).
+    var dialogManagerForTesting: VoiceDialogManager { dialogManager }
+
     /// Whether the intent router has its model, so a test can wait for the real sequencing rather
     /// than dispatching into a router that is not ready and asserting about a dropped turn.
     var intentRouterIsReadyForTesting: Bool { intentRouter.isReady }
