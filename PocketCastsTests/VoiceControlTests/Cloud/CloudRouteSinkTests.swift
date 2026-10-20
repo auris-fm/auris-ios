@@ -4273,6 +4273,33 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
 
     /// The RESOLVER FINDS each of those languages from the user's own locale — the production
     /// discovery path, not an injected bundle.
+    func test_dailyLimitKeyResolvesInRegionalLocaleVariantsSelectedByRealDiscovery() {
+        // Reviewer cffd67d1: the app ships fr-CA.lproj and es-MX.lproj, and REAL locale
+        // discovery hands the resolver those regional bundles for fr_CA/es_MX users — a
+        // base-identifier-only list misses them and returns empty. Both regional variants
+        // must carry the key AND discovery must select them from the user's own locale.
+        for localeID in ["fr_CA", "es_MX"] {
+            // lproj directories are named with a HYPHEN ("fr-CA.lproj"), so the resource
+            // lookup uses the hyphenated form even for an underscore Locale identifier.
+            let dirName = localeID.replacingOccurrences(of: "_", with: "-")
+            guard let path = Bundle.main.path(forResource: dirName, ofType: "lproj"),
+                  let bundle = Bundle(path: path) else {
+                XCTFail("\(dirName).lproj is missing from the app bundle")
+                continue
+            }
+            let resolver = SpokenTemplateResolver(locale: Locale(identifier: localeID))
+            let text = resolver.resolveForUserLocale("cloud_error_limit_exceeded")
+            XCTAssertFalse(
+                text.isEmpty,
+                "\(localeID) discovers a bundle without the daily-limit template: a regional user would hear only an earcon"
+            )
+            XCTAssertTrue(
+                text.contains("Auris"),
+                "\(localeID) daily-limit text must name Auris (got: \(text))"
+            )
+        }
+    }
+
     func test_dailyLimitKeyIsFoundByRealLocaleDiscovery() {
         for identifier in ["en", "de", "es", "fr", "ja", "ko", "zh-Hans", "yue"] {
             let resolver = SpokenTemplateResolver(locale: Locale(identifier: identifier))

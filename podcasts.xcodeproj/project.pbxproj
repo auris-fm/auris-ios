@@ -2075,6 +2075,8 @@
 		AB0C000000000000000006 /* "zh-Hans" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
 		AB0C000000000000000007 /* "zh-Hant" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
 		AB0C000000000000000008 /* yue */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = yue; path = yue.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+AB0C000000000000000009 /* fr-CA */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "fr-CA"; path = "fr-CA.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+AB0C00000000000000000A /* es-MX */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "es-MX"; path = "es-MX.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
 		A13200320100000000000003 /* SetSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000004 /* MigratedSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigratedSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000006 /* PocketCastsAppShortcutsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketCastsAppShortcutsProvider.swift; sourceTree = "<group>"; };
@@ -8677,6 +8679,8 @@
 				AB0C000000000000000006 /* "zh-Hans" */,
 				AB0C000000000000000007 /* "zh-Hant" */,
 				AB0C000000000000000008 /* yue */,
+				AB0C000000000000000009 /* "fr-CA" */,
+				AB0C00000000000000000A /* "es-MX" */,
 			);
 			name = VoiceTemplates.strings;
 			sourceTree = "<group>";
