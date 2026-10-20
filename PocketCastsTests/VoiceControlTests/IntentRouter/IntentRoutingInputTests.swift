@@ -181,6 +181,105 @@ final class IntentRoutingInputTests: XCTestCase {
         )
     }
 
+    /// PRODUCTION-ENTRY WAKE TRIM × NON-CONTENT (task #78 reviewer round): a WAKE-POSITIVE
+    /// capture whose permitted trim leaves a non-content remainder is discarded SILENTLY —
+    /// the wake phrase never leaks to routing, and CLEANUP means no translation-stage work,
+    /// no unroutable feedback, and no wake-only confirmation for the junk remainder.
+    func test_wakePositiveTrimLeavingNonContentRemainderIsSilentlyDiscardedWithNoTranslationWork() async throws {
+        let backend = StubAsrBackend(
+            result: AsrResult(
+                text: "hey auris !!!",
+                detectedLanguage: "en",
+                tokens: [
+                    AsrToken(text: "hey auris", startMs: 0, endMs: 300),   // inside the 370 ms band
+                    AsrToken(text: "!!!", startMs: 400, endMs: 700),       // the remainder
+                ]
+            ),
+            canTranslate: false
+        )
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation, wake: DetectingWakeStub())
+        engine.utteranceIdGeneratorForTesting = { "adm-trim-1" }
+
+        var inputs: [IntentRoutingInput] = []
+        var unroutable = 0
+        var wakeOnly = 0
+        engine.onRoutingInput = { inputs.append($0) }
+        engine.onUnroutable = { unroutable += 1 }
+        engine.onWakeOnly = { wakeOnly += 1 }
+
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+
+        XCTAssertTrue(inputs.isEmpty, "the non-content remainder never reaches routing")
+        XCTAssertEqual(unroutable, 0, "silently discarded — no error feedback")
+        XCTAssertEqual(wakeOnly, 0, "junk after the wake is not a wake confirmation")
+        XCTAssertEqual(
+            translation.ensureReadyCalls, 0,
+            "CLEANUP: the discarded utterance performs NO translation-stage work"
+        )
+    }
+
+    /// WAKE-POSITIVE trim leaving NOTHING is the wake-only path: the capture confirms the wake
+    /// and performs no downstream work at all.
+    func test_wakePositiveTrimLeavingNothingIsWakeOnlyWithNoDownstreamWork() async throws {
+        let backend = StubAsrBackend(
+            result: AsrResult(
+                text: "hey auris",
+                detectedLanguage: "en",
+                tokens: [
+                    AsrToken(text: "hey", startMs: 0, endMs: 140),
+                    AsrToken(text: " auris", startMs: 150, endMs: 300),
+                ]
+            ),
+            canTranslate: false
+        )
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation, wake: DetectingWakeStub())
+
+        var inputs: [IntentRoutingInput] = []
+        var unroutable = 0
+        var wakeOnly = 0
+        engine.onRoutingInput = { inputs.append($0) }
+        engine.onUnroutable = { unroutable += 1 }
+        engine.onWakeOnly = { wakeOnly += 1 }
+
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+
+        XCTAssertEqual(wakeOnly, 1, "an all-in-band wake capture is exactly one wake confirmation")
+        XCTAssertTrue(inputs.isEmpty, "no routing input without a command remainder")
+        XCTAssertEqual(unroutable, 0)
+        XCTAssertEqual(translation.ensureReadyCalls, 0, "no translation work for a wake-only capture")
+    }
+
+    /// WAKE-POSITIVE trim reaching routing carries ONLY the command remainder, under the
+    /// admitted utterance's identity.
+    func test_wakePositiveTrimRoutesOnlyTheCommandRemainderUnderTheAdmittedIdentity() async throws {
+        let backend = StubAsrBackend(
+            result: AsrResult(
+                text: "hey auris pause",
+                detectedLanguage: "en",
+                tokens: [
+                    AsrToken(text: "hey auris", startMs: 0, endMs: 300),
+                    AsrToken(text: " pause", startMs: 400, endMs: 700),
+                ]
+            ),
+            canTranslate: false
+        )
+        let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
+        let engine = makeEngine(backend: backend, translation: translation, wake: DetectingWakeStub())
+        engine.utteranceIdGeneratorForTesting = { "adm-trim-3" }
+
+        var inputs: [IntentRoutingInput] = []
+        engine.onRoutingInput = { inputs.append($0) }
+        engine.onWakeOnly = { XCTFail("the command remainder is routable") }
+
+        await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
+
+        XCTAssertEqual(inputs.count, 1)
+        XCTAssertEqual(inputs.first?.routerTranscript, "pause", "only the post-wake remainder routes")
+        XCTAssertEqual(inputs.first?.utteranceId, "adm-trim-3", "the admitted identity travels with the trimmed input")
+    }
+
     /// The rejection rule is CONTENT, not LENGTH: short meaningful utterances in several scripts
     /// and any digit survive, while punctuation/whitespace alone do not.
     func test_contentRulePreservesShortMeaningfulUtterancesAcrossScripts() {
