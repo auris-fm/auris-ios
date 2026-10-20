@@ -184,7 +184,10 @@ final class IntentRoutingInputTests: XCTestCase {
     /// The rejection rule is CONTENT, not LENGTH: short meaningful utterances in several scripts
     /// and any digit survive, while punctuation/whitespace alone do not.
     func test_contentRulePreservesShortMeaningfulUtterancesAcrossScripts() {
-        for meaningful in ["yes", "停", "嗯", "3", "ok", "No.", "3分", "بلى", "네"] {
+        // Includes NUMBERS in the non-decimal categories: "²" (No), "½" (No) and "Ⅻ" (Nl) are
+        // Unicode N and must NOT be discarded — only Nd would have been, had the predicate used
+        // `CharacterSet.decimalDigits` (reviewer 68afef6f).
+        for meaningful in ["yes", "停", "嗯", "3", "ok", "No.", "3分", "بلى", "네", "²", "½", "Ⅻ", "٣", "⑩"] {
             XCTAssertFalse(
                 VoiceAsrEngine.isNonContent(meaningful),
                 "\(meaningful.debugDescription) has Unicode content and must NOT be discarded"

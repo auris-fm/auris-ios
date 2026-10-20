@@ -470,9 +470,21 @@ class VoiceAsrEngine {
     /// CJK, Hangul, Arabic, digits in any script. Punctuation and whitespace alone do not qualify.
     /// Deliberately NOT a length rule: "yes", "停", "嗯" and "3" all pass.
     static func isNonContent(_ text: String) -> Bool {
-        // `.letters` and `.decimalDigits` are the two Unicode classes the spec names. Any match
-        // means the utterance has content; no match at all is non-content.
-        text.unicodeScalars.contains { CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0) } == false
+        // Unicode general categories, not CharacterSet: the spec's rule is L (letters) and N
+        // (numbers) — and `CharacterSet.decimalDigits` covers only Nd, which would silently
+        // DISCARD other numbers such as "²" (No), "½" (No) and "Ⅻ" (Nl) though the shared rule
+        // treats them as content (spec clarification + reviewer 68afef6f). Counting is over
+        // CHARACTERS for letters (multi-scalar letters such as "Ǆ" carry one letter category).
+        text.unicodeScalars.contains { scalar in
+            let category = scalar.properties.generalCategory
+            switch category {
+            case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+                 .decimalNumber, .letterNumber, .otherNumber:
+                return true
+            default:
+                return false
+            }
+        } == false
     }
 
     /// Android `isNonEnglishTranslateFailure` parity — fail / blank / noop / no-stage notes drop.
