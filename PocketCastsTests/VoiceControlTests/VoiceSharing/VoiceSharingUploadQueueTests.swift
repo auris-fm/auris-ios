@@ -831,6 +831,84 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
     }
 
+    func test_exactLimitAdmissionAccountsForProtocolOverhead() throws {
+        // Reviewer 589a0315: charging only audio+metadata lets preparation itself exceed the cap,
+        // because prepare writes created.at and finalize writes stage/temp/marker files.
+        let overhead = VoiceSharingUploadQueue.protocolOverheadBytes
+        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
+        // Budget exactly equals the caller-supplied bytes: WITHOUT overhead reservation this
+        // would be admitted, then immediately exceed the stated stored-byte cap.
+        let budget = audioA.count + record.count
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
+        XCTAssertThrowsError(try q.prepare(metadata: record, audio: audioA)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded,
+                           "protocol overhead must be reserved, not discovered after writing")
+        }
+        // And a budget that covers the overhead is admitted, so the control discriminates on the
+        // reservation rather than refusing everything.
+        let roomy = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(
+                maxBytes: budget + overhead, maxRecords: 32))
+        let prep = try roomy.prepare(metadata: record, audio: audioA)
+        try roomy.finalize(prep)
+        // After finalization the entry must still fit the stated cap: the reservation was honest.
+        let stored = try soleEntryDirectory()
+        let contents = try FileManager.default.contentsOfDirectory(atPath: stored.path)
+        let onDisk = contents.reduce(0) { sum, name in
+            sum + ((try? FileManager.default.attributesOfItem(
+                atPath: stored.appendingPathComponent(name).path)[.size] as? Int) ?? 0)
+        }
+        XCTAssertLessThanOrEqual(onDisk, budget + overhead,
+                                 "stored bytes (\(onDisk)) must fit the reserved bound")
+    }
+
+    func test_accountingFailureRefusesInsteadOfTreatingUnknownSpaceAsFree() throws {
+        // Reviewer 589a0315: a stat/listing failure currently reads as zero usage.
+        // Listing failure is the seam (FileManager's contentsOfDirectory cannot be subclassed).
+        final class ListingFailure { var failing = false }
+        let listing = ListingFailure()
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            listDirectory: { url, keys in
+                if listing.failing { throw CocoaError(.fileReadUnknown) }
+                return try FileManager.default.contentsOfDirectory(
+                    at: url, includingPropertiesForKeys: keys)
+            })
+        let existing = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(existing)
+
+        listing.failing = true
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "unknown usage must refuse, not read as free capacity")
+        }
+        listing.failing = false
+        // The existing entry is preserved across the refusal; accounting is not destructive.
+        XCTAssertEqual(q.readyEntries().map(\.name), [existing.name])
+    }
+
+    func test_foreignOrNestedContentMakesAccountingUnavailable() throws {
+        // Reviewer 589a0315: flat enumeration does not bound arbitrary debris/nested files.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        let entryDirectory = try soleEntryDirectory()
+        // An unknown file inside an entry directory is outside the owned on-disk format.
+        try Data(repeating: 0, count: 100).write(to: entryDirectory.appendingPathComponent("debris.bin"))
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+        }
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

@@ -56,7 +56,21 @@ final class VoiceSharingUploadQueue {
             maxRecords: VoiceSharingUploadQueue.maxQueueEntries)
     }
 
-    static let maxQueueBytes = 32 * (16_000 * 2 * 60) // queue-wide, ≈ 30 s of audio across entries
+    /// Upper bound on bytes this queue itself writes for one entry, excluding the caller's audio and
+    /// metadata: `created.at` (a bounded decimal instant), `stage.publishing` (1 byte),
+    /// `publication.failed` (1 byte), `ready.marker` (1 byte) and a temporary marker name. Reserving
+    /// a fixed bound keeps admission arithmetic closed-form and independent of filename length.
+    static let protocolOverheadBytes = 256
+
+    /// The closed set of file names an entry directory may contain. Accounting and cleanup are
+    /// defined over exactly these.
+    static let knownEntryNames: Set<String> = [
+        audioName, metadataName, createdName, readyMarkerName, stageName, failedName
+    ]
+
+    /// Queue-wide byte budget. 32 entries x 60 s of 16 kHz mono PCM16 = 1920 s of audio, i.e. ~32
+    /// minutes in total (32 entries x 60 s each), not a queue-wide 30-second window.
+    static let maxQueueBytes = 32 * (16_000 * 2 * 60)
 
     enum PrepareError: Error, Equatable {
         case queueFull
@@ -64,6 +78,9 @@ final class VoiceSharingUploadQueue {
         case metadataTooLarge
         /// The queue-wide byte budget would be exceeded. Distinct from per-entry `audioTooLarge`.
         case queueBytesExceeded
+        /// Stored usage could not be determined, so admission is refused rather than assuming the
+        /// unknown space is free.
+        case accountingUnavailable
         case expired
         /// The ready transition may have occurred but its final synchronization could not be
         /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
@@ -133,6 +150,10 @@ final class VoiceSharingUploadQueue {
     /// extension and cannot be overridden.
     private let markerReplacer: (URL, URL) throws -> URL?
     private let aggregateLimits: AggregateLimits
+    /// Injectable directory listing. Exists so accounting failure is testable: FileManager's
+    /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
+    /// be overridden by a subclass.
+    private let listDirectory: (URL, [URLResourceKey]) throws -> [URL]
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -147,7 +168,10 @@ final class VoiceSharingUploadQueue {
         markerReplacer: @escaping (URL, URL) throws -> URL? = {
             try FileManager.default.replaceItemAt($0, withItemAt: $1)
         },
-        aggregateLimits: AggregateLimits = .default
+        aggregateLimits: AggregateLimits = .default,
+        listDirectory: @escaping (URL, [URLResourceKey]) throws -> [URL] = { url, keys in
+            try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
+        }
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -156,6 +180,7 @@ final class VoiceSharingUploadQueue {
         self.failureRecordWriter = failureRecordWriter
         self.markerReplacer = markerReplacer
         self.aggregateLimits = aggregateLimits
+        self.listDirectory = listDirectory
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -197,9 +222,13 @@ final class VoiceSharingUploadQueue {
                 // Aggregate admission is measured from what is ACTUALLY stored, not from a running
                 // counter: a counter drifts the moment any write, removal or crash disagrees with
                 // it, and the queue would then admit past its budget or refuse within it forever.
-                let usage = storedUsageLocked()
+                let usage = try storedUsageLocked()
                 guard usage.records < aggregateLimits.maxRecords else { throw PrepareError.queueFull }
-                let incoming = audio.count + metadata.count
+                // Reserve the WHOLE entry footprint, not just the two caller-supplied blobs: prepare
+                // writes `created.at`, finalize writes `stage.publishing` and a temporary marker, and
+                // the completed entry carries `ready.marker`. Charging only audio+metadata would let
+                // a budget equal to audio+metadata be exceeded by preparation itself.
+                let incoming = audio.count + metadata.count + Self.protocolOverheadBytes
                 guard usage.bytes + incoming <= aggregateLimits.maxBytes else {
                     throw PrepareError.queueBytesExceeded
                 }
@@ -241,6 +270,12 @@ final class VoiceSharingUploadQueue {
             // discriminator that the restart guarantee depends on.
             if !fileManager.fileExists(atPath: stage.path) {
                 try Data([0x01]).write(to: stage, options: .atomic)
+                // No post-write re-check is needed: admission reserved `protocolOverheadBytes`,
+                // which strictly bounds every file this queue writes for an entry beyond the
+                // caller's blobs (created.at ≈ 18 B, stage/marker/failure 1 B each). A re-check
+                // that can never fire would be untested dead code, not a defence — so the
+                // reservation is kept honest by `test_exactLimitAdmissionAccountsForProtocolOverhead`
+                // measuring the real on-disk footprint instead.
             }
             // PUBLICATION PROTOCOL — one commit point, and the order is chosen so that the commit
             // point is the LAST fallible action.
@@ -415,19 +450,55 @@ final class VoiceSharingUploadQueue {
     /// Actual bytes and records currently stored, read from disk. Any file inside an entry
     /// directory counts, not just audio/metadata: a partial or stray file still consumes storage and
     /// the budget must account for it or the bound is fictional.
-    private func storedUsageLocked() -> (bytes: Int, records: Int) {
+    /// Throws when usage cannot be determined. "Unknown" must never be treated as "free": a queue
+    /// that cannot read its own storage is not trusted to admit more of it.
+    private func storedUsageLocked() throws -> (bytes: Int, records: Int) {
         var bytes = 0
         var records = 0
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)
-            let contents = (try? fileManager.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-            for file in contents {
-                bytes += (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            }
+            bytes += try entryFootprintLocked(at: directory)
             records += 1
         }
         return (bytes, records)
+    }
+
+    /// The queue's OWNED on-disk format for one entry directory: a FLAT set of regular files drawn
+    /// from a closed set of names. Accounting is therefore bounded by `knownNames.count` stat calls
+    /// per entry, not by whatever happens to be in the directory.
+    ///
+    /// Anything else — nested directories, unknown files, symlinks — is outside the owned format and
+    /// makes the footprint unknowable. That is a refusal, not an invitation to enumerate: an
+    /// attacker-controlled or debris directory must not be able to inflate or hide usage.
+    private func entryFootprintLocked(at directory: URL) throws -> Int {
+        // A read failure is UNKNOWABLE usage, not zero usage: surface it as the refusal case so the
+        // caller cannot mistake "could not read" for "nothing stored".
+        let contents: [URL]
+        do {
+            contents = try listDirectory(
+                directory, [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
+        } catch {
+            throw PrepareError.accountingUnavailable
+        }
+        var bytes = 0
+        for file in contents {
+            guard Self.knownEntryNames.contains(file.lastPathComponent) else {
+                throw PrepareError.accountingUnavailable
+            }
+            let values: URLResourceValues
+            do {
+                values = try file.resourceValues(
+                    forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
+            } catch {
+                throw PrepareError.accountingUnavailable
+            }
+            guard values.isSymbolicLink != true, values.isRegularFile == true,
+                  let size = values.fileSize, size >= 0 else {
+                throw PrepareError.accountingUnavailable
+            }
+            bytes += size
+        }
+        return bytes
     }
 
     private func countEntriesLocked() -> Int {
