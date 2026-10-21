@@ -590,35 +590,6 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    func test_uncertainPublicationIsReconciledFromDurableStateOnly() throws {
-        // Reconciliation must reach the same answer in a FRESH instance, because it reads durable
-        // state rather than process memory.
-        struct MarkerSyncFails: Error {}
-        var failedOnce = false
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            synchronizer: { url, isDirectory in
-                guard isDirectory, !failedOnce else { return }
-                let marker = url.appendingPathComponent("ready.marker")
-                if FileManager.default.fileExists(atPath: marker.path) {
-                    failedOnce = true
-                    throw MarkerSyncFails()
-                }
-            })
-        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
-        XCTAssertThrowsError(try q.finalize(prep))
-
-        // The queue's own verdict and a fresh instance's verdict must agree, since both read only
-        // durable state (the marker that could not be confirmed is gone or the entry is intact).
-        let own = q.reconcilePublication(prep)
-        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(reopened.reconcilePublication(prep), own,
-                       "reconciliation must not depend on in-process memory")
-        XCTAssertEqual(own, .uncommitted,
-                       "an unconfirmed transition is not a confirmed publication")
-        XCTAssertTrue(reopened.readyEntries().isEmpty)
-    }
-
     func test_reconciliationTrustsTheDurableStageRecordNotProcessMemory() throws {
         // A fresh queue has NO in-memory history. An entry left with `stage.publishing` present and
         // a ready marker must still reconcile as uncommitted, because the transition was never
@@ -643,6 +614,93 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertEqual(reopened.reconcilePublication(prep), .uncommitted)
         XCTAssertTrue(reopened.readyEntries().isEmpty)
+    }
+
+    func test_reconciliationSynchronizesAndWithholdsWhenDurabilityCannotBeConfirmed() throws {
+        // Reviewer db754d3d/1: presence is not confirmation. Inject sync failure DURING
+        // reconciliation on a fresh queue: the structurally valid entry must stay withheld.
+        struct SyncFails: Error {}
+        let q = makeQueue()
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        try q.finalize(prep)
+
+        // Fresh instance whose every synchronization fails: it can see the marker but cannot confirm.
+        let blind = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw SyncFails() })
+        XCTAssertEqual(blind.reconcilePublication(prep), .uncertain,
+                       "an unconfirmable marker must be withheld as uncertain, not committed")
+        XCTAssertTrue(blind.readyEntries().isEmpty,
+                      "readyEntries must not expose an entry it cannot confirm durably")
+    }
+
+    func test_uncertaintyIsNotErasedInProcessAndFreshInstanceAgrees() throws {
+        // Reviewer db754d3d/2: the catch must not convert uncertainty into a definite answer, and a
+        // fresh instance must not disagree with this one.
+        struct SyncFails: Error {}
+        // The fault is DURABLE-STATE-driven, not invocation-scoped: any sync of an entry directory
+        // whose marker exists fails. So this instance AND a fresh one both see the same
+        // unconfirmable state, which is exactly the guarantee under test.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            synchronizer: { url, isDirectory in
+                guard isDirectory else { return }
+                let marker = url.appendingPathComponent("ready.marker")
+                if FileManager.default.fileExists(atPath: marker.path) { throw SyncFails() }
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
+        }
+        // Same owner: still uncertain, not silently "uncommitted".
+        XCTAssertEqual(q.reconcilePublication(prep), .uncertain)
+        // Fresh owner, same durable fault, must reach the same verdict. Assert the durable state is
+        // still present first, so "agreement" cannot come from recovery having erased the entry.
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: try soleEntryDirectory().appendingPathComponent("ready.marker").path),
+            "precondition: the unconfirmed marker is still on disk")
+        let reopened = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if isDirectory {
+                    let marker = url.appendingPathComponent("ready.marker")
+                    if FileManager.default.fileExists(atPath: marker.path) { throw SyncFails() }
+                }
+            })
+        XCTAssertEqual(reopened.reconcilePublication(prep), q.reconcilePublication(prep),
+                       "reconciliation must not depend on in-process memory")
+        XCTAssertEqual(q.reconcilePublication(prep), .uncertain,
+                       "uncertainty must be preserved, not erased as a definite rejection")
+    }
+
+    func test_createdInstantContentsAreDurableBeforeReadiness() throws {
+        // Reviewer db754d3d/3: created.at is recovery authority, so it must be in the barrier.
+        struct SyncFails: Error {}
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            synchronizer: { url, isDirectory in
+                if !isDirectory, url.lastPathComponent == "created.at" { throw SyncFails() }
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep),
+                             "publication must not proceed without a durable creation instant")
+        XCTAssertTrue(q.readyEntries().isEmpty)
+    }
+
+    func test_markerReplacementFailureIsUncertainBecauseATransitionMayHaveOccurred() throws {
+        // Reviewer db754d3d/4: atomic replacement is inside the uncertainty guard.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            markerReplacer: { original, replacement in
+                // Install the marker and THEN throw: an operation that may publish must be uncertain.
+                _ = try FileManager.default.replaceItemAt(original, withItemAt: replacement)
+                throw CocoaError(.fileWriteUnknown)
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                           "a replacement that may have published is uncertain, not a rejection")
+        }
     }
 
     func test_realWavFailureReasonsAreRejected() throws {

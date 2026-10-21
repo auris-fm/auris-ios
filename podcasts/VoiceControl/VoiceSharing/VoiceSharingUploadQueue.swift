@@ -57,7 +57,7 @@ final class VoiceSharingUploadQueue {
 
     /// Opaque entry handle. Only names an entry under a root; every accessor validates that the
     /// handle belongs to THIS queue before touching the filesystem.
-    struct Entry: Equatable {
+    struct Entry: Hashable {
         let root: URL
         let name: String
     }
@@ -108,6 +108,14 @@ final class VoiceSharingUploadQueue {
         case uncertain
     }
 
+    /// Entries whose ready transition this instance could not confirm. An in-process HINT only: it
+    /// is never treated as proof of non-publication, and reconciliation derives its verdict from
+    /// durable state alone so a fresh instance reaches the same answer.
+    private var uncertainEntriesLocked: Set<Entry> = []
+    /// Injectable marker-installation seam. Exists so the atomic-replacement failure path (which may
+    /// install the marker and still throw) is testable: FileManager's replacement API lives in an
+    /// extension and cannot be overridden.
+    private let markerReplacer: (URL, URL) throws -> URL?
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -118,13 +126,17 @@ final class VoiceSharingUploadQueue {
         fileManager: FileManager = .default,
         clock: @escaping () -> Date = Date.init,
         synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer,
-        failureRecordWriter: @escaping (URL) throws -> Void = { try Data([0x01]).write(to: $0, options: .atomic) }
+        failureRecordWriter: @escaping (URL) throws -> Void = { try Data([0x01]).write(to: $0, options: .atomic) },
+        markerReplacer: @escaping (URL, URL) throws -> URL? = {
+            try FileManager.default.replaceItemAt($0, withItemAt: $1)
+        }
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
         self.clock = clock
         self.synchronizer = synchronizer
         self.failureRecordWriter = failureRecordWriter
+        self.markerReplacer = markerReplacer
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -218,6 +230,9 @@ final class VoiceSharingUploadQueue {
             // cleared BEFORE the marker is published, and nothing fallible follows publication.
             try synchronizer(directory.appendingPathComponent(Self.audioName), false)
             try synchronizer(directory.appendingPathComponent(Self.metadataName), false)
+            // created.at is recovery AUTHORITY (immutable age basis), so its contents must be durable
+            // before readiness too; otherwise a restart can lose the very bound the entry relies on.
+            try synchronizer(directory.appendingPathComponent(Self.createdName), false)
             try synchronizer(directory, true)
 
             // Clear the stage while the marker does NOT yet exist: the entry is then a plain
@@ -227,24 +242,49 @@ final class VoiceSharingUploadQueue {
 
             let temporary = directory.appendingPathComponent("\(Self.readyMarkerName).tmp-\(UUID().uuidString)")
             try Data([0x01]).write(to: temporary, options: .atomic)
-            _ = try fileManager.replaceItemAt(marker, withItemAt: temporary)
+            do {
+                _ = try markerReplacer(marker, temporary)
+            } catch {
+                // The replacement installs the marker and THEN throws (or throws after installing).
+                // Whatever the reason, a marker may now exist, so this is a possible transition and
+                // must not be classified as definitely-uncommitted.
+                quarantineLocked(entry)
+                throw PrepareError.publicationUncertain
+            }
 
-            // THE COMMIT POINT. The marker now exists; if its sync cannot be confirmed we do not know
-            // whether a later process will see it. That is `uncertain`, and it must be REPORTED as
-            // such — never silently downgraded to success or to "definitely uncommitted".
+            // THE COMMIT POINT. The marker now exists. The three synchronizations below are
+            // CONFIRMATION work, and they are fallible: this is why the outcome is tri-state rather
+            // than an absence of fallible steps. If confirmation cannot be completed we do not know
+            // whether a later process will see the marker. That is `uncertain`, and it must be
+            // REPORTED as such — never silently downgraded to success or to "definitely uncommitted".
             do {
                 try synchronizer(marker, false)
                 try synchronizer(directory, true)
                 try synchronizer(rootDirectory, true)
             } catch {
-                quarantineLocked(entry)
-                try? fileManager.removeItem(at: marker)
+                // Mark it uncertain IN PROCESS ONLY as a hint for this instance; it is deliberately
+                // not proof of non-publication and is never consulted by reconciliation. A fresh
+                // instance sees the same durable state and reaches the same verdict.
+                uncertainEntriesLocked.insert(entry)
                 throw PrepareError.publicationUncertain
             }
         }
     }
 
     // MARK: Publication reconciliation
+
+    /// Re-establishes the full durability barrier for an entry that already has a marker. Used by
+    /// reconciliation and by recovery: an entry is only exposed as ready once this succeeds.
+    /// Throws when durability cannot be confirmed, which the caller maps to an uncertain outcome.
+    private func confirmDurableLocked(directory: URL) throws {
+        try synchronizer(directory.appendingPathComponent(Self.audioName), false)
+        try synchronizer(directory.appendingPathComponent(Self.metadataName), false)
+        try synchronizer(directory.appendingPathComponent(Self.createdName), false)
+        try synchronizer(directory, true)
+        try synchronizer(directory.appendingPathComponent(Self.readyMarkerName), false)
+        try synchronizer(directory, true)
+        try synchronizer(rootDirectory, true)
+    }
 
     /// Reconciles an entry whose publication outcome is uncertain, under the SAME serialized owner
     /// that attempts publication. The spec requires this before any attempt, and requires the same
@@ -272,6 +312,11 @@ final class VoiceSharingUploadQueue {
             // Fully validate before exposing: the entry must still be the immutable record it claims
             // to be, within bounds. Anything less is not a confirmable publication.
             guard boundEntryLocked(at: entry) != nil else { return .uncommitted }
+            // PRESENCE IS NOT CONFIRMATION. After an uncertain transition the marker may be visible
+            // while its durability was never established, so reconciliation must re-establish the
+            // same barrier: contents, the marker's own durability, its directory entry and the root
+            // link. If that cannot be confirmed the entry stays withheld as uncertain.
+            guard (try? confirmDurableLocked(directory: directory)) != nil else { return .uncertain }
             return .committed
         }
     }
@@ -284,6 +329,9 @@ final class VoiceSharingUploadQueue {
         serialQueue.sync {
             entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
+                // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
+                // after an uncertain transition a marker may be visible without durable backing.
+                .filter { (try? self.confirmDurableLocked(directory: self.entryDirectoryLocked(for: $0))) != nil }
                 .filter { Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: $0).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge }
                 .sorted { lhs, rhs in
                     let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
