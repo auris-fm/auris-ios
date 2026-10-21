@@ -64,9 +64,14 @@ final class VoiceSharingUploadQueue {
 
     /// The closed set of file names an entry directory may contain. Accounting and cleanup are
     /// defined over exactly these.
+    /// The closed set of fixed file names an entry directory may contain.
     static let knownEntryNames: Set<String> = [
         audioName, metadataName, createdName, readyMarkerName, stageName, failedName
     ]
+    /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
+    /// that fails after writing the temporary can leave one behind, so it is part of the owned
+    /// format and must be both accounted and cleanup-able rather than permanently blocking admission.
+    static let temporaryMarkerPrefix = "\(readyMarkerName).tmp-"
 
     /// Queue-wide byte budget. 32 entries x 60 s of 16 kHz mono PCM16 = 1920 s of audio, i.e. ~32
     /// minutes in total (32 entries x 60 s each), not a queue-wide 30-second window.
@@ -455,9 +460,9 @@ final class VoiceSharingUploadQueue {
     private func storedUsageLocked() throws -> (bytes: Int, records: Int) {
         var bytes = 0
         var records = 0
-        for entry in entriesLocked() {
+        for entry in try entriesStrictLocked() {
             let directory = entryDirectoryLocked(for: entry)
-            bytes += try entryFootprintLocked(at: directory)
+            bytes += try chargeLocked(for: entry)
             records += 1
         }
         return (bytes, records)
@@ -470,6 +475,35 @@ final class VoiceSharingUploadQueue {
     /// Anything else — nested directories, unknown files, symlinks — is outside the owned format and
     /// makes the footprint unknowable. That is a refusal, not an invitation to enumerate: an
     /// attacker-controlled or debris directory must not be able to inflate or hide usage.
+    /// Charge that keeps the reservation HONEST for entries not yet published. A preparing entry has
+    /// been admitted but will still grow (stage, marker) before it is published, and an uncertain one
+    /// may be rewritten. Charging only its current footprint would let later admissions consume the
+    /// headroom those entries still need, and a later finalize would then exceed the cap that
+    /// admitted the newer entries. So an unpublished entry is charged its full bounded footprint.
+    private func chargeLocked(for entry: Entry) throws -> Int {
+        let directory = entryDirectoryLocked(for: entry)
+        let physical = try entryFootprintLocked(at: directory)
+        let marker = directory.appendingPathComponent(Self.readyMarkerName)
+        if fileManager.fileExists(atPath: marker.path) { return physical }
+        // Reserve the protocol headroom this entry may still consume on top of what it holds.
+        return physical + Self.protocolOverheadBytes
+    }
+
+    /// Removes this queue's own leftover `ready.marker.tmp-<UUID>` files. Bounded by the fixed name
+    /// set, not by directory size: only names matching our prefix plus a well-formed UUID qualify, so
+    /// foreign content is never touched and cannot be hidden behind this cleanup.
+    private func cleanupTemporaryMarkersLocked(in directory: URL) {
+        guard let contents = try? listDirectory(directory, []) else { return }
+        for file in contents {
+            let name = file.lastPathComponent
+            guard name.hasPrefix(Self.temporaryMarkerPrefix),
+                  UUID(uuidString: String(name.dropFirst(Self.temporaryMarkerPrefix.count))) != nil
+            else { continue }
+            try? fileManager.removeItem(at: file)
+        }
+    }
+
+    /// Physical bytes of one entry directory, restricted to the owned format.
     private func entryFootprintLocked(at directory: URL) throws -> Int {
         // A read failure is UNKNOWABLE usage, not zero usage: surface it as the refusal case so the
         // caller cannot mistake "could not read" for "nothing stored".
@@ -482,7 +516,10 @@ final class VoiceSharingUploadQueue {
         }
         var bytes = 0
         for file in contents {
-            guard Self.knownEntryNames.contains(file.lastPathComponent) else {
+            let name = file.lastPathComponent
+            let isOwnedTemporary = name.hasPrefix(Self.temporaryMarkerPrefix)
+                && UUID(uuidString: String(name.dropFirst(Self.temporaryMarkerPrefix.count))) != nil
+            guard Self.knownEntryNames.contains(name) || isOwnedTemporary else {
                 throw PrepareError.accountingUnavailable
             }
             let values: URLResourceValues
@@ -506,9 +543,20 @@ final class VoiceSharingUploadQueue {
     }
 
     private func entriesLocked() -> [Entry] {
-        let contents = (try? fileManager.contentsOfDirectory(
-            at: rootDirectory, includingPropertiesForKeys: [.contentModificationDateKey]
-        )) ?? []
+        // Lenient variant for read paths that must not fail (recovery, listing). Accounting must NOT
+        // use this: an unreadable root would then look like an empty queue.
+        (try? entriesStrictLocked()) ?? []
+    }
+
+    /// Enumerates entry directories and PROPAGATES a root listing failure. Used by accounting: an
+    /// unreadable root must refuse admission, never read as "nothing stored".
+    private func entriesStrictLocked() throws -> [Entry] {
+        let contents: [URL]
+        do {
+            contents = try listDirectory(rootDirectory, [])
+        } catch {
+            throw PrepareError.accountingUnavailable
+        }
         return contents
             .filter { $0.hasDirectoryPath }
             .map { Entry(root: rootDirectory, name: $0.lastPathComponent) }
@@ -599,6 +647,10 @@ final class VoiceSharingUploadQueue {
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)
+            // Bounded cleanup of this queue's own stale temporary markers before completeness is
+            // judged: a failed replacement can strand one, and leaving it would block admission
+            // forever with a name that is ours, not debris.
+            cleanupTemporaryMarkersLocked(in: directory)
             guard isCompleteEntryLocked(at: entry) else {
                 try? fileManager.removeItem(at: directory)
                 continue

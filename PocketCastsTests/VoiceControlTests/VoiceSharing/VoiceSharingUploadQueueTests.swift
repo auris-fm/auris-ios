@@ -909,6 +909,124 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
+    func test_unreadableRootRefusesAdmissionInsteadOfLookingLikeAnEmptyQueue() throws {
+        // Reviewer 7ebb7887/1: entriesLocked swallowed root listing failure as [], bypassing the seam.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            listDirectory: { url, keys in
+                // Fail ONLY the root listing; entry-level listing still works.
+                if url.standardizedFileURL == self.root.standardizedFileURL {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                return try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
+            })
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "an unreadable root is unknown usage, not an empty queue")
+        }
+    }
+
+    func test_multiplePreparationsReserveTheirPublicationHeadroom() throws {
+        // Reviewer 7ebb7887/2. The discriminating case is not admission of a third entry — the
+        // headroom is small relative to an entry, so the same count is admitted either way. It is
+        // FINALIZE: an entry admitted while charging only its physical footprint keeps no room for
+        // the stage/marker it will still write, so finalizing published entries can push stored
+        // bytes past the cap that admitted the newcomers.
+        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
+        // Measure the true post-prepare physical footprint once, from a probe queue.
+        let probeRoot = temporaryRoot()
+        let probe = VoiceSharingUploadQueue(
+            rootDirectory: probeRoot,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        _ = try probe.prepare(metadata: record, audio: audioA)
+        let probeName = try FileManager.default.contentsOfDirectory(atPath: probeRoot.path)
+            .first { !$0.hasPrefix(".") } ?? ""
+        let physical = try FileManager.default.contentsOfDirectory(
+            atPath: probeRoot.appendingPathComponent(probeName).path
+        ).reduce(0) { sum, file in
+            sum + ((try? FileManager.default.attributesOfItem(
+                atPath: probeRoot.appendingPathComponent(probeName).appendingPathComponent(file).path)[.size] as? Int) ?? 0)
+        }
+        let overhead = VoiceSharingUploadQueue.protocolOverheadBytes
+        // Put the budget INSIDE the gap between the two accounting rules, which is the only place a
+        // reservation change is observable:
+        //   reserved : 1st charged physical+overhead, incoming is physical+overhead -> 2nd REFUSED
+        //   physical : 1st charged physical,          incoming is physical+overhead -> 2nd ADMITTED
+        let budget = physical * 2 + overhead
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
+
+        let first = try q.prepare(metadata: record, audio: audioA)
+        // The headroom of the FIRST preparing entry is what makes this one refuse: it was admitted
+        // while still owing stage/marker bytes. Charging only physical footprint would admit it.
+        XCTAssertThrowsError(try q.prepare(metadata: record, audio: audioA)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded,
+                           "a preparing entry must hold its publication headroom against later admission")
+        }
+        try q.finalize(first)
+        let second = try q.prepare(metadata: record, audio: audioA)
+        try q.finalize(second)
+
+        // The invariant the reservation exists to protect: after publication, actual stored bytes
+        // must still fit the budget that admitted them.
+        let stored = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { !$0.hasPrefix(".") }
+            .reduce(0) { sum, name in
+                let dir = root.appendingPathComponent(name)
+                let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+                return sum + files.reduce(0) { inner, file in
+                    inner + ((try? FileManager.default.attributesOfItem(
+                        atPath: dir.appendingPathComponent(file).path)[.size] as? Int) ?? 0)
+                }
+            }
+        XCTAssertLessThanOrEqual(
+            stored, budget,
+            "stored bytes (\(stored)) must fit the admitting budget (\(budget)); without the "
+            + "preparing-entry headroom reservation finalize would overshoot")
+    }
+
+    func test_strandedTemporaryMarkerIsCleanedAndDoesNotBlockAdmission() throws {
+        // Reviewer 7ebb7887/3: ready.marker.tmp-UUID was outside knownEntryNames, so a failed
+        // replacement could strand it and permanently block admission.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        let original = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(original)
+        let entryDirectory = try soleEntryDirectory()
+        let stranded = entryDirectory.appendingPathComponent("ready.marker.tmp-\(UUID().uuidString)")
+        try Data([0x01]).write(to: stranded)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stranded.path), "precondition: stranded")
+        // Accounting must accept our own temp as part of the owned format...
+        let added = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(added)
+        // ...and recovery must clean it up rather than leave it forever.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stranded.path),
+                       "a stranded temporary marker is this queue's own garbage and must be removed")
+        XCTAssertEqual(reopened.readyEntries().count, 2,
+                       "both finalized entries survive; only the stranded temp is removed")
+    }
+
+    func test_foreignTemporaryLookingNameIsNotTreatedAsOwned() throws {
+        // The temp allowance must not become a hole: only prefix + well-formed UUID qualifies.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        let entryDirectory = try soleEntryDirectory()
+        try Data([0x01]).write(to: entryDirectory.appendingPathComponent("ready.marker.tmp-not-a-uuid"))
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+        }
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.
