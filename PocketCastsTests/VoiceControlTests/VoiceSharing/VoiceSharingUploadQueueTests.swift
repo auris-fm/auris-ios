@@ -687,20 +687,65 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty)
     }
 
-    func test_markerReplacementFailureIsUncertainBecauseATransitionMayHaveOccurred() throws {
-        // Reviewer db754d3d/4: atomic replacement is inside the uncertainty guard.
+    func test_markerInstalledThenThrowingIsConfirmedBySameAndFreshInstanceAfterHealthyReconciliation() throws {
+        // Reviewer f4688811: an install-then-throw replacement is an AMBIGUOUS transition. It must
+        // route through the same uncertainty/reconciliation semantics as any other ambiguous path —
+        // and once reconciliation is healthy, the IDENTICAL immutable entry must be confirmed both
+        // by this instance and by a fresh one. Asserting only the thrown error is not enough.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
             markerReplacer: { original, replacement in
-                // Install the marker and THEN throw: an operation that may publish must be uncertain.
                 _ = try FileManager.default.replaceItemAt(original, withItemAt: replacement)
                 throw CocoaError(.fileWriteUnknown)
             })
         let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         XCTAssertThrowsError(try q.finalize(prep)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
-                           "a replacement that may have published is uncertain, not a rejection")
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
         }
+        // The marker really was installed: this is a possible transition, not a rejection.
+        let entryDirectory = try soleEntryDirectory()
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("ready.marker").path),
+            "precondition: the replacer installed the marker before throwing")
+
+        // Same instance, healthy durable state (no injected fault in this queue's synchronizer).
+        XCTAssertEqual(q.reconcilePublication(prep), .committed,
+                       "the same instance must not treat a memory hint as proof of non-publication")
+        XCTAssertEqual(q.readyEntries().map(\.name), [prep.name])
+
+        // Fresh instance must agree on the identical entry.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(reopened.reconcilePublication(prep), .committed,
+                       "a fresh instance must reach the same verdict")
+        XCTAssertEqual(reopened.readyEntries().map(\.name), [prep.name])
+    }
+
+    func test_ambiguousSyncFailureAlsoConfirmsIdenticallyOnceDurabilityIsRestored() throws {
+        // The other ambiguous path, same assertion shape: after an unconfirmable sync the entry is
+        // withheld, and when durability becomes confirmable BOTH instances confirm the same entry.
+        struct SyncFails: Error {}
+        final class FlakySync { var failing = true }
+        let flaky = FlakySync()
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            synchronizer: { url, isDirectory in
+                guard flaky.failing, isDirectory else { return }
+                if FileManager.default.fileExists(
+                    atPath: url.appendingPathComponent("ready.marker").path) {
+                    throw SyncFails()
+                }
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep))
+        XCTAssertEqual(q.reconcilePublication(prep), .uncertain, "unconfirmable => uncertain")
+        XCTAssertTrue(q.readyEntries().isEmpty, "unconfirmed entries are not exposed")
+
+        // Durability becomes confirmable. The identical entry must now be confirmed by both.
+        flaky.failing = false
+        XCTAssertEqual(q.reconcilePublication(prep), .committed)
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(reopened.reconcilePublication(prep), .committed)
+        XCTAssertEqual(reopened.readyEntries().map(\.name), [prep.name])
     }
 
     func test_realWavFailureReasonsAreRejected() throws {

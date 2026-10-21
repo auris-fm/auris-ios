@@ -248,7 +248,7 @@ final class VoiceSharingUploadQueue {
                 // The replacement installs the marker and THEN throws (or throws after installing).
                 // Whatever the reason, a marker may now exist, so this is a possible transition and
                 // must not be classified as definitely-uncommitted.
-                quarantineLocked(entry)
+                uncertainEntriesLocked.insert(entry)
                 throw PrepareError.publicationUncertain
             }
 
@@ -304,7 +304,6 @@ final class VoiceSharingUploadQueue {
         serialQueue.sync {
             let directory = entryDirectoryLocked(for: entry)
             guard fileManager.fileExists(atPath: directory.path) else { return .uncommitted }
-            guard !quarantinedLocked(entry) else { return .uncommitted }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
             let failed = directory.appendingPathComponent(Self.failedName)
             if fileManager.fileExists(atPath: failed.path) { return .uncommitted }
@@ -425,18 +424,10 @@ final class VoiceSharingUploadQueue {
     ///   * readiness requires the persisted envelope to BIND to the audio bytes through the shared
     ///     record/WAV authority (canonical record digest, capture/epoch identity, real PCM16 mono
     ///     16 kHz header) — not merely a matching digest field.
-    /// Entries this process knows are unpublishable even though no on-disk disqualifier could be
-    /// written. Consulted by readiness, so a surviving marker cannot expose them.
-    private var quarantinedNames: Set<String> = []
-
-    /// Records `entry` as unpublishable for this process. Idempotent.
-    private func quarantineLocked(_ entry: Entry) {
-        quarantinedNames.insert(entry.name)
-    }
-
-    private func quarantinedLocked(_ entry: Entry) -> Bool {
-        quarantinedNames.contains(entry.name)
-    }
+    // No in-process quarantine state exists. It cannot stand as evidence of non-publication: an
+    // instance that remembers "I did not publish this" can disagree with a fresh instance that sees
+    // the same durable state, and the contract requires both to agree. Ambiguity is therefore
+    // expressed by `uncertainEntriesLocked` (a hint only) and resolved from disk.
 
     private func boundEntryLocked(at entry: Entry) -> VoiceSharingRecordBinding.BoundEntry? {
         let directory = entryDirectoryLocked(for: entry)
@@ -444,7 +435,6 @@ final class VoiceSharingUploadQueue {
         let audioURL = directory.appendingPathComponent(Self.audioName)
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
-        guard !quarantinedLocked(entry) else { return nil }
         guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedName).path)
         else { return nil }
         // A recorded publication stage means publication began. Until the marker is confirmed and
