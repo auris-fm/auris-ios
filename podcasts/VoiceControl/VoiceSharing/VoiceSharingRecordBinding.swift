@@ -26,6 +26,7 @@ enum VoiceSharingRecordBinding {
         case digestMismatch
         case audioDigestMismatch
         case audioSizeMismatch
+        case audioSampleCountMismatch(declared: Int, actual: Int)
         case invalidAudio(String)
     }
 
@@ -79,7 +80,16 @@ enum VoiceSharingRecordBinding {
         let actualAudioSHA = sha256Hex(audio)
         guard actualAudioSHA == declaredAudioSHA else { throw BindingError.audioDigestMismatch }
         guard audio.count == declaredByteCount else { throw BindingError.audioSizeMismatch }
-        try validateWAV(audio)
+        let wav = try validateWAV(audio)
+
+        // retained_samples is a claim about the audio; compare it with the samples actually present
+        // rather than accepting a number that describes a different recording.
+        guard let retainedSamples = audioBlock["retained_samples"] as? Int else {
+            throw BindingError.missingField("audio.retained_samples")
+        }
+        guard retainedSamples == wav.sampleCount else {
+            throw BindingError.audioSampleCountMismatch(declared: retainedSamples, actual: wav.sampleCount)
+        }
 
         guard let captureID = record["capture_id"] as? String, UUID(uuidString: captureID) != nil else {
             throw BindingError.invalidField("record.capture_id", "UUID required")
@@ -122,12 +132,14 @@ enum VoiceSharingRecordBinding {
             throw BindingError.missingField("record.audio")
         }
         try validateAudioBlock(audioBlock)
-        guard let models = record["models"] as? [String: Any], !models.isEmpty else {
-            throw BindingError.invalidField("record.models", "non-empty object required")
+        guard let models = record["models"] as? [String: Any] else {
+            throw BindingError.invalidField("record.models", "object required")
         }
-        guard let observations = record["observations"] as? [String: Any], !observations.isEmpty else {
-            throw BindingError.invalidField("record.observations", "non-empty object required")
+        try validateModels(models)
+        guard let observations = record["observations"] as? [String: Any] else {
+            throw BindingError.invalidField("record.observations", "object required")
         }
+        try validateObservations(observations)
         if let links = record["links"] {
             guard let linksObject = links as? [String: Any] else {
                 throw BindingError.invalidField("record.links", "object required")
@@ -189,13 +201,135 @@ enum VoiceSharingRecordBinding {
         }
     }
 
+    // MARK: Nested model/observation schema
+
+    /// The five model slots the record declares; absence of a model is `null`, never a missing key.
+    private static let modelKeys = ["vad", "wakeword", "asr", "translation", "router"]
+
+    private static let observationStages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
+
+    private static let observationStates: Set<String> = ["completed", "not_run", "failed", "cancelled", "unknown"]
+
+    /// Reasons are ENUMERATED per stage. An arbitrary sentence is where stack traces and file paths
+    /// enter the dataset, so a free-form reason is refused rather than stored.
+    private static let stageReasons: [String: Set<String>] = [
+        "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
+        "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
+        "asr": ["local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user"],
+        "translation": ["source_language_target_language", "no_text", "provider_error", "outcome_wait_expired"],
+        "routing": ["no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired"],
+        "execution": ["client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired"],
+    ]
+
+    private static let stageFields: [String: Set<String>] = [
+        "wake": ["state", "reason", "decision", "score", "threshold", "speech_offset_ms", "wake_offset_ms"],
+        "bleed": ["state", "reason", "decision", "overlap_ratio"],
+        "asr": ["state", "reason", "text", "source_language", "router_input"],
+        "translation": ["state", "reason", "translated_text", "target_language"],
+        "routing": [
+            "state", "reason", "predicted_intent", "predicted_tool", "validation",
+            "execution_disposition", "failure_reason", "arguments",
+        ],
+        "execution": ["state", "reason", "outcome"],
+    ]
+
+    private static func validateModels(_ models: [String: Any]) throws {
+        try assertAllowedKeys(models, allowed: Set(modelKeys), path: "models")
+        for key in modelKeys {
+            guard let entry = models[key] else {
+                throw BindingError.missingField("models.\(key)")
+            }
+            // "absent means not run/unknown" — null is the declared absence.
+            if entry is NSNull { continue }
+            guard let declared = entry as? [String: Any] else {
+                throw BindingError.invalidField("models.\(key)", "object or null required")
+            }
+            try assertAllowedKeys(declared, allowed: ["id", "version"], path: "models.\(key)")
+            guard let id = declared["id"] as? String, !id.isEmpty else {
+                throw BindingError.missingField("models.\(key).id")
+            }
+            guard let version = declared["version"] as? String, !version.isEmpty else {
+                throw BindingError.missingField("models.\(key).version")
+            }
+        }
+    }
+
+    private static func validateObservations(_ observations: [String: Any]) throws {
+        try assertAllowedKeys(observations, allowed: Set(observationStages), path: "observations")
+        for stage in observationStages {
+            let stagePath = "observations.\(stage)"
+            guard let entry = observations[stage] else {
+                // Every stage must be stated: a missing stage is an unstated claim about a stage the
+                // pipeline either observed or did not run.
+                throw BindingError.missingField(stagePath)
+            }
+            guard let declared = entry as? [String: Any] else {
+                throw BindingError.invalidField(stagePath, "object required")
+            }
+            guard let allowed = stageFields[stage] else { throw BindingError.invalidField(stagePath, "unknown stage") }
+            try assertAllowedKeys(declared, allowed: allowed, path: stagePath)
+            guard let state = declared["state"] as? String, observationStates.contains(state) else {
+                throw BindingError.invalidField("\(stagePath).state", "enumerated state required")
+            }
+            // Only a completed stage may omit a reason; anything else must say why, from the list.
+            if state != "completed" {
+                guard let reason = declared["reason"] as? String, !reason.isEmpty else {
+                    throw BindingError.missingField("\(stagePath).reason")
+                }
+                guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
+                    throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                }
+            }
+
+            // Per-stage conditional rules. Found by running the real Worker intake: a completed ASR
+            // stage MUST carry its text, and a non-completed one must NOT — text present for a
+            // stage that produced nothing is how an empty transcript becomes a silent success.
+            if stage == "asr" {
+                let text = declared["text"]
+                let hasText = !(text is NSNull) && text != nil
+                if state == "completed", !hasText {
+                    throw BindingError.missingField("\(stagePath).text")
+                }
+                if state != "completed", hasText {
+                    throw BindingError.invalidField("\(stagePath).text", "text present for a non-completed stage")
+                }
+                if let value = text as? String, value.trimmingCharacters(in: .whitespaces).isEmpty {
+                    throw BindingError.invalidField("\(stagePath).text", "whitespace only")
+                }
+            }
+
+            if let reason = declared["reason"], !(reason is NSNull) {
+                guard let text = reason as? String, let enumerated = stageReasons[stage], enumerated.contains(text) else {
+                    throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                }
+            }
+        }
+    }
+
+    private static func assertAllowedKeys(_ object: [String: Any], allowed: Set<String>, path: String) throws {
+        for key in object.keys where !allowed.contains(key) {
+            throw BindingError.unknownField(path, key)
+        }
+    }
+
     // MARK: WAV representation
 
-    /// The documented training representation only: PCM16, mono, 16 kHz. Every value is READ from
-    /// the header and compared; nothing is defaulted or inferred from a `.wav` name, and the
-    /// duration comes from bytes actually present (the declared size is what an interrupted
-    /// prepare lies about).
-    private static func validateWAV(_ data: Data) throws {
+    /// The documented training representation only: PCM16, mono, 16 kHz, in the canonical
+    /// 44-byte layout. Every value is READ from the header and cross-checked; nothing is defaulted
+    /// or inferred from a `.wav` name.
+    ///
+    /// Returned facts come from bytes actually RECEIVED, except where the server compares a
+    /// declared length against the received one — which it always does, because a torn upload
+    /// declares whatever it wanted to be.
+    struct WavFacts: Equatable {
+        let sampleCount: Int
+        let durationMs: Int
+        let dataLength: Int
+    }
+
+    static let wavHeaderBytes = 44
+
+    private static func validateWAV(_ data: Data) throws -> WavFacts {
         let bytes = [UInt8](data)
         func u16(_ offset: Int) -> UInt16? {
             guard offset + 2 <= bytes.count else { return nil }
@@ -206,57 +340,80 @@ enum VoiceSharingRecordBinding {
             return UInt32(bytes[offset]) | (UInt32(bytes[offset + 1]) << 8)
                 | (UInt32(bytes[offset + 2]) << 16) | (UInt32(bytes[offset + 3]) << 24)
         }
-        func tag(_ offset: Int) -> String? {
+        func ascii(_ offset: Int) -> String? {
             guard offset + 4 <= bytes.count else { return nil }
             return String(bytes: bytes[offset..<(offset + 4)], encoding: .ascii)
         }
 
-        guard tag(0) == "RIFF", tag(8) == "WAVE" else { throw BindingError.invalidAudio("malformed_header:RIFF/WAVE") }
-        guard u32(4) != nil else { throw BindingError.invalidAudio("malformed_header:declared size") }
+        guard bytes.count >= wavHeaderBytes else { throw BindingError.invalidAudio("malformed_header:too_short") }
+        guard ascii(0) == "RIFF" else { throw BindingError.invalidAudio("malformed_header:riff") }
+        guard ascii(8) == "WAVE" else { throw BindingError.invalidAudio("malformed_header:wave") }
+        // The canonical layout is fixed, so the chunk headers are at known offsets.
+        guard ascii(12) == "fmt " else { throw BindingError.invalidAudio("malformed_header:fmt_chunk") }
 
-        var offset = 12
-        var sawFormat = false
-        var sawData = false
-        while offset + 8 <= bytes.count {
-            guard let chunkID = tag(offset), let chunkSize = u32(offset + 4) else {
-                throw BindingError.invalidAudio("malformed_header:chunk")
-            }
-            let bodyStart = offset + 8
-            switch chunkID {
-            case "fmt ":
-                guard chunkSize >= 16, bodyStart + 16 <= bytes.count else {
-                    throw BindingError.invalidAudio("malformed_header:fmt")
-                }
-                guard let formatTag = u16(bodyStart), formatTag == 1 else {
-                    throw BindingError.invalidAudio("unsupported_format: PCM required")
-                }
-                guard let channels = u16(bodyStart + 2), channels == 1 else {
-                    throw BindingError.invalidAudio("unsupported_format: mono required")
-                }
-                guard let sampleRate = u32(bodyStart + 4), sampleRate == 16_000 else {
-                    throw BindingError.invalidAudio("unsupported_format: 16000 Hz required")
-                }
-                guard let bits = u16(bodyStart + 14), bits == 16 else {
-                    throw BindingError.invalidAudio("unsupported_format: 16-bit required")
-                }
-                sawFormat = true
-            case "data":
-                // Duration comes from bytes ACTUALLY present, not the declared chunk size.
-                let available = bytes.count - bodyStart
-                guard available > 0 else { throw BindingError.invalidAudio("truncated_body:data") }
-                if Int(chunkSize) > available {
-                    throw BindingError.invalidAudio("truncated_body:declared \(chunkSize) present \(available)")
-                }
-                guard sawFormat else { throw BindingError.invalidAudio("malformed_header:data before fmt") }
-                sawData = true
-            default:
-                break
-            }
-            if sawData { break }
-            offset = bodyStart + Int(chunkSize) + (Int(chunkSize) % 2)
+        let formatSize = u32(16).map(Int.init) ?? -1
+        guard formatSize >= 16 else { throw BindingError.invalidAudio("malformed_header:fmt_size") }
+        guard formatSize == 16 else {
+            throw BindingError.invalidAudio("unsupported_format:fmt_size\(formatSize)")
         }
-        guard sawFormat else { throw BindingError.invalidAudio("malformed_header:no fmt chunk") }
-        guard sawData else { throw BindingError.invalidAudio("malformed_header:no data chunk") }
+
+        guard let formatTag = u16(20), formatTag == 1 else {
+            throw BindingError.invalidAudio("unsupported_format:format_tag")
+        }
+        guard let channels = u16(22), channels == 1 else {
+            throw BindingError.invalidAudio("unsupported_format:channels")
+        }
+        guard let sampleRate = u32(24), sampleRate == 16_000 else {
+            throw BindingError.invalidAudio("unsupported_format:sample_rate")
+        }
+        guard let byteRate = u32(28) else { throw BindingError.invalidAudio("malformed_header:byte_rate") }
+        guard let blockAlign = u16(32) else { throw BindingError.invalidAudio("malformed_header:block_align") }
+        guard let bitsPerSample = u16(34), bitsPerSample == 16 else {
+            throw BindingError.invalidAudio("unsupported_format:bits_per_sample")
+        }
+
+        // Self-consistency: derived fields must agree with declared ones. Choosing which field to
+        // believe when they disagree would be arbitrary.
+        let expectedBlockAlign = Int(channels) * Int(bitsPerSample) / 8
+        guard Int(blockAlign) == expectedBlockAlign else {
+            throw BindingError.invalidAudio("malformed_header:block_align")
+        }
+        guard Int(byteRate) == Int(sampleRate) * expectedBlockAlign else {
+            throw BindingError.invalidAudio("malformed_header:byte_rate")
+        }
+
+        guard ascii(36) == "data" else { throw BindingError.invalidAudio("malformed_header:data_chunk") }
+        guard let declaredDataSize = u32(40).map(Int.init) else {
+            throw BindingError.invalidAudio("malformed_header:data_length")
+        }
+
+        // RIFF size claims total-8. Compared against RECEIVED bytes, never against the declared
+        // chunk size: two header fields agree with each other for free.
+        guard let riffDeclared = u32(4).map(Int.init) else {
+            throw BindingError.invalidAudio("malformed_header:riff_size")
+        }
+        guard riffDeclared + 8 == bytes.count else {
+            throw BindingError.invalidAudio("malformed_header:riff_size")
+        }
+
+        let available = bytes.count - wavHeaderBytes
+        // The declared size is a claim; the received length is the fact.
+        guard declaredDataSize <= available else {
+            throw BindingError.invalidAudio("truncated_body:data_length")
+        }
+        // Bytes beyond the declared chunk mean a second chunk nobody parsed or a corrupt length;
+        // digesting fewer bytes than were uploaded changes what the record claims to contain.
+        guard available == declaredDataSize else {
+            throw BindingError.invalidAudio("malformed_header:bytes beyond declared chunk")
+        }
+        // A half frame is a torn sample, not a rounding detail.
+        guard declaredDataSize % expectedBlockAlign == 0 else {
+            throw BindingError.invalidAudio("unsupported_format:data_length")
+        }
+
+        let sampleCount = declaredDataSize / expectedBlockAlign
+        let durationMs = Int((Double(sampleCount) / Double(sampleRate) * 1000).rounded())
+        return WavFacts(sampleCount: sampleCount, durationMs: durationMs, dataLength: declaredDataSize)
     }
 
     // MARK: RFC 8785 canonicalization
@@ -270,6 +427,12 @@ enum VoiceSharingRecordBinding {
     }
 
     private static func writeCanonical(_ value: Any, into output: inout String) throws {
+        // CFBoolean is an NSNumber subclass, so `as? NSNumber` matches booleans too. Discriminating
+        // on the CoreFoundation type id first is what keeps `false` from serializing as `0`.
+        if let number = value as? NSNumber, isBoolean(number) {
+            output += number.boolValue ? "true" : "false"
+            return
+        }
         switch value {
         case let string as String:
             try writeCanonicalString(string, into: &output)
@@ -331,22 +494,22 @@ enum VoiceSharingRecordBinding {
         output += "\""
     }
 
-    /// Numbers: ECMAScript serialization (shortest round-trip form; integers without a fraction).
+    /// Numbers: ECMAScript `Number::toString` rendering via [ES6NumberFormat]. The record digest is
+    /// compared against the server's, so a locally-convenient formatting (fixed decimals, `1e-07`,
+    /// `-0`) rejects records the server accepts.
     private static func writeCanonicalNumber(_ number: NSNumber, into output: inout String) throws {
         let double = number.doubleValue
-        guard double.isFinite else { throw BindingError.nonFiniteNumber("number") }
-        if double == double.rounded(), abs(double) < 1e21 {
-            output += String(format: "%.0f", double)
-        } else {
-            output += "\(double)"
+        guard let text = ES6NumberFormat.canonical(double) else {
+            throw BindingError.nonFiniteNumber("number")
         }
+        output += text
     }
 
     // MARK: Parsing
 
     /// Parses JSON refusing duplicate keys and non-finite numbers — the two collapses a lenient
     /// parser would silently accept and thereby let a different record share one digest.
-    private static func parseRefusingDuplicates(_ data: Data) throws -> Any {
+    static func parseRefusingDuplicates(_ data: Data) throws -> Any {
         guard let text = String(data: data, encoding: .utf8) else {
             throw BindingError.malformedJSON("not UTF-8")
         }
@@ -381,6 +544,59 @@ enum VoiceSharingRecordBinding {
         CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
+    /// Hex value of a single scalar, or nil when it is not a hex digit.
+    private static func hexValue(_ scalar: Unicode.Scalar) -> Int? {
+        switch scalar {
+        case "0"..."9": return Int(scalar.value) - 0x30
+        case "a"..."f": return Int(scalar.value) - 0x61 + 10
+        case "A"..."F": return Int(scalar.value) - 0x41 + 10
+        default: return nil
+        }
+    }
+
+    /// Decodes one JSON string escape at `index` (pointing at the backslash), returning the decoded
+    /// text and the index just past the escape. Used so duplicate detection compares NAMES, not their
+    /// spellings.
+    private static func decodeEscape(_ scalars: [Unicode.Scalar], at index: Int) -> (String, Int)? {
+        guard index + 1 < scalars.count else { return nil }
+        switch scalars[index + 1] {
+        case "\"": return ("\"", index + 2)
+        case "\\": return ("\\", index + 2)
+        case "/": return ("/", index + 2)
+        case "b": return ("\u{8}", index + 2)
+        case "f": return ("\u{c}", index + 2)
+        case "n": return ("\n", index + 2)
+        case "r": return ("\r", index + 2)
+        case "t": return ("\t", index + 2)
+        case "u":
+            guard index + 5 < scalars.count else { return nil }
+            var value: UInt32 = 0
+            for offset in 2...5 {
+                guard let digit = scalars[index + offset].properties.numericValue.flatMap({ $0 >= 0 ? Int($0) : nil }) ?? hexValue(scalars[index + offset]) else { return nil }
+                value = value << 4 | UInt32(digit)
+            }
+            // A high surrogate pairs with the following \uXXXX low surrogate; both are consumed so
+            // a supplementary character compares equal to its escaped form.
+            if value >= 0xD800, value <= 0xDBFF, index + 11 < scalars.count,
+                scalars[index + 6] == "\\", scalars[index + 7] == "u" {
+                var low: UInt32 = 0
+                var paired = true
+                for offset in 8...11 {
+                    guard let digit = hexValue(scalars[index + offset]) else { paired = false; break }
+                    low = low << 4 | UInt32(digit)
+                }
+                if paired, low >= 0xDC00, low <= 0xDFFF,
+                    let scalar = Unicode.Scalar(0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00)) {
+                    return (String(Character(scalar)), index + 12)
+                }
+            }
+            guard let scalar = Unicode.Scalar(value) else { return nil }
+            return (String(Character(scalar)), index + 6)
+        default:
+            return nil
+        }
+    }
+
     /// Tracks JSON string state so a brace or repeated word inside a string is never treated as a
     /// member name; compares member names within one object scope only.
     private static func scanForDuplicateKeys(_ text: String) throws {
@@ -397,8 +613,13 @@ enum VoiceSharingRecordBinding {
                 while cursor < scalars.count {
                     let current = scalars[cursor]
                     if current == "\\" {
-                        if cursor + 1 < scalars.count { literal.append(Character(scalars[cursor + 1])) }
-                        cursor += 2
+                        // An escaped member name must compare equal to its decoded form: `"a"` and
+                        // `"\u0061"` are the SAME key, so the escape is decoded before comparison.
+                        guard let (decoded, next) = decodeEscape(scalars, at: cursor) else {
+                            throw BindingError.malformedJSON("bad escape")
+                        }
+                        literal.append(decoded)
+                        cursor = next
                         continue
                     }
                     if current == "\"" { break }

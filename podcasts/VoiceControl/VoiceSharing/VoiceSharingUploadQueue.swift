@@ -65,6 +65,9 @@ final class VoiceSharingUploadQueue {
     /// retried publication. Queue age is measured from here, so a preparation held past the bound
     /// cannot gain a fresh lifetime by being published, and repeated finalize cannot extend it.
     private static let createdName = "created.at"
+    /// Upper bound for the immutable instant's file. A timestamp is a short decimal string; anything
+    /// larger is a corrupt or foreign object and must be refused without being read.
+    static let maxCreationInstantBytes = 64
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
     private static let failedPublicationName = "publication.failed"
@@ -76,6 +79,7 @@ final class VoiceSharingUploadQueue {
     /// Testable time source for the immutable queue-age bound.
     private let clock: () -> Date
     private let synchronizer: (_ path: URL, _ isDirectory: Bool) throws -> Void
+    private let failureRecordWriter: (URL) throws -> Void
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -85,12 +89,14 @@ final class VoiceSharingUploadQueue {
         rootDirectory: URL,
         fileManager: FileManager = .default,
         clock: @escaping () -> Date = Date.init,
-        synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer
+        synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer,
+        failureRecordWriter: @escaping (URL) throws -> Void = { try Data([0x01]).write(to: $0, options: .atomic) }
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
         self.clock = clock
         self.synchronizer = synchronizer
+        self.failureRecordWriter = failureRecordWriter
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -178,14 +184,26 @@ final class VoiceSharingUploadQueue {
             } catch {
                 // Refuse publication: without durable namespace entries the marker may not be
                 // visible after a crash, so the entry must not surface as ready.
+                //
+                // Both recovery paths are attempted, and neither is allowed to be the only one. If
+                // marker removal AND the failure record both fail, this process still knows the
+                // entry is not publishable, so it is quarantined in memory for its remaining
+                // lifetime — readiness must never rest on a best-effort write succeeding.
+                var markerRemoved = false
                 do {
                     try fileManager.removeItem(at: marker)
+                    markerRemoved = true
                 } catch {
-                    // Cleanup itself failed. Record an explicit failed-publication state so the
-                    // entry is never exposed as ready — a surviving marker must not imply success.
                     let failure = directory.appendingPathComponent(Self.failedPublicationName)
-                    try? Data([0x01]).write(to: failure, options: .atomic)
-                    try? synchronizer(failure, false)
+                    do {
+                        try failureRecordWriter(failure)
+                        try synchronizer(failure, false)
+                    } catch {
+                        quarantineLocked(entry)
+                    }
+                }
+                if !markerRemoved, !quarantinedLocked(entry) {
+                    quarantineLocked(entry)
                 }
                 throw error
             }
@@ -268,10 +286,18 @@ final class VoiceSharingUploadQueue {
     }
 
     /// The immutable admission instant recorded at prepare, or nil when absent/unparseable.
+    ///
+    /// Bounded read: the instant is a short decimal string, so an oversized file is a corrupt or
+    /// foreign object, not a large time. Size is checked from attributes BEFORE the content is
+    /// loaded, so a huge file cannot be read into memory to discover it is not a timestamp.
     private func creationInstantLocked(in directory: URL) -> Date? {
-        guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.createdName)),
+        let url = directory.appendingPathComponent(Self.createdName)
+        guard let size = fileSizeIfRegularLocked(at: url),
+            size.isRegular, size.bytes > 0, size.bytes <= Self.maxCreationInstantBytes
+        else { return nil }
+        guard let data = try? Data(contentsOf: url),
             let text = String(data: data, encoding: .utf8),
-            let seconds = TimeInterval(text)
+            let seconds = TimeInterval(text), seconds.isFinite
         else { return nil }
         // BOTH representations must be present: an entry without its immutable instant cannot have
         // its lifetime bounded, so it is incomplete rather than "fresh".
@@ -285,12 +311,26 @@ final class VoiceSharingUploadQueue {
     ///   * readiness requires the persisted envelope to BIND to the audio bytes through the shared
     ///     record/WAV authority (canonical record digest, capture/epoch identity, real PCM16 mono
     ///     16 kHz header) — not merely a matching digest field.
+    /// Entries this process knows are unpublishable even though no on-disk disqualifier could be
+    /// written. Consulted by readiness, so a surviving marker cannot expose them.
+    private var quarantinedNames: Set<String> = []
+
+    /// Records `entry` as unpublishable for this process. Idempotent.
+    private func quarantineLocked(_ entry: Entry) {
+        quarantinedNames.insert(entry.name)
+    }
+
+    private func quarantinedLocked(_ entry: Entry) -> Bool {
+        quarantinedNames.contains(entry.name)
+    }
+
     private func boundEntryLocked(at entry: Entry) -> VoiceSharingRecordBinding.BoundEntry? {
         let directory = entryDirectoryLocked(for: entry)
         let marker = directory.appendingPathComponent(Self.readyMarkerName)
         let audioURL = directory.appendingPathComponent(Self.audioName)
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
+        guard !quarantinedLocked(entry) else { return nil }
         guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedPublicationName).path)
         else { return nil }
         guard fileManager.fileExists(atPath: marker.path),

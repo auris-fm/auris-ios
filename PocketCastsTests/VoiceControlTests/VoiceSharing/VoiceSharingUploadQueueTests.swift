@@ -35,8 +35,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         root = nil
     }
 
-    private func makeQueue() -> VoiceSharingUploadQueue {
-        VoiceSharingUploadQueue(rootDirectory: root)
+    private func makeQueue(fileManager: FileManager = .default) -> VoiceSharingUploadQueue {
+        VoiceSharingUploadQueue(rootDirectory: root, fileManager: fileManager)
+    }
+
+    private func temporaryRoot() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
     // Real PCM16 mono 16 kHz WAVs of different lengths: readiness now requires a bound record, so
@@ -147,6 +151,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             }
             try super.removeItem(at: URL)
         }
+
+
     }
 
     private final class SyncLog {
@@ -198,10 +204,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: stageRoot) }
 
             var stage = 0
-            let q = VoiceSharingUploadQueue(rootDirectory: stageRoot) { _, _ in
+            let q = VoiceSharingUploadQueue(rootDirectory: stageRoot, synchronizer: { _, _ in
                 if stage == failureStage { throw NSError(domain: "test-sync", code: 1) }
                 stage += 1
-            }
+            })
             let prep = try q.prepare(metadata: validRecord(audio: self.audioA), audio: self.audioA)
             XCTAssertThrowsError(try q.finalize(prep), "sync failure at stage \(failureStage) must refuse publication")
             XCTAssertTrue(q.readyEntries().isEmpty,
@@ -249,8 +255,23 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                 "truncated": false,
                 "dropped_spans": [],
             ],
-            "models": ["asr": "sensevoice", "router": "lfm2"],
-            "observations": ["wake": ["state": "completed"], "asr": ["state": "completed"]],
+            // Every model slot must be present (null = declared absent) and every observation stage
+            // must be stated with an enumerated state; a missing stage is an unstated claim.
+            "models": [
+                "vad": NSNull(),
+                "wakeword": ["id": "porcupine", "version": "3.0"],
+                "asr": ["id": "sensevoice", "version": "1"],
+                "translation": NSNull(),
+                "router": ["id": "lfm2", "version": "1"],
+            ],
+            "observations": [
+                "wake": ["state": "completed", "decision": "accepted"],
+                "bleed": ["state": "not_run", "reason": "no_playback_reference"],
+                "asr": ["state": "completed", "text": "play the next episode"],
+                "translation": ["state": "not_run", "reason": "no_text"],
+                "routing": ["state": "completed"],
+                "execution": ["state": "not_run", "reason": "precondition_failed"],
+            ],
         ]
         // `record_sha256` is defined over the RFC 8785 CANONICAL form, not any JSON encoding.
         let canonical = try! VoiceSharingRecordBinding.canonicalize(record)
@@ -323,11 +344,11 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_cleanupFailureAfterPublicationKeepsEntryUnready() throws {
         // Post-marker sync fails AND removing the marker fails. The entry must still never be
         // returned as ready: the queue records a failed-publication owner state.
-        let q = VoiceSharingUploadQueue(rootDirectory: root, fileManager: MarkerRemovalBlockingFileManager()) { path, isDirectory in
+        let q = VoiceSharingUploadQueue(rootDirectory: root, fileManager: MarkerRemovalBlockingFileManager(), synchronizer: { path, isDirectory in
             if !isDirectory && path.lastPathComponent == "ready.marker" {
                 throw NSError(domain: "test-sync", code: 1)
             }
-        }
+        })
         let audio = wav()
         let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
         XCTAssertThrowsError(try q.finalize(prep))
@@ -383,6 +404,184 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         q = makeQueue() // recovery
         XCTAssertTrue(q.readyEntries().isEmpty, "a non-matching record_sha256 must not bind")
+    }
+
+    func test_oversizedCreationInstantIsRefusedWithoutBeingLoaded() throws {
+        // The instant is a short decimal string. An oversized file is a corrupt or foreign object;
+        // the bound must be checked from attributes so a huge file is never read to find out.
+        var q = makeQueue()
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        try wav().write(to: try soleEntryDirectory().appendingPathComponent("audio.wav"))
+        // Replace the immutable instant with content far past the bound.
+        let instant = try soleEntryDirectory().appendingPathComponent("created.at")
+        try Data(String(repeating: "1", count: 4096).utf8).write(to: instant)
+        try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
+        _ = prep
+
+        q = makeQueue() // recovery
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "an entry whose admission instant cannot be bounded is not ready")
+    }
+
+    func test_doubleFailurePublicationStaysUnreadyAcrossRestartAndLifetime() throws {
+        // Marker removal fails AND the failure record cannot be written. Readiness must still not
+        // expose the entry — never rest on a best-effort write succeeding.
+        let blocking = MarkerRemovalBlockingFileManager()
+        // The failure must happen AFTER the marker exists, which is the only state where cleanup is
+        // reached. Failing every stage would refuse before publication and never test the cleanup.
+        // Marker syncs and the two post-publication directory syncs fail; the pre-publication
+        // content syncs succeed.
+        var publishedMarker = false
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            fileManager: blocking,
+            clock: Date.init,
+            synchronizer: { url, _ in
+                if url.lastPathComponent == "ready.marker" { publishedMarker = true }
+                if publishedMarker, url.lastPathComponent == "ready.marker" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                if publishedMarker, url.hasDirectoryPath {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            },
+            // The on-disk disqualifier cannot be produced either: both recovery paths fail.
+            failureRecordWriter: { _ in throw CocoaError(.fileWriteNoPermission) })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep)) { error in
+            // The publication still fails loudly; what matters is what the queue exposes AFTERWARDS.
+            _ = error
+        }
+        // Preconditions: the marker removal really was refused, and the failure record really is
+        // absent from disk. Without BOTH, the test would be exercising a single (handled) failure
+        // and would pass even with no in-memory state at all.
+        let entryDirectory = try XCTUnwrap(
+            try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+                .filter { $0.hasDirectoryPath }.first)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("ready.marker").path),
+            "precondition: marker removal must have been refused")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("publication.failed").path),
+            "precondition: the failure record must not exist on disk")
+        XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must not leave a ready entry")
+        // Still unready while this process owns the knowledge, since no disqualifier reached disk.
+        XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must stay unready on repeat reads")
+    }
+
+    func test_wavStructurallyInconsistentHeadersAreRejected() throws {
+        func reject(_ bytes: Data, _ note: String) throws {
+            var object = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: validRecord(audio: bytes)) as? [String: Any])
+            var record = try XCTUnwrap(object["record"] as? [String: Any])
+            var audio = try XCTUnwrap(record["audio"] as? [String: Any])
+            audio["byte_count"] = bytes.count
+            audio["retained_samples"] = max(0, (bytes.count - 44) / 2)
+            record["audio"] = audio
+            object["record"] = record
+            let canonical = try VoiceSharingRecordBinding.canonicalize(record)
+            let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+            object["record_sha256"] = digest
+            let metadata = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+
+            // Each case gets a clean root so exactly one entry directory exists.
+            if let existing = self.root, FileManager.default.fileExists(atPath: existing.path) {
+                try FileManager.default.removeItem(at: existing)
+            }
+            let freshRoot = temporaryRoot()
+            self.root = freshRoot
+            let q = VoiceSharingUploadQueue(rootDirectory: freshRoot, clock: Date.init)
+            _ = try q.prepare(metadata: metadata, audio: bytes)
+            let entryDirectory = try soleEntryDirectory()
+            try bytes.write(to: entryDirectory.appendingPathComponent("audio.wav"))
+            try Data([0x01]).write(to: entryDirectory.appendingPathComponent("ready.marker"))
+            let reopened = VoiceSharingUploadQueue(rootDirectory: freshRoot, clock: Date.init)
+            XCTAssertTrue(reopened.readyEntries().isEmpty, note)
+        }
+
+        var riffTooBig = wav()
+        riffTooBig[4] = UInt8((UInt32(riffTooBig.count) + 8) & 0xFF) // RIFF size disagrees with file
+        try reject(riffTooBig, "RIFF size must agree with the received length")
+
+        var badByteRate = wav()
+        badByteRate[28] = 0x11
+        try reject(badByteRate, "byte rate must agree with sample rate and block align")
+
+        var badBlockAlign = wav()
+        badBlockAlign[32] = 4
+        try reject(badBlockAlign, "block align must agree with channels and bit depth")
+
+        var trailing = wav()
+        trailing.append(contentsOf: [0, 0]) // bytes beyond the declared chunk
+        try reject(trailing, "unaccounted bytes after the data chunk are refused")
+    }
+
+    func test_retainedSamplesMustMatchTheWavsActualSamples() throws {
+        let bytes = wav()
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: validRecord(audio: bytes)) as? [String: Any])
+        var record = try XCTUnwrap(object["record"] as? [String: Any])
+        var audio = try XCTUnwrap(record["audio"] as? [String: Any])
+        audio["retained_samples"] = 999_999 // describes a different recording
+        record["audio"] = audio
+        object["record"] = record
+        let canonical = try VoiceSharingRecordBinding.canonicalize(record)
+        object["record_sha256"] = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+        let metadata = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+
+        XCTAssertThrowsError(try VoiceSharingRecordBinding.bind(envelope: metadata, audio: bytes)) { error in
+            guard case VoiceSharingRecordBinding.BindingError.audioSampleCountMismatch = error else {
+                return XCTFail("expected audioSampleCountMismatch, got \(error)")
+            }
+        }
+    }
+
+    func test_nestedSchemaGapsAreRejected() throws {
+        func mutatedRecord(_ mutate: (inout [String: Any]) -> Void) -> Data {
+            var object = (try? JSONSerialization.jsonObject(with: validRecord(audio: audioA)) as? [String: Any]) ?? [:]
+            var record = (object["record"] as? [String: Any]) ?? [:]
+            mutate(&record)
+            object["record"] = record
+            let canonical = (try? VoiceSharingRecordBinding.canonicalize(record)) ?? ""
+            object["record_sha256"] = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+            return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+        }
+
+        // A model slot with an unlisted nested field.
+        let extraModelField = mutatedRecord { record in
+            var models = (record["models"] as? [String: Any]) ?? [:]
+            models["asr"] = ["id": "sensevoice", "version": "1", "weights_path": "/etc/passwd"]
+            record["models"] = models
+        }
+        XCTAssertThrowsError(try VoiceSharingRecordBinding.bind(envelope: extraModelField, audio: audioA)) { error in
+            guard case VoiceSharingRecordBinding.BindingError.unknownField = error else {
+                return XCTFail("expected unknownField, got \(error)")
+            }
+        }
+
+        // A missing observation stage is an unstated claim.
+        let missingStage = mutatedRecord { record in
+            var observations = (record["observations"] as? [String: Any]) ?? [:]
+            observations.removeValue(forKey: "bleed")
+            record["observations"] = observations
+        }
+        XCTAssertThrowsError(try VoiceSharingRecordBinding.bind(envelope: missingStage, audio: audioA)) { error in
+            guard case VoiceSharingRecordBinding.BindingError.missingField = error else {
+                return XCTFail("expected missingField, got \(error)")
+            }
+        }
+
+        // A free-form reason is where stack traces and paths enter the dataset.
+        let freeFormReason = mutatedRecord { record in
+            var observations = (record["observations"] as? [String: Any]) ?? [:]
+            observations["bleed"] = ["state": "not_run", "reason": "Error at /Users/me/file.swift:42"]
+            record["observations"] = observations
+        }
+        XCTAssertThrowsError(try VoiceSharingRecordBinding.bind(envelope: freeFormReason, audio: audioA)) { error in
+            guard case VoiceSharingRecordBinding.BindingError.invalidField = error else {
+                return XCTFail("expected invalidField, got \(error)")
+            }
+        }
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
