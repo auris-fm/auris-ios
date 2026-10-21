@@ -163,7 +163,7 @@ final class VoiceSharingUploadQueue {
     /// install the marker and still throw) is testable: FileManager's replacement API lives in an
     /// extension and cannot be overridden.
     private let markerReplacer: (URL, URL) throws -> URL?
-    private let aggregateLimits: AggregateLimits
+    private var aggregateLimits: AggregateLimits
     /// Injectable directory listing. Exists so accounting failure is testable: FileManager's
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
@@ -281,6 +281,19 @@ final class VoiceSharingUploadQueue {
             }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
             let stage = directory.appendingPathComponent(Self.stageName)
+            // CAPACITY CHECK BEFORE GROWTH. Publication and repeated finalization both write files,
+            // so the budget must be re-verified against actual stored bytes before those writes
+            // happen — not assumed from the admission decision, which other entries may have
+            // consumed in the meantime. Refusing here is the fail-closed direction: no bytes are
+            // written for an entry the queue cannot afford.
+            // `storedUsageLocked` already charges EVERY entry its protocol headroom (published or
+            // not), so the current growth of THIS entry is already covered by that charge. What must
+            // be re-verified is that the total still fits — the earlier admission decision may have
+            // been overtaken by other entries.
+            let usageBefore = try storedUsageLocked()
+            guard usageBefore.bytes <= aggregateLimits.maxBytes else {
+                throw PrepareError.queueBytesExceeded
+            }
             // The lifecycle stage is recorded BEFORE publication begins, so that after any crash the
             // presence of this file means "publication was attempted and may not have completed".
             // Written with the plain (non-atomic) route so a crash HERE leaves nothing rather than a
@@ -358,11 +371,19 @@ final class VoiceSharingUploadQueue {
     /// size.
     static let defaultBoundedLister: (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool) = {
         directory, keys, limit in
+        // Enumeration errors are CAPTURED, not swallowed: returning `false` from the handler stops
+        // iteration silently, and a partial result reported as authoritative would treat unread
+        // storage as fully accounted.
+        final class EnumerationErrorBox { var error: Error? }
+        let box = EnumerationErrorBox()
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: keys,
             options: [.skipsSubdirectoryDescendants],
-            errorHandler: { _, _ in false })
+            errorHandler: { _, error in
+                box.error = error
+                return false
+            })
         else { throw CocoaError(.fileReadUnknown) }
         var urls: [URL] = []
         // ALLOCATION is bounded structurally: at most `limit` URLs are ever appended, and the loop
@@ -373,7 +394,17 @@ final class VoiceSharingUploadQueue {
             if urls.count >= limit { return (urls, true) }
             urls.append(next)
         }
+        // Stopping early is only legitimate when we stopped for the CAP. If iteration ended because
+        // of an error, the partial listing must not be reported as authoritative.
+        if let error = box.error { throw error }
         return (urls, false)
+    }
+
+    /// Test-only: tightens the budget of an existing instance. A second instance cannot be used to
+    /// simulate consumed capacity because its construction runs recovery, which removes entries that
+    /// are still preparing.
+    func setAggregateLimitsForTesting(_ limits: AggregateLimits) {
+        serialQueue.sync { aggregateLimits = limits }
     }
 
     // MARK: Publication reconciliation
@@ -521,9 +552,10 @@ final class VoiceSharingUploadQueue {
     private func chargeLocked(for entry: Entry) throws -> Int {
         let directory = entryDirectoryLocked(for: entry)
         let physical = try entryFootprintLocked(at: directory)
-        let marker = directory.appendingPathComponent(Self.readyMarkerName)
-        if fileManager.fileExists(atPath: marker.path) { return physical }
-        // Reserve the protocol headroom this entry may still consume on top of what it holds.
+        // EVERY entry holds the protocol headroom, published or not. A published entry can still be
+        // finalized again, and each attempt may leave a temporary behind, so "already published"
+        // does not mean "will not grow". Charging only physical bytes once a marker exists would let
+        // another admission consume the space a later finalize needs.
         return physical + Self.protocolOverheadBytes
     }
 
@@ -720,10 +752,15 @@ final class VoiceSharingUploadQueue {
             }
         }
         // Stray regular files directly under the root are not entries; remove them so the root
-        // stays queue-owned.
-        let strays = (try? fileManager.contentsOfDirectory(at: rootDirectory, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        for stray in strays where !((try? stray.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false) {
-            try? fileManager.removeItem(at: stray)
+        // stays queue-owned. Discovery here is BOUNDED too: construction must not eagerly
+        // materialise an oversized root just because recovery tolerates failures. On overflow we
+        // skip cleanup (fail-closed) rather than enumerate past the bound.
+        if let listed = try? listDirectoryBounded(
+            rootDirectory, [.isDirectoryKey], Self.maxDirectoryEntries), !listed.overflowed {
+            for stray in listed.urls
+            where !((try? stray.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false) {
+                try? fileManager.removeItem(at: stray)
+            }
         }
     }
 }
