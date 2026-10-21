@@ -62,6 +62,12 @@ final class VoiceSharingUploadQueue {
     /// a fixed bound keeps admission arithmetic closed-form and independent of filename length.
     static let protocolOverheadBytes = 256
 
+    /// Hard cap on directory entries examined during discovery. A cap checked AFTER an eager listing
+    /// does not bound allocation, so listing itself goes through `listDirectoryBounded`, which stops
+    /// at the cap and reports overflow. Exceeding it is a refusal: an entry directory that cannot be
+    /// examined within the bound has unknowable usage.
+    static let maxDirectoryEntries = 64
+
     /// The closed set of file names an entry directory may contain. Accounting and cleanup are
     /// defined over exactly these.
     /// The closed set of fixed file names an entry directory may contain.
@@ -71,6 +77,9 @@ final class VoiceSharingUploadQueue {
     /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
     /// that fails after writing the temporary can leave one behind, so it is part of the owned
     /// format and must be both accounted and cleanup-able rather than permanently blocking admission.
+    ///
+    /// Because the suffix is arbitrary, these names are NOT a finite set. They are recognised by
+    /// prefix + well-formed UUID, and all work over them is budgeted.
     static let temporaryMarkerPrefix = "\(readyMarkerName).tmp-"
 
     /// Queue-wide byte budget. 32 entries x 60 s of 16 kHz mono PCM16 = 1920 s of audio, i.e. ~32
@@ -159,6 +168,9 @@ final class VoiceSharingUploadQueue {
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
     private let listDirectory: (URL, [URLResourceKey]) throws -> [URL]
+    /// Bounded listing. Returns at most `maxDirectoryEntries` names along with whether more existed,
+    /// so callers refuse on overflow instead of allocating an unbounded array first.
+    private let listDirectoryBounded: (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool)
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -176,7 +188,9 @@ final class VoiceSharingUploadQueue {
         aggregateLimits: AggregateLimits = .default,
         listDirectory: @escaping (URL, [URLResourceKey]) throws -> [URL] = { url, keys in
             try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
-        }
+        },
+        listDirectoryBounded: @escaping (URL, [URLResourceKey], Int) throws
+            -> (urls: [URL], overflowed: Bool) = VoiceSharingUploadQueue.defaultBoundedLister
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -186,6 +200,7 @@ final class VoiceSharingUploadQueue {
         self.markerReplacer = markerReplacer
         self.aggregateLimits = aggregateLimits
         self.listDirectory = listDirectory
+        self.listDirectoryBounded = listDirectoryBounded
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -336,6 +351,29 @@ final class VoiceSharingUploadQueue {
                 throw PrepareError.publicationUncertain
             }
         }
+    }
+
+    /// Enumerates at most `limit` names and reports whether the directory holds more. Stops pulling
+    /// from the enumerator at the cap, so allocation is bounded by `limit` rather than by directory
+    /// size.
+    static let defaultBoundedLister: (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool) = {
+        directory, keys, limit in
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsSubdirectoryDescendants],
+            errorHandler: { _, _ in false })
+        else { throw CocoaError(.fileReadUnknown) }
+        var urls: [URL] = []
+        // ALLOCATION is bounded structurally: at most `limit` URLs are ever appended, and the loop
+        // stops at the first name beyond the cap. This cannot be verified from the return value
+        // (an eager lister returns the same array), so the guarantee is carried by the loop shape
+        // itself and by `maxDirectoryEntries` being the only way in.
+        while let next = enumerator.nextObject() as? URL {
+            if urls.count >= limit { return (urls, true) }
+            urls.append(next)
+        }
+        return (urls, false)
     }
 
     // MARK: Publication reconciliation
@@ -489,16 +527,25 @@ final class VoiceSharingUploadQueue {
         return physical + Self.protocolOverheadBytes
     }
 
-    /// Removes this queue's own leftover `ready.marker.tmp-<UUID>` files. Bounded by the fixed name
-    /// set, not by directory size: only names matching our prefix plus a well-formed UUID qualify, so
-    /// foreign content is never touched and cannot be hidden behind this cleanup.
+    /// Removes this queue's own leftover `ready.marker.tmp-<UUID>` files.
+    ///
+    /// NOT bounded by a fixed name set: the UUID suffix permits arbitrarily many such names, so a
+    /// bounded number of files can become an unbounded number of temporary names. Cleanup therefore
+    /// operates under an explicit entry budget (below) and fails closed when it is exceeded, rather
+    /// than claiming a bound it does not have.
     private func cleanupTemporaryMarkersLocked(in directory: URL) {
-        guard let contents = try? listDirectory(directory, []) else { return }
-        for file in contents {
+        // Bounded discovery of our own temporaries. If the directory overflows the cap we simply do
+        // not clean: the files stay on disk, so they stay CHARGED by accounting, which is the
+        // fail-closed direction. Cleanup never makes usage look smaller than it is.
+        guard let listed = try? listDirectoryBounded(directory, [], Self.maxDirectoryEntries),
+              !listed.overflowed else { return }
+        for file in listed.urls {
             let name = file.lastPathComponent
             guard name.hasPrefix(Self.temporaryMarkerPrefix),
                   UUID(uuidString: String(name.dropFirst(Self.temporaryMarkerPrefix.count))) != nil
             else { continue }
+            // A failed removal leaves the file in place, so its charge persists: correct, because the
+            // bytes are still there. Never treat a failed cleanup as reclaimed space.
             try? fileManager.removeItem(at: file)
         }
     }
@@ -509,8 +556,11 @@ final class VoiceSharingUploadQueue {
         // caller cannot mistake "could not read" for "nothing stored".
         let contents: [URL]
         do {
-            contents = try listDirectory(
-                directory, [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
+            let listed = try listDirectoryBounded(
+                directory, [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey],
+                Self.maxDirectoryEntries)
+            guard !listed.overflowed else { throw PrepareError.accountingUnavailable }
+            contents = listed.urls
         } catch {
             throw PrepareError.accountingUnavailable
         }
@@ -553,7 +603,11 @@ final class VoiceSharingUploadQueue {
     private func entriesStrictLocked() throws -> [Entry] {
         let contents: [URL]
         do {
-            contents = try listDirectory(rootDirectory, [])
+            // Bounded discovery: a root with more names than the cap cannot be accounted, so it is a
+            // refusal. Checking a cap after an eager listing would not bound allocation.
+            let listed = try listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries)
+            guard !listed.overflowed else { throw PrepareError.accountingUnavailable }
+            contents = listed.urls
         } catch {
             throw PrepareError.accountingUnavailable
         }

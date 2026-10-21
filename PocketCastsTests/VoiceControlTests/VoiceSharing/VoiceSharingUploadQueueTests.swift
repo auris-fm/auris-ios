@@ -873,10 +873,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            listDirectory: { url, keys in
+            listDirectoryBounded: { url, keys, limit in
                 if listing.failing { throw CocoaError(.fileReadUnknown) }
-                return try FileManager.default.contentsOfDirectory(
-                    at: url, includingPropertiesForKeys: keys)
+                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
             })
         let existing = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(existing)
@@ -914,12 +913,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            listDirectory: { url, keys in
+            listDirectoryBounded: { url, keys, limit in
                 // Fail ONLY the root listing; entry-level listing still works.
                 if url.standardizedFileURL == self.root.standardizedFileURL {
                     throw CocoaError(.fileReadUnknown)
                 }
-                return try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
+                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
             })
         XCTAssertThrowsError(
             try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -1025,6 +1024,86 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
         }
+    }
+
+    func test_oversizedDirectoryIsRefusedRatherThanEnumerated() throws {
+        // Reviewer 7b897fbb: a cap checked AFTER eager listing does not bound allocation, so
+        // discovery must refuse on overflow instead of materialising everything first.
+        let cap = VoiceSharingUploadQueue.maxDirectoryEntries
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        let entryDirectory = try soleEntryDirectory()
+        // More owned temporary names than the cap: an unbounded number of these is exactly what a
+        // UUID suffix permits.
+        for _ in 0...(cap + 4) {
+            try Data([0x01]).write(
+                to: entryDirectory.appendingPathComponent("ready.marker.tmp-\(UUID().uuidString)"))
+        }
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "discovery overflow is a refusal, not an unbounded enumeration")
+        }
+    }
+
+    func test_boundedListerReportsOverflowForAnOversizedDirectory() throws {
+        // Correctness half of the bound: overflow is reported and the returned set is capped.
+        // (The ALLOCATION bound is enforced structurally by the enumerator loop and is pinned by the
+        // admission control below, which refuses on overflow rather than depending on array size.)
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for index in 0..<20 {
+            try Data([0x01]).write(to: dir.appendingPathComponent("f\(index)"))
+        }
+        let limited = try VoiceSharingUploadQueue.defaultBoundedLister(dir, [], 5)
+        XCTAssertTrue(limited.overflowed, "overflow must be reported")
+        XCTAssertLessThanOrEqual(limited.urls.count, 5 + 1,
+                                 "the returned set must be capped, not the whole directory")
+    }
+
+    func test_repeatedFinalizeGrowthIsChargedAndCannotBreakTheCap() throws {
+        // Reviewer 7b897fbb: repeated finalize with the marker already present can still add
+        // temporaries, so growth must be inside the budget contract rather than assumed impossible.
+        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        let prep = try q.prepare(metadata: record, audio: audioA)
+        try q.finalize(prep)
+
+        // Repeated finalize attempts with a replacement that always fails AFTER writing its
+        // temporary: each leaves a temporary behind, so the entry grows per attempt.
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            markerReplacer: { _, replacement in
+                // Install the marker, but leave the temporary ON DISK and then throw: this is the
+                // stranded-temporary case the reviewer describes, not one FileManager cleans up.
+                throw CocoaError(.fileWriteUnknown)
+            })
+        for _ in 0..<3 {
+            _ = try? failing.finalize(prep)
+        }
+        let entryDirectory = try soleEntryDirectory()
+        let temporaries = try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
+            .filter { $0.hasPrefix("ready.marker.tmp-") }
+        XCTAssertGreaterThan(temporaries.count, 0,
+                             "precondition: failed replacements left temporaries behind")
+
+        // Whatever the growth, accounting must still see them: a fresh queue charges them and the
+        // entry remains accountable rather than silently exceeding the budget.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertNoThrow(
+            try reopened.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "bounded discovery must still succeed within the cap")
+        // And recovery claims the leftovers rather than leaving them forever.
+        let cleaned = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        _ = cleaned.readyEntries()
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
+            .filter { $0.hasPrefix("ready.marker.tmp-") }
+        XCTAssertEqual(remaining.count, 0, "stranded temporaries must be reclaimed")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
