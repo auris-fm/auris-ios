@@ -207,10 +207,21 @@ final class VoiceSharingUploadQueue {
                 // publication; a pre-marker directory sync cannot cover namespace changes made later.
                 try synchronizer(directory, true)
                 try synchronizer(rootDirectory, true)
-                // Publication is confirmed durable: clear the stage LAST, then sync so the removal
-                // is itself durable. Inside the guarded block on purpose — if clearing fails the
-                // publication is not confirmed and the entry stays excluded (fail-closed).
+                // Publication is confirmed durable. The stage is cleared as the FINAL step.
+                //
+                // The removal must not be able to create the hole the stage exists to prevent: if
+                // the stage is gone and the follow-up sync then fails, a later process sees a marker
+                // with neither a stage nor a failure record and cannot tell it from a confirmed
+                // publication. The disqualifier is therefore written BEFORE the stage is removed, so
+                // the discriminator can never disappear without something replacing it. On success
+                // the disqualifier is removed again; if THAT removal fails the entry is harmlessly
+                // excluded rather than wrongly exposed.
+                let failureMarker = directory.appendingPathComponent(Self.failedName)
+                try failureRecordWriter(failureMarker)
+                try synchronizer(directory, true)
                 try fileManager.removeItem(at: stage)
+                try synchronizer(directory, true)
+                try fileManager.removeItem(at: failureMarker)
                 try synchronizer(directory, true)
             } catch {
                 // REFUSE PUBLICATION.

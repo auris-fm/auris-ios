@@ -185,15 +185,18 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(audioSyncs.count, 1)
         XCTAssertEqual(metadataSyncs.count, 1)
         XCTAssertEqual(markerSyncs.count, 1)
-        XCTAssertEqual(entryDirSyncs.count, 3,
-                       "entry directory is synced before publication, after the marker, and after clearing the stage")
+        XCTAssertEqual(entryDirSyncs.count, 5,
+                       "entry directory is synced pre-publication, post-marker, after writing the "
+                       + "disqualifier, after clearing the stage, and after removing the disqualifier")
         XCTAssertEqual(rootSyncs.count, 1, "the queue root is synced once, persisting the entry link")
 
         XCTAssertLessThan(audioSyncs[0], markerSyncs[0], "audio must be durable before the marker is published")
         XCTAssertLessThan(metadataSyncs[0], markerSyncs[0], "metadata must be durable before the marker is published")
         XCTAssertLessThan(markerSyncs[0], entryDirSyncs[1], "the marker's namespace entry must be persisted after publication")
         XCTAssertLessThan(entryDirSyncs[1], rootSyncs[0], "the queue root must be synced after the entry directory")
-        XCTAssertLessThan(rootSyncs[0], entryDirSyncs[2], "clearing the stage is the LAST durable step")
+        XCTAssertLessThan(rootSyncs[0], entryDirSyncs[2], "the disqualifier is written only after the marker is durable")
+        XCTAssertLessThan(entryDirSyncs[2], entryDirSyncs[3], "the stage is cleared only after the disqualifier is durable")
+        XCTAssertLessThan(entryDirSyncs[3], entryDirSyncs[4], "the disqualifier is removed LAST")
     }
 
     func test_syncFailureRefusesPublication() throws {
@@ -496,6 +499,68 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertFalse(FileManager.default.fileExists(atPath: entryDirectory.path),
                        "recovery must remove an entry whose publication was never confirmed")
+    }
+
+    func test_stageClearSucceededButItsSyncFailedKeepsEntryUnreadyAcrossRestart() throws {
+        // Reviewer ef155ce2: the FINAL transition can reproduce the hole. Stage removal succeeds,
+        // the following directory sync throws, then both failure-record writing and marker removal
+        // also fail. Result: ready.marker with neither stage nor failure file — and a fresh queue
+        // would accept it even though finalize threw.
+        final class StageGoneProbe: FileManager {
+            var stagePath = ""
+            var removalDone = false
+            override func removeItem(at url: URL) throws {
+                if url.lastPathComponent == "stage.publishing" {
+                    try super.removeItem(at: url)
+                    removalDone = true
+                    return
+                }
+                // Both fallible cleanups refuse.
+                if url.lastPathComponent == "ready.marker" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                try super.removeItem(at: url)
+            }
+        }
+        let probe = StageGoneProbe()
+        var publishedMarker = false
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            fileManager: probe,
+            clock: Date.init,
+            synchronizer: { url, isDirectory in
+                // Everything through the marker's OWN sync succeeds so publication is reached; the
+                // stage is then cleared, and only the DIRECTORY sync after that removal fails. That
+                // is the reviewer's exact window.
+                if url.lastPathComponent == "ready.marker" { publishedMarker = true }
+                guard isDirectory, publishedMarker, probe.removalDone else { return }
+                throw CocoaError(.fileWriteNoPermission)
+            },
+            failureRecordWriter: { _ in throw CocoaError(.fileWriteNoPermission) })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDirectory = try soleEntryDirectory()
+        probe.stagePath = entryDirectory.appendingPathComponent("stage.publishing").path
+
+        XCTAssertThrowsError(try q.finalize(prep))
+        // The disqualifier is now written BEFORE the stage is cleared, so the stage survives the
+        // failure. Either discriminator excludes the entry; the important part is that one does.
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: entryDirectory.appendingPathComponent("stage.publishing").path)
+            || FileManager.default.fileExists(
+                atPath: entryDirectory.appendingPathComponent("publication.failed").path),
+            "precondition: a durable disqualifier survives the failed final transition")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("ready.marker").path),
+            "precondition: the marker survived")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("publication.failed").path),
+            "precondition: no failure record either")
+
+        // finalize threw, so this entry was NOT published. A fresh queue must agree.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(reopened.readyEntries().isEmpty,
+                      "finalize threw, so a fresh queue must not accept the entry")
     }
 
     func test_disqualifierIsWrittenBeforeTheMarkerIsRemoved() throws {
