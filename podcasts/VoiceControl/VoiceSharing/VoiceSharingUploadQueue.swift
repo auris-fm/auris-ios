@@ -44,10 +44,26 @@ final class VoiceSharingUploadQueue {
     /// refuse publication — a compiled ceiling, NOT an activation value.
     static let maxEntryAge: TimeInterval = 48 * 60 * 60
 
+    /// QUEUE-WIDE budgets. Per-entry bounds cannot bound the queue: N individually-legal entries
+    /// still multiply. These are compiled defaults; like every other numeric limit here they are
+    /// implementation bounds, NOT owner-approved activation values.
+    struct AggregateLimits {
+        let maxBytes: Int
+        let maxRecords: Int
+
+        static let `default` = AggregateLimits(
+            maxBytes: VoiceSharingUploadQueue.maxQueueBytes,
+            maxRecords: VoiceSharingUploadQueue.maxQueueEntries)
+    }
+
+    static let maxQueueBytes = 32 * (16_000 * 2 * 60) // queue-wide, ≈ 30 s of audio across entries
+
     enum PrepareError: Error, Equatable {
         case queueFull
         case audioTooLarge
         case metadataTooLarge
+        /// The queue-wide byte budget would be exceeded. Distinct from per-entry `audioTooLarge`.
+        case queueBytesExceeded
         case expired
         /// The ready transition may have occurred but its final synchronization could not be
         /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
@@ -116,6 +132,7 @@ final class VoiceSharingUploadQueue {
     /// install the marker and still throw) is testable: FileManager's replacement API lives in an
     /// extension and cannot be overridden.
     private let markerReplacer: (URL, URL) throws -> URL?
+    private let aggregateLimits: AggregateLimits
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -129,7 +146,8 @@ final class VoiceSharingUploadQueue {
         failureRecordWriter: @escaping (URL) throws -> Void = { try Data([0x01]).write(to: $0, options: .atomic) },
         markerReplacer: @escaping (URL, URL) throws -> URL? = {
             try FileManager.default.replaceItemAt($0, withItemAt: $1)
-        }
+        },
+        aggregateLimits: AggregateLimits = .default
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -137,6 +155,7 @@ final class VoiceSharingUploadQueue {
         self.synchronizer = synchronizer
         self.failureRecordWriter = failureRecordWriter
         self.markerReplacer = markerReplacer
+        self.aggregateLimits = aggregateLimits
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -173,9 +192,17 @@ final class VoiceSharingUploadQueue {
             let name = UUID().uuidString
             let entryDirectory = rootDirectory.appendingPathComponent(name, isDirectory: true)
             do {
-                guard countEntriesLocked() < Self.maxQueueEntries else { throw PrepareError.queueFull }
                 guard audio.count <= Self.maxEntryAudioBytes else { throw PrepareError.audioTooLarge }
                 guard metadata.count <= Self.maxMetadataBytes else { throw PrepareError.metadataTooLarge }
+                // Aggregate admission is measured from what is ACTUALLY stored, not from a running
+                // counter: a counter drifts the moment any write, removal or crash disagrees with
+                // it, and the queue would then admit past its budget or refuse within it forever.
+                let usage = storedUsageLocked()
+                guard usage.records < aggregateLimits.maxRecords else { throw PrepareError.queueFull }
+                let incoming = audio.count + metadata.count
+                guard usage.bytes + incoming <= aggregateLimits.maxBytes else {
+                    throw PrepareError.queueBytesExceeded
+                }
                 try fileManager.createDirectory(at: entryDirectory, withIntermediateDirectories: true)
                 try audio.write(to: entryDirectory.appendingPathComponent(Self.audioName), options: .atomic)
                 try metadata.write(to: entryDirectory.appendingPathComponent(Self.metadataName), options: .atomic)
@@ -383,6 +410,24 @@ final class VoiceSharingUploadQueue {
             throw CocoaError(.fileNoSuchFile)
         }
         return directory
+    }
+
+    /// Actual bytes and records currently stored, read from disk. Any file inside an entry
+    /// directory counts, not just audio/metadata: a partial or stray file still consumes storage and
+    /// the budget must account for it or the bound is fictional.
+    private func storedUsageLocked() -> (bytes: Int, records: Int) {
+        var bytes = 0
+        var records = 0
+        for entry in entriesLocked() {
+            let directory = entryDirectoryLocked(for: entry)
+            let contents = (try? fileManager.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+            for file in contents {
+                bytes += (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            }
+            records += 1
+        }
+        return (bytes, records)
     }
 
     private func countEntriesLocked() -> Int {

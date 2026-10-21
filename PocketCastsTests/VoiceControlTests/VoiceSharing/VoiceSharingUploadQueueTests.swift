@@ -748,6 +748,89 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(reopened.readyEntries().map(\.name), [prep.name])
     }
 
+    // MARK: Aggregate accounting (spec: admission gates on queue-wide budgets)
+
+    func test_prepareRefusesWhenAggregateQueueBytesWouldExceedTheBound() throws {
+        // Per-entry bounds alone are not enough: N individually-legal entries can still blow the
+        // queue-wide byte budget. Admission must account for what is already stored.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 6_000, maxRecords: 32))
+        // Each real WAV here is ~3.2 kB, so the second entry must be refused.
+        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded)
+        }
+    }
+
+    func test_aggregateAccountingCountsMetadataNotJustAudio() throws {
+        // Budget sits between ONE and TWO of these padded entries, so counting metadata is the only
+        // way the second admission can be refused: audio-only accounting would let both in.
+        // A large-but-legal metadata body must be counted; ignoring it would let the budget leak.
+        var padded = try JSONSerialization.jsonObject(
+            with: validRecord(captureID: UUID().uuidString, audio: audioA)) as! [String: Any]
+        padded["capture_session_id"] = String(repeating: "x", count: 2_000)
+        let big = try JSONSerialization.data(withJSONObject: padded)
+        // The stored-vs-incoming split is what this control distinguishes. `incoming` (this entry's
+        // audio + metadata) is always counted, so the discriminating quantity is the STORED side:
+        // budget is set so a stored entry measured as audio-only leaves room for a second entry,
+        // while a stored entry measured as audio+metadata does not.
+        //   stored full   = 3244 + 3080 = 6324 ; stored audio-only = 3244
+        //   incoming      = 6324
+        //   budget        = 6324 + 3244 + 500 = 10068 -> full: 6324+6324=12648 > 10068 REFUSE
+        //                                            -> audio-only: 3244+6324=9568 <= 10068 ADMIT
+        let budget = (audioA.count + big.count) + audioA.count + 500
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(
+                maxBytes: budget, maxRecords: 32))
+        _ = try q.prepare(metadata: big, audio: audioA)
+        // Precondition: the padded metadata really is on disk at the size that matters.
+        let stored = try soleEntryDirectory().appendingPathComponent("metadata.json")
+        let storedSize = (try FileManager.default.attributesOfItem(atPath: stored.path)[.size] as? Int) ?? 0
+        XCTAssertGreaterThan(storedSize, 2_000,
+                             "precondition: padded metadata is stored (size \(storedSize))")
+
+        XCTAssertThrowsError(try q.prepare(metadata: big, audio: audioA)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded)
+        }
+        // Discrimination asserted explicitly: with stored usage measured as audio-only, the same
+        // budget WOULD have admitted this entry — so counting stored metadata is what discriminates.
+        XCTAssertLessThanOrEqual(storedSize + audioA.count + big.count, budget,
+                                 "audio-only stored accounting would admit the second entry")
+        XCTAssertGreaterThan(audioA.count + big.count + audioA.count + big.count, budget,
+                             "full accounting must refuse it")
+    }
+
+    func test_aggregateRecordCountBoundIsEnforcedAcrossReadyAndPreparingEntries() throws {
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 2))
+        let a = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(a)
+        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueFull)
+        }
+    }
+
+    func test_removingAnEntryReleasesItsAggregateBudget() throws {
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 6_000, maxRecords: 32))
+        let first = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+        try q.remove(first)
+        // Budget is released only if accounting reflects actual on-disk state, not a counter.
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.
