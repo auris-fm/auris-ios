@@ -103,6 +103,8 @@ final class VoiceSharingUploadQueue {
         /// Stored usage could not be determined, so admission is refused rather than assuming the
         /// unknown space is free.
         case accountingUnavailable
+        /// An increment path was asked to spend an attempt the entry does not have.
+        case attemptsExhausted
         case expired
         /// The ready transition may have occurred but its final synchronization could not be
         /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
@@ -136,6 +138,11 @@ final class VoiceSharingUploadQueue {
     /// process restarts as the spec requires.
     static let attemptRecordName = "attempts.json"
     static let maxCreationInstantBytes = 64
+    /// Upper bound on the attempt record's size. A larger file is corrupt or foreign, and reading it
+    /// to find out would let a hostile object drive allocation.
+    static let maxAttemptRecordBytes = 64
+    /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
+    static let maxUploadAttemptsCeiling = 1_000
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
     /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
@@ -181,6 +188,7 @@ final class VoiceSharingUploadQueue {
     /// that opened it, so a killed process cannot leave one behind. The durable file records that an
     /// attempt STARTED (so the count survives restart) but is never read as "still running".
     private var inFlightAttempts: Set<Entry> = []
+
     /// Injectable directory listing. Exists so accounting failure is testable: FileManager's
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
@@ -408,10 +416,11 @@ final class VoiceSharingUploadQueue {
         with source: ((URL, [URLResourceKey]) -> AnySequence<EnumerationStep>)?
     ) -> (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool) {
         { directory, keys, limit in
-            if let source {
-                return try boundedListing(over: source(directory, keys), limit: limit)
-            }
-            return try VoiceSharingUploadQueue.realBoundedListing(directory, keys, limit)
+            // ONE path: the injected source and the real enumerator both produce
+            // `EnumerationStep` sequences that are processed by `boundedListing`.
+            let steps = source?(directory, keys)
+                ?? VoiceSharingUploadQueue.realSteps(directory, keys)
+            return try boundedListing(over: steps, limit: limit)
         }
     }
 
@@ -433,46 +442,47 @@ final class VoiceSharingUploadQueue {
         return (urls, false)
     }
 
-    static func realBoundedListing(
-        _ directory: URL, _ keys: [URLResourceKey], _ limit: Int
-    ) throws -> (urls: [URL], overflowed: Bool) {
-        do {
-        // Enumeration errors are CAPTURED, not swallowed: returning `false` from the handler stops
-        // iteration silently, and a partial result reported as authoritative would treat unread
-        // storage as fully accounted.
-        final class EnumerationErrorBox { var error: Error? }
-        let box = EnumerationErrorBox()
+    /// Adapts the REAL FileManager enumerator into the same `EnumerationStep` sequence that the
+    /// injected control produces, so there is exactly ONE step-processing path. Errors from the
+    /// enumerator are yielded as `.failure` rather than captured in a side channel: a control that
+    /// supplies `.failure` therefore exercises the identical code that a real enumeration error
+    /// takes, which a parallel implementation could not guarantee.
+    static func realSteps(
+        _ directory: URL, _ keys: [URLResourceKey]
+    ) -> AnySequence<EnumerationStep> {
+        // A failure to even create the enumerator is yielded as a step, not thrown here, so callers
+        // have a single error path.
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: keys,
             options: [.skipsSubdirectoryDescendants],
-            errorHandler: { _, error in
-                box.error = error
-                return false
+            errorHandler: { _, _ in
+                // Returning true lets enumeration continue so the error can be surfaced for THIS
+                // position; the yielded `.failure` below stops the loop and propagates.
+                true
             })
-        else { throw CocoaError(.fileReadUnknown) }
-        var urls: [URL] = []
-        // ALLOCATION is bounded structurally: at most `limit` URLs are ever appended, and the loop
-        // stops at the first name beyond the cap. This cannot be verified from the return value
-        // (an eager lister returns the same array), so the guarantee is carried by the loop shape
-        // itself and by `maxDirectoryEntries` being the only way in.
-        while let next = enumerator.nextObject() as? URL {
-            if urls.count >= limit { return (urls, true) }
-            urls.append(next)
+        else {
+            return AnySequence([.failure(CocoaError(.fileReadUnknown))])
         }
-        // Stopping early is only legitimate when we stopped for the CAP. If iteration ended because
-        // of an error, the partial listing must not be reported as authoritative.
-        if let error = box.error { throw error }
-        return (urls, false)
+        return AnySequence { () -> AnyIterator<EnumerationStep> in
+            // `nextObject()` is the only real read; it must not be called after a failure is
+            // yielded, so a failure terminates the sequence.
+            AnyIterator {
+                guard let object = enumerator.nextObject() else { return nil }
+                if let url = object as? URL { return .url(url) }
+                if let error = object as? Error { return .failure(error) }
+                return .failure(CocoaError(.fileReadUnknown))
+            }
         }
     }
+
 
     // MARK: Attempt ownership
 
     /// Number of attempts already started for this entry. Read from durable state so the count
     /// survives process restarts.
-    func attemptCount(for entry: Entry) -> Int {
-        serialQueue.sync { attemptCountLocked(for: entry) }
+    func attemptCount(for entry: Entry) throws -> Int {
+        try serialQueue.sync { try attemptCountLocked(for: entry) }
     }
 
     /// Whether this process currently owns a live request for the entry.
@@ -481,8 +491,8 @@ final class VoiceSharingUploadQueue {
     }
 
     /// Whether the entry has attempts remaining.
-    func isAttemptable(_ entry: Entry) -> Bool {
-        serialQueue.sync { isAttemptableLocked(entry) }
+    func isAttemptable(_ entry: Entry) throws -> Bool {
+        try serialQueue.sync { try isAttemptableLocked(entry) }
     }
 
     /// Acquires single-request ownership and consumes one attempt. Returns `false` when another
@@ -490,10 +500,23 @@ final class VoiceSharingUploadQueue {
     @discardableResult
     func beginAttempt(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
+            // The handle is validated through the SAME boundary every other destructive operation
+            // uses, but only ONCE: `isAttemptableLocked` -> `attemptCountLocked` ->
+            // `validatedEntryDirectoryLocked` throws for a foreign or malformed `Entry` before any
+            // directory is created, read or removed. An earlier duplicate check here was shadowed on
+            // every path (including the removal below, which is reachable only after this one
+            // succeeded) and no control could distinguish its absence.
+            let directory = entryDirectoryLocked(for: entry)
+            // Single in-flight ownership is a property of THIS process's live work. It is
+            // deliberately not held statically across instances: a static set outlives the queue
+            // that filled it, so an attempt abandoned by a killed owner would block the entry
+            // forever — the failure mode `test_inFlightOwnershipIsNotResumedAsLiveAfterRestart`
+            // exists to catch. Two concurrent owners over one root are excluded by the lead process
+            // being the only uploader, and the durable attempt count still bounds total attempts.
             guard !inFlightAttempts.contains(entry) else { return false }
-            guard isAttemptableLocked(entry) else {
+            guard try isAttemptableLocked(entry) else {
                 // Exhausted: remove the local entry rather than retrying forever.
-                try? fileManager.removeItem(at: entryDirectoryLocked(for: entry))
+                try? fileManager.removeItem(at: directory)
                 return false
             }
             try recordAttemptLocked(entry)
@@ -504,7 +527,9 @@ final class VoiceSharingUploadQueue {
 
     /// Releases single-request ownership. Does NOT remove the durable record: the attempt is spent.
     func endAttempt(_ entry: Entry) {
-        serialQueue.sync { inFlightAttempts.remove(entry) }
+        serialQueue.sync {
+            inFlightAttempts.remove(entry)
+        }
     }
 
     /// Records an attempt without taking ownership. Prefer `beginAttempt`, which does both atomically.
@@ -518,26 +543,64 @@ final class VoiceSharingUploadQueue {
         entryDirectoryLocked(for: entry).appendingPathComponent(Self.attemptRecordName)
     }
 
-    private func attemptCountLocked(for entry: Entry) -> Int {
-        let url = attemptRecordURL(for: entry)
+    /// Reads the durable attempt count.
+    ///
+    /// Only a CONFIRMED ABSENCE means zero. A missing file is absence; an unreadable, oversized,
+    /// malformed or negative record is NOT — treating those as zero would silently reset the retry
+    /// budget and let an entry retry forever. They throw instead, so the caller must refuse.
+    private func attemptCountLocked(for entry: Entry) throws -> Int {
+        let directory = try validatedEntryDirectoryLocked(entry)
+        let url = directory.appendingPathComponent(Self.attemptRecordName)
+        guard fileManager.fileExists(atPath: url.path) else { return 0 }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+              size.bytes > 0, size.bytes <= Self.maxAttemptRecordBytes
+        else { throw PrepareError.accountingUnavailable }
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any],
+              dict.count == 1,
               let value = dict["attempts"] as? Int,
-              value >= 0 else { return 0 }
+              value >= 0, value <= Self.maxUploadAttemptsCeiling
+        else { throw PrepareError.accountingUnavailable }
         return value
     }
 
-    private func isAttemptableLocked(_ entry: Entry) -> Bool {
-        attemptCountLocked(for: entry) < attemptLimits.maxUploadAttempts
+    private func isAttemptableLocked(_ entry: Entry) throws -> Bool {
+        try attemptCountLocked(for: entry) < attemptLimits.maxUploadAttempts
     }
 
+    /// Writes the attempt record and confirms its durability. Returns only after the record and its
+    /// containing directory have been synchronized, so a crash cannot lose a counted attempt and let
+    /// the entry be retried past its budget. Ambiguous persistence surfaces as `.publicationUncertain`
+    /// for the attempt rather than permitting an uncounted request.
     private func recordAttemptLocked(_ entry: Entry) throws {
-        let count = attemptCountLocked(for: entry) + 1
-        let url = attemptRecordURL(for: entry)
+        let directory = try validatedEntryDirectoryLocked(entry)
+        let current = try attemptCountLocked(for: entry)
+        // Every increment path enforces the limit, not only `beginAttempt`.
+        guard current < attemptLimits.maxUploadAttempts else {
+            throw PrepareError.attemptsExhausted
+        }
+        let next = current + 1
+        // Guard the arithmetic: an increment that cannot be represented is a corrupt record, not a
+        // fresh start.
+        guard next > current, next <= Self.maxUploadAttemptsCeiling else {
+            throw PrepareError.accountingUnavailable
+        }
+        let url = directory.appendingPathComponent(Self.attemptRecordName)
         let data = try JSONSerialization.data(
-            withJSONObject: ["attempts": count], options: [.sortedKeys])
-        try data.write(to: url, options: [.atomic])
+            withJSONObject: ["attempts": next], options: [.sortedKeys])
+        guard data.count <= Self.maxAttemptRecordBytes else {
+            throw PrepareError.accountingUnavailable
+        }
+        do {
+            try data.write(to: url, options: [.atomic])
+            try synchronizer(url, false)
+            try synchronizer(directory, true)
+        } catch {
+            // The write may or may not have landed. Do not hand out a request whose attempt is not
+            // known to be counted.
+            throw PrepareError.publicationUncertain
+        }
     }
 
     /// Test-only: tightens the budget of an existing instance. A second instance cannot be used to

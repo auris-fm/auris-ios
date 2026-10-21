@@ -1236,9 +1236,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // the reopen failure below is about the fixture, not about attempt durability.
         XCTAssertEqual(q.readyEntries().count, 1,
                        "PRE: the finalized entry must be ready before any attempt is recorded")
-        XCTAssertEqual(q.attemptCount(for: prep), 0, "a fresh entry has no attempts")
+        XCTAssertEqual(try q.attemptCount(for: prep), 0, "a fresh entry has no attempts")
         try q.recordAttempt(prep)
-        XCTAssertEqual(q.attemptCount(for: prep), 1)
+        XCTAssertEqual(try q.attemptCount(for: prep), 1)
 
         // A FRESH queue over the same root must see the same count.
         let recordPath = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
@@ -1249,10 +1249,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "POST: the entry must still be ready after reopening")
         XCTAssertTrue(FileManager.default.fileExists(atPath: recordPath.path),
                       "POST: reopening must not remove the attempt record")
-        XCTAssertEqual(reopened.attemptCount(for: prep), 1,
+        XCTAssertEqual(try reopened.attemptCount(for: prep), 1,
                        "attempts must survive process restart")
         try reopened.recordAttempt(prep)
-        XCTAssertEqual(reopened.attemptCount(for: prep), 2)
+        XCTAssertEqual(try reopened.attemptCount(for: prep), 2)
     }
 
     func test_entryIsRemovedWhenAttemptsAreExhausted() throws {
@@ -1270,7 +1270,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(try q.beginAttempt(prep))
         q.endAttempt(prep)
         // Exhausted: the entry is no longer attemptable, and attempting again removes it.
-        XCTAssertFalse(q.isAttemptable(prep), "an exhausted entry must not be attemptable")
+        try XCTAssertFalse(q.isAttemptable(prep), "an exhausted entry must not be attemptable")
         XCTAssertFalse(try q.beginAttempt(prep),
                        "an exhausted entry must not be granted another attempt")
         XCTAssertTrue(q.readyEntries().isEmpty, "an exhausted entry is removed, not retried forever")
@@ -1304,6 +1304,148 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "a killed process leaves no live in-flight request")
         XCTAssertTrue(try reopened.beginAttempt(prep),
                       "a stale attempt must not block the entry forever")
+    }
+
+    func test_attemptRecordIsInsideThePerEntryProtocolReserve() throws {
+        // `recordAttempt` writes outside the admission path, so it must not be able to push an entry
+        // past the budget. It cannot: the record is a short JSON object and every entry reserves
+        // `protocolOverheadBytes` for exactly this class of sidecar. This test pins that reasoning so
+        // a future growth to a multi-byte-per-attempt format fails here instead of silently
+        // exceeding the reserve.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 100))
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        // The largest count that fits the record's byte bound must still fit the per-entry reserve.
+        // 99 is the largest two-digit count; the bound must not be reachable by growth.
+        for _ in 0..<99 { try q.recordAttempt(prep) }
+        XCTAssertEqual(try q.attemptCount(for: prep), 99)
+        let recordURL = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
+        let size = try XCTUnwrap(
+            (try recordURL.resourceValues(forKeys: [.fileSizeKey])).fileSize)
+        XCTAssertLessThanOrEqual(
+            size, VoiceSharingUploadQueue.protocolOverheadBytes,
+            "the attempt record must fit inside the per-entry protocol reserve")
+    }
+
+    // MARK: Attempt record integrity (reviewer 6f2dd161)
+
+    func test_malformedAttemptRecordIsRefusedNotTreatedAsZero() throws {
+        // Only CONFIRMED ABSENCE means zero. A corrupt record must not reset the retry budget.
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        let record = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
+        try Data("not json".utf8).write(to: record)
+        XCTAssertThrowsError(try q.attemptCount(for: prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "a malformed record is unknown usage, not zero")
+        }
+        XCTAssertThrowsError(try q.beginAttempt(prep),
+                             "an unreadable budget must not permit a request")
+    }
+
+    func test_negativeAndOversizedAttemptRecordsAreRefused() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        let record = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
+
+        try Data("{\"attempts\":-1}".utf8).write(to: record)
+        XCTAssertThrowsError(try q.attemptCount(for: prep), "a negative count is corrupt")
+
+        try Data("{\"attempts\":99999999}".utf8).write(to: record)
+        XCTAssertThrowsError(try q.attemptCount(for: prep), "a count past the ceiling is corrupt")
+
+        // Oversized: refused from ATTRIBUTES, without reading the content into memory. The payload is
+        // a SINGLE-key, syntactically valid JSON integer, so the shape and decode guards both accept
+        // it and only the size bound can reject it. A multi-key or malformed payload would be caught
+        // by those guards first and would not discriminate.
+        // A single-key record whose value is syntactically a JSON number but far beyond any
+        // representable count, so the SIZE bound is what refuses it from attributes rather than a
+        // full read of a potentially huge foreign object.
+        let padded = "{\"attempts\":1" + String(repeating: "0", count: 4000) + "}"
+        let oversized = Data(padded.utf8)
+        XCTAssertGreaterThan(oversized.count, VoiceSharingUploadQueue.maxAttemptRecordBytes)
+        try oversized.write(to: record)
+        XCTAssertThrowsError(try q.attemptCount(for: prep), "an oversized record is corrupt")
+
+        // The size bound must also refuse a record whose VALUE is perfectly valid but whose file is
+        // padded past the bound: the read is refused from attributes, not after decoding.
+        let paddedValid = "{\"attempts\":1}" + String(repeating: " ", count: 4000)
+        let paddedData = Data(paddedValid.utf8)
+        XCTAssertGreaterThan(paddedData.count, VoiceSharingUploadQueue.maxAttemptRecordBytes)
+        try paddedData.write(to: record)
+        XCTAssertThrowsError(try q.attemptCount(for: prep),
+                             "an oversized-but-parseable record must still be refused by size")
+    }
+
+    func test_attemptRecordSyncFailureDoesNotPermitAnUncountedRequest() throws {
+        // Atomic write is not a durability barrier. If the record's sync cannot be confirmed, the
+        // attempt is ambiguous and must not yield a request.
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if !isDirectory, url.lastPathComponent == "attempts.json" { throw CocoaError(.fileWriteUnknown) }
+            },
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        let prep = try failing.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try failing.finalize(prep)
+        XCTAssertThrowsError(try failing.beginAttempt(prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                           "unconfirmed attempt durability is uncertain, not success")
+        }
+        XCTAssertFalse(failing.isAttemptInFlight(prep),
+                       "an attempt whose durability is unconfirmed must not hold ownership")
+    }
+
+    func test_foreignEntryHandleIsRefusedByAttemptOperations() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let foreign = VoiceSharingUploadQueue.Entry(root: URL(fileURLWithPath: "/tmp"), name: "../../etc")
+        XCTAssertThrowsError(try q.beginAttempt(foreign),
+                             "a foreign handle must not name a directory this queue owns")
+        XCTAssertThrowsError(try q.attemptCount(for: foreign))
+    }
+
+    func test_recordAttemptEnforcesTheLimitToo() throws {
+        // Every increment path must enforce the bound, not only beginAttempt.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: Date.init,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        try q.recordAttempt(prep)
+        XCTAssertThrowsError(try q.recordAttempt(prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .attemptsExhausted,
+                           "recordAttempt must refuse past the limit")
+        }
+    }
+
+    func test_enumerationFailureControlRunsThroughTheRealPath() throws {
+        // Reviewer 6f2dd161: a control over a PARALLEL implementation proves nothing. `boundedLister`
+        // with no injected source must run the real enumerator through the SAME step processing, so
+        // the injected-failure control exercises identical code.
+        struct Boom: Error {}
+        let steps: [VoiceSharingUploadQueue.EnumerationStep] = [
+            .url(URL(fileURLWithPath: "/tmp/one")), .failure(Boom())
+        ]
+        XCTAssertThrowsError(
+            try VoiceSharingUploadQueue.boundedListing(over: AnySequence(steps), limit: 8)
+        ) { XCTAssertTrue($0 is Boom) }
+
+        // And the real enumerator is adapted into the same sequence type: a readable directory
+        // yields urls, and the lister returns them.
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: dir.appendingPathComponent("a"))
+        let listed = try VoiceSharingUploadQueue.defaultBoundedLister(dir, [], 8)
+        XCTAssertEqual(listed.urls.count, 1)
+        XCTAssertFalse(listed.overflowed)
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
