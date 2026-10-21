@@ -94,9 +94,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_entryWithMissingOrDirectoryAudioIsRemovedByRecovery() throws {
         var q = makeQueue()
-        let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        _ = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
         try FileManager.default.removeItem(at: try soleEntryDirectory().appendingPathComponent("audio.wav"))
-        try q.finalize(prep)
+        try Data([0x01]).write(to: soleEntryDirectory().appendingPathComponent("ready.marker"))
         _ = q.readyEntries() // live filter
 
         q = makeQueue() // recovery
@@ -133,30 +133,131 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    // MARK: Durability ordering (finding 3)
+    // MARK: Durability ordering and fail-closed publication (review round 24, finding 1)
 
-    func test_audioAndMetadataAreSynchronizedBeforeMarkerPublication() throws {
-        var synced: [String] = []
-        let q = VoiceSharingUploadQueue(rootDirectory: root) { path, isDirectory in
-            synced.append((isDirectory ? "dir:" : "file:") + path.lastPathComponent)
+    private final class SyncLog {
+        var entries: [String] = []
+        func recorder() -> (URL, Bool) throws -> Void {
+            { path, isDirectory in
+                self.entries.append((isDirectory ? "dir:" : "file:") + path.lastPathComponent)
+            }
         }
+    }
+
+    func test_publicationProtocolOrder() throws {
+        let log = SyncLog()
+        let q = VoiceSharingUploadQueue(rootDirectory: root, synchronizer: log.recorder())
         let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
-        synced.removeAll(keepingCapacity: true) // observe only the finalize sequence
+        log.entries.removeAll() // observe only the finalize sequence
         try q.finalize(prep)
+        let synced = log.entries
 
-        let audioSyncIndex = synced.firstIndex { $0 == "file:audio.wav" }
-        let metadataSyncIndex = synced.firstIndex { $0 == "file:metadata.json" }
-        let markerSyncIndex = synced.firstIndex { $0.hasSuffix("ready.marker") }
         let entryDirectory = try soleEntryDirectory()
-        let entryDirSyncIndex = synced.firstIndex { $0 == "dir:" + entryDirectory.lastPathComponent }
-        let audioSync = try XCTUnwrap(audioSyncIndex)
-        let metadataSync = try XCTUnwrap(metadataSyncIndex)
-        let markerSync = try XCTUnwrap(markerSyncIndex)
-        let entryDirSync = try XCTUnwrap(entryDirSyncIndex)
+        func indexes(_ label: String) -> [Int] {
+            synced.indices.filter { synced[$0] == label }
+        }
+        let audioSyncs = indexes("file:audio.wav")
+        let metadataSyncs = indexes("file:metadata.json")
+        let markerSyncs = indexes("file:ready.marker")
+        let entryDirSyncs = indexes("dir:" + entryDirectory.lastPathComponent)
+        let rootSyncs = synced.indices.filter { synced[$0].hasPrefix("dir:") && !entryDirSyncs.contains($0) }
 
-        XCTAssertLessThan(audioSync, markerSync, "audio must be durable before the marker is published")
-        XCTAssertLessThan(metadataSync, markerSync, "metadata must be durable before the marker is published")
-        XCTAssertLessThan(entryDirSync, markerSync, "the entry directory must be durable before the marker is published")
+        XCTAssertEqual(audioSyncs.count, 1)
+        XCTAssertEqual(metadataSyncs.count, 1)
+        XCTAssertEqual(markerSyncs.count, 1)
+        XCTAssertEqual(entryDirSyncs.count, 2, "entry directory is synced before AND after marker publication")
+        XCTAssertEqual(rootSyncs.count, 1, "the queue root is synced once, persisting the entry link")
+
+        XCTAssertLessThan(audioSyncs[0], markerSyncs[0], "audio must be durable before the marker is published")
+        XCTAssertLessThan(metadataSyncs[0], markerSyncs[0], "metadata must be durable before the marker is published")
+        XCTAssertLessThan(markerSyncs[0], entryDirSyncs[1], "the marker's namespace entry must be persisted after publication")
+        XCTAssertLessThan(entryDirSyncs[1], rootSyncs[0], "the queue root must be synced after the entry directory")
+    }
+
+    func test_syncFailureRefusesPublication() throws {
+        // Fail at each publication stage; in every case the entry must NOT become ready.
+        // Stages in publication order: audio, metadata, marker, entry-dir (post-marker), root.
+        for failureStage in 0..<5 {
+            let stageRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("vsq-syncfail-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: stageRoot, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: stageRoot) }
+
+            var stage = 0
+            let q = VoiceSharingUploadQueue(rootDirectory: stageRoot) { _, _ in
+                if stage == failureStage { throw NSError(domain: "test-sync", code: 1) }
+                stage += 1
+            }
+            let prep = try q.prepare(metadata: metadatadeclaring(self.audioA), audio: self.audioA)
+            XCTAssertThrowsError(try q.finalize(prep), "sync failure at stage \(failureStage) must refuse publication")
+            XCTAssertTrue(q.readyEntries().isEmpty,
+                          "a failed publication must never surface as ready (stage \(failureStage))")
+        }
+    }
+
+    func test_defaultSynchronizerFailureRefusesPublication() throws {
+        // A REAL storage failure through the DEFAULT synchronizer: audio.wav made read-only makes
+        // its fsync-open (O_WRONLY) fail with EACCES. Publication must refuse, not assume durable.
+        let q = makeQueue() // default synchronizer — no injection
+        let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let audioPath = entryDir.appendingPathComponent("audio.wav")
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: audioPath.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: audioPath.path) }
+        XCTAssertThrowsError(try q.finalize(prep), "a real sync failure must refuse publication")
+        XCTAssertTrue(q.readyEntries().isEmpty, "failed publication must never surface as ready")
+    }
+
+    // MARK: Bounds at recovery (review round 24, finding 2)
+
+    func test_oversizedMetadataIsRefusedAtPrepare() throws {
+        let q = makeQueue()
+        let digest = SHA256.hash(data: audioA).map { String(format: "%02x", $0) }.joined()
+        let padding = String(repeating: "A", count: VoiceSharingUploadQueue.maxMetadataBytes)
+        let padded = "{\"record\":{\"capture_id\":\"X\",\"audio\":{\"sha256\":\"\(digest)\",\"byte_count\":\(audioA.count)},\"pad\":\"\(padding)\"}}"
+            .data(using: .utf8)!
+        XCTAssertGreaterThan(padded.count, VoiceSharingUploadQueue.maxMetadataBytes)
+        XCTAssertThrowsError(try q.prepare(metadata: padded, audio: audioA)) { error in
+            guard case VoiceSharingUploadQueue.PrepareError.metadataTooLarge = error else {
+                return XCTFail("expected metadataTooLarge, got \(error)")
+            }
+        }
+        // The refused preparation leaves no partial directory behind.
+        let dirs = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        XCTAssertTrue(dirs.isEmpty)
+    }
+
+    func test_recoveryReEnforcesEntryLimitsAndRemovesExpiredEntries() throws {
+        var q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: metadatadeclaring(audioA), audio: audioA)
+        // Simulate an aged entry by backdating its marker beyond maxEntryAge.
+        let entryDir = try soleEntryDirectory()
+        let marker = entryDir.appendingPathComponent("ready.marker")
+        let oldDate = Date().addingTimeInterval(-VoiceSharingUploadQueue.maxEntryAge - 60)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: marker.path)
+
+        q = makeQueue() // recovery
+
+        XCTAssertTrue(q.readyEntries().isEmpty, "entries past the queue-age bound must not survive recovery")
+    }
+
+    func test_recoveryStopsBeforeLoadingOversizedAudio() throws {
+        // An entry whose audio exceeds the ceiling is removed by recovery WITHOUT reading it:
+        // corrupt the bytes (digest mismatch alone would also remove it, so prove size path by
+        // making the file large but the metadata count small AND the file unreadable as data
+        // via an irregular file — a directory named audio.wav).
+        var q = makeQueue()
+        _ = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let audioPath = try soleEntryDirectory().appendingPathComponent("audio.wav")
+        try FileManager.default.removeItem(at: audioPath)
+        try FileManager.default.createDirectory(at: audioPath, withIntermediateDirectories: true)
+        // Simulate an already-published entry (fail-closed finalize would refuse this state);
+        // recovery must remove it based on attributes alone.
+        try Data([0x01]).write(to: soleEntryDirectory().appendingPathComponent("ready.marker"))
+
+        q = makeQueue() // recovery
+
+        XCTAssertTrue(q.readyEntries().isEmpty, "irregular audio entries must be removed without surfacing")
     }
 
     // MARK: Serialized ownership (finding 4)

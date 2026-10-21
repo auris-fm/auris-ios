@@ -36,9 +36,18 @@ final class VoiceSharingUploadQueue {
     /// Entry-count ceiling over preparation + ready work. Compiled ceiling, NOT an activation value.
     static let maxQueueEntries = 32
 
+    /// Per-entry metadata ceiling (spec `max_metadata_bytes` is validated against a compiled
+    /// ceiling; this is the ceiling, NOT an activation value).
+    static let maxMetadataBytes = 64 * 1024
+
+    /// Queue-age bound for ready entries. Entries older than this are removed at recovery and
+    /// refuse publication — a compiled ceiling, NOT an activation value.
+    static let maxEntryAge: TimeInterval = 48 * 60 * 60
+
     enum PrepareError: Error, Equatable {
         case queueFull
         case audioTooLarge
+        case metadataTooLarge
     }
 
     /// Opaque entry handle. Only names an entry under a root; every accessor validates that the
@@ -56,7 +65,7 @@ final class VoiceSharingUploadQueue {
     private let fileManager: FileManager
     /// Storage-synchronization seam: fsync-equivalent for a file or directory path. Production
     /// default performs a real sync; controls inject a recorder to pin ordering.
-    private let synchronizer: (_ path: URL, _ isDirectory: Bool) -> Void
+    private let synchronizer: (_ path: URL, _ isDirectory: Bool) throws -> Void
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -65,7 +74,7 @@ final class VoiceSharingUploadQueue {
     init(
         rootDirectory: URL,
         fileManager: FileManager = .default,
-        synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) -> Void = VoiceSharingUploadQueue.defaultSynchronizer
+        synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -76,14 +85,23 @@ final class VoiceSharingUploadQueue {
         serialQueue.sync { recoverLocked() }
     }
 
-    private static func defaultSynchronizer(path: URL, isDirectory: Bool) {
+    /// REAL synchronization: stat/open/fsync results are checked and failures THROW — a storage
+    /// layer that cannot confirm durability must fail publication, not silently accept it.
+    private static func defaultSynchronizer(path: URL, isDirectory: Bool) throws {
         var statBuffer = stat()
-        guard stat(path.path, &statBuffer) == 0 else { return }
+        guard stat(path.path, &statBuffer) == 0 else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
+                          userInfo: [NSFilePathErrorKey: path.path])
+        }
         // Directories cannot be opened for writing; fsync them read-only via the descriptor.
         let fd = open(path.path, isDirectory ? O_RDONLY : O_WRONLY)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         defer { close(fd) }
-        fsync(fd)
+        guard fsync(fd) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 
     // MARK: Preparation
@@ -99,6 +117,7 @@ final class VoiceSharingUploadQueue {
             do {
                 guard countEntriesLocked() < Self.maxQueueEntries else { throw PrepareError.queueFull }
                 guard audio.count <= Self.maxEntryAudioBytes else { throw PrepareError.audioTooLarge }
+                guard metadata.count <= Self.maxMetadataBytes else { throw PrepareError.metadataTooLarge }
                 try fileManager.createDirectory(at: entryDirectory, withIntermediateDirectories: true)
                 try audio.write(to: entryDirectory.appendingPathComponent(Self.audioName), options: .atomic)
                 try metadata.write(to: entryDirectory.appendingPathComponent(Self.metadataName), options: .atomic)
@@ -118,23 +137,41 @@ final class VoiceSharingUploadQueue {
         try serialQueue.sync {
             let directory = try validatedEntryDirectoryLocked(entry)
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
-            synchronizer(directory.appendingPathComponent(Self.audioName), false)
-            synchronizer(directory.appendingPathComponent(Self.metadataName), false)
-            synchronizer(directory, true)
+            // Publication protocol: entry CONTENT must be durable before the marker exists, and
+            // the marker's namespace entry must be durable after it is written. A synchronization
+            // failure at any stage THROWS and the entry stays unready — durability is never
+            // silently assumed.
+            try synchronizer(directory.appendingPathComponent(Self.audioName), false)
+            try synchronizer(directory.appendingPathComponent(Self.metadataName), false)
+            try synchronizer(directory, true)
             let temporary = directory.appendingPathComponent("\(Self.readyMarkerName).tmp-\(UUID().uuidString)")
             try Data([0x01]).write(to: temporary, options: .atomic)
             _ = try fileManager.replaceItemAt(marker, withItemAt: temporary)
-            synchronizer(marker, false)
+            do {
+                try synchronizer(marker, false)
+                // The marker's directory entry and the queue root link are persisted AFTER
+                // publication; a pre-marker directory sync cannot cover namespace changes made
+                // later.
+                try synchronizer(directory, true)
+                try synchronizer(rootDirectory, true)
+            } catch {
+                // Refuse publication: without durable namespace entries the marker may not be
+                // visible after a crash, so the entry must not surface as ready.
+                try? fileManager.removeItem(at: marker)
+                throw error
+            }
         }
     }
 
     // MARK: Listing and access
 
-    /// All complete, ready entries in finalize order (marker mtime; name as the deterministic tiebreak).
+    /// All complete, ready entries within the queue-age bound, in finalize order (marker mtime;
+    /// name as the deterministic tiebreak).
     func readyEntries() -> [Entry] {
         serialQueue.sync {
             entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
+                .filter { Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: $0).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge }
                 .sorted { lhs, rhs in
                     let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
                     let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
@@ -201,8 +238,10 @@ final class VoiceSharingUploadQueue {
             .map { Entry(root: rootDirectory, name: $0.lastPathComponent) }
     }
 
-    /// Complete-entry validation: ready marker + regular non-empty metadata + regular non-empty
-    /// audio, and the metadata's declared audio digest and byte count must match the actual bytes.
+    /// Complete-entry validation, FAIL-CLOSED and STAT-FIRST: sizes and file kinds are checked
+    /// via attributes BEFORE any content is loaded; then the metadata's declared audio digest and
+    /// byte count must match the actual bytes. Oversized, irregular, malformed or unbindable
+    /// entries are incomplete.
     private func isCompleteEntryLocked(at entry: Entry) -> Bool {
         let directory = entryDirectoryLocked(for: entry)
         let marker = directory.appendingPathComponent(Self.readyMarkerName)
@@ -210,9 +249,13 @@ final class VoiceSharingUploadQueue {
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
         guard fileManager.fileExists(atPath: marker.path),
-            let audioData = try? Data(contentsOf: audioURL), !audioData.isEmpty,
-            let metadataData = try? Data(contentsOf: metadataURL), !metadataData.isEmpty,
-            isRegularFileLocked(at: audioURL), isRegularFileLocked(at: metadataURL),
+            let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular, audioSize.bytes > 0, audioSize.bytes <= Self.maxEntryAudioBytes,
+            let metadataSize = fileSizeIfRegularLocked(at: metadataURL), metadataSize.isRegular, metadataSize.bytes > 0, metadataSize.bytes <= Self.maxMetadataBytes
+        else { return false }
+
+        // Sizes are within bounds; only now is content loaded.
+        guard let audioData = try? Data(contentsOf: audioURL),
+            let metadataData = try? Data(contentsOf: metadataURL),
             let declared = declaredAudioFactsLocked(from: metadataData)
         else { return false }
 
@@ -220,8 +263,11 @@ final class VoiceSharingUploadQueue {
         return digest == declared.digest && audioData.count == declared.byteCount
     }
 
-    private func isRegularFileLocked(at url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+    /// (isRegularFile, byte size) via attributes — no content is read.
+    private func fileSizeIfRegularLocked(at url: URL) -> (isRegular: Bool, bytes: Int)? {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard let isRegular = values?.isRegularFile, let bytes = values?.fileSize else { return nil }
+        return (isRegular, bytes)
     }
 
     /// Extracts `audio.sha256` and `audio.byte_count` from the metadata envelope. Missing or
@@ -243,13 +289,29 @@ final class VoiceSharingUploadQueue {
     }
 
     /// Recovery: anything under the root that is not a complete entry is removed — abandoned
-    /// preparation, foreign directories, malformed entries, stray files. Complete ready entries
+    /// preparation, foreign directories, malformed entries, stray files. The finite limits are
+    /// RE-ESTABLISHED here over what survives: entries past the queue-age bound are removed, and
+    /// if more than `maxQueueEntries` complete entries remain (e.g. the ceiling was lowered), the
+    /// OLDEST are removed until the count is within bounds. Complete ready entries within bounds
     /// are kept byte-for-byte.
     private func recoverLocked() {
+        var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)
-            if !isCompleteEntryLocked(at: entry) {
+            guard isCompleteEntryLocked(at: entry) else {
                 try? fileManager.removeItem(at: directory)
+                continue
+            }
+            let readyDate = modificationDateLocked(of: directory.appendingPathComponent(Self.readyMarkerName))
+            if Date().timeIntervalSince(readyDate) > Self.maxEntryAge {
+                try? fileManager.removeItem(at: directory)
+                continue
+            }
+            complete.append((entry, readyDate))
+        }
+        if complete.count > Self.maxQueueEntries {
+            for stale in complete.sorted(by: { $0.readyDate < $1.readyDate }).prefix(complete.count - Self.maxQueueEntries) {
+                try? fileManager.removeItem(at: entryDirectoryLocked(for: stale.entry))
             }
         }
         // Stray regular files directly under the root are not entries; remove them so the root
