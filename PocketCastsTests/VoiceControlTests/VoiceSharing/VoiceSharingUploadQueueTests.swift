@@ -1302,7 +1302,13 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertFalse(reopened.isAttemptInFlight(prep),
                        "a killed process leaves no live in-flight request")
-        XCTAssertTrue(try reopened.beginAttempt(prep),
+        // The DURABLE lease still marks the attempt as possibly live, so a fresh instance must not
+        // take it instantly — two live owners would race. It becomes available when it expires.
+        XCTAssertFalse(try reopened.beginAttempt(prep),
+                       "a live-looking lease must not be stolen immediately")
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let after = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertTrue(try after.beginAttempt(prep),
                       "a stale attempt must not block the entry forever")
     }
 
@@ -1540,6 +1546,48 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data([0x01]).write(to: failedDirectory.appendingPathComponent("publication.failed"))
         XCTAssertFalse(try q.isAttemptable(failedTicket),
                        "a disqualified entry is not attemptable")
+    }
+
+    // MARK: Cross-instance attempt ownership (reviewer 6886455c)
+
+    func test_twoQueueInstancesCannotBothOwnAnAttempt() throws {
+        // A per-instance serial queue does not serialize a shared attempts.json, so two instances
+        // over one root must not both start a request for the same entry.
+        let a = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try a.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try a.finalize(prep)
+        let b = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+
+        XCTAssertTrue(try a.beginAttempt(prep), "the first owner acquires the lease")
+        XCTAssertFalse(try b.beginAttempt(prep),
+                       "a second instance must not also own the same entry's attempt")
+        XCTAssertEqual(try a.attemptCount(for: prep), 1,
+                       "a refused acquisition must not have spent an attempt")
+        a.endAttempt(prep)
+        XCTAssertTrue(try b.beginAttempt(prep), "the lease is available once released")
+    }
+
+    func test_staleAttemptLeaseIsReclaimableAfterItsOwnerDies() throws {
+        // A killed process leaves its lease on disk. It must be reclaimable — but not instantly, or
+        // two live instances would race; and not never, or the entry is blocked forever.
+        let a = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try a.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try a.finalize(prep)
+        XCTAssertTrue(try a.beginAttempt(prep))
+        // Deliberately no endAttempt: this models a kill while owning the lease.
+
+        let b = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(try b.beginAttempt(prep),
+                       "a FRESH lease must not be stealable while it may be live")
+
+        // The lease is reclaimable once it has expired. A killed owner cannot renew it.
+        let later = Date().addingTimeInterval(
+            VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let c = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertTrue(try c.beginAttempt(prep),
+                      "an expired lease must be reclaimable")
+        XCTAssertEqual(try c.attemptCount(for: prep), 2,
+                       "reclaiming spends a new attempt")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {

@@ -79,7 +79,7 @@ final class VoiceSharingUploadQueue {
     /// defined over exactly these.
     /// The closed set of fixed file names an entry directory may contain.
     static let knownEntryNames: Set<String> = [
-        attemptRecordName,
+        attemptRecordName, attemptLeaseName,
         audioName, metadataName, createdName, readyMarkerName, stageName, failedName
     ]
     /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
@@ -141,6 +141,13 @@ final class VoiceSharingUploadQueue {
     /// Upper bound on the attempt record's size. A larger file is corrupt or foreign, and reading it
     /// to find out would let a hostile object drive allocation.
     static let maxAttemptRecordBytes = 64
+    /// Name of the root-scoped lease for an in-flight attempt. It lives NEXT TO the entry (inside
+    /// the entry directory, as `attempt.lease`) so a stale lease travels with its entry.
+    static let attemptLeaseName = "attempt.lease"
+    static let maxAttemptLeaseBytes = 256
+    /// How long a lease is considered live without renewal. A killed owner cannot renew, so after
+    /// this window another owner may reclaim. Compiled bound, NOT an activation value.
+    static let attemptLeaseDuration: TimeInterval = 120
     /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
     static let maxUploadAttemptsCeiling = 1_000
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
@@ -517,13 +524,14 @@ final class VoiceSharingUploadQueue {
             // every path (including the removal below, which is reachable only after this one
             // succeeded) and no control could distinguish its absence.
             let directory = entryDirectoryLocked(for: entry)
-            // Single in-flight ownership is a property of THIS process's live work. It is
-            // deliberately not held statically across instances: a static set outlives the queue
-            // that filled it, so an attempt abandoned by a killed owner would block the entry
-            // forever — the failure mode `test_inFlightOwnershipIsNotResumedAsLiveAfterRestart`
-            // exists to catch. Two concurrent owners over one root are excluded by the lead process
-            // being the only uploader, and the durable attempt count still bounds total attempts.
+            // Single in-flight ownership is ROOT-SCOPED and DURABLE. A per-instance serial queue
+            // cannot serialize a shared attempts.json, so two instances over one root would both
+            // start a request. The lease is a file inside the entry directory: it serializes across
+            // instances and across processes, and it expires, so a killed owner cannot block the
+            // entry forever. An in-memory static set was tried and rejected — it outlives the queue
+            // that filled it and has no crash-safe release.
             guard !inFlightAttempts.contains(entry) else { return false }
+            guard try acquireLeaseLocked(for: entry) else { return false }
             guard try isAttemptableLocked(entry) else {
                 // Only an EXHAUSTED entry is removed, and only if it is otherwise complete and
                 // ready. A preparing, disqualified or incomplete entry is simply not attemptable:
@@ -534,7 +542,13 @@ final class VoiceSharingUploadQueue {
                 }
                 return false
             }
-            try recordAttemptLocked(entry)
+            do {
+                try recordAttemptLocked(entry)
+            } catch {
+                // The attempt was not counted, so the lease must not be held.
+                releaseLeaseLocked(for: entry)
+                throw error
+            }
             inFlightAttempts.insert(entry)
             return true
         }
@@ -544,6 +558,7 @@ final class VoiceSharingUploadQueue {
     func endAttempt(_ entry: Entry) {
         serialQueue.sync {
             inFlightAttempts.remove(entry)
+            releaseLeaseLocked(for: entry)
         }
     }
 
@@ -633,6 +648,58 @@ final class VoiceSharingUploadQueue {
             // known to be counted.
             throw PrepareError.publicationUncertain
         }
+    }
+
+    /// Acquires the durable attempt lease. Succeeds when there is no lease, or when the existing one
+    /// has EXPIRED (its owner died and cannot renew). Records `acquiredAt` so expiry is decided from
+    /// durable state, not from this process's memory.
+    private func acquireLeaseLocked(for entry: Entry) throws -> Bool {
+        let directory = try validatedEntryDirectoryLocked(entry)
+        let lease = directory.appendingPathComponent(Self.attemptLeaseName)
+        switch Self.statKind(of: lease) {
+        case .failure:
+            throw PrepareError.accountingUnavailable
+        case .absent:
+            break
+        case .present:
+            guard let acquiredAt = leaseInstantLocked(at: lease) else {
+                // A lease we cannot read is not a lease we can steal or trust.
+                throw PrepareError.accountingUnavailable
+            }
+            guard clock().timeIntervalSince(acquiredAt) > Self.attemptLeaseDuration else {
+                return false
+            }
+        }
+        let stamp = String(format: "%.6f", clock().timeIntervalSince1970)
+        let data = Data(stamp.utf8)
+        do {
+            try data.write(to: lease, options: [.atomic])
+            try synchronizer(lease, false)
+            try synchronizer(directory, true)
+        } catch {
+            throw PrepareError.publicationUncertain
+        }
+        return true
+    }
+
+    /// Releases the lease. Best-effort: an unreleased lease still expires, so a failure here costs a
+    /// delay, not a permanently blocked entry.
+    private func releaseLeaseLocked(for entry: Entry) {
+        let directory = entryDirectoryLocked(for: entry)
+        try? fileManager.removeItem(at: directory.appendingPathComponent(Self.attemptLeaseName))
+        try? synchronizer(directory, true)
+    }
+
+    /// Reads a lease's acquisition instant, bounded in size.
+    private func leaseInstantLocked(at url: URL) -> Date? {
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+              size.bytes > 0, size.bytes <= Self.maxAttemptLeaseBytes
+        else { return nil }
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8),
+              let seconds = TimeInterval(text), seconds.isFinite, seconds > 0
+        else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     /// Test-only: tightens the budget of an existing instance. A second instance cannot be used to
