@@ -1118,27 +1118,43 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(remaining.count, 0, "stranded temporaries must be reclaimed")
     }
 
-    func test_partialEnumerationFailureIsNotReportedAsComplete() throws {
-        // Reviewer 02cd9c53/2: an enumeration error must not yield (partialURLs, overflowed: false).
-        // The production helper is exercised directly: a directory we cannot fully read must throw.
-        let dir = temporaryRoot()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        for index in 0..<3 {
-            try Data([0x01]).write(to: dir.appendingPathComponent("f\(index)"))
+    func test_midEnumerationFailureIsThrownRatherThanReportedAsComplete() throws {
+        // Reviewer 4fd0a113: the previous control accepted `(urls: [], overflowed: false)` — the exact
+        // fail-open result at issue. This control delivers one URL and THEN an error through the
+        // production helper (`boundedListing(over:limit:)`) and requires the error to propagate.
+        struct Boom: Error {}
+        let one = URL(fileURLWithPath: "/tmp/one")
+        let steps: [VoiceSharingUploadQueue.EnumerationStep] = [.url(one), .failure(Boom())]
+        XCTAssertThrowsError(
+            try VoiceSharingUploadQueue.boundedListing(over: AnySequence(steps), limit: 64)
+        ) { error in
+            XCTAssertTrue(error is Boom,
+                          "the enumeration error must propagate, not be turned into a clean result")
         }
-        // Remove read permission so enumeration fails partway/none-at-all.
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: dir.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+    }
 
-        // Either it throws, or it returns a list we can trust. What it must NOT do is silently
-        // return a truncated list as authoritative.
-        do {
-            let listed = try VoiceSharingUploadQueue.defaultBoundedLister(dir, [], 64)
-            XCTAssertFalse(listed.overflowed && listed.urls.isEmpty,
-                           "an unreadable directory must not report as cleanly empty-and-overflowing")
-        } catch {
-            // Throwing is the fail-closed outcome and is acceptable.
+    func test_truncatedEnumerationIsNeverReportedAsCompleteByTheProductionLister() throws {
+        // The same guarantee through the injectable lister used by accounting: partial URLs plus an
+        // error must throw, so callers can never mistake a truncated scan for full accounting.
+        struct Boom: Error {}
+        let one = URL(fileURLWithPath: "/tmp/one")
+        let lister = VoiceSharingUploadQueue.boundedLister(with: { _, _ in
+            AnySequence([VoiceSharingUploadQueue.EnumerationStep.url(one),
+                         VoiceSharingUploadQueue.EnumerationStep.failure(Boom())])
+        })
+        XCTAssertThrowsError(try lister(URL(fileURLWithPath: "/tmp"), [], 64)) { error in
+            XCTAssertTrue(error is Boom)
         }
+    }
+
+    func test_boundedListingStopsAtTheCapWithoutReportedError() throws {
+        // And the legitimate stop: hitting the cap returns overflowed, not an error.
+        let steps = (0..<10).map {
+            VoiceSharingUploadQueue.EnumerationStep.url(URL(fileURLWithPath: "/tmp/\($0)"))
+        }
+        let result = try VoiceSharingUploadQueue.boundedListing(over: AnySequence(steps), limit: 3)
+        XCTAssertEqual(result.urls.count, 3)
+        XCTAssertTrue(result.overflowed)
     }
 
     func test_recoveryStrayScanIsBoundedAndDoesNotEagerlyMaterialiseTheRoot() throws {
@@ -1205,6 +1221,89 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: stagePath),
                        "finalize must refuse before writing the stage record")
         _ = second
+    }
+
+    // MARK: Attempt ownership (spec: attempts count across process restarts)
+
+    func test_attemptCountSurvivesProcessRestart() throws {
+        // Spec: "Attempts count across process restarts." A memory-only counter would reset on every
+        // launch and let an entry retry forever, so the count must be durable.
+        let q = makeQueue()
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+
+        // PRE: the entry must be a complete, bindable entry BEFORE we touch attempts. If it is not,
+        // the reopen failure below is about the fixture, not about attempt durability.
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "PRE: the finalized entry must be ready before any attempt is recorded")
+        XCTAssertEqual(q.attemptCount(for: prep), 0, "a fresh entry has no attempts")
+        try q.recordAttempt(prep)
+        XCTAssertEqual(q.attemptCount(for: prep), 1)
+
+        // A FRESH queue over the same root must see the same count.
+        let recordPath = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recordPath.path),
+                      "PRE: the attempt record must be on disk before reopening")
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(reopened.readyEntries().count, 1,
+                       "POST: the entry must still be ready after reopening")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recordPath.path),
+                      "POST: reopening must not remove the attempt record")
+        XCTAssertEqual(reopened.attemptCount(for: prep), 1,
+                       "attempts must survive process restart")
+        try reopened.recordAttempt(prep)
+        XCTAssertEqual(reopened.attemptCount(for: prep), 2)
+    }
+
+    func test_entryIsRemovedWhenAttemptsAreExhausted() throws {
+        // Spec: "Exhaustion or expiry removes the local entry with a content-free terminal counter."
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 2))
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+
+        // Drive the REAL ownership path: beginAttempt/endAttempt is how attempts are actually spent.
+        XCTAssertTrue(try q.beginAttempt(prep))
+        q.endAttempt(prep)
+        XCTAssertTrue(try q.beginAttempt(prep))
+        q.endAttempt(prep)
+        // Exhausted: the entry is no longer attemptable, and attempting again removes it.
+        XCTAssertFalse(q.isAttemptable(prep), "an exhausted entry must not be attemptable")
+        XCTAssertFalse(try q.beginAttempt(prep),
+                       "an exhausted entry must not be granted another attempt")
+        XCTAssertTrue(q.readyEntries().isEmpty, "an exhausted entry is removed, not retried forever")
+        let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertTrue(leftover.filter { !$0.hasPrefix(".") }.isEmpty,
+                      "the entry directory must be gone")
+    }
+
+    func test_onlyOneInFlightAttemptPerEntryIsOwned() throws {
+        // Spec: "One entry has at most one in-flight request."
+        let q = makeQueue()
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        XCTAssertTrue(try q.beginAttempt(prep), "the first attempt acquires ownership")
+        XCTAssertFalse(try q.beginAttempt(prep), "a second concurrent attempt must be refused")
+        q.endAttempt(prep)
+        XCTAssertTrue(try q.beginAttempt(prep), "ownership is released when the attempt ends")
+    }
+
+    func test_inFlightOwnershipIsNotResumedAsLiveAfterRestart() throws {
+        // A stale attempt record from a killed process must not block the entry forever, but it also
+        // must not be treated as a live in-flight request.
+        let q = makeQueue()
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        XCTAssertTrue(try q.beginAttempt(prep))
+        // Simulate a kill mid-attempt: no endAttempt.
+
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(reopened.isAttemptInFlight(prep),
+                       "a killed process leaves no live in-flight request")
+        XCTAssertTrue(try reopened.beginAttempt(prep),
+                      "a stale attempt must not block the entry forever")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
