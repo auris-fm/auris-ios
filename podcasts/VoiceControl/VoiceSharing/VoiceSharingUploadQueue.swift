@@ -80,6 +80,16 @@ final class VoiceSharingUploadQueue {
     private let clock: () -> Date
     private let synchronizer: (_ path: URL, _ isDirectory: Bool) throws -> Void
     private let failureRecordWriter: (URL) throws -> Void
+
+    /// Whether the most recent refused publication could be disqualified DURABLY. `unavailable`
+    /// means neither the failure record nor marker removal succeeded, so only this process knows the
+    /// entry is unpublishable — a restart cannot be protected by in-memory state.
+    enum DurableDisqualifier: Equatable {
+        case durable
+        case unavailable
+    }
+
+    private(set) var lastDurableDisqualifierOutcome: DurableDisqualifier?
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -189,21 +199,42 @@ final class VoiceSharingUploadQueue {
                 // marker removal AND the failure record both fail, this process still knows the
                 // entry is not publishable, so it is quarantined in memory for its remaining
                 // lifetime — readiness must never rest on a best-effort write succeeding.
+                // RECOVERY ORDER IS DELIBERATE: the failure record is written BEFORE the marker is
+                // removed. In-memory state cannot cross a process boundary, so a surviving marker
+                // with no on-disk disqualifier would reappear as ready after a restart. Writing the
+                // disqualifier first means the only states are "marked failed" or "marker gone" —
+                // never "marker present, nothing says it failed".
+                let failure = directory.appendingPathComponent(Self.failedPublicationName)
+                var disqualifiedOnDisk = false
+                do {
+                    try failureRecordWriter(failure)
+                    try? synchronizer(failure, false)
+                    disqualifiedOnDisk = true
+                } catch {
+                    // The disqualifier could not be persisted. Fall through to marker removal; if
+                    // THAT also fails, the in-memory quarantine is the last line of defence for this
+                    // process (and the entry is left undisqualified on disk — see the restart note).
+                }
+
                 var markerRemoved = false
                 do {
                     try fileManager.removeItem(at: marker)
                     markerRemoved = true
                 } catch {
-                    let failure = directory.appendingPathComponent(Self.failedPublicationName)
-                    do {
-                        try failureRecordWriter(failure)
-                        try synchronizer(failure, false)
-                    } catch {
-                        quarantineLocked(entry)
-                    }
+                    // Both durable paths failed.
                 }
-                if !markerRemoved, !quarantinedLocked(entry) {
-                    quarantineLocked(entry)
+
+                // Fail closed for THIS process regardless: readiness must never depend on a
+                // best-effort write succeeding. The durable guarantee is claimed only when a
+                // disqualifier actually reached disk or the marker is actually gone.
+                quarantineLocked(entry)
+                if !disqualifiedOnDisk, !markerRemoved {
+                    // Neither durable outcome was achieved. Nothing further can be written here
+                    // without recursing into the same failure, so the entry is quarantined and the
+                    // condition is reported rather than silently accepted.
+                    lastDurableDisqualifierOutcome = .unavailable
+                } else {
+                    lastDurableDisqualifierOutcome = .durable
                 }
                 throw error
             }

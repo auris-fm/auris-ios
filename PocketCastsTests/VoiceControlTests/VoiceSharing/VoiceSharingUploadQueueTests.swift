@@ -467,6 +467,94 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must not leave a ready entry")
         // Still unready while this process owns the knowledge, since no disqualifier reached disk.
         XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must stay unready on repeat reads")
+
+        // A RESTART cannot be protected by in-memory state. When BOTH durable paths fail this must be
+        // REPORTED, not silently absorbed: the caller has to know that the only thing standing
+        // between a failed publication and a later process exposing it is this process's memory.
+        XCTAssertEqual(q.lastDurableDisqualifierOutcome, .unavailable,
+                       "a double durable failure must be reported to the caller")
+    }
+
+    func test_disqualifierIsWrittenBeforeTheMarkerIsRemoved() throws {
+        // The ORDER is the durability guarantee. With a NORMAL file manager (removal would succeed),
+        // the disqualifier must already exist when the marker is removed — otherwise a crash between
+        // the two leaves a marker with nothing saying it failed, which a later process would accept.
+        var observedDisqualifierAtRemoval: Bool?
+        final class OrderProbe: FileManager {
+            var disqualifierPath: String = ""
+            var observedAtMarkerRemoval: Bool?
+            override func removeItem(at url: URL) throws {
+                if url.lastPathComponent == "ready.marker" {
+                    observedAtMarkerRemoval = FileManager.default.fileExists(atPath: disqualifierPath)
+                }
+                try super.removeItem(at: url)
+            }
+        }
+        let probe = OrderProbe()
+        var publishedMarker = false
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            fileManager: probe,
+            clock: Date.init,
+            synchronizer: { url, _ in
+                if url.lastPathComponent == "ready.marker" { publishedMarker = true }
+                if publishedMarker, url.lastPathComponent == "ready.marker" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                if publishedMarker, url.hasDirectoryPath {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDirectory = try soleEntryDirectory()
+        probe.disqualifierPath = entryDirectory.appendingPathComponent("publication.failed").path
+
+        XCTAssertThrowsError(try q.finalize(prep))
+        observedDisqualifierAtRemoval = probe.observedAtMarkerRemoval
+        XCTAssertEqual(observedDisqualifierAtRemoval, true,
+                       "the durable disqualifier must be on disk BEFORE the marker is removed")
+    }
+
+    func test_publicationFailureThatReachesDiskSurvivesRestart() throws {
+        // The realistic single-failure case: marker removal is refused, but the failure record CAN be
+        // written. It is written BEFORE the marker is removed, so a restart still sees a disqualifier.
+        let blocking = MarkerRemovalBlockingFileManager()
+        var publishedMarker = false
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            fileManager: blocking,
+            clock: Date.init,
+            synchronizer: { url, _ in
+                if url.lastPathComponent == "ready.marker" { publishedMarker = true }
+                if publishedMarker, url.lastPathComponent == "ready.marker" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                if publishedMarker, url.hasDirectoryPath {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep))
+        XCTAssertEqual(q.lastDurableDisqualifierOutcome, .durable,
+                       "the disqualifier reached disk, so recovery IS durably protected")
+        XCTAssertTrue(q.readyEntries().isEmpty)
+
+        // The disqualifier is genuinely ON DISK before any restart, which is what makes the next
+        // process safe independently of this process's memory.
+        let entryDirectory = try XCTUnwrap(
+            try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+                .filter { $0.hasDirectoryPath }.first)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("publication.failed").path),
+            "the durable disqualifier must exist before restart")
+
+        // Fresh process over the same root: recovery removes the disqualified entry, so the failed
+        // publication can never be exposed OR linger as half-published state.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(reopened.readyEntries().isEmpty,
+                      "a fresh queue over the same root must not expose a failed publication")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entryDirectory.path),
+                       "recovery must remove the disqualified entry, not retain it")
     }
 
     func test_wavStructurallyInconsistentHeadersAreRejected() throws {
