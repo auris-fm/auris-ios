@@ -450,28 +450,38 @@ final class VoiceSharingUploadQueue {
     static func realSteps(
         _ directory: URL, _ keys: [URLResourceKey]
     ) -> AnySequence<EnumerationStep> {
-        // A failure to even create the enumerator is yielded as a step, not thrown here, so callers
-        // have a single error path.
+        // FileManager reports enumeration errors to the error HANDLER; `nextObject()` never yields an
+        // Error object. So the handler must CAPTURE the error and the iterator must surface it as
+        // `.failure` — discarding it here (as an earlier version did) silently loses unread storage.
+        final class PendingError { var error: Error? }
+        let pending = PendingError()
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: keys,
             options: [.skipsSubdirectoryDescendants],
-            errorHandler: { _, _ in
-                // Returning true lets enumeration continue so the error can be surfaced for THIS
-                // position; the yielded `.failure` below stops the loop and propagates.
-                true
+            errorHandler: { _, error in
+                // Capture, then stop: continuing would keep skipping storage we could not read.
+                pending.error = error
+                return false
             })
         else {
             return AnySequence([.failure(CocoaError(.fileReadUnknown))])
         }
         return AnySequence { () -> AnyIterator<EnumerationStep> in
-            // `nextObject()` is the only real read; it must not be called after a failure is
-            // yielded, so a failure terminates the sequence.
             AnyIterator {
-                guard let object = enumerator.nextObject() else { return nil }
-                if let url = object as? URL { return .url(url) }
-                if let error = object as? Error { return .failure(error) }
-                return .failure(CocoaError(.fileReadUnknown))
+                // Checked IMMEDIATELY after the read that may have triggered it, and before any URL
+                // is yielded, so an error can never be reordered behind a later result.
+                let object = enumerator.nextObject()
+                if let error = pending.error {
+                    pending.error = nil
+                    return .failure(error)
+                }
+                guard let object else { return nil }
+                // A non-URL element is not a name we can account for; refuse rather than substitute.
+                guard let url = object as? URL else {
+                    return .failure(CocoaError(.fileReadUnknown))
+                }
+                return .url(url)
             }
         }
     }
@@ -515,8 +525,13 @@ final class VoiceSharingUploadQueue {
             // being the only uploader, and the durable attempt count still bounds total attempts.
             guard !inFlightAttempts.contains(entry) else { return false }
             guard try isAttemptableLocked(entry) else {
-                // Exhausted: remove the local entry rather than retrying forever.
-                try? fileManager.removeItem(at: directory)
+                // Only an EXHAUSTED entry is removed, and only if it is otherwise complete and
+                // ready. A preparing, disqualified or incomplete entry is simply not attemptable:
+                // deleting it here would destroy work that publication or recovery still owns.
+                if isCompleteEntryLocked(at: entry),
+                   try attemptCountLocked(for: entry) >= attemptLimits.maxUploadAttempts {
+                    try? fileManager.removeItem(at: directory)
+                }
                 return false
             }
             try recordAttemptLocked(entry)
@@ -551,7 +566,17 @@ final class VoiceSharingUploadQueue {
     private func attemptCountLocked(for entry: Entry) throws -> Int {
         let directory = try validatedEntryDirectoryLocked(entry)
         let url = directory.appendingPathComponent(Self.attemptRecordName)
-        guard fileManager.fileExists(atPath: url.path) else { return 0 }
+        // `fileExists` returns false for MANY failures, not just absence. Only ENOENT means "no
+        // attempts yet"; any other error is unreadable storage and must refuse, otherwise a
+        // permission fault would reset the retry budget.
+        switch VoiceSharingUploadQueue.statKind(of: url) {
+        case .absent:
+            return 0
+        case .failure:
+            throw PrepareError.accountingUnavailable
+        case .present:
+            break
+        }
         guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
               size.bytes > 0, size.bytes <= Self.maxAttemptRecordBytes
         else { throw PrepareError.accountingUnavailable }
@@ -565,8 +590,15 @@ final class VoiceSharingUploadQueue {
         return value
     }
 
+    /// An entry may only be attempted when it is COMPLETE and READY. Attempting an entry mid-
+    /// preparation would upload a record that does not exist yet, and would spend one of its
+    /// attempts on a state the spec never permits to be exposed.
     private func isAttemptableLocked(_ entry: Entry) throws -> Bool {
-        try attemptCountLocked(for: entry) < attemptLimits.maxUploadAttempts
+        // Validate the handle FIRST: a foreign or malformed Entry is an error, not a "not ready"
+        // answer, and its absence must never be reported as a benign false.
+        _ = try validatedEntryDirectoryLocked(entry)
+        guard isCompleteEntryLocked(at: entry) else { return false }
+        return try attemptCountLocked(for: entry) < attemptLimits.maxUploadAttempts
     }
 
     /// Writes the attempt record and confirms its durability. Returns only after the record and its
@@ -913,6 +945,22 @@ final class VoiceSharingUploadQueue {
 
     private func isCompleteEntryLocked(at entry: Entry) -> Bool {
         boundEntryLocked(at: entry) != nil
+    }
+
+    /// Result of an error-reporting, no-follow stat. Distinguishes "not there" from "could not
+    /// tell", which `fileExists` cannot: it collapses every failure into `false`.
+    enum StatKind { case present, absent, failure }
+
+    /// Stats `url` without following symlinks and WITHOUT conflating failure with absence. Only an
+    /// actual `ENOENT` yields `.absent`.
+    static func statKind(of url: URL) -> StatKind {
+        var info = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return lstat(path, &info)
+        }
+        if result == 0 { return .present }
+        return errno == ENOENT ? .absent : .failure
     }
 
     /// (isRegularFile, byte size) via attributes — no content is read.

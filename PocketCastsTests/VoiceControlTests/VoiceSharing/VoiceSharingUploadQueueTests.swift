@@ -1448,6 +1448,100 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(listed.overflowed)
     }
 
+    func test_realStepsSurfacesErrorHandlerFailures() throws {
+        // Reviewer 988cf96c: FileManager delivers errors to `errorHandler`; `nextObject()` never
+        // yields an Error. A synthetic `.failure` step cannot prove the adapter propagates an error
+        // the ENUMERATOR reported. This exercises `realSteps` itself: the error handler is invoked
+        // with a real error and the sequence must yield `.failure`, not silently end.
+        //
+        // A directory whose ACL denies traversal to a child, plus a child we then remove mid-flight,
+        // is not reliably reproducible here, so the handler contract is asserted directly: any error
+        // captured by the adapter must appear as a step.
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: dir.appendingPathComponent("a"))
+        let steps = Array(VoiceSharingUploadQueue.realSteps(dir, []))
+        XCTAssertEqual(steps.count, 1)
+        guard case .url(let first) = steps[0] else {
+            return XCTFail("a readable directory must yield a URL step, got \(steps[0])")
+        }
+        XCTAssertEqual(first.lastPathComponent, "a")
+
+        // A directory that does not exist makes the REAL FileManager enumerator invoke its error
+        // handler (verified by instrumenting the handler: it fires once with NSCocoaError 260). The
+        // adapter must turn that captured error into a `.failure` step and `boundedListing` must
+        // throw — the previous version of this test accepted "no steps at all", which is the
+        // fail-open outcome being guarded against.
+        let missing = dir.appendingPathComponent("does-not-exist")
+        let missingSteps = Array(VoiceSharingUploadQueue.realSteps(missing, []))
+        XCTAssertFalse(missingSteps.isEmpty,
+                       "an unreadable directory must not enumerate as empty success")
+        XCTAssertTrue(missingSteps.contains { if case .failure = $0 { return true } else { return false } },
+                      "the error-handler error must be surfaced as a .failure step")
+        XCTAssertThrowsError(
+            try VoiceSharingUploadQueue.boundedListing(over: AnySequence(missingSteps), limit: 8))
+        XCTAssertThrowsError(try VoiceSharingUploadQueue.defaultBoundedLister(missing, [], 8),
+                             "the production lister must refuse an unreadable directory")
+    }
+
+    func test_unreadableAttemptRecordPathIsNotTreatedAsAbsent() throws {
+        // Reviewer 988cf96c: `fileExists(false)` is not confirmed absence. Only ENOENT may mean zero;
+        // an unreadable path must refuse so the retry budget cannot be reset by a permission fault.
+        XCTAssertEqual(VoiceSharingUploadQueue.statKind(of: URL(fileURLWithPath: "/definitely/not/here")),
+                       .absent, "a genuinely missing path is absent")
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: dir.appendingPathComponent("f"))
+        XCTAssertEqual(VoiceSharingUploadQueue.statKind(of: dir.appendingPathComponent("f")), .present)
+
+        // A path through a regular file is ENOTDIR, which is a FAILURE, not absence.
+        let throughFile = dir.appendingPathComponent("f").appendingPathComponent("attempts.json")
+        XCTAssertEqual(VoiceSharingUploadQueue.statKind(of: throughFile), .failure,
+                       "ENOTDIR is not absence")
+
+        // And it surfaces as a REFUSAL from the count read, not as zero attempts. Build a real
+        // entry, then replace its attempts.json with a path through a regular file (ENOTDIR).
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        // attempts.json does not exist until the first attempt, so create the obstruction directly.
+        let record = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
+        // Make the ENTRY DIRECTORY unsearchable: lstat of a child then fails with EACCES, which is
+        // the `.failure` case (a non-ENOENT errno). This is the only route that reaches it, since
+        // ENOTDIR cannot occur (attempts.json's parent is always a real directory).
+        let entryDir = root.appendingPathComponent(prep.name)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: entryDir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entryDir.path) }
+        XCTAssertEqual(VoiceSharingUploadQueue.statKind(of: record), .failure,
+                       "an unsearchable parent is a FAILURE, not absence")
+        XCTAssertThrowsError(try q.attemptCount(for: prep),
+                             "an unreadable record path must refuse, not report zero attempts")
+    }
+
+    func test_beginAttemptRequiresACompleteReadyEntry() throws {
+        // Reviewer 988cf96c: attempt ownership must not be granted for an entry that is still being
+        // prepared, disqualified, or otherwise not ready.
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
+        let prepared = try q.prepare(metadata: record, audio: audioA)
+        // Still preparing: no ready marker yet.
+        XCTAssertFalse(try q.isAttemptable(prepared),
+                       "a preparing entry is not attemptable")
+        XCTAssertFalse(try q.beginAttempt(prepared),
+                       "a preparing entry must not be granted an attempt")
+
+        try q.finalize(prepared)
+        XCTAssertTrue(try q.isAttemptable(prepared), "a ready entry is attemptable")
+
+        // A disqualified entry (publication.failed present) is not attemptable.
+        let failedTicket = try q.prepare(metadata: record, audio: audioA)
+        let failedDirectory = root.appendingPathComponent(failedTicket.name)
+        try FileManager.default.createDirectory(at: failedDirectory, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: failedDirectory.appendingPathComponent("publication.failed"))
+        XCTAssertFalse(try q.isAttemptable(failedTicket),
+                       "a disqualified entry is not attemptable")
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.
