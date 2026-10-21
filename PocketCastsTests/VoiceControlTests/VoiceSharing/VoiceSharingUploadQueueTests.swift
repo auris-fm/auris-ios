@@ -39,15 +39,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         VoiceSharingUploadQueue(rootDirectory: root)
     }
 
-    /// A metadata body that declares the true digest and byte count of `audio`.
-    private func metadatadeclaring(_ audio: Data) -> Data {
-        let digest = SHA256.hash(data: audio).map { String(format: "%02x", $0) }.joined()
-        return #"{"record":{"capture_id":"X","audio":{"sha256":"\#(digest)","byte_count":\#(audio.count)}}}"#
-            .data(using: .utf8)!
-    }
-
-    private let audioA = Data("wav-bytes-A".utf8)
-    private let audioB = Data("wav-bytes-B-longer".utf8)
+    // Real PCM16 mono 16 kHz WAVs of different lengths: readiness now requires a bound record, so
+    // fixtures must be the documented representation rather than arbitrary bytes.
+    private var audioA: Data { wav(frames: 1_600) }
+    private var audioB: Data { wav(frames: 1_700) }
 
 
     private func soleEntryDirectory() throws -> URL {
@@ -82,7 +77,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_entryWithDigestMismatchIsRemovedByRecovery() throws {
         var q = makeQueue()
         // Prepare with CORRECT metadata, then corrupt the audio bytes before finalize.
-        let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         try audioB.write(to: try soleEntryDirectory().appendingPathComponent("audio.wav"))
         try q.finalize(prep)
 
@@ -94,7 +89,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_entryWithMissingOrDirectoryAudioIsRemovedByRecovery() throws {
         var q = makeQueue()
-        _ = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        _ = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         try FileManager.default.removeItem(at: try soleEntryDirectory().appendingPathComponent("audio.wav"))
         try Data([0x01]).write(to: soleEntryDirectory().appendingPathComponent("ready.marker"))
         _ = q.readyEntries() // live filter
@@ -109,10 +104,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_prepareRefusesBeyondEntryCountCeilingAndCleansUp() throws {
         let q = makeQueue()
         for index in 0..<VoiceSharingUploadQueue.maxQueueEntries {
-            _ = try prepareAndFinalize(q, metadata: metadatadeclaring(audioA), audio: Data("a-\(index)".utf8))
+            _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: Data("a-\(index)".utf8))
         }
 
-        XCTAssertThrowsError(try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)) { error in
+        XCTAssertThrowsError(try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)) { error in
             guard case VoiceSharingUploadQueue.PrepareError.queueFull = error else {
                 return XCTFail("expected queueFull, got \(error)")
             }
@@ -126,7 +121,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_prepareRefusesAudioAboveByteCeiling() throws {
         let q = makeQueue()
         let oversized = Data(repeating: 0x00, count: VoiceSharingUploadQueue.maxEntryAudioBytes + 1)
-        XCTAssertThrowsError(try q.prepare(metadata: metadatadeclaring(oversized), audio: oversized)) { error in
+        XCTAssertThrowsError(try q.prepare(metadata: validRecord(audio: oversized), audio: oversized)) { error in
             guard case VoiceSharingUploadQueue.PrepareError.audioTooLarge = error else {
                 return XCTFail("expected audioTooLarge, got \(error)")
             }
@@ -134,6 +129,25 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     // MARK: Durability ordering and fail-closed publication (review round 24, finding 1)
+
+    /// Deterministic clock seam for queue-age controls.
+    private final class MutableClock {
+        private var current: Date
+        init(start: Date) { current = start }
+        func now() -> Date { current }
+        func advance(by interval: TimeInterval) { current = current.addingTimeInterval(interval) }
+    }
+
+    /// Refuses to delete the ready marker, so the post-publication cleanup path can be tested
+    /// against a cleanup that itself fails.
+    private final class MarkerRemovalBlockingFileManager: FileManager {
+        override func removeItem(at URL: URL) throws {
+            if URL.lastPathComponent == "ready.marker" {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            try super.removeItem(at: URL)
+        }
+    }
 
     private final class SyncLog {
         var entries: [String] = []
@@ -147,7 +161,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_publicationProtocolOrder() throws {
         let log = SyncLog()
         let q = VoiceSharingUploadQueue(rootDirectory: root, synchronizer: log.recorder())
-        let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         log.entries.removeAll() // observe only the finalize sequence
         try q.finalize(prep)
         let synced = log.entries
@@ -188,7 +202,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                 if stage == failureStage { throw NSError(domain: "test-sync", code: 1) }
                 stage += 1
             }
-            let prep = try q.prepare(metadata: metadatadeclaring(self.audioA), audio: self.audioA)
+            let prep = try q.prepare(metadata: validRecord(audio: self.audioA), audio: self.audioA)
             XCTAssertThrowsError(try q.finalize(prep), "sync failure at stage \(failureStage) must refuse publication")
             XCTAssertTrue(q.readyEntries().isEmpty,
                           "a failed publication must never surface as ready (stage \(failureStage))")
@@ -199,13 +213,200 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // A REAL storage failure through the DEFAULT synchronizer: audio.wav made read-only makes
         // its fsync-open (O_WRONLY) fail with EACCES. Publication must refuse, not assume durable.
         let q = makeQueue() // default synchronizer — no injection
-        let prep = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         let entryDir = try soleEntryDirectory()
         let audioPath = entryDir.appendingPathComponent("audio.wav")
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: audioPath.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: audioPath.path) }
         XCTAssertThrowsError(try q.finalize(prep), "a real sync failure must refuse publication")
         XCTAssertTrue(q.readyEntries().isEmpty, "failed publication must never surface as ready")
+    }
+
+
+    /// Minimal but complete RFC 8785-canonical wire envelope whose `audio` block matches a real
+    /// PCM16 mono 16 kHz WAV built by `wav(_:)`. Signatures are a test fixture, not activation values.
+    private func validRecord(captureID: String = "11111111-2222-3333-4444-555555555555",
+                             epoch: String = "epoch-1",
+                             audio: Data) -> Data {
+        let audioDigest = SHA256.hash(data: audio).map { String(format: "%02x", $0) }.joined()
+        let record: [String: Any] = [
+            "schema_version": 1,
+            "capture_id": captureID,
+            "enrollment_epoch": epoch,
+            "platform": "ios",
+            "app_version": "8.0",
+            "build": "1",
+            "capture_session_id": "session-1",
+            "audio": [
+                "sha256": audioDigest,
+                "byte_count": audio.count,
+                "encoding": "pcm_s16le",
+                "sample_rate_hz": 16_000,
+                "channels": 1,
+                "retained_samples": (audio.count - 44) / 2,
+                "original_format": "pcm_s16le",
+                "conversion_version": "1",
+                "truncated": false,
+                "dropped_spans": [],
+            ],
+            "models": ["asr": "sensevoice", "router": "lfm2"],
+            "observations": ["wake": ["state": "completed"], "asr": ["state": "completed"]],
+        ]
+        // `record_sha256` is defined over the RFC 8785 CANONICAL form, not any JSON encoding.
+        let canonical = try! VoiceSharingRecordBinding.canonicalize(record)
+        let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+        let envelope: [String: Any] = [
+            "record": record,
+            "record_sha256": digest,
+        ]
+        return try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+    }
+
+    /// A real PCM16 mono 16 kHz WAV of `frames` sample frames (zero-valued), 44-byte header.
+    private func wav(frames: Int = 1_600) -> Data {
+        var data = Data()
+        let dataBytes = frames * 2
+        func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        data.append(contentsOf: Array("RIFF".utf8)); append32(UInt32(36 + dataBytes))
+        data.append(contentsOf: Array("WAVE".utf8))
+        data.append(contentsOf: Array("fmt ".utf8)); append32(16)
+        append16(1); append16(1); append32(16_000); append32(16_000 * 2); append16(2); append16(16)
+        data.append(contentsOf: Array("data".utf8)); append32(UInt32(dataBytes))
+        data.append(Data(repeating: 0x00, count: dataBytes))
+        return data
+    }
+
+    // MARK: Round 25 — immutable entry lifecycle instant (review 1f7dc05d)
+
+    func test_queueAgeIsMeasuredFromCreationInstantAndNeverRefreshed() throws {
+        // A preparation created long ago and finalized now must NOT receive a fresh lifetime, and
+        // repeating finalize must not extend it.
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_000_000))
+        var q = VoiceSharingUploadQueue(rootDirectory: root, clock: clock.now)
+        let audio = wav()
+        let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
+
+        // 49 hours later (past the 48h bound) the preparation is finalized. Publication must be
+        // REFUSED — not accepted with a fresh lifetime.
+        clock.advance(by: 49 * 60 * 60)
+        XCTAssertThrowsError(try q.finalize(prep)) { error in
+            guard case VoiceSharingUploadQueue.PrepareError.expired = error else {
+                return XCTFail("expected expired, got \(error)")
+            }
+        }
+
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "an over-age preparation must not gain a fresh lifetime by being finalized")
+    }
+
+    func test_repeatedFinalizeDoesNotRefreshQueueAge() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 2_000_000))
+        var q = VoiceSharingUploadQueue(rootDirectory: root, clock: clock.now)
+        let audio = wav()
+        let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
+        try q.finalize(prep)
+        XCTAssertEqual(q.readyEntries().count, 1)
+
+        clock.advance(by: 47 * 60 * 60)
+        try q.finalize(prep) // repeated publication must NOT reset the clock
+        clock.advance(by: 2 * 60 * 60) // now 49h past creation
+
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "re-finalizing must not extend the immutable entry's queue lifetime")
+        q = VoiceSharingUploadQueue(rootDirectory: root, clock: clock.now)
+        XCTAssertTrue(q.readyEntries().isEmpty, "recovery applies the same creation-instant age bound")
+    }
+
+    // MARK: Round 25 — cleanup failure after publication (review 1f7dc05d)
+
+    func test_cleanupFailureAfterPublicationKeepsEntryUnready() throws {
+        // Post-marker sync fails AND removing the marker fails. The entry must still never be
+        // returned as ready: the queue records a failed-publication owner state.
+        let q = VoiceSharingUploadQueue(rootDirectory: root, fileManager: MarkerRemovalBlockingFileManager()) { path, isDirectory in
+            if !isDirectory && path.lastPathComponent == "ready.marker" {
+                throw NSError(domain: "test-sync", code: 1)
+            }
+        }
+        let audio = wav()
+        let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
+        XCTAssertThrowsError(try q.finalize(prep))
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "an entry whose publication failed cleanup must never be exposed as ready")
+        // A fresh instance over the same root must reach the same verdict.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, fileManager: MarkerRemovalBlockingFileManager())
+        XCTAssertTrue(reopened.readyEntries().isEmpty,
+                      "the failed-publication state must survive a restart")
+    }
+
+    // MARK: Round 25 — record/WAV binding (review 1f7dc05d / spec direction)
+
+    func test_validBoundRecordWithRealWAVSurvivesRecovery() throws {
+        var q = makeQueue()
+        let audio = wav()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audio), audio: audio)
+
+        q = makeQueue() // recovery
+
+        XCTAssertEqual(q.readyEntries().count, 1, "a genuinely bound record with a valid WAV must survive")
+    }
+
+    func test_metadataTamperedOutsideItsDigestIsRejected() throws {
+        // The record_sha256 binds the WHOLE record: changing any field after it was computed must
+        // invalidate the entry, even when the audio digest/size still match the bytes.
+        let audio = wav()
+        let envelope = validRecord(audio: audio)
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: envelope) as? [String: Any])
+        var record = try XCTUnwrap(object["record"] as? [String: Any])
+        record["app_version"] = "9.9-tampered" // outside audio, inside the hashed record
+        object["record"] = record
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+
+        var q = makeQueue()
+        _ = try q.prepare(metadata: tampered, audio: audio)
+        try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
+
+        q = makeQueue() // recovery
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "a record edited after its digest was computed is not the bound record")
+    }
+
+    func test_wrongRecordDigestIsRejected() throws {
+        let audio = wav()
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: validRecord(audio: audio)) as? [String: Any])
+        object["record_sha256"] = String(repeating: "0", count: 64)
+        let wrongDigest = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+
+        var q = makeQueue()
+        _ = try q.prepare(metadata: wrongDigest, audio: audio)
+        try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
+
+        q = makeQueue() // recovery
+        XCTAssertTrue(q.readyEntries().isEmpty, "a non-matching record_sha256 must not bind")
+    }
+
+    func test_realWavFailureReasonsAreRejected() throws {
+        let audio = wav()
+        // 1. Float samples (format tag 3) — same shape, wrong representation.
+        var floatWav = audio
+        floatWav[20] = 3
+        // 2. Stereo.
+        var stereoWav = audio
+        stereoWav[22] = 2
+        // 3. Wrong sample rate (8 kHz).
+        var lowRateWav = audio
+        lowRateWav[24] = UInt8(8_000 & 0xFF); lowRateWav[25] = UInt8((8_000 >> 8) & 0xFF)
+        // 4. Truncated body: header claims more than is present.
+        let truncatedWav = audio.prefix(audio.count - 100)
+
+        for (label, candidate) in [("float", floatWav), ("stereo", stereoWav),
+                                   ("low-rate", lowRateWav), ("truncated", Data(truncatedWav))] {
+            var q = makeQueue()
+            _ = try q.prepare(metadata: validRecord(audio: candidate), audio: candidate)
+            try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
+            q = makeQueue() // recovery
+            XCTAssertTrue(q.readyEntries().isEmpty, "\(label) WAV must be rejected as not the documented representation")
+        }
     }
 
     // MARK: Bounds at recovery (review round 24, finding 2)
@@ -229,7 +430,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_recoveryReEnforcesEntryLimitsAndRemovesExpiredEntries() throws {
         var q = makeQueue()
-        _ = try prepareAndFinalize(q, metadata: metadatadeclaring(audioA), audio: audioA)
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
         // Simulate an aged entry by backdating its marker beyond maxEntryAge.
         let entryDir = try soleEntryDirectory()
         let marker = entryDir.appendingPathComponent("ready.marker")
@@ -247,7 +448,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // making the file large but the metadata count small AND the file unreadable as data
         // via an irregular file — a directory named audio.wav).
         var q = makeQueue()
-        _ = try q.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        _ = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         let audioPath = try soleEntryDirectory().appendingPathComponent("audio.wav")
         try FileManager.default.removeItem(at: audioPath)
         try FileManager.default.createDirectory(at: audioPath, withIntermediateDirectories: true)
@@ -279,8 +480,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_preparedEntryIsNotReadyUntilFinalized() throws {
         let queue = makeQueue()
-        _ = try prepareAndFinalize(queue, metadata: metadatadeclaring(audioA), audio: audioA)
-        _ = try queue.prepare(metadata: metadatadeclaring(audioB), audio: audioB) // not finalized
+        _ = try prepareAndFinalize(queue, metadata: validRecord(audio: audioA), audio: audioA)
+        _ = try queue.prepare(metadata: validRecord(audio: audioB), audio: audioB) // not finalized
 
         let ready = queue.readyEntries()
         XCTAssertEqual(ready.count, 1, "an entry without its ready marker must never be dequeueable")
@@ -289,8 +490,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_recoveryRemovesAbandonedPreparationAndKeepsReadyEntries() throws {
         var queue = makeQueue()
-        _ = try prepareAndFinalize(queue, metadata: metadatadeclaring(audioA), audio: audioA)
-        _ = try queue.prepare(metadata: metadatadeclaring(audioB), audio: audioB) // abandoned
+        _ = try prepareAndFinalize(queue, metadata: validRecord(audio: audioA), audio: audioA)
+        _ = try queue.prepare(metadata: validRecord(audio: audioB), audio: audioB) // abandoned
 
         queue = makeQueue() // restart
 
@@ -301,8 +502,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_readyEntriesDequeueInFinalizeOrder() throws {
         let queue = makeQueue()
-        let prepB = try queue.prepare(metadata: metadatadeclaring(audioB), audio: audioB)
-        let prepA = try queue.prepare(metadata: metadatadeclaring(audioA), audio: audioA)
+        let prepB = try queue.prepare(metadata: validRecord(audio: audioB), audio: audioB)
+        let prepA = try queue.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         try queue.finalize(prepA)
         try queue.finalize(prepB)
 
@@ -315,7 +516,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
     func test_removeDeletesTheWholeEntry() throws {
         let queue = makeQueue()
-        let entry = try prepareAndFinalize(queue, metadata: metadatadeclaring(audioA), audio: audioA)
+        let entry = try prepareAndFinalize(queue, metadata: validRecord(audio: audioA), audio: audioA)
 
         try queue.remove(entry)
 

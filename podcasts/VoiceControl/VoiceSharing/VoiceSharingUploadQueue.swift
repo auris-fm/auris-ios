@@ -48,6 +48,7 @@ final class VoiceSharingUploadQueue {
         case queueFull
         case audioTooLarge
         case metadataTooLarge
+        case expired
     }
 
     /// Opaque entry handle. Only names an entry under a root; every accessor validates that the
@@ -60,11 +61,20 @@ final class VoiceSharingUploadQueue {
     private static let readyMarkerName = "ready.marker"
     private static let audioName = "audio.wav"
     private static let metadataName = "metadata.json"
+    /// The IMMUTABLE admission instant: written once at prepare, never refreshed by finalize or a
+    /// retried publication. Queue age is measured from here, so a preparation held past the bound
+    /// cannot gain a fresh lifetime by being published, and repeated finalize cannot extend it.
+    private static let createdName = "created.at"
+    /// Present when publication failed and its cleanup could not complete. Such an entry is never
+    /// exposed as ready, even if the ready marker survived.
+    private static let failedPublicationName = "publication.failed"
 
     let rootDirectory: URL
     private let fileManager: FileManager
     /// Storage-synchronization seam: fsync-equivalent for a file or directory path. Production
     /// default performs a real sync; controls inject a recorder to pin ordering.
+    /// Testable time source for the immutable queue-age bound.
+    private let clock: () -> Date
     private let synchronizer: (_ path: URL, _ isDirectory: Bool) throws -> Void
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
@@ -74,10 +84,12 @@ final class VoiceSharingUploadQueue {
     init(
         rootDirectory: URL,
         fileManager: FileManager = .default,
+        clock: @escaping () -> Date = Date.init,
         synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
+        self.clock = clock
         self.synchronizer = synchronizer
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
@@ -121,6 +133,9 @@ final class VoiceSharingUploadQueue {
                 try fileManager.createDirectory(at: entryDirectory, withIntermediateDirectories: true)
                 try audio.write(to: entryDirectory.appendingPathComponent(Self.audioName), options: .atomic)
                 try metadata.write(to: entryDirectory.appendingPathComponent(Self.metadataName), options: .atomic)
+                // One immutable admission instant for the whole queue lifetime of this entry.
+                let createdAt = String(clock().timeIntervalSince1970)
+                try Data(createdAt.utf8).write(to: entryDirectory.appendingPathComponent(Self.createdName), options: .atomic)
                 return Entry(root: rootDirectory, name: name)
             } catch {
                 try? fileManager.removeItem(at: entryDirectory)
@@ -136,6 +151,12 @@ final class VoiceSharingUploadQueue {
     func finalize(_ entry: Entry) throws {
         try serialQueue.sync {
             let directory = try validatedEntryDirectoryLocked(entry)
+            // Publication must not launder an over-age preparation into a fresh lifetime: the
+            // creation instant is immutable, so an entry past the bound refuses publication.
+            if let createdAt = creationInstantLocked(in: directory),
+                clock().timeIntervalSince(createdAt) > Self.maxEntryAge {
+                throw PrepareError.expired
+            }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
             // Publication protocol: entry CONTENT must be durable before the marker exists, and
             // the marker's namespace entry must be durable after it is written. A synchronization
@@ -157,7 +178,15 @@ final class VoiceSharingUploadQueue {
             } catch {
                 // Refuse publication: without durable namespace entries the marker may not be
                 // visible after a crash, so the entry must not surface as ready.
-                try? fileManager.removeItem(at: marker)
+                do {
+                    try fileManager.removeItem(at: marker)
+                } catch {
+                    // Cleanup itself failed. Record an explicit failed-publication state so the
+                    // entry is never exposed as ready — a surviving marker must not imply success.
+                    let failure = directory.appendingPathComponent(Self.failedPublicationName)
+                    try? Data([0x01]).write(to: failure, options: .atomic)
+                    try? synchronizer(failure, false)
+                }
                 throw error
             }
         }
@@ -238,29 +267,50 @@ final class VoiceSharingUploadQueue {
             .map { Entry(root: rootDirectory, name: $0.lastPathComponent) }
     }
 
-    /// Complete-entry validation, FAIL-CLOSED and STAT-FIRST: sizes and file kinds are checked
-    /// via attributes BEFORE any content is loaded; then the metadata's declared audio digest and
-    /// byte count must match the actual bytes. Oversized, irregular, malformed or unbindable
-    /// entries are incomplete.
-    private func isCompleteEntryLocked(at entry: Entry) -> Bool {
+    /// The immutable admission instant recorded at prepare, or nil when absent/unparseable.
+    private func creationInstantLocked(in directory: URL) -> Date? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent(Self.createdName)),
+            let text = String(data: data, encoding: .utf8),
+            let seconds = TimeInterval(text)
+        else { return nil }
+        // BOTH representations must be present: an entry without its immutable instant cannot have
+        // its lifetime bounded, so it is incomplete rather than "fresh".
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// Complete-entry validation, FAIL-CLOSED, STAT-FIRST and BOUND:
+    ///   * sizes and file kinds from attributes BEFORE any content is loaded;
+    ///   * a recorded publication failure disqualifies the entry outright;
+    ///   * the age bound uses the IMMUTABLE creation instant, never the marker's mtime;
+    ///   * readiness requires the persisted envelope to BIND to the audio bytes through the shared
+    ///     record/WAV authority (canonical record digest, capture/epoch identity, real PCM16 mono
+    ///     16 kHz header) — not merely a matching digest field.
+    private func boundEntryLocked(at entry: Entry) -> VoiceSharingRecordBinding.BoundEntry? {
         let directory = entryDirectoryLocked(for: entry)
         let marker = directory.appendingPathComponent(Self.readyMarkerName)
         let audioURL = directory.appendingPathComponent(Self.audioName)
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
+        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedPublicationName).path)
+        else { return nil }
         guard fileManager.fileExists(atPath: marker.path),
-            let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular, audioSize.bytes > 0, audioSize.bytes <= Self.maxEntryAudioBytes,
-            let metadataSize = fileSizeIfRegularLocked(at: metadataURL), metadataSize.isRegular, metadataSize.bytes > 0, metadataSize.bytes <= Self.maxMetadataBytes
-        else { return false }
+            let createdAt = creationInstantLocked(in: directory),
+            clock().timeIntervalSince(createdAt) <= Self.maxEntryAge,
+            let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular,
+            audioSize.bytes > 0, audioSize.bytes <= Self.maxEntryAudioBytes,
+            let metadataSize = fileSizeIfRegularLocked(at: metadataURL), metadataSize.isRegular,
+            metadataSize.bytes > 0, metadataSize.bytes <= Self.maxMetadataBytes
+        else { return nil }
 
-        // Sizes are within bounds; only now is content loaded.
         guard let audioData = try? Data(contentsOf: audioURL),
             let metadataData = try? Data(contentsOf: metadataURL),
-            let declared = declaredAudioFactsLocked(from: metadataData)
-        else { return false }
+            let bound = try? VoiceSharingRecordBinding.bind(envelope: metadataData, audio: audioData)
+        else { return nil }
+        return bound
+    }
 
-        let digest = SHA256.hash(data: audioData).map { String(format: "%02x", $0) }.joined()
-        return digest == declared.digest && audioData.count == declared.byteCount
+    private func isCompleteEntryLocked(at entry: Entry) -> Bool {
+        boundEntryLocked(at: entry) != nil
     }
 
     /// (isRegularFile, byte size) via attributes — no content is read.
@@ -268,20 +318,6 @@ final class VoiceSharingUploadQueue {
         let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard let isRegular = values?.isRegularFile, let bytes = values?.fileSize else { return nil }
         return (isRegular, bytes)
-    }
-
-    /// Extracts `audio.sha256` and `audio.byte_count` from the metadata envelope. Missing or
-    /// malformed declarations make the entry incomplete — an undeclarable entry cannot be bound
-    /// to its bytes, so it must not survive.
-    private func declaredAudioFactsLocked(from metadata: Data) -> (digest: String, byteCount: Int)? {
-        guard
-            let object = try? JSONSerialization.jsonObject(with: metadata, options: [.fragmentsAllowed]),
-            let record = (object as? [String: Any])?["record"] as? [String: Any],
-            let audio = record["audio"] as? [String: Any],
-            let digest = audio["sha256"] as? String, digest.count == 64,
-            let byteCount = audio["byte_count"] as? Int
-        else { return nil }
-        return (digest, byteCount)
     }
 
     private func modificationDateLocked(of url: URL) -> Date {
@@ -302,12 +338,10 @@ final class VoiceSharingUploadQueue {
                 try? fileManager.removeItem(at: directory)
                 continue
             }
-            let readyDate = modificationDateLocked(of: directory.appendingPathComponent(Self.readyMarkerName))
-            if Date().timeIntervalSince(readyDate) > Self.maxEntryAge {
-                try? fileManager.removeItem(at: directory)
-                continue
-            }
-            complete.append((entry, readyDate))
+            // Ordering uses the immutable creation instant; age is already enforced by the
+            // completeness check above (which reads the same instant).
+            let createdAt = creationInstantLocked(in: directory) ?? .distantPast
+            complete.append((entry, createdAt))
         }
         if complete.count > Self.maxQueueEntries {
             for stale in complete.sorted(by: { $0.readyDate < $1.readyDate }).prefix(complete.count - Self.maxQueueEntries) {
