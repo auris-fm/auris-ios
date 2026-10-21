@@ -59,6 +59,11 @@ final class VoiceSharingUploadQueue {
     }
 
     private static let readyMarkerName = "ready.marker"
+    /// Write-once lifecycle stage, created BEFORE the marker is published. It is the discriminator
+    /// that makes "marker present, no disqualifier" impossible to observe after a restart: an entry
+    /// that reached publication always carries `stage.publishing`, and an entry that never did
+    /// carries none. A truncated stage file is distinguishable from an absent one.
+    private static let stageName = "stage.publishing"
     private static let audioName = "audio.wav"
     private static let metadataName = "metadata.json"
     /// The IMMUTABLE admission instant: written once at prepare, never refreshed by finalize or a
@@ -70,7 +75,8 @@ final class VoiceSharingUploadQueue {
     static let maxCreationInstantBytes = 64
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
-    private static let failedPublicationName = "publication.failed"
+    /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
+    private static let failedName = "publication.failed"
 
     let rootDirectory: URL
     private let fileManager: FileManager
@@ -174,6 +180,17 @@ final class VoiceSharingUploadQueue {
                 throw PrepareError.expired
             }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
+            let stage = directory.appendingPathComponent(Self.stageName)
+            // The lifecycle stage is recorded BEFORE publication begins, so that after any crash the
+            // presence of this file means "publication was attempted and may not have completed".
+            // Written with the plain (non-atomic) route so a crash HERE leaves nothing rather than a
+            // half-written discriminator: an entry with no stage file and no marker never published.
+            // Deliberately NOT routed through the injectable failure-record seam: this write is part
+            // of the publication protocol, and letting failure injection suppress it would remove the
+            // discriminator that the restart guarantee depends on.
+            if !fileManager.fileExists(atPath: stage.path) {
+                try Data([0x01]).write(to: stage, options: .atomic)
+            }
             // Publication protocol: entry CONTENT must be durable before the marker exists, and
             // the marker's namespace entry must be durable after it is written. A synchronization
             // failure at any stage THROWS and the entry stays unready — durability is never
@@ -187,55 +204,33 @@ final class VoiceSharingUploadQueue {
             do {
                 try synchronizer(marker, false)
                 // The marker's directory entry and the queue root link are persisted AFTER
-                // publication; a pre-marker directory sync cannot cover namespace changes made
-                // later.
+                // publication; a pre-marker directory sync cannot cover namespace changes made later.
                 try synchronizer(directory, true)
                 try synchronizer(rootDirectory, true)
+                // Publication is confirmed durable: clear the stage LAST, then sync so the removal
+                // is itself durable. Inside the guarded block on purpose — if clearing fails the
+                // publication is not confirmed and the entry stays excluded (fail-closed).
+                try fileManager.removeItem(at: stage)
+                try synchronizer(directory, true)
             } catch {
-                // Refuse publication: without durable namespace entries the marker may not be
-                // visible after a crash, so the entry must not surface as ready.
+                // REFUSE PUBLICATION.
                 //
-                // Both recovery paths are attempted, and neither is allowed to be the only one. If
-                // marker removal AND the failure record both fail, this process still knows the
-                // entry is not publishable, so it is quarantined in memory for its remaining
-                // lifetime — readiness must never rest on a best-effort write succeeding.
-                // RECOVERY ORDER IS DELIBERATE: the failure record is written BEFORE the marker is
-                // removed. In-memory state cannot cross a process boundary, so a surviving marker
-                // with no on-disk disqualifier would reappear as ready after a restart. Writing the
-                // disqualifier first means the only states are "marked failed" or "marker gone" —
-                // never "marker present, nothing says it failed".
-                let failure = directory.appendingPathComponent(Self.failedPublicationName)
-                var disqualifiedOnDisk = false
-                do {
-                    try failureRecordWriter(failure)
-                    try? synchronizer(failure, false)
-                    disqualifiedOnDisk = true
-                } catch {
-                    // The disqualifier could not be persisted. Fall through to marker removal; if
-                    // THAT also fails, the in-memory quarantine is the last line of defence for this
-                    // process (and the entry is left undisqualified on disk — see the restart note).
-                }
-
-                var markerRemoved = false
-                do {
-                    try fileManager.removeItem(at: marker)
-                    markerRemoved = true
-                } catch {
-                    // Both durable paths failed.
-                }
-
-                // Fail closed for THIS process regardless: readiness must never depend on a
-                // best-effort write succeeding. The durable guarantee is claimed only when a
-                // disqualifier actually reached disk or the marker is actually gone.
+                // The decisive property is that `stage.publishing` was written BEFORE the marker
+                // existed. So after any crash or restart the possible states are:
+                //   * no stage, no marker  -> never published (removed as abandoned preparation);
+                //   * stage, no marker     -> attempted, not confirmed (removed);
+                //   * stage, marker        -> attempted, not confirmed (removed);
+                //   * no stage, marker     -> CONFIRMED publication (only reachable via the success
+                //                             path above, which clears the stage after all syncs).
+                // "marker present with no disqualifier" therefore cannot describe a FAILED
+                // publication, which is what reordering two fallible cleanups could not achieve.
+                //
+                // Both durable routes are still attempted below so the entry is cleaned up promptly
+                // rather than lingering until the next restart; neither is required for correctness.
                 quarantineLocked(entry)
-                if !disqualifiedOnDisk, !markerRemoved {
-                    // Neither durable outcome was achieved. Nothing further can be written here
-                    // without recursing into the same failure, so the entry is quarantined and the
-                    // condition is reported rather than silently accepted.
-                    lastDurableDisqualifierOutcome = .unavailable
-                } else {
-                    lastDurableDisqualifierOutcome = .durable
-                }
+                let failed = directory.appendingPathComponent(Self.failedName)
+                try? failureRecordWriter(failed)
+                try? fileManager.removeItem(at: marker)
                 throw error
             }
         }
@@ -362,7 +357,12 @@ final class VoiceSharingUploadQueue {
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
         guard !quarantinedLocked(entry) else { return nil }
-        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedPublicationName).path)
+        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedName).path)
+        else { return nil }
+        // A recorded publication stage means publication began. Until the marker is confirmed and
+        // the stage cleared, the entry is not trustworthy — this is the discriminator that makes
+        // "marker present with no disqualifier" unreachable for a restart.
+        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.stageName).path)
         else { return nil }
         guard fileManager.fileExists(atPath: marker.path),
             let createdAt = creationInstantLocked(in: directory),

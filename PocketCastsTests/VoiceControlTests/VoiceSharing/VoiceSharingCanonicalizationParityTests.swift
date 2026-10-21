@@ -159,6 +159,51 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
         ]
     }
 
+    /// Authorization is checked BEFORE the record is hashed, not only during recovery: arguments
+    /// that reach the immutable record cannot be removed afterwards without invalidating the digest
+    /// the Worker recomputes.
+    func test_unauthorizedRoutingArgumentsAreRefusedBeforeFinalization() throws {
+        let audio = Self.clientWav(frames: 1600)
+        func bind(withArguments arguments: Any?, intent: String) throws {
+            var record = Self.workerAcceptedRecord(audio: audio)
+            var observations = try XCTUnwrap(record["observations"] as? [String: Any])
+            var routing = try XCTUnwrap(observations["routing"] as? [String: Any])
+            routing["state"] = "completed"
+            routing["predicted_intent"] = intent
+            routing["execution_disposition"] = "refused"
+            if let arguments { routing["arguments"] = arguments }
+            observations["routing"] = routing
+            record["observations"] = observations
+            let canonical = try VoiceSharingRecordBinding.canonicalize(record)
+            let envelope: [String: Any] = [
+                "record": record,
+                "record_sha256": SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined(),
+            ]
+            let metadata = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+            _ = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+        }
+
+        // Authorized intent with its approved member: accepted.
+        XCTAssertNoThrow(try bind(withArguments: ["duration_minutes": 30], intent: "sleep_timer.set"))
+
+        // Unknown intent: no approved argument list, so NO arguments may be carried.
+        XCTAssertThrowsError(try bind(withArguments: ["anything": 1], intent: "unreviewed.intent")) { error in
+            guard case VoiceSharingRecordBinding.BindingError.invalidField = error else {
+                return XCTFail("expected invalidField for unauthorized arguments, got \(error)")
+            }
+        }
+
+        // Authorized intent, unauthorized member: refused rather than partially retained.
+        XCTAssertThrowsError(try bind(withArguments: ["track_hint": "x", "user_email": "a@b.c"], intent: "track.play")) { error in
+            guard case VoiceSharingRecordBinding.BindingError.invalidField = error else {
+                return XCTFail("expected invalidField for unrecognized member, got \(error)")
+            }
+        }
+
+        // Omitting arguments entirely is the correct shape and keeps category/disposition.
+        XCTAssertNoThrow(try bind(withArguments: nil, intent: "unreviewed.intent"))
+    }
+
     /// RFC 8785 §3.2.3 sorts by UTF-16 code units, which is NOT locale-aware string ordering: an
     /// uppercase key precedes the lowercase one, and a prefix precedes its extension.
     func test_keysSortByUTF16CodeUnits() throws {

@@ -185,13 +185,15 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(audioSyncs.count, 1)
         XCTAssertEqual(metadataSyncs.count, 1)
         XCTAssertEqual(markerSyncs.count, 1)
-        XCTAssertEqual(entryDirSyncs.count, 2, "entry directory is synced before AND after marker publication")
+        XCTAssertEqual(entryDirSyncs.count, 3,
+                       "entry directory is synced before publication, after the marker, and after clearing the stage")
         XCTAssertEqual(rootSyncs.count, 1, "the queue root is synced once, persisting the entry link")
 
         XCTAssertLessThan(audioSyncs[0], markerSyncs[0], "audio must be durable before the marker is published")
         XCTAssertLessThan(metadataSyncs[0], markerSyncs[0], "metadata must be durable before the marker is published")
         XCTAssertLessThan(markerSyncs[0], entryDirSyncs[1], "the marker's namespace entry must be persisted after publication")
         XCTAssertLessThan(entryDirSyncs[1], rootSyncs[0], "the queue root must be synced after the entry directory")
+        XCTAssertLessThan(rootSyncs[0], entryDirSyncs[2], "clearing the stage is the LAST durable step")
     }
 
     func test_syncFailureRefusesPublication() throws {
@@ -424,13 +426,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_doubleFailurePublicationStaysUnreadyAcrossRestartAndLifetime() throws {
-        // Marker removal fails AND the failure record cannot be written. Readiness must still not
-        // expose the entry — never rest on a best-effort write succeeding.
+        // THE ORIGINAL FAULT, PRESERVED AS THE CONTROL: the failure record cannot be written AND
+        // the marker cannot be removed. Per @spec/reviewer this must NOT be narrowed to a
+        // successful-cleanup scenario — a restart over the same root must not expose the entry.
         let blocking = MarkerRemovalBlockingFileManager()
-        // The failure must happen AFTER the marker exists, which is the only state where cleanup is
-        // reached. Failing every stage would refuse before publication and never test the cleanup.
-        // Marker syncs and the two post-publication directory syncs fail; the pre-publication
-        // content syncs succeed.
         var publishedMarker = false
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -445,34 +444,58 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                     throw CocoaError(.fileWriteNoPermission)
                 }
             },
-            // The on-disk disqualifier cannot be produced either: both recovery paths fail.
+            // The on-disk disqualifier cannot be produced either.
             failureRecordWriter: { _ in throw CocoaError(.fileWriteNoPermission) })
         let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
-        XCTAssertThrowsError(try q.finalize(prep)) { error in
-            // The publication still fails loudly; what matters is what the queue exposes AFTERWARDS.
-            _ = error
-        }
-        // Preconditions: the marker removal really was refused, and the failure record really is
-        // absent from disk. Without BOTH, the test would be exercising a single (handled) failure
-        // and would pass even with no in-memory state at all.
+        XCTAssertThrowsError(try q.finalize(prep))
+        XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must not leave a ready entry")
+
         let entryDirectory = try XCTUnwrap(
             try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
                 .filter { $0.hasDirectoryPath }.first)
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: entryDirectory.appendingPathComponent("ready.marker").path),
-            "precondition: marker removal must have been refused")
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: entryDirectory.appendingPathComponent("publication.failed").path),
-            "precondition: the failure record must not exist on disk")
-        XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must not leave a ready entry")
-        // Still unready while this process owns the knowledge, since no disqualifier reached disk.
-        XCTAssertTrue(q.readyEntries().isEmpty, "a double failure must stay unready on repeat reads")
+            "precondition: the disqualifier really could not be written")
+        // The discriminator that replaces cleanup-dependent state: publication was ATTEMPTED, and
+        // that fact is on disk regardless of whether any cleanup succeeded.
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryDirectory.appendingPathComponent("stage.publishing").path),
+            "precondition: the pre-publication stage record is on disk")
 
-        // A RESTART cannot be protected by in-memory state. When BOTH durable paths fail this must be
-        // REPORTED, not silently absorbed: the caller has to know that the only thing standing
-        // between a failed publication and a later process exposing it is this process's memory.
-        XCTAssertEqual(q.lastDurableDisqualifierOutcome, .unavailable,
-                       "a double durable failure must be reported to the caller")
+        // THE DECISIVE ASSERTION. Neither cleanup succeeded, yet a FRESH queue over the same root
+        // must still not expose the entry. This is the case in-memory quarantine could not cover.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(reopened.readyEntries().isEmpty,
+                      "a fresh queue over the same root must not expose a failed publication, even "
+                      + "when neither cleanup succeeded")
+    }
+
+    func test_failedPublicationWithBothCleanupsFailingIsRemovedOnRecovery() throws {
+        // The same fault followed by a fresh instance: recovery removes the unconfirmed entry
+        // rather than leaving half-published state on disk.
+        let blocking = MarkerRemovalBlockingFileManager()
+        var publishedMarker = false
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            fileManager: blocking,
+            clock: Date.init,
+            synchronizer: { url, _ in
+                if url.lastPathComponent == "ready.marker" { publishedMarker = true }
+                if publishedMarker, url.lastPathComponent == "ready.marker" {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                if publishedMarker, url.hasDirectoryPath {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            },
+            failureRecordWriter: { _ in throw CocoaError(.fileWriteNoPermission) })
+        let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertThrowsError(try q.finalize(prep))
+
+        let entryDirectory = try soleEntryDirectory()
+        _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entryDirectory.path),
+                       "recovery must remove an entry whose publication was never confirmed")
     }
 
     func test_disqualifierIsWrittenBeforeTheMarkerIsRemoved() throws {
@@ -535,8 +558,6 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             })
         let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         XCTAssertThrowsError(try q.finalize(prep))
-        XCTAssertEqual(q.lastDurableDisqualifierOutcome, .durable,
-                       "the disqualifier reached disk, so recovery IS durably protected")
         XCTAssertTrue(q.readyEntries().isEmpty)
 
         // The disqualifier is genuinely ON DISK before any restart, which is what makes the next

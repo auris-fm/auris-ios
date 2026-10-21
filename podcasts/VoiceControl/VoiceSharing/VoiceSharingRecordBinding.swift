@@ -221,6 +221,21 @@ enum VoiceSharingRecordBinding {
         "execution": ["client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired"],
     ]
 
+    /// Approved argument members per intent. An intent absent from this table has NO approved
+    /// argument list, so any `arguments` member is refused. The client must omit `arguments` before
+    /// finalizing the immutable record — sanitizing afterwards would change the bytes the digest
+    /// covers, and the Worker recomputes that digest.
+    private static let intentArgumentAllowlist: [String: Set<String>] = [
+        "playlist.play": ["playlist_hint"],
+        "track.play": ["track_hint", "artist_hint"],
+        "track.pause": [],
+        "sleep_timer.set": ["duration_minutes"],
+    ]
+
+    private static let routingValidationStates: Set<String> = ["valid", "invalid", "not_run"]
+
+    private static let routingDispositions: Set<String> = ["executed", "refused", "failed", "not_run", "pending"]
+
     private static let stageFields: [String: Set<String>] = [
         "wake": ["state", "reason", "decision", "score", "threshold", "speech_offset_ms", "wake_offset_ms"],
         "bleed": ["state", "reason", "decision", "overlap_ratio"],
@@ -298,11 +313,37 @@ enum VoiceSharingRecordBinding {
                 }
             }
 
+            if stage == "routing" {
+                try validateRoutingArguments(declared, path: stagePath)
+            }
+
             if let reason = declared["reason"], !(reason is NSNull) {
                 guard let text = reason as? String, let enumerated = stageReasons[stage], enumerated.contains(text) else {
                     throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
                 }
             }
+        }
+    }
+
+    /// `routing.arguments` may only carry members the record's own intent authorizes. This runs at
+    /// BINDING time, i.e. before finalization and hashing, not only during recovery: an argument
+    /// payload that survives into the immutable record can never be removed afterwards without
+    /// changing the digest, so the correct behaviour is to refuse it here and require the client to
+    /// omit `arguments` while still retaining the action category and disposition.
+    private static func validateRoutingArguments(_ routing: [String: Any], path: String) throws {
+        guard let raw = routing["arguments"], !(raw is NSNull) else { return }
+        guard let arguments = raw as? [String: Any] else {
+            throw BindingError.invalidField("\(path).arguments", "object required")
+        }
+        let intent = routing["predicted_intent"] as? String ?? ""
+        guard let allowed = intentArgumentAllowlist[intent] else {
+            // Missing authorization: the intent has no approved argument list at all. Refused
+            // rather than partially retained — a partial payload would misrepresent what the model
+            // saw, and mutating it here would break the digest contract.
+            throw BindingError.invalidField("\(path).arguments", "intent has no approved argument list")
+        }
+        for key in arguments.keys where !allowed.contains(key) {
+            throw BindingError.invalidField("\(path).arguments", "unrecognized argument member")
         }
     }
 
