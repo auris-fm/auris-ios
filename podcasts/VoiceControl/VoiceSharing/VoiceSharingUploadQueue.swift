@@ -49,6 +49,10 @@ final class VoiceSharingUploadQueue {
         case audioTooLarge
         case metadataTooLarge
         case expired
+        /// The ready transition may have occurred but its final synchronization could not be
+        /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
+        /// must reconcile (`reconcilePublication`) rather than assuming either outcome.
+        case publicationUncertain
     }
 
     /// Opaque entry handle. Only names an entry under a root; every accessor validates that the
@@ -90,12 +94,20 @@ final class VoiceSharingUploadQueue {
     /// Whether the most recent refused publication could be disqualified DURABLY. `unavailable`
     /// means neither the failure record nor marker removal succeeded, so only this process knows the
     /// entry is unpublishable — a restart cannot be protected by in-memory state.
-    enum DurableDisqualifier: Equatable {
-        case durable
-        case unavailable
+    /// Outcome of a publication attempt. The spec requires three distinct states: a generic thrown
+    /// error must not erase the difference between "definitely not committed" and "may have
+    /// committed".
+    enum PublicationOutcome: Equatable {
+        /// Durable success: the entry is ready and its readiness is confirmed on disk.
+        case committed
+        /// Known to precede the ready transition: the entry is not ready and never will be.
+        case uncommitted
+        /// The ready transition MAY have occurred but its final synchronization could not be
+        /// confirmed. Neither success nor rejection: the same immutable identity must be reconciled
+        /// under the queue owner before any attempt, and a fresh instance applies the same rules.
+        case uncertain
     }
 
-    private(set) var lastDurableDisqualifierOutcome: DurableDisqualifier?
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -191,59 +203,76 @@ final class VoiceSharingUploadQueue {
             if !fileManager.fileExists(atPath: stage.path) {
                 try Data([0x01]).write(to: stage, options: .atomic)
             }
-            // Publication protocol: entry CONTENT must be durable before the marker exists, and
-            // the marker's namespace entry must be durable after it is written. A synchronization
-            // failure at any stage THROWS and the entry stays unready — durability is never
-            // silently assumed.
+            // PUBLICATION PROTOCOL — one commit point, and the order is chosen so that the commit
+            // point is the LAST fallible action.
+            //
+            // Spec (voice-recording-uploads.md): durability of the immutable bytes is established
+            // BEFORE readiness; readiness is published atomically and its directory synchronization
+            // confirmed before durable success is reported. A failure known to precede the ready
+            // transition is uncommitted. A ready transition that may have occurred but whose final
+            // synchronization cannot be confirmed is UNCERTAIN, not success and not rejection.
+            //
+            // The ordering exists because every design that clears a discriminator AFTER publishing
+            // readiness leaves a window: removing that discriminator can succeed and its sync can
+            // fail, returning the entry to "marker with no disqualifier". The stage file is therefore
+            // cleared BEFORE the marker is published, and nothing fallible follows publication.
             try synchronizer(directory.appendingPathComponent(Self.audioName), false)
             try synchronizer(directory.appendingPathComponent(Self.metadataName), false)
             try synchronizer(directory, true)
+
+            // Clear the stage while the marker does NOT yet exist: the entry is then a plain
+            // prepared entry, and a failure here is unambiguously uncommitted.
+            try fileManager.removeItem(at: stage)
+            try synchronizer(directory, true)
+
             let temporary = directory.appendingPathComponent("\(Self.readyMarkerName).tmp-\(UUID().uuidString)")
             try Data([0x01]).write(to: temporary, options: .atomic)
             _ = try fileManager.replaceItemAt(marker, withItemAt: temporary)
+
+            // THE COMMIT POINT. The marker now exists; if its sync cannot be confirmed we do not know
+            // whether a later process will see it. That is `uncertain`, and it must be REPORTED as
+            // such — never silently downgraded to success or to "definitely uncommitted".
             do {
                 try synchronizer(marker, false)
-                // The marker's directory entry and the queue root link are persisted AFTER
-                // publication; a pre-marker directory sync cannot cover namespace changes made later.
                 try synchronizer(directory, true)
                 try synchronizer(rootDirectory, true)
-                // Publication is confirmed durable. The stage is cleared as the FINAL step.
-                //
-                // The removal must not be able to create the hole the stage exists to prevent: if
-                // the stage is gone and the follow-up sync then fails, a later process sees a marker
-                // with neither a stage nor a failure record and cannot tell it from a confirmed
-                // publication. The disqualifier is therefore written BEFORE the stage is removed, so
-                // the discriminator can never disappear without something replacing it. On success
-                // the disqualifier is removed again; if THAT removal fails the entry is harmlessly
-                // excluded rather than wrongly exposed.
-                let failureMarker = directory.appendingPathComponent(Self.failedName)
-                try failureRecordWriter(failureMarker)
-                try synchronizer(directory, true)
-                try fileManager.removeItem(at: stage)
-                try synchronizer(directory, true)
-                try fileManager.removeItem(at: failureMarker)
-                try synchronizer(directory, true)
             } catch {
-                // REFUSE PUBLICATION.
-                //
-                // The decisive property is that `stage.publishing` was written BEFORE the marker
-                // existed. So after any crash or restart the possible states are:
-                //   * no stage, no marker  -> never published (removed as abandoned preparation);
-                //   * stage, no marker     -> attempted, not confirmed (removed);
-                //   * stage, marker        -> attempted, not confirmed (removed);
-                //   * no stage, marker     -> CONFIRMED publication (only reachable via the success
-                //                             path above, which clears the stage after all syncs).
-                // "marker present with no disqualifier" therefore cannot describe a FAILED
-                // publication, which is what reordering two fallible cleanups could not achieve.
-                //
-                // Both durable routes are still attempted below so the entry is cleaned up promptly
-                // rather than lingering until the next restart; neither is required for correctness.
                 quarantineLocked(entry)
-                let failed = directory.appendingPathComponent(Self.failedName)
-                try? failureRecordWriter(failed)
                 try? fileManager.removeItem(at: marker)
-                throw error
+                throw PrepareError.publicationUncertain
             }
+        }
+    }
+
+    // MARK: Publication reconciliation
+
+    /// Reconciles an entry whose publication outcome is uncertain, under the SAME serialized owner
+    /// that attempts publication. The spec requires this before any attempt, and requires the same
+    /// rules on a fresh instance.
+    ///
+    /// The decision is made from durable state only, so it is identical in this process and after a
+    /// restart:
+    ///   * the immutable record must bind completely (canonical digest, WAV/audio binding, shape);
+    ///   * the entry must be within its age and resource bounds;
+    ///   * a marker whose namespace could not be confirmed is NOT trusted merely because it exists.
+    ///
+    /// A `stage.publishing` record means the transition was interrupted before it could be
+    /// confirmed, so the entry is unavailable and removed by bounded cleanup. Otherwise an intact,
+    /// fully validated entry is confirmed.
+    @discardableResult
+    func reconcilePublication(_ entry: Entry) -> PublicationOutcome {
+        serialQueue.sync {
+            let directory = entryDirectoryLocked(for: entry)
+            guard fileManager.fileExists(atPath: directory.path) else { return .uncommitted }
+            guard !quarantinedLocked(entry) else { return .uncommitted }
+            let marker = directory.appendingPathComponent(Self.readyMarkerName)
+            let failed = directory.appendingPathComponent(Self.failedName)
+            if fileManager.fileExists(atPath: failed.path) { return .uncommitted }
+            guard fileManager.fileExists(atPath: marker.path) else { return .uncommitted }
+            // Fully validate before exposing: the entry must still be the immutable record it claims
+            // to be, within bounds. Anything less is not a confirmable publication.
+            guard boundEntryLocked(at: entry) != nil else { return .uncommitted }
+            return .committed
         }
     }
 
