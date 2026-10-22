@@ -2428,6 +2428,74 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path))
     }
 
+    // MARK: Shared-queue coverage clarification 7e9606b (spec 0b5841c2)
+
+    func test_unknownCoverageHoldsServingUntilSuccessfulScan() throws {
+        var failListing = false
+        let rootPath = root.path
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            listDirectoryBounded: { url, keys, limit in
+                if failListing, url.path == rootPath {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                let urls = try FileManager.default.contentsOfDirectory(
+                    at: url, includingPropertiesForKeys: keys)
+                return (urls: Array(urls.prefix(limit)), overflowed: urls.count > limit)
+            })
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        guard case .known(let ready) = q.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("healthy root must report known coverage")
+        }
+        XCTAssertEqual(ready.count, 1)
+
+        // Scan failure: serving is HELD (unknown), not read as an empty queue. Admission is
+        // equally held (fail-closed accounting).
+        failListing = true
+        guard case .unknownCoverage = q.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("unknown coverage must hold serving, not report an empty queue")
+        }
+        XCTAssertThrowsError(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+
+        // Restoration: a bounded SUCCESSFUL scan reopens serving.
+        failListing = false
+        guard case .known(let restored) = q.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("restored scan must reopen serving")
+        }
+        XCTAssertEqual(restored.count, 1)
+    }
+
+    func test_disposalIntentsAreDiscoveredChargedAndRetained() throws {
+        // Disposal/disqualification intents (publication.failed) are discovered state: the entry
+        // is retained by recovery, never served, but REMAINS owned and charged in accounting.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let livePrep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(livePrep)
+        let failedPrep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+        try owner.finalize(failedPrep)
+        try Data([0x01]).write(to: root.appendingPathComponent(failedPrep.name).appendingPathComponent("publication.failed"))
+
+        // A fresh instance's recovery must NOT delete the disqualified entry.
+        let recovered = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(failedPrep.name).path),
+            "a disposal intent is discovered state, not debris")
+        // It is not served...
+        guard case .known(let ready) = recovered.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("healthy root")
+        }
+        XCTAssertEqual(Set(ready.map(\.name)), [livePrep.name],
+                       "the disqualified entry is never served")
+        // ...but it remains owned and charged.
+        let limits = VoiceSharingUploadQueue.AggregateLimits(maxBytes: 1, maxRecords: 1)
+        let crowded = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init, aggregateLimits: limits)
+        XCTAssertThrowsError(try crowded.prepare(
+            metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "the retained survivor still consumes budget: a second entry cannot fit")
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

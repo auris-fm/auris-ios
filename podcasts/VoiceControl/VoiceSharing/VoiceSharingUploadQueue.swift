@@ -1372,6 +1372,34 @@ final class VoiceSharingUploadQueue {
 
     /// All complete, ready entries within the queue-age bound, in finalize order (marker mtime;
     /// name as the deterministic tiebreak).
+    /// Clarification 7e9606b: discovery covers disposal/disqualification intents as well as
+    /// audio/metadata, and UNKNOWN coverage must HOLD serving, not read as "nothing ready".
+    /// This tri-state result distinguishes a genuinely empty queue from a root that could not be
+    /// scanned: callers that cannot handle `.unknownCoverage` must not serve.
+    enum ReadyDiscovery {
+        case known([Entry])
+        case unknownCoverage
+    }
+
+    func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
+        serialQueue.sync {
+            guard let all = try? entriesStrictLocked() else { return .unknownCoverage }
+            let ready = all
+                .filter { isCompleteEntryLocked(at: $0) }
+                // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
+                // after an uncertain transition a marker may be visible without durable backing.
+                .filter { (try? self.confirmDurableLocked(directory: self.entryDirectoryLocked(for: $0))) != nil }
+                .filter { Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: $0).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge }
+                .sorted { lhs, rhs in
+                    let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
+                    let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
+                    if lDate == rDate { return lhs.name < rhs.name }
+                    return lDate < rDate
+                }
+            return .known(ready)
+        }
+    }
+
     func readyEntries() -> [Entry] {
         serialQueue.sync {
             entriesLocked()
@@ -1666,6 +1694,14 @@ final class VoiceSharingUploadQueue {
             // forever with a name that is ours, not debris.
             cleanupTemporaryMarkersLocked(in: directory)
             guard isCompleteEntryLocked(at: entry) else {
+                // Clarification 7e9606b: a disposal/disqualification intent (`publication.failed`)
+                // is DISCOVERED STATE, not incompleteness — its cleanup deliberately could not
+                // complete. The entry is RETAINED: never served (the binding refuses it), still
+                // owned and charged by accounting. Deleting it here would erase the failure
+                // evidence and let a fresh scan re-admit the content.
+                if fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedName).path) {
+                    continue
+                }
                 try? fileManager.removeItem(at: directory)
                 continue
             }
