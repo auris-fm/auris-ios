@@ -2641,6 +2641,57 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         owner.endAttempt(a)
     }
 
+    func test_createdAtReadFailureHoldsCoverageAndReadyGateConfirmsHoldAttempts() throws {
+        // Reviewer 72e9362d: (a) a present, bounded created-at whose READ fails is UNKNOWN
+        // coverage, never .incomplete; (b) B's durability-confirmation failure holds A's held-
+        // handle attempt via the shared authority.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let good = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(good)
+        let broken = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+        try owner.finalize(broken)
+
+        // (a) Replace created.at via an unreplicable-in-content path: make the file unreadable
+        // while stat-visible — chmod 000 on the FILE itself (stat ok, read fails).
+        let createdURL = root.appendingPathComponent(broken.name).appendingPathComponent("created.at")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: createdURL.path)
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a bounded created-at whose read fails must hold coverage")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: createdURL.path)
+
+        // (b) B's ready marker present but its durability witness unconfirmable: chmod 000 on the
+        // marker — stat-visible, but the confirmation's open/fsync fails while entry state is
+        // still .bound, isolating the CONFIRMATION failure from the state check.
+        let markerURL = root.appendingPathComponent(broken.name).appendingPathComponent("ready.marker")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: markerURL.path)
+        let perms = try FileManager.default.attributesOfItem(atPath: markerURL.path)[.posixPermissions] as? Int
+        XCTAssertEqual(perms, 0o000, "chmod applied? path=\(markerURL.path)")
+        let fd = open(markerURL.path, O_WRONLY)
+        if fd >= 0 { close(fd) }
+        XCTAssertFalse(fd >= 0, "probe: O_WRONLY open on 000 marker must fail (fd=\(fd))")
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("serving holds with unconfirmable ready marker")
+        }
+        XCTAssertThrowsError(try owner.beginAttempt(good)) { error in
+            // The authority surfaces raw I/O failure (synchronizer's NSError), not a classified
+            // outcome — the point is that it THROWS and no lease survives.
+            XCTAssertNotNil(error as? NSError, "B's confirmation failure holds A's attempt")
+        }
+        XCTAssertFalse(owner.isAttemptInFlight(good), "no lease survives the hold")
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("serving holds equally")
+        }
+        // Restoration: marker readable again — A's attempt is admitted.
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: markerURL.path)
+        guard case .known(let ready) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("restored coverage")
+        }
+        XCTAssertEqual(ready.count, 2, "restored: both entries are valid and served")
+        XCTAssertTrue(try owner.beginAttempt(good))
+        owner.endAttempt(good)
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

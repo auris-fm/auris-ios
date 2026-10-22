@@ -1393,13 +1393,20 @@ final class VoiceSharingUploadQueue {
         case unknownCoverage
     }
 
-    /// THE strict owner-wide coverage authority: root listing and every entry's required state
-    /// must be KNOWN. Serving queries and attempt gates share this one implementation so neither
-    /// can hold a weaker standard than the other.
+    /// THE strict owner-wide coverage authority: root listing, every entry's required state, AND
+    /// every ready entry's durability confirmation must be KNOWN. Serving queries and attempt
+    /// gates share this one implementation so neither can hold a weaker standard than the other.
     private func strictOwnerCoverageLocked() throws -> [Entry] {
         let all = try entriesStrictLocked()
         for entry in all {
-            _ = try entryStateLocked(at: entry)
+            let state = try entryStateLocked(at: entry)
+            // Reviewer 72e9362d: an unconfirmable READY marker is UNKNOWN coverage for the whole
+            // owner — the attempt gate must hold exactly where the serving query holds. Entries
+            // still being prepared (incomplete, no marker) are known-incomplete; durability
+            // confirmation does not apply to them.
+            if case .bound = state {
+                try confirmDurableLocked(directory: entryDirectoryLocked(for: entry))
+            }
         }
         return all
     }
@@ -1419,14 +1426,8 @@ final class VoiceSharingUploadQueue {
                     return .unknownCoverage
                 }
                 guard case .bound = state else { continue }
-                // Exposure also requires CONFIRMED durability, not just a structurally valid
-                // marker: after an uncertain transition a marker may be visible without durable
-                // backing. Unconfirmable durability is UNKNOWN coverage, not "not ready".
-                do {
-                    try confirmDurableLocked(directory: entryDirectoryLocked(for: entry))
-                } catch {
-                    return .unknownCoverage
-                }
+                // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
+                // shared authority); reaching here means it held.
                 if Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge {
                     ready.append(entry)
                 }
@@ -1723,8 +1724,13 @@ final class VoiceSharingUploadQueue {
             createdSize.bytes <= Self.maxCreationInstantBytes else {
             throw PrepareError.accountingUnavailable
         }
-        guard let createdData = try? Data(contentsOf: createdURL),
-            let text = String(data: createdData, encoding: .utf8),
+        // Reviewer 72e9362d: the READ is throwing — a present, bounded file whose read fails is
+        // UNKNOWN coverage, never .incomplete. Only content PARSING failure classifies.
+        let createdData: Data
+        do { createdData = try Data(contentsOf: createdURL) } catch {
+            throw PrepareError.accountingUnavailable
+        }
+        guard let text = String(data: createdData, encoding: .utf8),
             let seconds = TimeInterval(text), seconds.isFinite
         else { return .incomplete }
         let createdAt = Date(timeIntervalSince1970: seconds)
