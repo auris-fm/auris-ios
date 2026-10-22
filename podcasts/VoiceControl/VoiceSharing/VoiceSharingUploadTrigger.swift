@@ -18,6 +18,10 @@ final class VoiceSharingUploadTrigger {
     private let surfaceEnabled: () -> Bool
     private let isAuthorized: () -> Bool
     private var drainTask: Task<Void, Never>?
+    /// Guards the in-flight bookkeeping only; never held across upload or credential work.
+    private let stateLock = NSLock()
+    private var drainInFlight = false
+    private var activeToken: UUID?
 
     init(
         scheduler: VoiceSharingUploadScheduler,
@@ -47,10 +51,32 @@ final class VoiceSharingUploadTrigger {
         guard surfaceEnabled() else { return }
         // Gate 2: live collection policy.
         guard isAuthorized() else { return }
-        // Serialized by the scheduler itself; a second trigger while one drain runs is a no-op.
-        guard drainTask == nil || drainTask?.isCancelled == true else { return }
+        // SINGLE-FLIGHT, but LIFETIME-CORRECT (reviewer aa84564a / spec 0414c13d): a COMPLETED
+        // drain is not "in flight", so the flag must be cleared when the drain ends — otherwise
+        // every later foreground trigger is refused forever. Each drain carries its own token and
+        // may only clear the slot it owns, so a later drain's slot is never clobbered by an
+        // earlier one finishing. State lives on `stateLock`, never on the capture path.
+        stateLock.lock()
+        guard !drainInFlight else {
+            stateLock.unlock()
+            return
+        }
+        drainInFlight = true
+        let token = UUID()
+        activeToken = token
+        stateLock.unlock()
         drainTask = Task { [scheduler] in
             _ = await scheduler.drainOnce()
+        }
+        Task { [weak self] in
+            await self?.drainTask?.value
+            guard let self else { return }
+            self.stateLock.lock()
+            if self.activeToken == token {
+                self.drainInFlight = false
+                self.activeToken = nil
+            }
+            self.stateLock.unlock()
         }
     }
 

@@ -495,6 +495,42 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertFalse(VoiceSharingStubProtocol.seenRequests.isEmpty, "this path DID send, unlike the pre-transport refusal")
     }
 
+    /// ONE-REFRESH COMPOSITION (spec 175260b2): same account, same enrollment epoch, NEW login.
+    /// A re-login is not an enrollment change: the epoch must survive the one refresh that the new
+    /// login performs, and the stale session's in-flight read must never install.
+    func test_sameAccountSameEpochNewLogin_refreshesOnceAndKeepsTheEpoch() async throws {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = Reply(
+            status: 200,
+            body: projection("r8", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        // Install the membership under the FIRST login (epoch e1).
+        let firstFetch = await client.fetchProjection()
+        let firstRead = try XCTUnwrap(firstFetch)
+        XCTAssertEqual(firstRead.membership.enrollmentEpoch, "e1")
+        // Same account, SAME epoch, NEW login.
+        identity = "gen-A2"
+        // The new login's refresh runs — exactly one request, and the epoch is unchanged by it.
+        VoiceSharingStubProtocol.seenRequests.removeAll()
+        let refreshedFetch = await client.fetchProjection()
+        let refreshed = try XCTUnwrap(
+            refreshedFetch, "the new login must be able to refresh")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1,
+                       "one refresh — not a retry storm — for the new login")
+        XCTAssertEqual(refreshed.membership.enrollmentEpoch, "e1",
+                       "a re-login must not move the enrollment epoch")
+        // And a mutation begun under the OLD login is still refused before transport.
+        VoiceSharingStubProtocol.seenRequests.removeAll()
+        identity = "gen-A"
+        let staleOp = try XCTUnwrap(client.beginWithdrawal(
+            enrollmentEpoch: "e1", expectedMembershipRevision: "r8"))
+        identity = "gen-A2"
+        let outcome = await client.perform(staleOp)
+        XCTAssertEqual(outcome, .refusedStaleSession,
+                       "same account, new login: the old login's operation is superseded")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty,
+                      "refusal is before transport")
+    }
+
     /// GET was previously unguarded: an account transition during the fetch would still install the previous
     /// account's projection. Also asserts no request at all when there is no authenticated session.
     func test_getProjection_transitionDuringFetch_isDropped() async {

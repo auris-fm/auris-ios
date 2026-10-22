@@ -71,71 +71,200 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return entry
     }
 
-    /// Extracts a string field from the multipart body's metadata JSON part.
-    static func metadataField(_ key: String, from multipart: String) -> String? {
-        guard let metadataStart = multipart.range(of: "name=\"metadata\""),
-            let jsonStart = multipart.range(of: "{", range: metadataStart.upperBound..<multipart.endIndex),
-            let jsonEnd = multipart.range(of: "}", range: jsonStart.lowerBound..<multipart.endIndex)
-        else { return nil }
-        let json = String(multipart[jsonStart.lowerBound...jsonEnd.lowerBound])
-        guard let data = json.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return object[key] as? String
+    /// STRICT metadata extraction (reviewer aa84564a / spec 0414c13d): isolate the EXACT multipart
+    /// part named "metadata", parse the WHOLE envelope JSON, and read `record.capture_id` plus the
+    /// envelope's `record_sha256`. No first-brace slicing, no fallbacks: anything unexpected
+    /// throws, and callers XCTFail rather than manufacturing an identity.
+    static func attemptedIdentity(from request: URLRequest) throws -> (captureID: String, sha: String) {
+        let body = try XCTUnwrap(request.httpBody, "no body")
+        let contentType = try XCTUnwrap(request.value(forHTTPHeaderField: "Content-Type"))
+        guard let boundaryRange = contentType.range(of: "boundary=") else {
+            throw NSError(domain: "fixture", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "no multipart boundary"])
+        }
+        let boundary = "--" + contentType[boundaryRange.upperBound...]
+            .trimmingCharacters(in: .whitespaces)
+        // The body is multipart with BINARY audio bytes, so the full body is not valid UTF-8 by
+        // design. Decode the JSON envelope with a byte search instead: locate the metadata part's
+        // payload between its boundary and the next boundary, then parse exactly those bytes.
+        let raw = [UInt8](body)
+        let boundaryBytes = [UInt8](boundary.utf8)
+        guard let firstBoundary = findBytes(boundaryBytes, in: raw, from: 0) else {
+            throw NSError(domain: "fixture", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "no boundary in body"])
+        }
+        var cursor = firstBoundary + boundaryBytes.count
+        while cursor < raw.count {
+            guard let nextBoundary = findBytes(boundaryBytes, in: raw, from: cursor) else { break }
+            let part = Array(raw[cursor..<nextBoundary])
+            if let headerEnd = findBytes([13, 10, 13, 10], in: part, from: 0) {
+                let headers = String(decoding: part[0..<headerEnd], as: UTF8.self)
+                if headers.contains("name=\"metadata\"") {
+                    let payload = Array(part[(headerEnd + 4)..<part.count])
+                    let object = try XCTUnwrap(
+                        try JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any],
+                        "metadata part is not a JSON object")
+                    let sha = try XCTUnwrap(object["record_sha256"] as? String,
+                                            "envelope has no record_sha256")
+                    let record = try XCTUnwrap(object["record"] as? [String: Any],
+                                               "envelope has no record")
+                    let captureID = try XCTUnwrap(record["capture_id"] as? String,
+                                                  "record has no capture_id")
+                    return (captureID, sha)
+                }
+            }
+            cursor = nextBoundary + boundaryBytes.count
+        }
+        throw NSError(domain: "fixture", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "no metadata part"])
     }
 
-    /// PRODUCTION INVOCATION via the guarded trigger (spec 7dcf0b01): the SAME VoiceControlAssembly
-    /// chain types, but reached through `VoiceSharingUploadTrigger.triggerDrainIfPermitted()` — the
-    /// path a lifecycle event actually hits — not a hand-built drainOnce call.
-    func test_productionTriggerDeliversWhenAllGatesPermit() async throws {
-        var permitted = true
-        let chain = makeChain(policyPermits: { permitted },
-                              tokenProvider: StaticTokenProvider(token: "tok"))
-        let trigger = VoiceSharingUploadTrigger(
+    /// First index of `needle` in `haystack` at or after `from`.
+    static func findBytes(_ needle: [UInt8], in haystack: [UInt8], from: Int) -> Int? {
+        guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
+        var index = from
+        while index + needle.count <= haystack.count {
+            if Array(haystack[index..<(index + needle.count)]) == needle { return index }
+            index += 1
+        }
+        return nil
+    }
+    /// A valid, identity-matching 201 receipt for whatever entry the request actually carries.
+    static func acceptedReceiptResponder() -> (URLRequest) -> (HTTPURLResponse, Data) {
+        { request in
+            guard let identity = try? Self.attemptedIdentity(from: request) else {
+                XCTFail("fixture could not extract the attempted entry's identity")
+                return (HTTPURLResponse(url: request.url!, statusCode: 500,
+                                        httpVersion: nil, headerFields: nil)!, Data())
+            }
+            let receipt: [String: Any] = [
+                "schema_version": 1,
+                "capture_id": identity.captureID,
+                "record_sha256": identity.sha,
+                "status": "accepted",
+                "receipt_id": "rcpt-ok",
+                "accepted_at": "2026-10-22T14:00:00Z",
+                "retention_expires_at": "2026-11-22T14:00:00Z",
+            ]
+            return (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil,
+                                    headerFields: nil)!,
+                    try! JSONSerialization.data(withJSONObject: receipt))
+        }
+    }
+
+    private func waitForEmptyQueue(_ queue: VoiceSharingUploadQueue) async throws {
+        for _ in 0..<400 where !queue.readyEntries().isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func makeTrigger(
+        _ chain: (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler),
+        surfaceEnabled: @escaping () -> Bool,
+        isAuthorized: @escaping () -> Bool
+    ) -> VoiceSharingUploadTrigger {
+        VoiceSharingUploadTrigger(
             scheduler: chain.scheduler,
-            surfaceEnabled: { true },
-            isAuthorized: { permitted })
+            surfaceEnabled: surfaceEnabled,
+            isAuthorized: isAuthorized)
+    }
+
+    /// PRODUCTION INVOCATION via the guarded trigger (spec 7dcf0b01/0414c13d): reached through
+    /// `triggerDrainIfPermitted()` — the lifecycle path — and asserted through SETTLEMENT.
+    func test_productionTriggerDeliversAndSettlesWhenAllGatesPermit() async throws {
+        let chain = makeChain(policyPermits: { true },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = makeTrigger(chain, surfaceEnabled: { true }, isAuthorized: { true })
+        AssemblyIntercept.responder = Self.acceptedReceiptResponder()
+        defer { AssemblyIntercept.responder = nil }
         _ = try makeReadyEntry(chain.queue)
         trigger.triggerDrainIfPermitted()
-        // The drain is asynchronous; poll for the single request to appear.
-        for _ in 0..<200 where AssemblyIntercept.requestCount == 0 {
+        for _ in 0..<400 where AssemblyIntercept.requestCount == 0 {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(AssemblyIntercept.requestCount, 1,
                        "the guarded trigger must drive the real chain")
+        try await waitForEmptyQueue(chain.queue)
+        XCTAssertTrue(chain.queue.readyEntries().isEmpty,
+                      "an accepted receipt must SETTLE the entry, not merely be sent")
+    }
+
+    /// TWO SUCCESSIVE completed drains both run (reviewer aa84564a): a completed task must not
+    /// block the trigger for its lifetime.
+    func test_successiveTriggersEachDrain() async throws {
+        let chain = makeChain(policyPermits: { true },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = makeTrigger(chain, surfaceEnabled: { true }, isAuthorized: { true })
+        AssemblyIntercept.responder = Self.acceptedReceiptResponder()
+        defer { AssemblyIntercept.responder = nil }
+        _ = try makeReadyEntry(chain.queue)
+        trigger.triggerDrainIfPermitted()
+        for _ in 0..<400 where AssemblyIntercept.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "first trigger drains")
+        try await waitForEmptyQueue(chain.queue)
+        XCTAssertTrue(chain.queue.readyEntries().isEmpty, "first entry settled")
+        _ = try makeReadyEntry(chain.queue)
+        trigger.triggerDrainIfPermitted()
+        for _ in 0..<400 where AssemblyIntercept.requestCount < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 2,
+                       "a completed drain must not block later triggers")
+        try await waitForEmptyQueue(chain.queue)
+        XCTAssertTrue(chain.queue.readyEntries().isEmpty, "second entry settled too")
+    }
+
+    /// OVERLAPPING triggers stay single-flight.
+    func test_overlappingTriggersStaySingleFlight() async throws {
+        let chain = makeChain(policyPermits: { true },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = makeTrigger(chain, surfaceEnabled: { true }, isAuthorized: { true })
+        let base = Self.acceptedReceiptResponder()
+        let lock = NSLock()
+        var inFlight = 0
+        var peak = 0
+        AssemblyIntercept.responder = { request in
+            lock.lock(); inFlight += 1; peak = max(peak, inFlight); lock.unlock()
+            Thread.sleep(forTimeInterval: 0.03)
+            lock.lock(); inFlight -= 1; lock.unlock()
+            return base(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+        _ = try makeReadyEntry(chain.queue)
+        _ = try makeReadyEntry(chain.queue)
+        trigger.triggerDrainIfPermitted()
+        trigger.triggerDrainIfPermitted()
+        trigger.triggerDrainIfPermitted()
+        try await waitForEmptyQueue(chain.queue)
+        XCTAssertEqual(peak, 1, "overlapping triggers must never run two passes concurrently")
     }
 
     /// The compiled-off surface constant gates FIRST: even fully eligible and credentialed, a
     /// lifecycle trigger does NOTHING while `surfaceEnabled` is false.
     func test_productionTriggerIsSilentWhileTheSurfaceIsCompiledOff() async throws {
-        var permitted = true
-        let chain = makeChain(policyPermits: { permitted },
+        let chain = makeChain(policyPermits: { true },
                               tokenProvider: StaticTokenProvider(token: "tok"))
-        let trigger = VoiceSharingUploadTrigger(
-            scheduler: chain.scheduler,
-            surfaceEnabled: { false },
-            isAuthorized: { permitted })
+        let trigger = makeTrigger(chain, surfaceEnabled: { false }, isAuthorized: { true })
         _ = try makeReadyEntry(chain.queue)
         trigger.triggerDrainIfPermitted()
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(AssemblyIntercept.requestCount, 0,
                        "compiled-off means the trigger is unreachable, full stop")
     }
 
-    /// The live policy gate re-read at trigger time: withdrawal between events silences the
-    /// trigger even though the surface is enabled.
+    /// The live policy gate is re-read at trigger time.
     func test_productionTriggerRespectsLiveWithdrawal() async throws {
         var permitted = true
         let chain = makeChain(policyPermits: { permitted },
                               tokenProvider: StaticTokenProvider(token: "tok"))
-        let trigger = VoiceSharingUploadTrigger(
-            scheduler: chain.scheduler,
-            surfaceEnabled: { true },
-            isAuthorized: { permitted })
+        let trigger = makeTrigger(chain, surfaceEnabled: { true },
+                                  isAuthorized: { permitted })
         _ = try makeReadyEntry(chain.queue)
         permitted = false
         trigger.triggerDrainIfPermitted()
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(AssemblyIntercept.requestCount, 0,
                        "withdrawal silences the trigger at trigger time")
     }
@@ -235,20 +364,18 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         _ = try makeReadyEntry(chain.queue)
         _ = try makeReadyEntry(chain.queue)
         AssemblyIntercept.responder = { request in
-            // Withdrawal lands while a VALID receipt is on the wire. The receipt identity is
-            // bound to the entry the request ACTUALLY carries (reviewer 0a80e1c6): the metadata
-            // part is parsed out of the outgoing multipart body, never assumed from creation
-            // order — ready order is age-based, not creation-based.
+            // Withdrawal lands while a VALID receipt is on the wire. Identity is the ACTUAL
+            // attempted entry's (strict parse; fixture failure rather than a made-up id).
             permitted = false
-            let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
-            let captureID = Self.metadataField("capture_id", from: body)
-                ?? UUID().uuidString
-            let recordSHA = Self.metadataField("record_sha256", from: body)
-                ?? String(repeating: "0", count: 64)
+            guard let identity = try? Self.attemptedIdentity(from: request) else {
+                XCTFail("fixture could not extract the attempted entry's identity")
+                return (HTTPURLResponse(url: request.url!, statusCode: 500,
+                                        httpVersion: nil, headerFields: nil)!, Data())
+            }
             let receipt: [String: Any] = [
                 "schema_version": 1,
-                "capture_id": captureID,
-                "record_sha256": recordSHA,
+                "capture_id": identity.captureID,
+                "record_sha256": identity.sha,
                 "status": "accepted",
                 "receipt_id": "rcpt-late",
                 "accepted_at": "2026-10-22T14:00:00Z",
@@ -300,7 +427,9 @@ private final class AssemblyIntercept: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
             return
         }
-        let (response, data) = responder(request)
+        // URLProtocol receives upload bodies as a STREAM, not `httpBody`: materialize it so
+        // fixtures can read the exact bytes that were sent.
+        let (response, data) = responder(Self.materialized(request))
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
@@ -308,4 +437,23 @@ private final class AssemblyIntercept: URLProtocol {
 
     override func stopLoading() {}
 
+    /// URLSession strips `httpBody` and hands URLProtocol an `httpBodyStream`. Fixtures parse the
+    /// body, so it is drained here and re-attached (reviewer aa84564a's strict-parse controls
+    /// depend on seeing the real multipart bytes).
+    static func materialized(_ request: URLRequest) -> URLRequest {
+        guard request.httpBody == nil, let stream = request.httpBodyStream else { return request }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let size = 16 * 1024
+        var buffer = [UInt8](repeating: 0, count: size)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: size)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        var copy = request
+        copy.httpBody = data
+        return copy
+    }
 }
