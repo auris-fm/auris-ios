@@ -357,8 +357,9 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertNotNil(stampFile, "the policy delay must be PERSISTED")
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld,
-                           "a fresh owner must be refused, not trusted to wait politely")
+            guard case .notYetDue = (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("a fresh owner must be refused by the SCHEDULE, got \(error)")
+            }
         }
         // Consistent with the rest of the queue: no attempt is reported as in flight for it.
         XCTAssertFalse(fresh.isAttemptInFlight(entry))
@@ -381,7 +382,10 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         // A delay was stamped, so an immediate fresh attempt is refused.
         XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld)
+            // NOT-YET-DUE, not "someone owns it": the refusal names the schedule (r70l).
+            guard case .notYetDue = (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("expected the schedule to refuse, got \(error)")
+            }
         }
     }
 
@@ -683,8 +687,13 @@ final class VoiceSharingUploaderTests: XCTestCase {
         _ = reconciler.reconcileRetryHold()
         // ...but the ORIGINAL MINIMUM still refuses early attempts.
         XCTAssertThrowsError(try reconciler.admitAttempt(entry)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld,
-                           "reconciliation must not convert a 600s minimum into an early retry")
+            // Reconciliation must not convert a 600s minimum into an early retry.
+            guard case .notYetDue(let retryAt) =
+                (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("expected the schedule to refuse, got \(error)")
+            }
+            XCTAssertGreaterThan(retryAt.timeIntervalSinceNow, 500,
+                                 "the ORIGINAL minimum is what refuses, not a short backoff")
         }
     }
 
