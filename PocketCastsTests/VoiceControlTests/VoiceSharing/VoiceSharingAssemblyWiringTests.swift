@@ -438,15 +438,18 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "an entry with no attempts left is never offered for upload")
     }
 
-    /// GENUINELY OVERLAPPING SUCCESSOR (spec 2bb81b64, rebuilt per spec 3e35973a): the successor
-    /// shares the SAME root explicitly, and every assertion is bound to the EXACT entry attempted —
-    /// a different entry can no longer masquerade as a successor violation (the withdrawn
-    /// fixture-artifact failure, receipts labelled withdrawn).
-    func test_overlappingSuccessorCannotAttemptTheEntryUnderALiveLease() async throws {
+    /// OVERLAPPING OWNER, SAME ENTRY, LIVE LEASE (spec 0fb00cfe / reviewer 2e1e7f2c): a second
+    /// chain over the SAME durable root must be REFUSED at lease admission while the first attempt
+    /// holds the lease.
+    ///
+    /// TIMING IS THE WHOLE CONTROL. Authorization stays TRUE for the successor's pass so it really
+    /// reaches lease admission instead of stopping at the eligibility guard; withdrawal is applied
+    /// afterwards, separately, before the first response is released. Every successor assertion is
+    /// UNCONDITIONAL — an `if case .drained` branch would skip them exactly when the successor
+    /// short-circuits, which is what made the previous version vacuous.
+    func test_successorOnTheSameEntryIsRefusedWhileTheLeaseIsLive() async throws {
         let sharedRoot = root!
         var permitted = true
-        // The chain must consult the LIVE flag, not a constant: hardcoding `{ true }` here is what
-        // made an earlier version of this control prove nothing about withdrawal.
         let chain = makeChain(policyPermits: { permitted },
                               tokenProvider: StaticTokenProvider(token: "tok"),
                               attemptLimits: .init(maxUploadAttempts: 4))
@@ -458,13 +461,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             if let identity = try? Self.attemptedIdentity(from: request) {
                 requestedNames.record(identity.captureID)
             }
-            // Withdrawal lands exactly ONCE, on the FIRST request, while it is on the wire. The
-            // successor's own (refused) request must not be able to fake the withdrawal — the
-            // shared gate would otherwise make this control pass or fail on somebody else's timing.
-            if releaseFirst.isFirst() {
-                permitted = false
-                releaseFirst.waitForRelease()
-            }
+            if releaseFirst.isFirst() { releaseFirst.waitForRelease() }
             return accepted(request)
         }
         defer { AssemblyIntercept.responder = nil }
@@ -474,8 +471,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
+        XCTAssertTrue(permitted, "authorization must still be TRUE when the successor runs")
 
-        // A SECOND chain over the SAME durable root — an explicit shared-root successor.
         let successor = makeChain(policyPermits: { permitted },
                                   tokenProvider: StaticTokenProvider(token: "tok"),
                                   attemptLimits: .init(maxUploadAttempts: 4),
@@ -483,28 +480,34 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertEqual(successor.queue.rootDirectory, chain.queue.rootDirectory,
                        "the successor must share the durable root, or it proves nothing")
         let successorOutcome = await successor.scheduler.drainOnce()
-        // A pass reports every entry it CONSIDERED, including refusals — so the correct assertion
-        // is not "no result" but "no request and no acquisition". The earlier version read the
-        // result count as an attempt count, which is what produced the withdrawn finding.
-        if case .drained(let results) = successorOutcome {
-            XCTAssertEqual(results.count, 1, "the successor saw the entry")
-            for result in results {
-                guard case .unavailable = result.outcome else {
-                    return XCTFail("a successor must be REFUSED under a live lease, got \(result.outcome)")
-                }
-            }
-        }
 
+        // UNCONDITIONAL: the pass must have considered this entry and REFUSED it.
+        guard case .drained(let results) = successorOutcome else {
+            return XCTFail("the successor pass must consider the entry, got \(successorOutcome)")
+        }
+        XCTAssertEqual(results.count, 1, "the successor considered exactly the shared entry")
+        let successorResult = try XCTUnwrap(results.first)
+        XCTAssertEqual(successorResult.entry.name, entry.name,
+                       "the successor must have tried THIS entry, not a neighbour")
+        guard case .unavailable = successorResult.outcome else {
+            return XCTFail("a live lease must refuse the successor, got \(successorResult.outcome)")
+        }
+        XCTAssertEqual(requestedNames.count, 1,
+                       "the refused successor put nothing on the wire")
+
+        // SEPARATELY: withdraw, then release the held response. The late success must not win.
+        permitted = false
         releaseFirst.release()
         let firstOutcome = await firstDrain.value
-        guard case .drained(let results) = firstOutcome, let first = results.first else {
+        guard case .drained(let firstResults) = firstOutcome,
+              let first = firstResults.first else {
             return XCTFail("expected one result, got \(firstOutcome)")
         }
         guard case .revoked = first.outcome else {
             return XCTFail("the late success must not beat the withdrawal, got \(first.outcome)")
         }
         XCTAssertEqual(requestedNames.count, 1,
-                       "exactly one request reached the wire: the successor added none")
+                       "exactly one request: the successor added none")
         XCTAssertTrue(chain.queue.readyEntries().contains { $0.name == entry.name },
                       "the entry is retained: the late success did not complete it")
     }
