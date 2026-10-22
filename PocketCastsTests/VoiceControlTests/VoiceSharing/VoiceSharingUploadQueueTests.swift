@@ -2271,7 +2271,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let onDisk = try String(contentsOf: settlementURL, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("\"phase\":\"confirmed\""),
                       "the confirmed rewrite is visible for recovery, got \(onDisk)")
-        // RESTORED RETRY: the confirmed record is already durable, so the retry reconciles it
+        // RESTORED RETRY: the confirmed record is visibly present and phase-marked (recovery
+        // state), so the retry reconciles it
         // (verify state, retire record) and succeeds without re-removing anything.
         armAt = nil
         try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
