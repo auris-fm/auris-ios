@@ -88,6 +88,20 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0)
     }
 
+    /// An oversized response is not a receipt: refused as a transport-class failure, never parsed.
+    func test_oversizedResponseIsRefusedWithoutParsing() async {
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        UploadRecordingURLProtocol.handler = { _ in
+            (HTTPURLResponse(url: URL(string: "https://unit.test/x")!,
+                             statusCode: 201, httpVersion: nil, headerFields: nil)!,
+             Data(repeating: 0x41, count: 128 * 1024))
+        }
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        let result = await transport.send(request: makeRequest())
+        XCTAssertEqual(result, .transportFailure)
+    }
+
     /// The production endpoint is the mounted worker route.
     func test_endpointIsTheMountdWorkerRoute() {
         let transport = VoiceSharingUploadTransport(

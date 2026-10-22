@@ -380,6 +380,94 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    // MARK: - reviewer ce001b9a: authoritative settlement transaction
+
+    /// A STALE writer cannot publish a boundary into a successor's future: applyAttemptResult
+    /// validates the lease first, so the stale settlement is refused and the successor's stamp —
+    /// if any — is untouched.
+    func test_staleSettlementCannotWriteASuccessorsBoundary() async throws {
+        let entry = try makeReadyEntry()
+        let admitted = try XCTUnwrap(try queue.admitAttempt(entry))
+        // Successor takes over (lease reclaimed via expiry simulation).
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let successorClockQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        _ = try successorClockQueue.admitAttempt(entry)
+        // The STALE owner now reports a retryable result. It must be refused outright.
+        XCTAssertThrowsError(try queue.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: later.addingTimeInterval(60)))
+        // The boundary was NOT written by the stale owner.
+        let stamps = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) }
+        XCTAssertTrue(stamps.isEmpty, "a stale owner must not publish any boundary")
+    }
+
+    /// A failed boundary barrier never degrades to advisory: the owner-wide hold engages and a
+    /// FRESH instance re-derives the hold from disk.
+    func test_failedBarrierEngagesADurableHold() throws {
+        let entry = try makeReadyEntry()
+        // An injected failureRecordWriter that fails ONLY for not-before stamps.
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(60)))
+        // In-memory hold engaged in THIS instance...
+        XCTAssertThrowsError(try failing.admitAttempt(entry))
+        // ...and re-derived from disk by a FRESH instance.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError,
+                           .accountingUnavailable,
+                           "the durable pause intent must hold a fresh owner")
+        }
+    }
+
+    /// Contradictory code/status pairs are protocol violations: unknown outcome, entry retained.
+    func test_contradictoryStatusPairsAreUnknown() async throws {
+        for (code, status) in [(200, "accepted"), (201, "duplicate")] {
+            let entry = try makeReadyEntry()
+            let identity = try queue.boundIdentity(of: entry)
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: code, body: self.receiptBody(
+                    captureID: identity.captureID, recordSHA: identity.recordSHA256,
+                    status: status))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .unknownOutcome(let reason) = outcome else {
+                return XCTFail("\(code)+\(status): expected unknownOutcome, got \(outcome)")
+            }
+            XCTAssertEqual(reason, "receipt status contradicts http status")
+            guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+                return XCTFail("coverage known")
+            }
+            XCTAssertTrue(after.contains(entry), "\(code)+\(status) must not delete the entry")
+        }
+    }
+
+    /// An unknown 4xx (511) is NOT in the terminal table: retained and retried, never deleted.
+    func test_unknown4xxIsRetainedNotAbandoned() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _ in
+            .response(statusCode: 511, body: Data())
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .retry = outcome else {
+            return XCTFail("expected retry, got \(outcome)")
+        }
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(after.contains(entry))
+    }
+
     /// A strict receipt parser: every required field, or nothing.
     func test_receiptParsingIsStrict() throws {
         let good = receiptBody(captureID: "c", recordSHA: String(repeating: "a", count: 64))

@@ -17,6 +17,8 @@ final class VoiceSharingUploadTransport {
     /// Production route (worker/src/contributions/upload_route.ts, mounted as
     /// POST /api/v1/voice-recordings).
     static let uploadPath = "/api/v1/voice-recordings"
+    /// Receipt bodies are small JSON objects; anything larger is not one.
+    static let maxResponseBytes = 64 * 1024
 
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
@@ -64,6 +66,10 @@ final class VoiceSharingUploadTransport {
 
         do {
             let (data, response) = try await session.data(for: request)
+            // BOUNDED response (reviewer ce001b9a): a receipt is a small JSON object. An
+            // oversized or non-small body is not a receipt — it is refused as a transport-class
+            // failure (unknown, retryable) rather than parsed or buffered further.
+            guard data.count <= Self.maxResponseBytes else { return .transportFailure }
             guard let http = response as? HTTPURLResponse else {
                 // A non-HTTP response is not an answer about this record.
                 return .transportFailure

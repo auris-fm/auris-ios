@@ -156,16 +156,21 @@ final class VoiceSharingUploader {
             case 429:
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
-            case 400...499:
-                // Terminal for THIS record (validated/conflicting/expired). Not retryable: the
-                // record is immutable, so repeating it cannot help. 408 is the exception the
-                // server table calls transient: it is a timeout, not a judgement.
-                if statusCode == 408 {
-                    return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                       serverRetryAfter: nil)
-                }
+            case 408:
+                // Request timeout: transient by the owning table, never a judgement on the record.
+                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
+                                   serverRetryAfter: nil)
+            case 400, 402, 403, 404, 405, 406, 407, 409, 410, 411, 412, 413, 414, 415, 416, 417,
+                 418, 421, 422, 423, 424, 425, 426, 428, 431, 451:
+                // EXPLICIT terminal table (spec ruling, not a catchall): each of these is the
+                // server refusing THIS record or this client outright (validation, conflict,
+                // expiry, forbidden). The record is immutable, so repeating cannot help. Every
+                // 4xx NOT in this list and not matched above has no owning disposition — and an
+                // unknown disposition must never delete: it falls through to the retry default.
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
+                // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's
+                // fate is unknown, so it is retained and retried with bounded backoff.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             }
@@ -191,6 +196,12 @@ final class VoiceSharingUploader {
             // UNKNOWN OUTCOME: retain audio, retry the same record. Never delete for a bad receipt.
             return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "malformed receipt")
         }
+        // The PAIR must agree: 201 with "duplicate" or 200 with "accepted" is a contradiction —
+        // the server is describing a different history than the code it sent. Unknown, retained.
+        guard receipt.status.contradicts(statusCode) == false else {
+            return unknownOutcome(entry: entry, lease: lease, attempt: attempt,
+                                  reason: "receipt status contradicts http status")
+        }
         // The receipt must describe THIS entry. A well-formed receipt for another identity is a
         // protocol violation, not acceptance of ours.
         guard receipt.captureID == expected.captureID,
@@ -211,12 +222,18 @@ final class VoiceSharingUploader {
         entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
         attempt: Int, reason: String, serverRetryAfter: Double? = nil
     ) -> Outcome {
-        // Retain the entry as a retryable failure: by contract this is not acceptance, so the next
-        // attempt sends the same immutable record. The stamp is written BEFORE release here too —
-        // an unknown outcome is as retryable as a 503 and deserves the same enforced delay.
+        // Same transaction discipline as a 503: unknown is as retryable, so it gets the same
+        // lease-validated, durably published boundary.
         let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
-        queue.setNotBefore(clock().addingTimeInterval(delay), for: entry)
-        _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
+        do {
+            try queue.applyAttemptResult(
+                entry, lease: lease, outcome: .retryableFailure,
+                retryNotBefore: clock().addingTimeInterval(delay))
+        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
+            return .staleAttempt
+        } catch {
+            return .unavailable(reason: "settlement failed: \(type(of: error))")
+        }
         return .unknownOutcome(reason: reason)
     }
 
@@ -224,14 +241,15 @@ final class VoiceSharingUploader {
         entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, attempt: Int,
         serverRetryAfter: Double?
     ) -> Outcome {
-        // ORDER IS THE GUARANTEE: the not-before stamp is persisted BEFORE the lease is released.
-        // Written afterwards, another owner could admit the entry in the gap and start a retry
-        // that this owner's stamp never governed — exactly the "advisory delay" the reviewer
-        // rejected. Stamping first means no owner can observe the entry as retryable-but-undelayed.
+        // ONE AUTHORITATIVE TRANSACTION (reviewer ce001b9a / spec b9a416d6): the queue validates
+        // the lease FIRST, publishes the durable boundary inside the same serialized operation,
+        // and only then releases. A stale result can neither settle nor touch a successor's
+        // boundary; a failed barrier engages the owner-wide hold instead of degrading to advisory.
         let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
-        queue.setNotBefore(clock().addingTimeInterval(delay), for: entry)
         do {
-            try queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
+            try queue.applyAttemptResult(
+                entry, lease: lease, outcome: .retryableFailure,
+                retryNotBefore: clock().addingTimeInterval(delay))
         } catch VoiceSharingUploadQueue.PrepareError.resultStale {
             return .staleAttempt
         } catch {
@@ -376,6 +394,14 @@ final class VoiceSharingUploader {
     enum ReceiptStatus: String {
         case accepted
         case duplicate
+
+        /// A code/status pair the owning table never produces is a protocol violation.
+        func contradicts(_ httpStatus: Int) -> Bool {
+            switch (httpStatus, self) {
+            case (201, .accepted), (200, .duplicate): return false
+            default: return true
+            }
+        }
     }
 
     /// Retry-After is advisory server guidance; unparseable values are simply absent (the policy

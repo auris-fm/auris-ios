@@ -850,6 +850,7 @@ final class VoiceSharingUploadQueue {
     func admitAttempt(_ entry: Entry) throws -> AdmittedAttempt? {
         try serialQueue.sync { () -> AdmittedAttempt? in
             guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
+            guard !retryHoldLocked else { throw PrepareError.accountingUnavailable }
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
                 !entry.name.contains("/")
@@ -883,24 +884,39 @@ final class VoiceSharingUploadQueue {
                 releaseLeaseLocked(for: entry, owner: lease)
                 throw error
             }
-            let count = (try? attemptCountLocked(for: entry)) ?? 0
+            let count = try attemptCountLocked(for: entry)
             inFlightAttempts[entry] = lease
             return AdmittedAttempt(lease: lease, attemptNumber: count)
         }
     }
 
     /// Persists a not-before instant for the entry (survives restart, applies to every owner).
-    func setNotBefore(_ instant: Date, for entry: Entry) {
-        serialQueue.sync {
-            guard entry.root == rootDirectory, UUID(uuidString: entry.name) != nil else { return }
-            let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entry.name))
-            guard let data = try? JSONSerialization.data(
-                withJSONObject: ["notBefore": instant.timeIntervalSince1970]) else { return }
-            // A failed write leaves NO stamp, which is a hole in the enforced delay; report it via
-            // the synchronizer-free path and let admission stay permissive only for this record.
-            try? failureRecordWriter(url, data)
-            try? synchronizer(url, false)
+    /// Durable retry-hold: engaged when a not-before barrier cannot be published. Written and
+    /// synced BEFORE the error propagates, so a fresh instance re-derives the hold from disk
+    /// instead of resuming an unbounded retry.
+    static let retryHoldIntentName = "attempt.pause.intent"
+    private var retryHoldLocked = false
+
+    private func engageRetryHoldLocked() {
+        retryHoldLocked = true
+        let url = rootDirectory.appendingPathComponent(Self.retryHoldIntentName)
+        let data = Data([0x01])
+        _ = try? failureRecordWriter(url, data)
+        _ = try? synchronizer(url, false)
+        _ = try? synchronizer(rootDirectory, true)
+    }
+
+    /// Publishes a not-before stamp with REAL error propagation: write, file barrier, root barrier.
+    /// A failure of any stage throws — never a silent advisory delay.
+    private func publishNotBeforeLocked(_ instant: Date, for entry: Entry) throws {
+        let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entry.name))
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["notBefore": instant.timeIntervalSince1970]) else {
+            throw PrepareError.accountingUnavailable
         }
+        try failureRecordWriter(url, data)
+        try synchronizer(url, false)
+        try synchronizer(rootDirectory, true)
     }
 
     /// Refuses an attempt that is not yet due. Unreadable/unparseable state refuses (fail closed):
@@ -937,6 +953,9 @@ final class VoiceSharingUploadQueue {
             // OWNER-WIDE HOLD blocks attempt admission for the same reason serving is blocked:
             // the on-disk entry set is not provable, so no attempt may be spent on it.
             guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
+            guard !retryHoldLocked else { throw PrepareError.accountingUnavailable }
+            // The enforced retry boundary applies at EVERY entry point (reviewer ce001b9a).
+            try refuseIfNotYetDueLocked(entry)
             guard inFlightAttempts[entry] == nil else { return false }
             // Handle identity is checked BEFORE coverage (a foreign handle is a refusal, not a
             // coverage question). Clarification 7e9606b (spec c988cb1b): attempts must then honor
@@ -1138,12 +1157,19 @@ final class VoiceSharingUploadQueue {
         clearSettlementBestEffort(for: entry.name)
     }
 
-    func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
+    /// `retryNotBefore` publishes the enforced retry boundary INSIDE the settlement transaction:
+    /// lease is validated first, so a stale owner can never write a successor's boundary
+    /// (reviewer ce001b9a), and the stamp lands only if the lease is live.
+    func applyAttemptResult(
+        _ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome,
+        retryNotBefore: Date? = nil
+    ) throws {
         // Boundary classification: any filesystem/barrier error inside means the settlement's
         // outcome is UNKNOWN. PrepareErrors thrown deliberately keep their meaning; raw I/O errors
         // become `.publicationUncertain`.
         do {
-            try applyAttemptResultLocked(entry, lease: lease, outcome: outcome)
+            try applyAttemptResultLocked(entry, lease: lease, outcome: outcome,
+                                         retryNotBefore: retryNotBefore)
         } catch let error as PrepareError {
             throw error
         } catch {
@@ -1152,7 +1178,7 @@ final class VoiceSharingUploadQueue {
     }
 
     private func applyAttemptResultLocked(
-        _ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
+        _ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome, retryNotBefore: Date?) throws {
         try serialQueue.sync {
             // Reviewer 4b02a457: handle validation is restored — this entry must belong to THIS
             // root and carry a name this queue could have minted, before any path is constructed.
@@ -1358,6 +1384,19 @@ final class VoiceSharingUploadQueue {
                 }
                 try finishSettlement()
             case .retryableFailure:
+                // DURABLE BOUNDARY BEFORE RELEASE (reviewer ce001b9a): the not-before stamp is
+                // part of this settlement, written while the lease is verified-live. A failed
+                // barrier is never swallowed: the owner-wide hold engages until reconciliation,
+                // because a released lease without its boundary is exactly the advisory-delay
+                // fail-open state this design forbids.
+                if let boundary = retryNotBefore {
+                    do {
+                        try publishNotBeforeLocked(boundary, for: entry)
+                    } catch {
+                        engageRetryHoldLocked()
+                        throw PrepareError.publicationUncertain
+                    }
+                }
                 do {
                     try fileManager.removeItem(at: leaseURL)
                     try confirmLeaseRemovalDurability()
@@ -2196,6 +2235,13 @@ final class VoiceSharingUploadQueue {
         case .present: revocationHoldLocked = true
         case .absent: revocationHoldLocked = false
         case .failure: revocationHoldLocked = true // unknown ⇒ hold
+        }
+        // The retry hold re-derives the same way: an `attempt.pause.intent` left by a failed
+        // not-before barrier keeps admission held across restart until reconciliation.
+        switch intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName)) {
+        case .present: retryHoldLocked = true
+        case .absent: retryHoldLocked = false
+        case .failure: retryHoldLocked = true // unknown ⇒ hold
         }
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
