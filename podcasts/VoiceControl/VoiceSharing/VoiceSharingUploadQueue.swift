@@ -852,13 +852,14 @@ final class VoiceSharingUploadQueue {
             func confirmPhase(_ record: SettlementRecord) throws {
                 var confirmed = record
                 confirmed.phase = .confirmed
-                // Only the ROOT barrier matters for the phase rewrite: the file content was
-                // already fsynced when the pending record was written, and the confirmed record
-                // is idempotently re-derivable from it. A file-level failure here would leave the
-                // pending record intact — not a lost recovery state — but re-running the file
-                // barrier would block recovery of an otherwise durable completion.
+                // Reviewer d28594ef: the atomic rewrite REPLACES the inode — fsyncing the
+                // previous pending file proves nothing about the replacement. Every journal
+                // rewrite synchronizes FILE first, then its naming directory. A file-barrier
+                // failure retains the recovery state (the atomic temp either lands or not; the
+                // record is re-readable either way) and refuses success.
                 let data = try confirmed.encoded()
                 try data.write(to: settlementURL, options: [.atomic])
+                try synchronizer(settlementURL, false)
                 try synchronizer(rootDirectory, true)
             }
 

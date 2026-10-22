@@ -2265,10 +2265,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
         // Exactly three settlement root syncs were attempted, failing on the third (confirmed).
         XCTAssertEqual(rootSyncCount, baseline + 3, "the CONFIRMED-phase barrier is the one that failed")
-        // The confirmed phase IS on disk despite the failed barrier: completion is recoverable.
+        // The record is VISIBLE with the confirmed phase (visibility is not durability evidence,
+        // but it is the recoverable state the retry needs): the rewrite landed, its barriers did
+        // not both succeed.
         let onDisk = try String(contentsOf: settlementURL, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("\"phase\":\"confirmed\""),
-                      "completion was durably recorded before the failing barrier, got \(onDisk)")
+                      "the confirmed rewrite is visible for recovery, got \(onDisk)")
         // RESTORED RETRY: the confirmed record is already durable, so the retry reconciles it
         // (verify state, retire record) and succeeds without re-removing anything.
         armAt = nil
@@ -2379,6 +2381,50 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "recovery must never retire a PENDING record")
         XCTAssertFalse(FileManager.default.fileExists(atPath: confirmedURL.path),
                        "recovery retires a CONFIRMED record whose state verifies")
+    }
+
+    func test_confirmedRewriteFileBarrierFailureRefusesSuccessAndKeepsRecoveryState() throws {
+        // Reviewer d28594ef: every journal rewrite must synchronize FILE then root. A
+        // FILE-barrier failure on the confirmed rewrite must refuse success and leave a
+        // recoverable record — not let the root barrier publish non-durable content.
+        let rootPath = root.path
+        var armed = false
+        var fileSyncs = 0
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                guard !isDirectory, url.path == rootPath + "/probe" else {
+                    if !isDirectory, armed { fileSyncs += 1 }
+                    if !isDirectory, armed, fileSyncs > 1 {
+                        // The confirmed rewrite's FILE barrier: the pending write's file barrier
+                        // was the first.
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    return
+                }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let settlementURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
+
+        // Sync order during settlement: intent FILE (1), intent root, entry-removal root,
+        // confirmed FILE (2 => FAIL), confirmed root (never reached).
+        armed = true
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                           "a failed file barrier refuses success")
+        }
+        XCTAssertEqual(fileSyncs, 2, "the failure is the CONFIRMED rewrite's file barrier")
+        // The record is still present and readable as recovery state.
+        let onDisk = try String(contentsOf: settlementURL, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("\"phase\""), "a recoverable record survives")
+        // Restored: the retry completes the settlement.
+        armed = false
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(owner.isAttemptInFlight(prep))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path))
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
