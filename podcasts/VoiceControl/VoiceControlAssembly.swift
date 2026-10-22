@@ -82,7 +82,7 @@ class VoiceControlAssembly {
                     build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
                     captureSessionID: UUID().uuidString,
                     models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
-                    conversionVersion: 1)
+                    conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
             })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,

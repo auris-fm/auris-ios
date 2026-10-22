@@ -37,7 +37,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
                 vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
                 asr: .init(id: "asr-1", version: "1"), translation: nil,
                 router: .init(id: "router-1", version: "1")),
-            conversionVersion: 1)
+            conversionVersion: "v1")
     }
 
     private var observations: [String: VoiceSharingContributionEncoder.StageOutcome] {
@@ -319,6 +319,81 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             return XCTFail("the owner-wide hold must block serving after an unconfirmed purge")
         }
         XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance(forBytes: 1_000))
+    }
+
+    /// Reviewer 35e67a87: a FRESH queue must not serve an unmarked survivor after a revocation
+    /// that could not durably disqualify it. The intent is on disk, so restart cannot forget it.
+    func test_freshQueueHoldsAfterUnconfirmedDisqualification() throws {
+        makeSink().handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+              let name = ready.first?.name else { return XCTFail("expected one ready entry") }
+        // Marker file-sync fails → disqualification unconfirmed, entry left intact and unmarked.
+        let failingFileSyncQueue = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: Date.init,
+            synchronizer: { path, isDirectory in
+                if !isDirectory, path.lastPathComponent.hasPrefix("publication.failed") {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+            })
+        guard case .held = failingFileSyncQueue.purgeAll() else {
+            return XCTFail("expected a held outcome")
+        }
+        // The unmarked entry is still structurally complete — nothing removed it.
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(name).path)
+                .filter { ["audio.wav", "metadata.json", "created.at", "ready.marker"].contains($0) }.count,
+            4)
+        // A FRESH queue (production restart) must honor the durable intent in EVERY authority.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a fresh queue must not serve after an unconfirmed revocation")
+        }
+        XCTAssertEqual(fresh.readyEntries().count, 0, "legacy serving path must honor the hold too")
+        XCTAssertFalse(fresh.hasAdmissionAllowance(forBytes: 1_000), "preflight must refuse")
+        XCTAssertThrowsError(try fresh.prepare(metadata: Data("{}".utf8), audio: Data([0, 0]))) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "the AUTHORITATIVE admission path must refuse")
+        }
+    }
+
+    /// Reviewer 35e67a87: a REFUSED listing (root unreadable/overflowing) must set the hold — a
+    /// purge that could not see the root has not revoked anything, and must not leave the owner
+    /// admitting once the I/O failure clears.
+    func test_refusedListingHoldsOwnerUntilReconciled() throws {
+        makeSink().handle(event())
+        drain()
+        var failListing = true
+        let refusingListQueue = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: Date.init,
+            listDirectoryBounded: { url, keys, limit in
+                if failListing { throw CocoaError(.fileReadNoPermission) }
+                return try VoiceSharingUploadQueue.testBoundedListing(url, keys, limit)
+            })
+        guard case .refused = refusingListQueue.purgeAll() else {
+            return XCTFail("an unlistable root must refuse, never report success")
+        }
+        // The I/O failure now clears — the hold must NOT clear with it.
+        failListing = false
+        guard case .unknownCoverage = refusingListQueue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a refused listing must leave the owner held")
+        }
+        XCTAssertFalse(refusingListQueue.hasAdmissionAllowance(forBytes: 1_000))
+        XCTAssertEqual(refusingListQueue.readyEntries().count, 0)
+        // A FRESH queue sees the durable intent and stays held.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("the refused-listing intent must survive restart")
+        }
+        // Only a RECONCILED purge clears it.
+        guard case .reconciled = fresh.purgeAll() else { return XCTFail("expected reconciliation") }
+        guard case .known(let after) = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a reconciled purge releases the hold")
+        }
+        XCTAssertEqual(after.count, 0, "the entry was removed by the reconciled purge")
     }
 
     private func drain() {

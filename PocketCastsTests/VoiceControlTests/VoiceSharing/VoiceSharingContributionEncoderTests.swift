@@ -23,7 +23,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             vad: VoiceSharingContributionEncoder.ModelRef(id: "vad-1", version: "1"), wakeword: VoiceSharingContributionEncoder.ModelRef(id: "wake-1", version: "1"),
             asr: VoiceSharingContributionEncoder.ModelRef(id: "asr-1", version: "1"), translation: nil,
             router: VoiceSharingContributionEncoder.ModelRef(id: "router-1", version: "1")),
-        conversionVersion: 1)
+        conversionVersion: "v1")
 
     /// A stage-claim set the caller (pipeline) supplies — every non-completed stage states an
     /// enumerated reason; nothing is fabricated by the encoder.
@@ -43,6 +43,27 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             envelope: encoded.metadataEnvelope, audio: encoded.wav)
         XCTAssertEqual(bound.captureID, event().captureID.uuidString)
         XCTAssertEqual(bound.enrollmentEpoch, "epoch-1")
+        XCTAssertEqual(bound.audioByteCount, encoded.wav.count)
+        XCTAssertEqual(bound.audioSHA256,
+                       SHA256.hash(data: encoded.wav).map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// Emits a REAL encoder fixture (envelope + WAV) for the pinned Worker intake harness, so the
+    /// cross-repo check uses bytes this encoder actually produces rather than a hand-written
+    /// sample. Skips silently unless AURIS_FIXTURE_DIR points at a writable directory.
+    func test_exportFixtureForPinnedWorkerIntake() throws {
+        guard let dir = ProcessInfo.processInfo.environment["AURIS_FIXTURE_DIR"] else {
+            return // not a fixture run
+        }
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event(), provenance: provenance, observations: observations)
+        let base = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try encoded.metadataEnvelope.write(to: base.appendingPathComponent("metadata.json"))
+        try encoded.wav.write(to: base.appendingPathComponent("audio.wav"))
+        // The fixture must be SELF-CONSISTENT before it leaves this runner.
+        let bound = try VoiceSharingRecordBinding.bind(
+            envelope: encoded.metadataEnvelope, audio: encoded.wav)
         XCTAssertEqual(bound.audioByteCount, encoded.wav.count)
         XCTAssertEqual(bound.audioSHA256,
                        SHA256.hash(data: encoded.wav).map { String(format: "%02x", $0) }.joined())

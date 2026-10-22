@@ -222,6 +222,11 @@ final class VoiceSharingUploadQueue {
     /// exposed as ready, even if the ready marker survived.
     /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
     private static let failedName = "publication.failed"
+    /// DURABLE owner-wide revocation intent (round 67, reviewer 35e67a87): written and synced
+    /// BEFORE any purge mutation, so a crash or a failed disqualification cannot leave a fresh
+    /// queue that serves an unmarked survivor. While this file exists, the owner is HELD: nothing
+    /// serves or admits. It is removed only by a fully reconciled purge.
+    private static let revocationIntentName = "revocation.intent"
 
     let rootDirectory: URL
     private let fileManager: FileManager
@@ -271,6 +276,12 @@ final class VoiceSharingUploadQueue {
     /// report success or miscount an unmarked survivor as disqualified.
     private var revocationHoldLocked = false
 
+    private var revocationIntentPath: URL {
+        serialQueueSafeRoot.appendingPathComponent(Self.revocationIntentName)
+    }
+
+    private var serialQueueSafeRoot: URL { rootDirectory }
+
     /// Injectable directory listing. Exists so accounting failure is testable: FileManager's
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
@@ -316,6 +327,11 @@ final class VoiceSharingUploadQueue {
         serialQueue.sync { recoverLocked() }
     }
 
+    /// Test seam: the REAL bounded listing, so injected wrappers can fail selectively.
+    static func testBoundedListing(_ url: URL, _ keys: [URLResourceKey], _ limit: Int) throws -> ([URL], Bool) {
+        try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
+    }
+
     /// Test seam: the REAL synchronizer, so injected wrappers can fail selectively and delegate
     /// the rest to production behaviour.
     static func testSynchronizer(path: URL, isDirectory: Bool) throws {
@@ -349,6 +365,9 @@ final class VoiceSharingUploadQueue {
     /// nothing behind.
     func prepare(metadata: Data, audio: Data) throws -> Entry {
         try serialQueue.sync {
+            // AUTHORITATIVE admission path: a held owner admits nothing. Preflight refusal alone
+            // is not enough (reviewer 35e67a87) — callers that never ask for preflight exist.
+            guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
             let name = UUID().uuidString
             let entryDirectory = rootDirectory.appendingPathComponent(name, isDirectory: true)
             do {
@@ -467,6 +486,19 @@ final class VoiceSharingUploadQueue {
     }
 
     private func purgeLocked() -> PurgeOutcome {
+        // DURABLE INTENT BEFORE ANY MUTATION (reviewer 35e67a87). If this cannot be written and
+        // synced, the purge must not start: a partial revocation with no on-disk record is exactly
+        // the state a fresh queue would mistake for "nothing happened". The memory hold is set
+        // regardless, so even an unwritable intent refuses serving for this process.
+        do {
+            try failureRecordWriter(revocationIntentPath)
+            try synchronizer(revocationIntentPath, false)
+            try synchronizer(rootDirectory, true)
+        } catch {
+            revocationHoldLocked = true
+            return .refused
+        }
+        revocationHoldLocked = true
         let listing: [URL]
         do {
             let (urls, overflowed) = try listDirectoryBounded(
@@ -518,7 +550,22 @@ final class VoiceSharingUploadQueue {
         do { try synchronizer(rootDirectory, true) } catch { reconciled = false }
         inFlightAttempts.removeAll()
         uncertainEntriesLocked.removeAll()
-        revocationHoldLocked = !reconciled
+        // The hold may be released ONLY when every barrier reconciled, and the durable intent must
+        // be removed before the in-memory hold is cleared — otherwise a crash between the two
+        // leaves a queue that serves while storage still records an unfinished revocation.
+        if reconciled {
+            do {
+                try fileManager.removeItem(at: revocationIntentPath)
+                try synchronizer(rootDirectory, true)
+                revocationHoldLocked = false
+            } catch {
+                // Intent could not be retired: stay held. A fresh instance would re-derive it.
+                revocationHoldLocked = true
+                reconciled = false
+            }
+        } else {
+            revocationHoldLocked = true
+        }
         return reconciled ? .reconciled(removed: removed, retained: retained)
                           : .held(removed: removed, retained: retained)
     }
@@ -1627,7 +1674,10 @@ final class VoiceSharingUploadQueue {
 
     func readyEntries() -> [Entry] {
         serialQueue.sync {
-            entriesLocked()
+            // LEGACY serving path also honors the owner-wide hold (reviewer 35e67a87): an empty
+            // list, never a stale one — this path has no unknown-coverage channel.
+            guard !revocationHoldLocked else { return [] }
+            return entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
                 // after an uncertain transition a marker may be visible without durable backing.
@@ -1986,6 +2036,11 @@ final class VoiceSharingUploadQueue {
     /// OLDEST are removed until the count is within bounds. Complete ready entries within bounds
     /// are kept byte-for-byte.
     private func recoverLocked() {
+        // A fresh instance re-derives the hold from STORAGE, never from memory (reviewer
+        // 35e67a87): an intent file left by an interrupted/failed revocation keeps the owner held
+        // across restart, so an unmarked survivor can never be served. Clearing it requires a
+        // reconciliation pass that proves every barrier — i.e. a successful purge, not a restart.
+        revocationHoldLocked = fileManager.fileExists(atPath: revocationIntentPath.path)
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)

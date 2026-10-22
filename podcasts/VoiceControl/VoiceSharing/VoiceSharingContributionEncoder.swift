@@ -36,7 +36,12 @@ enum VoiceSharingContributionEncoder {
         var captureSessionID: String
         let models: Models
         /// Conversion pipeline version for float→PCM s16le. Compiled, NOT an activation value.
-        let conversionVersion: Int
+        ///
+        /// WIRE TYPE IS A STRING (spec ruling 2026-10-22): the Worker's record schema requires a
+        /// bounded nonempty string and Android already emits `"v1"`. An Int here produced a
+        /// record the pinned intake rejected (`invalid_audio at audio.conversion_version`), caught
+        /// only by running a REAL encoder fixture through the Worker.
+        let conversionVersion: String
     }
 
     /// Caller-supplied stage claim. `state` is one of the record schema's enumerated states;
