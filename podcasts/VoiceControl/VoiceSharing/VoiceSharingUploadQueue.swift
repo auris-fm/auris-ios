@@ -184,6 +184,11 @@ final class VoiceSharingUploadQueue {
     /// old generation, one replaces the lease, and the other deletes the successor's. `flock` on a
     /// stable file is the OS-backed serialization the comparison lacks.
     static let attemptLeaseLockName = "attempt.lease.lock"
+    /// Root-level lease-lock file name for an entry. Lives at the ROOT because entry directories
+    /// are removed whole by recovery/exhaustion, which would invalidate the lock's inode.
+    static func rootLeaseLockName(for entryName: String) -> String {
+        "attempt.lease.\(entryName).lock"
+    }
     static let maxAttemptLeaseBytes = 256
     /// How long a lease is considered live without renewal. A killed owner cannot renew, so after
     /// this window another owner may reclaim. Compiled bound, NOT an activation value.
@@ -703,7 +708,7 @@ final class VoiceSharingUploadQueue {
         // Serialize the whole read-decide-delete/create transition against other processes. Without
         // this, two expired reclaimers can both read the old generation and the later remover would
         // delete the first reclaimer's successor lease.
-        let lock = try LeaseLock(directory: directory, fileManager: fileManager)
+        let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
         defer { lock.close() }
         try lock.lockExclusive()
         // Policy decision first (absent or expired), then an EXCLUSIVE OS CLAIM. `stat` then
@@ -793,7 +798,7 @@ final class VoiceSharingUploadQueue {
         // must not remove whatever lease exists — that could delete another owner's lease. An
         // unknown or unreadable current identity is also refused: trust nothing we cannot confirm.
         guard let owner else { return }
-        let lock = try? LeaseLock(directory: directory, fileManager: fileManager)
+        let lock = try? LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
         lock?.closeAfter { [self] in
             guard let current = leaseOwnerLocked(at: lease) else { return }
             guard current.generation == owner.generation else { return }
@@ -802,35 +807,43 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    /// Exclusive advisory lock over a STABLE per-entry file, held across a lease transition.
-    /// `flock(LOCK_EX)` serializes claim/reclaim/release across instances and processes; the file
-    /// itself is never removed, so two instances always lock the same inode.
+    /// Exclusive advisory lock over a STABLE per-entry file at the QUEUE ROOT. `flock(LOCK_EX)`
+    /// serializes claim/reclaim/release across instances and processes.
+    ///
+    /// The file lives at the ROOT, not inside the entry directory: recovery and exhaustion remove
+    /// entry directories whole, which would destroy the lock file and its inode — a re-created file
+    /// is a different inode, and two instances would then lock different locks. The root scan in
+    /// `recoverLocked` skips well-formed lock files for exactly this reason.
+    ///
+    /// The descriptor is opened once with a single `open(O_CREAT|O_RDWR)` (no exists-check race)
+    /// and closed EXACTLY once: `close()` invalidates the stored descriptor, so `defer`/`closeAfter`
+    /// and `deinit` cannot double-close — a reused descriptor number could otherwise close an
+    /// unrelated file or socket.
     final class LeaseLock {
-        private let fd: Int32
-        private var locked = false
+        private var fd: Int32
 
-        init(directory: URL, fileManager: FileManager) throws {
-            let url = directory.appendingPathComponent(
-                VoiceSharingUploadQueue.attemptLeaseLockName)
-            if !fileManager.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
-            }
+        init(entryName: String, rootDirectory: URL) throws {
+            let url = rootDirectory.appendingPathComponent(
+                VoiceSharingUploadQueue.rootLeaseLockName(for: entryName))
             fd = url.withUnsafeFileSystemRepresentation { path in
                 guard let path else { return -1 }
-                return open(path, O_RDWR, 0o600)
+                return open(path, O_CREAT | O_RDWR, 0o600)
             }
             guard fd >= 0 else { throw CocoaError(.fileReadUnknown) }
         }
 
         /// Test-only non-blocking acquisition.
         func tryLockForTesting() throws {
-            guard !locked else { return }
+            guard fd >= 0, !locked else { return }
             guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw CocoaError(.fileReadUnknown) }
             locked = true
         }
 
         func lockExclusive() throws {
-            guard !locked else { return }
+            guard fd >= 0, !locked else {
+                if locked { return }
+                throw CocoaError(.fileReadUnknown)
+            }
             guard flock(fd, LOCK_EX) == 0 else { throw CocoaError(.fileReadUnknown) }
             locked = true
         }
@@ -843,11 +856,14 @@ final class VoiceSharingUploadQueue {
         }
 
         func close() {
-            if locked { flock(fd, LOCK_UN) }
+            let descriptor = fd
+            fd = -1
+            if locked { flock(descriptor, LOCK_UN) }
             locked = false
-            if fd >= 0 { Darwin.close(fd) }
+            if descriptor >= 0 { Darwin.close(descriptor) }
         }
 
+        private var locked = false
         deinit { close() }
     }
 
@@ -1257,6 +1273,16 @@ final class VoiceSharingUploadQueue {
             rootDirectory, [.isDirectoryKey], Self.maxDirectoryEntries), !listed.overflowed {
             for stray in listed.urls
             where !((try? stray.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false) {
+                // Lease locks are OWNED root files, not debris: removing one would invalidate the
+                // inode live lock holders rely on. Only well-formed names are skipped; anything
+                // else is debris as before.
+                let name = stray.lastPathComponent
+                if name.hasPrefix("attempt.lease."),
+                   name.hasSuffix(".lock"),
+                   UUID(uuidString: String(name.dropFirst("attempt.lease.".count)
+                       .dropLast(".lock".count))) != nil {
+                    continue
+                }
                 try? fileManager.removeItem(at: stray)
             }
         }

@@ -1275,8 +1275,17 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "an exhausted entry must not be granted another attempt")
         XCTAssertTrue(q.readyEntries().isEmpty, "an exhausted entry is removed, not retried forever")
         let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
-        XCTAssertTrue(leftover.filter { !$0.hasPrefix(".") }.isEmpty,
-                      "the entry directory must be gone")
+            .filter { !$0.hasPrefix(".") }
+        // The entry directory must be gone. Root lease locks legitimately survive their entry (the
+        // inode must stay stable while any holder exists), but ONLY well-formed owned ones.
+        let locks = leftover.filter { $0.hasPrefix("attempt.lease.") && $0.hasSuffix(".lock") }
+        let debris = leftover.filter { !(locks.contains($0)) }
+        XCTAssertTrue(debris.isEmpty, "no debris may remain, got \(debris)")
+        for lock in locks {
+            let entryName = String(lock.dropFirst("attempt.lease.".count).dropLast(".lock".count))
+            XCTAssertNotNil(UUID(uuidString: entryName),
+                            "surviving lock files must be well-formed owned names")
+        }
     }
 
     func test_onlyOneInFlightAttemptPerEntryIsOwned() throws {
@@ -1750,16 +1759,16 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let dir = temporaryRoot()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let type = VoiceSharingUploadQueue.self
-        let lockA = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+        let lockA = try type.LeaseLock(entryName: "TEST-ENTRY", rootDirectory: dir)
         try lockA.lockExclusive()
-        let lockB = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+        let lockB = try type.LeaseLock(entryName: "TEST-ENTRY", rootDirectory: dir)
 
         let acquired = LockedBox<Bool>(false)
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             // A non-blocking attempt must FAIL while A holds the lock.
             do {
-                let fd = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+                let fd = try type.LeaseLock(entryName: "TEST-ENTRY", rootDirectory: dir)
                 try fd.tryLockForTesting()
                 acquired.mutate { $0 = true }
             } catch { acquired.mutate { $0 = false } }
@@ -1771,11 +1780,77 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         lockA.close()
         // After release, acquisition must succeed.
-        let second = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+        let second = try type.LeaseLock(entryName: "TEST-ENTRY", rootDirectory: dir)
         try second.tryLockForTesting()
         XCTAssertTrue(true, "acquisition after release succeeds")
         second.close()
         _ = lockB
+    }
+
+    // MARK: LeaseLock lifecycle (reviewer 8f964e8c)
+
+    func test_leaseLockCloseIsIdempotent() throws {
+        // A non-idempotent close closes the descriptor twice; if the number was reused in between,
+        // the second close hits an unrelated file or socket. close() must invalidate the stored
+        // descriptor so defer/deinit/closeAfter cannot double-close.
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let lock = try VoiceSharingUploadQueue.LeaseLock(entryName: "TEST", rootDirectory: dir)
+        try lock.lockExclusive()
+        lock.close()
+
+        // Occupy the descriptor number the lock just released. A NON-idempotent second close would
+        // close THIS descriptor; the victim file must stay open and writable.
+        let victimPath = dir.appendingPathComponent("victim")
+        FileManager.default.createFile(atPath: victimPath.path, contents: nil)
+        let victim = victimPath.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_RDWR)
+        }
+        XCTAssertGreaterThan(victim, 2)
+
+        // Closing again must be a no-op, not a second Darwin.close on a reused descriptor.
+        lock.close()
+        lock.close()
+
+        // The victim must be untouched: writable and its descriptor valid.
+        let probe = write(victim, "x", 1)
+        XCTAssertGreaterThanOrEqual(probe, 0,
+                                    "the second close must not have closed a reused descriptor")
+        Darwin.close(victim)
+    }
+
+    func test_leaseLockSurvivesRecoveryAndEntryRemoval() throws {
+        // Reviewer 8f964e8c: the lock file lived inside the entry directory, which recovery and
+        // exhaustion remove whole — destroying the inode live holders rely on. It must now live at
+        // the root, be skipped by the stray scan, and survive entry removal.
+        let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        XCTAssertTrue(try q.beginAttempt(prep))
+        q.endAttempt(prep) // release; the lock FILE stays (stable inode by design)
+        let lockPath = root.appendingPathComponent(
+            VoiceSharingUploadQueue.rootLeaseLockName(for: prep.name))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
+                      "the lock file is created at the ROOT on first lease use")
+
+        // Exhaustion removes the entry directory; the lock file must survive it. Exhaustion must be
+        // driven through the OWNING instance: a fresh queue would simply start its own attempt.
+        let limited = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 2))
+        try limited.recordAttempt(prep) // count -> 2 = exhausted (q already spent 1)
+        _ = try? limited.beginAttempt(prep) // refused after claiming; removes the entry
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(prep.name).path), "entry removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
+                      "the lock inode must survive entry removal")
+
+        // Recovery must also skip it as a stray.
+        _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
+                      "recovery must not delete a well-formed lease lock")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
