@@ -75,7 +75,20 @@ class VoiceControlAssembly {
         // recognition pipeline.
         let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
         try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
-        let contributionQueue = VoiceSharingUploadQueue(rootDirectory: queueRoot)
+        // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036 / spec fe99ec96): the queue compares each
+        // entry's own durable enrollment epoch against this LIVE read at admission, so a surviving
+        // entry from a previous epoch cannot ride a newer process into an upload — and a new entry
+        // is admitted without waiting for a rebuild. The reader is evaluated per admission, never
+        // captured at construction.
+        let contributionQueue = VoiceSharingUploadQueue(
+            rootDirectory: queueRoot,
+            // BOTH halves, structurally (reviewer 2b121320): an epoch value is opaque and can
+            // collide across accounts, so the live identity pairs it with the account scope.
+            currentIdentity: {
+                VoiceSharingUploadIdentity(
+                    accountScope: ServerSettings.userId,
+                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
+            })
         // PRODUCTION WIRE (spec 18:38Z): the real transport (bearer credential + the configured
         // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
         // The whole chain sits behind the live authorization gate, so nothing here can mint a
@@ -86,11 +99,11 @@ class VoiceControlAssembly {
         // under one enrollment epoch must not be uploaded after the account's epoch moves, even
         // when the new epoch also permits collection. The pin is sampled from the SAME store the
         // policy folds on, so account switch and re-enrollment both invalidate it.
-        let uploadIdentityPin = VoiceSharingUploadIdentityPin(
-            accountScope: { ServerSettings.userId ?? "signed-out" },
-            enrollmentEpoch: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
+        // The PER-ENTRY binding above owns the "may this entry go out" decision. A construction-time
+        // pin must not also veto it: that froze identity at assembly time, blocking every new entry
+        // after a re-enrollment and admitting stale entries after a rebuild (reviewer fd6b8036).
         let uploadAuthorized: () -> Bool = {
-            VoiceSharingCoordinator.shared.policy.permitsCollection && uploadIdentityPin.isCurrent
+            VoiceSharingCoordinator.shared.policy.permitsCollection
         }
         let uploadTransport = VoiceSharingUploadTransport(
             baseURLProvider: { CloudConfig.shared.baseUrl },

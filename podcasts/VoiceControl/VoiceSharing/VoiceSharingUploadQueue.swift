@@ -113,7 +113,7 @@ final class VoiceSharingUploadQueue {
     /// The closed set of fixed file names an entry directory may contain.
     static let knownEntryNames: Set<String> = [
         attemptRecordName, attemptLeaseName,
-        audioName, metadataName, createdName, readyMarkerName, stageName, failedName
+        audioName, metadataName, createdName, readyMarkerName, stageName, failedName, ownerName
     ]
     /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
     /// that fails after writing the temporary can leave one behind, so it is part of the owned
@@ -173,6 +173,13 @@ final class VoiceSharingUploadQueue {
     /// retried publication. Queue age is measured from here, so a preparation held past the bound
     /// cannot gain a fresh lifetime by being published, and repeated finalize cannot extend it.
     private static let createdName = "created.at"
+    /// ACCOUNT OWNERSHIP, local only (reviewer 2b121320). The wire record carries the enrollment
+    /// epoch but deliberately no account scope — the pinned intake schema has no such field, and
+    /// adding one would change the upload contract. Ownership is therefore recorded HERE, beside
+    /// the entry, and compared at admission; it never reaches the server.
+    private static let ownerName = "owner.account"
+    /// A scope string is a bounded opaque id, never a path or log payload.
+    private static let maxOwnerBytes = 256
     /// Upper bound for the immutable instant's file. A timestamp is a short decimal string; anything
     /// larger is a corrupt or foreign object and must be refused without being read.
     /// Durable attempt record. Its PRESENCE means "an attempt started"; its CONTENT is the count. It
@@ -273,7 +280,7 @@ final class VoiceSharingUploadQueue {
     /// unbound queue is unchanged. Once BOUND, a reader that returns nil is a FAILED identity read
     /// (signed out, epoch not yet loaded) and admission refuses: that is the startup case where a
     /// surviving entry must not be uploaded before enrollment is known.
-    private let currentIdentityLocked: (() -> String?)?
+    private let currentIdentityLocked: (() -> VoiceSharingUploadIdentity?)?
     private var identityIsBound: Bool { currentIdentityLocked != nil }
     /// Installs the live identity reader. Read under the queue's serial queue on every admission, so
     /// a transition between admissions is observed rather than pinned at construction.
@@ -333,7 +340,7 @@ final class VoiceSharingUploadQueue {
             -> (urls: [URL], overflowed: Bool) = VoiceSharingUploadQueue.defaultBoundedLister
     ,
         intentDiscovery: @escaping (URL) -> StatKind = { VoiceSharingUploadQueue.statKind(of: $0) },
-        currentIdentity: (() -> String?)? = nil
+        currentIdentity: (() -> VoiceSharingUploadIdentity?)? = nil
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -418,6 +425,14 @@ final class VoiceSharingUploadQueue {
                 // One immutable admission instant for the whole queue lifetime of this entry.
                 let createdAt = String(clock().timeIntervalSince1970)
                 try Data(createdAt.utf8).write(to: entryDirectory.appendingPathComponent(Self.createdName), options: .atomic)
+                // Record the account that owns this entry, so admission can tell "same epoch,
+                // different account" apart from a genuine continuation (reviewer 2b121320).
+                if let readOwner = currentIdentityLocked, let owner = readOwner() {
+                    let data = Data(owner.accountScope.utf8)
+                    guard data.count <= Self.maxOwnerBytes else { throw PrepareError.metadataTooLarge }
+                    try data.write(to: entryDirectory.appendingPathComponent(Self.ownerName),
+                                   options: .atomic)
+                }
                 return Entry(root: rootDirectory, name: name)
             } catch {
                 try? fileManager.removeItem(at: entryDirectory)
@@ -882,10 +897,15 @@ final class VoiceSharingUploadQueue {
             // after a transition, while a NEW entry under the current epoch is admitted — the
             // decision follows the entry, not the process's construction time.
             if let readIdentity = currentIdentityLocked {
-                // A BOUND queue refuses when the identity cannot be established at all.
-                guard let expected = readIdentity() else { return nil }
+                // A BOUND queue refuses when the identity cannot be established at all. Both halves
+                // are compared structurally: an equal epoch under a different account is not the
+                // same identity (reviewer 2b121320).
+                guard let live = readIdentity() else { return nil }
                 let bound = try boundIdentityLocked(of: entry)
-                guard bound.enrollmentEpoch == expected else { return nil }
+                let captured = VoiceSharingUploadIdentity(
+                    accountScope: ownerScopeLocked(for: entry),
+                    enrollmentEpoch: bound.enrollmentEpoch)
+                guard captured == live else { return nil }
             }
             guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
             do {
@@ -1657,6 +1677,20 @@ final class VoiceSharingUploadQueue {
     /// Only a CONFIRMED ABSENCE means zero. A missing file is absence; an unreadable, oversized,
     /// malformed or negative record is NOT — treating those as zero would silently reset the retry
     /// budget and let an entry retry forever. They throw instead, so the caller must refuse.
+    /// The account recorded beside the entry at preparation. Absent or unreadable ⇒ nil, which
+    /// admission treats as "no identity", never as "any account will do".
+    private func ownerScopeLocked(for entry: Entry) -> String? {
+        guard let directory = try? validatedEntryDirectoryLocked(entry) else { return nil }
+        let url = directory.appendingPathComponent(Self.ownerName)
+        guard case .present = Self.statKind(of: url),
+              let size = fileSizeIfRegularLocked(at: url), size.isRegular, size.bytes > 0,
+              size.bytes <= Self.maxOwnerBytes,
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8), !text.isEmpty
+        else { return nil }
+        return text
+    }
+
     private func attemptCountLocked(for entry: Entry) throws -> Int {
         let directory = try validatedEntryDirectoryLocked(entry)
         let url = directory.appendingPathComponent(Self.attemptRecordName)

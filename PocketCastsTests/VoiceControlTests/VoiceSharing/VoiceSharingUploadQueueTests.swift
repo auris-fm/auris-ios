@@ -1259,11 +1259,16 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// `bindIdentity` without capturing a `var` mutated after escaping.
     private final class IdentityBox {
         private let lock = NSLock()
-        private var value: String?
-        init(_ initial: String?) { value = initial }
-        var current: String? {
+        private var value: VoiceSharingUploadIdentity?
+        init(account: String = "acct-A", _ epoch: String? = nil) {
+            value = VoiceSharingUploadIdentity(accountScope: account, enrollmentEpoch: epoch)
+        }
+        var current: VoiceSharingUploadIdentity? {
             get { lock.lock(); defer { lock.unlock() }; return value }
             set { lock.lock(); value = newValue; lock.unlock() }
+        }
+        func setEpoch(_ epoch: String?, account: String = "acct-A") {
+            current = VoiceSharingUploadIdentity(accountScope: account, enrollmentEpoch: epoch)
         }
     }
 
@@ -1276,23 +1281,50 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                                audio: audioA)
     }
 
+    /// ACCOUNT SCOPE IS PART OF THE IDENTITY (reviewer 2b121320): an entry owned by account A must
+    /// not be admitted when the live identity is account B carrying the SAME epoch string — epochs
+    /// are opaque and can collide across accounts. Epoch-only comparison passes this by accident.
+    func test_equalEpochUnderADifferentAccountDoesNotAdmitTheEntry() throws {
+        let box = IdentityBox(account: "acct-A", "epoch-1")
+        let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        let entry = try makeCompleteEntry(q, epoch: "epoch-1")
+
+        box.current = VoiceSharingUploadIdentity(accountScope: "acct-B", enrollmentEpoch: "epoch-1")
+        XCTAssertNil(try q.admitAttempt(entry),
+                     "the same epoch under another account is not the same identity")
+
+        box.current = VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1")
+        XCTAssertNotNil(try q.admitAttempt(entry), "the owning account is admitted")
+    }
+
     /// STARTUP BEFORE PROJECTION (reviewer fd6b8036): a BOUND queue whose identity cannot be
     /// established yet (signed out, epoch not loaded) must refuse every entry.
     func test_boundQueueRefusesEntriesUntilTheIdentityIsKnown() throws {
-        let box = IdentityBox(nil)
+        let box = IdentityBox(account: "acct-A", nil)
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        // Prepared while sign-in has NOT landed, so the entry records no owner: that is the real
+        // startup order, and it is why the entry must be refused until ownership is known.
         let entry = try makeCompleteEntry(q, epoch: "epoch-1")
 
         XCTAssertNil(try q.admitAttempt(entry), "no identity yet ⇒ nothing is admitted")
 
-        box.current = "epoch-1"
-        XCTAssertNotNil(try q.admitAttempt(entry), "a known matching identity admits the entry")
+        // Sign-in later establishes the identity; the entry still carries no owner, so it stays
+        // refused. Advertising admission here would mean admitting an entry whose account is
+        // unknown, which is precisely the hole this binding closes.
+        box.setEpoch("epoch-1")
+        XCTAssertNil(try q.admitAttempt(entry),
+                     "an entry with no recorded owner cannot be attributed to any account")
+
+        // A queue that knows its identity at PREPARATION time records the owner and admits it.
+        let later = try makeCompleteEntry(q, epoch: "epoch-1")
+        XCTAssertNotNil(try q.admitAttempt(later),
+                        "an entry prepared under a known identity is admitted")
     }
 
     /// RE-ENROLLMENT: after A→B, a NEW entry captured under B is admitted while the surviving A
     /// entry is refused. A construction-time pin cannot express this — it blocks both or admits both.
     func test_reEnrollmentAdmitsNewEpochEntriesAndRefusesSurvivingOldOnes() throws {
-        let box = IdentityBox("epoch-1")
+        let box = IdentityBox(account: "acct-A", "epoch-1")
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         let oldEntry = try makeCompleteEntry(q, epoch: "epoch-1")
         // Admit AND SETTLE it, so the lease is released: otherwise the second admission would be
@@ -1301,7 +1333,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let firstAdmission = try XCTUnwrap(try q.admitAttempt(oldEntry), "the A entry is admitted under A")
         try q.applyAttemptResult(oldEntry, lease: firstAdmission.lease, outcome: .retryableFailure)
 
-        box.current = "epoch-2"
+        box.setEpoch("epoch-2")
         XCTAssertNil(try q.admitAttempt(oldEntry), "the surviving A entry is refused under B")
         let newEntry = try makeCompleteEntry(q, epoch: "epoch-2")
         XCTAssertNotNil(try q.admitAttempt(newEntry), "a new B entry is admitted under B")
@@ -1310,11 +1342,11 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// RESTART WITH A SURVIVING OLD ENTRY: a FRESH queue over the same durable root, whose live
     /// identity is already B, must still refuse a surviving A entry.
     func test_freshQueueOnTheSameDiskStillRefusesASurvivingOldEpochEntry() throws {
-        let box = IdentityBox("epoch-1")
+        let box = IdentityBox(account: "acct-A", "epoch-1")
         let first = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         let oldEntry = try makeCompleteEntry(first, epoch: "epoch-1")
 
-        box.current = "epoch-2"
+        box.setEpoch("epoch-2")
         let restarted = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         XCTAssertNil(try restarted.admitAttempt(oldEntry),
                      "a fresh process must not admit a stale-epoch entry just because it started under B")
