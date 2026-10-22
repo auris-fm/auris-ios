@@ -887,7 +887,18 @@ final class VoiceSharingUploadQueue {
                 releaseLeaseLocked(for: entry, owner: lease)
                 throw error
             }
-            let count = try attemptCountLocked(for: entry)
+            // INVARIANT: any throwing admission step AFTER the lease is acquired must release it
+            // before rethrowing. This count read is such a step — it runs outside the cleanup
+            // catches above. Disclosed limitation: no fault control reaches it (the injected-fault
+            // attempts either landed before the read or desynchronised the record), so this is
+            // inspection-justified consistency, not a demonstrated fix.
+            let count: Int
+            do {
+                count = try attemptCountLocked(for: entry)
+            } catch {
+                releaseLeaseLocked(for: entry, owner: lease)
+                throw error
+            }
             inFlightAttempts[entry] = lease
             return AdmittedAttempt(lease: lease, attemptNumber: count)
         }

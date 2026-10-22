@@ -437,7 +437,64 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "an entry with no attempts left is never offered for upload")
     }
 
-    /// NO ELIGIBILITY: with the policy refusing    /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
+    /// GENUINELY OVERLAPPING SUCCESSOR (spec 2bb81b64 / reviewer c7da2dbe's stated limit): a
+    /// SUCCESSOR uploader on the same queue, driven concurrently while the first attempt is still
+    /// in flight, must not settle the entry on the first attempt's late success — and must not
+    /// borrow its lease. The sequential-successor limit is replaced by a concurrent one.
+    func test_overlappingSuccessorCannotSettleOnALateSuccess() async throws {
+        var permitted = true
+        let chain = makeChain(policyPermits: { true }, tokenProvider: StaticTokenProvider(token: "tok"),
+                              attemptLimits: .init(maxUploadAttempts: 4))
+        // A SECOND uploader + scheduler over the SAME durable queue: a successor instance.
+        let successor = makeChain(policyPermits: { true },
+                                  tokenProvider: StaticTokenProvider(token: "tok"),
+                                  attemptLimits: .init(maxUploadAttempts: 4))
+        XCTAssertEqual(successor.queue.rootDirectory, chain.queue.rootDirectory)
+        let entry = try makeReadyEntry(chain.queue)
+        let accepted = Self.acceptedReceiptResponder()
+        let releaseFirst = AsyncGate()
+        AssemblyIntercept.responder = { request in
+            // The FIRST attempt is held on the wire until the successor has had its chance to run.
+            if releaseFirst.isFirst() { releaseFirst.waitForRelease() }
+            // Withdrawal lands while the first attempt is STILL in flight.
+            permitted = false
+            return accepted(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+        // Start the first attempt; it blocks in the responder.
+        let firstDrain = Task { await chain.scheduler.drainOnce() }
+        // Wait until the first request is genuinely ON THE WIRE before the successor runs.
+        let start = Date()
+        while AssemblyIntercept.requestCount == 0, Date().timeIntervalSince(start) < 5 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
+        // While it is in flight, the successor tries the same entry CONCURRENTLY.
+
+        var successorRequests = 0
+        let successorOutcome = await successor.scheduler.drainOnce()
+        if case .drained(let results) = successorOutcome {
+            successorRequests = results.count
+        }
+
+        XCTAssertEqual(successorRequests, 0,
+                       "a concurrent successor cannot attempt an entry under a live lease")
+        // Now let the first attempt's late success arrive.
+        releaseFirst.release()
+        let firstOutcome = await firstDrain.value
+        guard case .drained(let results) = firstOutcome, let first = results.first else {
+            return XCTFail("expected one result, got \(firstOutcome)")
+        }
+        guard case .revoked = first.outcome else {
+            return XCTFail("the late success must not beat the withdrawal, got \(first.outcome)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "exactly one request: the successor added none")
+        XCTAssertEqual(chain.queue.readyEntries().map(\.name), [entry.name],
+                       "the entry is retained: the late success did not complete it")
+    }
+
+    /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
     /// activity, entries untouched.
     func test_noRequestWithoutEligibility() async throws {
         var permitted = false
@@ -574,6 +631,34 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
 }
 
 /// Token provider double for assembly controls.
+/// A one-shot latch for holding a request on the wire while another task runs.
+private final class AsyncGate {
+    private let lock = NSCondition()
+    private var used = false
+    private var released = false
+
+    /// True exactly once: only the FIRST request waits.
+    func isFirst() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
+    }
+
+    func waitForRelease() {
+        lock.lock()
+        while !released { lock.wait() }
+        lock.unlock()
+    }
+
+    func release() {
+        lock.lock()
+        released = true
+        lock.broadcast()
+        lock.unlock()
+    }
+}
+
 /// A credential provider that refreshes ONCE per rejected token and records what it was told.
 private final class RefreshingTokenProvider: CloudTokenProviding {
     private let lock = NSLock()
