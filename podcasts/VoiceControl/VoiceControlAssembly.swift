@@ -3,6 +3,9 @@ import PocketCastsDataModel
 import PocketCastsUtils
 
 class VoiceControlAssembly {
+    /// Strong reference to the upload lifecycle trigger so its notification observer survives;
+    /// creation happens inside `buildVoiceControlService` when the upload chain is built.
+    private var voiceSharingUploadTrigger: VoiceSharingUploadTrigger?
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -95,10 +98,17 @@ class VoiceControlAssembly {
             queue: contributionQueue,
             uploader: uploadUploader,
             isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection })
-        // Wired but NOT invoked: no production caller drains yet (the surface is compiled off and
-        // activation is owner-gated). The wire exists so activation cannot outpace the reviewed
-        // path; retaining the reference keeps the chain alive for that future caller.
-        _ = uploadScheduler
+        // GUARDED TRIGGER WIRING (spec 55f636fe): the lifecycle trigger is the production caller,
+        // but it is unreachable while `VoiceSharingSettingsModel.surfaceEnabled` is false — and
+        // the live policy gate is re-read at every trigger. Flipping the constant is an owner
+        // activation decision, not something this wiring does. No capture-path lock is held:
+        // the trigger only spawns a task and the scheduler serializes its own drains.
+        let uploadTrigger = VoiceSharingUploadTrigger(
+            scheduler: uploadScheduler,
+            surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
+            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection })
+        // A retained reference keeps the notification observer alive for the app's lifetime.
+        self.voiceSharingUploadTrigger = uploadTrigger
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },

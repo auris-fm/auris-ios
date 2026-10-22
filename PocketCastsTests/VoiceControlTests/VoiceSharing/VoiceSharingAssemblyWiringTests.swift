@@ -71,6 +71,75 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return entry
     }
 
+    /// Extracts a string field from the multipart body's metadata JSON part.
+    static func metadataField(_ key: String, from multipart: String) -> String? {
+        guard let metadataStart = multipart.range(of: "name=\"metadata\""),
+            let jsonStart = multipart.range(of: "{", range: metadataStart.upperBound..<multipart.endIndex),
+            let jsonEnd = multipart.range(of: "}", range: jsonStart.lowerBound..<multipart.endIndex)
+        else { return nil }
+        let json = String(multipart[jsonStart.lowerBound...jsonEnd.lowerBound])
+        guard let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object[key] as? String
+    }
+
+    /// PRODUCTION INVOCATION via the guarded trigger (spec 7dcf0b01): the SAME VoiceControlAssembly
+    /// chain types, but reached through `VoiceSharingUploadTrigger.triggerDrainIfPermitted()` — the
+    /// path a lifecycle event actually hits — not a hand-built drainOnce call.
+    func test_productionTriggerDeliversWhenAllGatesPermit() async throws {
+        var permitted = true
+        let chain = makeChain(policyPermits: { permitted },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: chain.scheduler,
+            surfaceEnabled: { true },
+            isAuthorized: { permitted })
+        _ = try makeReadyEntry(chain.queue)
+        trigger.triggerDrainIfPermitted()
+        // The drain is asynchronous; poll for the single request to appear.
+        for _ in 0..<200 where AssemblyIntercept.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "the guarded trigger must drive the real chain")
+    }
+
+    /// The compiled-off surface constant gates FIRST: even fully eligible and credentialed, a
+    /// lifecycle trigger does NOTHING while `surfaceEnabled` is false.
+    func test_productionTriggerIsSilentWhileTheSurfaceIsCompiledOff() async throws {
+        var permitted = true
+        let chain = makeChain(policyPermits: { permitted },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: chain.scheduler,
+            surfaceEnabled: { false },
+            isAuthorized: { permitted })
+        _ = try makeReadyEntry(chain.queue)
+        trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0,
+                       "compiled-off means the trigger is unreachable, full stop")
+    }
+
+    /// The live policy gate re-read at trigger time: withdrawal between events silences the
+    /// trigger even though the surface is enabled.
+    func test_productionTriggerRespectsLiveWithdrawal() async throws {
+        var permitted = true
+        let chain = makeChain(policyPermits: { permitted },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: chain.scheduler,
+            surfaceEnabled: { true },
+            isAuthorized: { permitted })
+        _ = try makeReadyEntry(chain.queue)
+        permitted = false
+        trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0,
+                       "withdrawal silences the trigger at trigger time")
+    }
+
     /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
     /// activity, entries untouched.
     func test_noRequestWithoutEligibility() async throws {
@@ -163,16 +232,23 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         var permitted = true
         let chain = makeChain(policyPermits: { permitted },
                               tokenProvider: StaticTokenProvider(token: "tok"))
-        let first = try makeReadyEntry(chain.queue)
-        let second = try makeReadyEntry(chain.queue)
-        let identity = try chain.queue.boundIdentity(of: first)
+        _ = try makeReadyEntry(chain.queue)
+        _ = try makeReadyEntry(chain.queue)
         AssemblyIntercept.responder = { request in
-            // Withdrawal lands while a VALID receipt is on the wire.
+            // Withdrawal lands while a VALID receipt is on the wire. The receipt identity is
+            // bound to the entry the request ACTUALLY carries (reviewer 0a80e1c6): the metadata
+            // part is parsed out of the outgoing multipart body, never assumed from creation
+            // order — ready order is age-based, not creation-based.
             permitted = false
+            let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            let captureID = Self.metadataField("capture_id", from: body)
+                ?? UUID().uuidString
+            let recordSHA = Self.metadataField("record_sha256", from: body)
+                ?? String(repeating: "0", count: 64)
             let receipt: [String: Any] = [
                 "schema_version": 1,
-                "capture_id": identity.captureID,
-                "record_sha256": identity.recordSHA256,
+                "capture_id": captureID,
+                "record_sha256": recordSHA,
                 "status": "accepted",
                 "receipt_id": "rcpt-late",
                 "accepted_at": "2026-10-22T14:00:00Z",
@@ -231,4 +307,5 @@ private final class AssemblyIntercept: URLProtocol {
     }
 
     override func stopLoading() {}
+
 }
