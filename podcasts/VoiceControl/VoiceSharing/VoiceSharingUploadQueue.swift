@@ -949,7 +949,10 @@ final class VoiceSharingUploadQueue {
             size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
             let data = try? Data(contentsOf: url),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let stamp = object["notBefore"] as? Double, stamp.isFinite
+            let stamp = object["notBefore"] as? Double, stamp.isFinite,
+            // IDENTITY (reviewer c9416bf7): the stored entry must name THIS file's entry.
+            let namedEntry = object["entry"] as? String,
+            namedEntry == entry.name
         else { return .nan }
         return stamp
     }

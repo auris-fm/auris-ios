@@ -89,10 +89,20 @@ final class VoiceSharingUploadTransport {
                 if timedOut { throw URLError(.timedOut) }
                 return nil
             }
-            guard let first = try await group.next() else { return nil }
+            // ONE AUTHORITATIVE RESULT (reviewer c9416bf7): the timer's loser notification
+            // (nil from a cancelled timer child) must never WIN the race over a successful
+            // transfer. Only a non-nil transfer result or a REAL timeout throw decides; loser
+            // notifications are consumed and ignored.
+            var decided: (HTTPURLResponse, Data)?
+            while let notification = try await group.next() {
+                if let notification {
+                    decided = notification
+                    break
+                }
+                // nil = the cancelled timer child finished: keep waiting for the transfer child.
+            }
             group.cancelAll()
-            if first == nil { return nil } // violation path: no fabricated answer
-            return first
+            return decided // nil here means a genuine violation, never a lost race
         }
     }
 

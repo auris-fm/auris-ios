@@ -688,6 +688,31 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// The 600s obligation REALLY is what refused: once it passes (fresh owner, no live lease),
+    /// admission succeeds again.
+    func test_admissionResumesAfterTheObligationPasses() throws {
+        let entry = try makeReadyEntry()
+        let stampFails = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try stampFails.admitAttempt(entry))
+        let settleTime = Date()
+        XCTAssertThrowsError(try stampFails.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: settleTime.addingTimeInterval(600)))
+        // A clock AFTER the obligation passes, on a FRESH owner: no live lease exists here.
+        let later = VoiceSharingUploadQueue(rootDirectory: root, clock: { settleTime.addingTimeInterval(601) })
+        _ = later.reconcileRetryHold()
+        let readmitted = try XCTUnwrap(try later.admitAttempt(entry),
+                                       "after the obligation passes, a fresh owner may retry")
+        XCTAssertEqual(readmitted.attemptNumber, 2, "the retry is the SECOND attempt")
+    }
+
     /// 410 carries either owning code: record_gone or enrollment_retired.
     func test_410AcceptsBothOwningCodes() async throws {
         for code in ["record_gone", "enrollment_retired"] {
