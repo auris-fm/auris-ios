@@ -289,6 +289,10 @@ final class VoiceSharingUploadQueue {
     /// Bounded listing. Returns at most `maxDirectoryEntries` names along with whether more existed,
     /// so callers refuse on overflow instead of allocating an unbounded array first.
     private let listDirectoryBounded: (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool)
+    /// Intent-discovery seam (reviewer 2d7cb2c9): defaults to the REAL required-stat. Injectable
+    /// so a discovery FAILURE is observable in isolation — a real POSIX stat failure on the intent
+    /// path is always accompanied by an unreadable root, which would mask the hold's effect.
+    private let intentDiscovery: (URL) -> StatKind
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -310,6 +314,8 @@ final class VoiceSharingUploadQueue {
         },
         listDirectoryBounded: @escaping (URL, [URLResourceKey], Int) throws
             -> (urls: [URL], overflowed: Bool) = VoiceSharingUploadQueue.defaultBoundedLister
+    ,
+        intentDiscovery: @escaping (URL) -> StatKind = { VoiceSharingUploadQueue.statKind(of: $0) }
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -321,6 +327,7 @@ final class VoiceSharingUploadQueue {
         self.attemptLimits = attemptLimits
         self.listDirectory = listDirectory
         self.listDirectoryBounded = listDirectoryBounded
+        self.intentDiscovery = intentDiscovery
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -541,8 +548,14 @@ final class VoiceSharingUploadQueue {
                 try fileManager.removeItem(at: item)
                 removed += 1
             } catch {
-                // Removal failed but disqualification IS durable: retained and provably dead.
                 retained += 1
+                // A RECURSIVE removal can delete children (including publication.failed) before
+                // failing on another child, so the marker written above is NOT proof it survived.
+                // Re-establish durable disqualification on the SURVIVOR, or hold the owner
+                // (reviewer 2d7cb2c9). Nothing here may assume the earlier claim still holds.
+                if UUID(uuidString: name) != nil, !survivorIsDurablyDisqualifiedLocked(item) {
+                    reconciled = false
+                }
             }
         }
         // Root barrier: the listing must reflect the removals. Failure means on-disk truth is
@@ -568,6 +581,13 @@ final class VoiceSharingUploadQueue {
         }
         return reconciled ? .reconciled(removed: removed, retained: retained)
                           : .held(removed: removed, retained: retained)
+    }
+
+    /// Re-establishes (and proves) durable disqualification of a SURVIVOR after a failed removal.
+    /// Returns true only when the marker is present AND its bytes are confirmed synced. Rewriting
+    /// is safe: the marker's content carries no information beyond "revoked".
+    private func survivorIsDurablyDisqualifiedLocked(_ entry: URL) -> Bool {
+        disqualifyLocked(entry)
     }
 
     /// Durably disqualifies one entry: marker bytes synced as a FILE, then the entry directory.
@@ -2040,7 +2060,14 @@ final class VoiceSharingUploadQueue {
         // 35e67a87): an intent file left by an interrupted/failed revocation keeps the owner held
         // across restart, so an unmarked survivor can never be served. Clearing it requires a
         // reconciliation pass that proves every barrier — i.e. a successful purge, not a restart.
-        revocationHoldLocked = fileManager.fileExists(atPath: revocationIntentPath.path)
+        // EXPLICIT REQUIRED-STAT, not fileExists (reviewer 2d7cb2c9): `fileExists` collapses
+        // "cannot determine" into "absent", which would RESUME serving after an unreadable root.
+        // Unknown discovery must hold the whole owner, exactly like every other unknown state.
+        switch intentDiscovery(revocationIntentPath) {
+        case .present: revocationHoldLocked = true
+        case .absent: revocationHoldLocked = false
+        case .failure: revocationHoldLocked = true // unknown ⇒ hold
+        }
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)

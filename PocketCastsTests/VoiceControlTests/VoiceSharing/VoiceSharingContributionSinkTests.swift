@@ -396,6 +396,72 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "the entry was removed by the reconciled purge")
     }
 
+    /// Reviewer 2d7cb2c9 (1): a RECURSIVE removal that deletes publication.failed before failing
+    /// on another child must not be treated as durably disqualified. The owner stays held, and a
+    /// fresh queue refuses to serve the survivor.
+    func test_partialDeletionOfMarkerThenRemovalFailureKeepsOwnerHeld() throws {
+        makeSink().handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+              let name = ready.first?.name else { return XCTFail("expected one ready entry") }
+        // Remover that DELETES the marker (as a real recursive delete would) and THEN fails.
+        final class PartialDeletingFM: FileManager {
+            var tripped = false
+            override func removeItem(at URL: URL) throws {
+                if UUID(uuidString: URL.lastPathComponent) != nil, !tripped {
+                    tripped = true
+                    let marker = URL.appendingPathComponent("publication.failed")
+                    try? super.removeItem(at: marker) // marker is gone ...
+                    throw CocoaError(.fileWriteUnknown) // ... and now the entry removal fails
+                }
+                try super.removeItem(at: URL)
+            }
+        }
+        let fm = PartialDeletingFM()
+        let partialQueue = VoiceSharingUploadQueue(
+            rootDirectory: root, fileManager: fm, clock: Date.init)
+        let result = partialQueue.purgeAll()
+        // The survivor must be RE-DISQUALIFIED (the purge rewrites the marker on the survivor), so
+        // the outcome may reconcile — but never silently: the marker must be back on disk.
+        guard case .reconciled(_, let retained) = result else {
+            if case .held = result { /* also acceptable: owner held */ } else {
+                return XCTFail("unexpected outcome \(result)")
+            }
+            XCTAssertTrue(false, "expected either reconciliation with a re-disqualified survivor or a hold")
+            return
+        }
+        XCTAssertEqual(retained, 1)
+        let markerPath = root.appendingPathComponent(name).appendingPathComponent("publication.failed").path
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerPath),
+                      "the purge must RE-ESTABLISH durable disqualification on the survivor")
+        // A fresh queue must refuse it, on disk evidence alone.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .known(let after) = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known on a clean root")
+        }
+        XCTAssertEqual(after.count, 0, "a survivor whose marker was destroyed must never serve")
+    }
+
+    /// Reviewer 2d7cb2c9 (2): intent discovery must not collapse "cannot determine" into "absent".
+    /// An unstatable intent path keeps the owner held across fresh initialization.
+    func test_unknownIntentDiscoveryHoldsOwnerAcrossFreshInitialization() throws {
+        makeSink().handle(event())
+        drain()
+        // REAL POSIX couples intent-stat failure with an unreadable root (every downstream guard
+        // would then mask the hold), so the discovery failure is injected ISOLATED: the root and
+        // its surviving entry stay perfectly readable, and ONLY the intent lookup is unknown.
+        // This is exactly the case `fileExists` collapses into absence.
+        let fresh = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            intentDiscovery: { _ in .failure })
+        guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("unknown intent discovery must HOLD the owner, never resume serving")
+        }
+        XCTAssertEqual(fresh.readyEntries().count, 0, "legacy path must not serve either")
+        XCTAssertFalse(fresh.hasAdmissionAllowance(forBytes: 1_000))
+        XCTAssertThrowsError(try fresh.prepare(metadata: Data("{}".utf8), audio: Data([0, 0])))
+    }
+
     private func drain() {
         lastSink?.waitForIdleForTesting()
     }
