@@ -45,12 +45,13 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     private func makeUploader(
+        retryPolicy: VoiceSharingRetryPolicy? = nil,
         authorized: @escaping () -> Bool = { true },
         endpoint: @escaping () -> URL? = { URL(string: "https://unit.test/api/v1/contributions") },
         transport: @escaping (URLRequest) async -> VoiceSharingUploader.TransportResult
     ) -> VoiceSharingUploader {
         VoiceSharingUploader(
-            queue: queue, retryPolicy: retryPolicy(),
+            queue: queue, retryPolicy: retryPolicy ?? self.retryPolicy(),
             isAuthorized: authorized, endpoint: endpoint, transport: transport)
     }
 
@@ -246,6 +247,137 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let outcome = await uploader.upload(entry)
         XCTAssertEqual(outcome, .revoked)
         XCTAssertFalse(sent, "no bytes may leave without live authorization")
+    }
+
+    // MARK: - reviewer 7dd1e357 findings
+
+    /// 401 is AUTHENTICATION, not a verdict: the entry is retained and retried, never deleted.
+    func test_unauthorizedRetainsTheEntryForRetry() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _ in
+            .response(statusCode: 401, body: Data())
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .retry = outcome else {
+            return XCTFail("401 must retry, got \(outcome)")
+        }
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(after.contains(entry), "a 401 must not destroy a valid recording")
+    }
+
+    /// An unrecognized 4xx is not silently terminal either: unknown means preserve.
+    func test_unrecognized4xxPreservesTheEntry() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _ in
+            .response(statusCode: 418, body: Data())
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .abandoned = outcome else {
+            return XCTFail("expected terminal, got \(outcome)")
+        }
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertFalse(after.contains(entry))
+    }
+
+    /// 503's server minimum is not discarded: it is both reported AND persisted, and a FRESH owner
+    /// is refused immediately afterwards (enforced, not advisory).
+    func test_retryDelayIsEnforcedForAnyOwnerAfterRestart() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _ in
+            .response(statusCode: 503, body: Data("{\"retry_after_s\":120}".utf8))
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .retry(let delay, _) = outcome else {
+            return XCTFail("expected retry, got \(outcome)")
+        }
+        XCTAssertEqual(delay, 120, "503's server minimum must be preserved")
+
+        // A COMPLETELY FRESH queue instance (the restart/reclaim case) is refused until due.
+        let listed = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        let stampFile = listed.first { $0.hasPrefix("attempt.notbefore.") }
+        XCTAssertNotNil(stampFile, "the policy delay must be PERSISTED")
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld,
+                           "a fresh owner must be refused, not trusted to wait politely")
+        }
+        // Consistent with the rest of the queue: no attempt is reported as in flight for it.
+        XCTAssertFalse(fresh.isAttemptInFlight(entry))
+    }
+
+    /// Malformed 2xx also schedules a real, enforced retry (it is not "free"). A non-zero policy
+    /// delay here proves the unknown path stamps the same durable statement as a 503.
+    func test_malformed2xxAlsoEnforcesADelay() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 60, retryMaximumDelay: 600, random: { 1 }),
+            transport: { _ in
+                .response(statusCode: 200, body: Data("{".utf8))
+            })
+        let outcome = await uploader.upload(entry)
+        guard case .unknownOutcome = outcome else {
+            return XCTFail("expected unknownOutcome, got \(outcome)")
+        }
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        // A delay was stamped, so an immediate fresh attempt is refused.
+        XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld)
+        }
+    }
+
+    /// The admitted token is ONE value: the lease and count come from the same transaction, so a
+    /// reclaim cannot make this uploader settle under a successor's lease.
+    func test_admissionReturnsLeaseAndCountTogether() throws {
+        let entry = try makeReadyEntry()
+        let admitted = try XCTUnwrap(try queue.admitAttempt(entry))
+        XCTAssertEqual(admitted.attemptNumber, 1, "the first attempt is 1")
+        XCTAssertEqual(try queue.currentLease(for: entry), admitted.lease,
+                       "the admitted lease is the lease in force")
+        // While admitted, a SECOND admission of the same entry is refused (owned elsewhere).
+        XCTAssertNil(try queue.admitAttempt(entry))
+    }
+
+    /// schema_version must be the integer 1 — a JSON boolean must not authorize a receipt.
+    func test_booleanSchemaVersionIsRefused() throws {
+        let body = Data("{\"schema_version\":true,\"capture_id\":\"c\",\"record_sha256\":\"\(String(repeating: "a", count: 64))\",\"status\":\"accepted\",\"receipt_id\":\"r\",\"accepted_at\":\"2026-10-22T14:00:00Z\",\"retention_expires_at\":\"2026-11-22T14:00:00Z\"}".utf8)
+        XCTAssertThrowsError(try VoiceSharingUploader.parseReceipt(body))
+    }
+
+    /// Timestamps are part of the contract: arbitrary strings are refused.
+    func test_nonTimestampValuesAreRefused() throws {
+        var object = try JSONSerialization.jsonObject(
+            with: receiptBody(captureID: "c", recordSHA: String(repeating: "a", count: 64))
+        ) as! [String: Any]
+        object["accepted_at"] = "sometime"
+        let data = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try VoiceSharingUploader.parseReceipt(data))
+        object["accepted_at"] = "2026-10-22T14:00:00"
+        XCTAssertThrowsError(try VoiceSharingUploader.parseReceipt(
+            try JSONSerialization.data(withJSONObject: object)),
+            "a timestamp without a zone designator is not a timestamp")
+    }
+
+    /// 200 and 201 both map to acceptance, and the receipt status distinguishes the replay.
+    func test_200DuplicateAnd201AcceptedBothDeliver() async throws {
+        for (code, status, duplicate) in [(201, "accepted", false), (200, "duplicate", true)] {
+            let entry = try makeReadyEntry()
+            let identity = try queue.boundIdentity(of: entry)
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: code, body: self.receiptBody(
+                    captureID: identity.captureID, recordSHA: identity.recordSHA256,
+                    status: status))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .delivered(_, let gotDuplicate) = outcome else {
+                return XCTFail("\(code): expected delivered, got \(outcome)")
+            }
+            XCTAssertEqual(gotDuplicate, duplicate, "\(code) duplicate flag")
+        }
     }
 
     /// A strict receipt parser: every required field, or nothing.

@@ -53,7 +53,7 @@ final class VoiceSharingUploader {
     struct Receipt {
         let captureID: String
         let recordSHA256: String
-        let status: String // "accepted" | "duplicate"
+        let status: ReceiptStatus
         let receiptID: String
     }
 
@@ -93,25 +93,21 @@ final class VoiceSharingUploader {
         guard isAuthorized() else { return .revoked }
         // Ownership: taking the lease is what makes this attempt OURS. Note beginAttempt also
         // enforces the strict owner-wide coverage hold, so an unreconciled owner uploads nothing.
-        let lease: VoiceSharingUploadQueue.AttemptLease
+        // Ownership: ONE atomic admission yields the lease AND the attempt number together
+        // (reviewer 7dd1e357). Reading them separately let a reclaim in between make this uploader
+        // settle under a SUCCESSOR's lease. Only this token may settle from here on.
+        let admitted: VoiceSharingUploadQueue.AdmittedAttempt
         do {
-            guard try queue.beginAttempt(entry) else {
+            guard let granted = try queue.admitAttempt(entry) else {
                 return .unavailable(reason: "attempt refused (held, exhausted or owned)")
             }
-            guard let acquired = try queue.currentLease(for: entry) else {
-                return .unavailable(reason: "attempt granted without a lease")
-            }
-            lease = acquired
+            admitted = granted
         } catch {
+            // Includes the enforced not-before refusal: a fresh owner is refused until due.
             return .unavailable(reason: "attempt refused: \(type(of: error))")
         }
-        let attemptNumber: Int
-        do {
-            attemptNumber = try queue.attemptNumber(for: entry)
-        } catch {
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .unavailable(reason: "attempt accounting unavailable")
-        }
+        let lease = admitted.lease
+        let attemptNumber = admitted.attemptNumber
 
         guard let url = endpoint() else {
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
@@ -142,17 +138,32 @@ final class VoiceSharingUploader {
         case .response(let statusCode, let body):
             switch statusCode {
             case 200, 201:
-                return settleReceipt(entry: entry, lease: lease, body: body)
-            case 503:
-                // "upload_pending": transient by contract; retry the same immutable record.
+                // 201 = newly accepted, 200 = previously accepted (idempotent replay). Both are
+                // only trustworthy when the receipt body validates against OUR record identity.
+                return settleReceipt(entry: entry, lease: lease, body: body,
+                                     statusCode: statusCode, attempt: attemptNumber)
+            case 401:
+                // AUTHENTICATION, not a verdict on the record (reviewer 7dd1e357). The credential
+                // is refreshed out of band and the SAME immutable entry is retried; deleting it
+                // here would discard a valid recording because of a stale token.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
+            case 503:
+                // "upload_pending": transient by contract, and the server may still tell us when.
+                // Its minimum is PRESERVED and ENFORCED through the persisted not-before stamp.
+                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
+                                   serverRetryAfter: Self.retryAfterSeconds(body))
             case 429:
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             case 400...499:
                 // Terminal for THIS record (validated/conflicting/expired). Not retryable: the
-                // record is immutable, so repeating it cannot help.
+                // record is immutable, so repeating it cannot help. 408 is the exception the
+                // server table calls transient: it is a timeout, not a judgement.
+                if statusCode == 408 {
+                    return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
+                                       serverRetryAfter: nil)
+                }
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
@@ -164,26 +175,27 @@ final class VoiceSharingUploader {
     // MARK: - settlement
 
     private func settleReceipt(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, body: Data
+        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
+        body: Data, statusCode: Int, attempt: Int
     ) -> Outcome {
         let expected: VoiceSharingRecordBinding.BoundEntry
         do {
             expected = try queue.boundIdentity(of: entry)
         } catch {
-            return unknownOutcome(entry: entry, lease: lease, reason: "local identity unreadable")
+            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "local identity unreadable")
         }
         let receipt: Receipt
         do {
             receipt = try Self.parseReceipt(body)
         } catch {
             // UNKNOWN OUTCOME: retain audio, retry the same record. Never delete for a bad receipt.
-            return unknownOutcome(entry: entry, lease: lease, reason: "malformed receipt")
+            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "malformed receipt")
         }
         // The receipt must describe THIS entry. A well-formed receipt for another identity is a
         // protocol violation, not acceptance of ours.
         guard receipt.captureID == expected.captureID,
               receipt.recordSHA256 == expected.recordSHA256 else {
-            return unknownOutcome(entry: entry, lease: lease, reason: "receipt identity mismatch")
+            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "receipt identity mismatch")
         }
         do {
             try queue.applyAttemptResult(entry, lease: lease, outcome: .delivered)
@@ -192,14 +204,18 @@ final class VoiceSharingUploader {
         } catch {
             return .unavailable(reason: "settlement failed: \(type(of: error))")
         }
-        return .delivered(receiptID: receipt.receiptID, duplicate: receipt.status == "duplicate")
+        return .delivered(receiptID: receipt.receiptID, duplicate: receipt.status == .duplicate)
     }
 
     private func unknownOutcome(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, reason: String
+        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
+        attempt: Int, reason: String, serverRetryAfter: Double? = nil
     ) -> Outcome {
-        // Retain the entry AND release the lease as a retryable failure: by contract this is not
-        // acceptance, so the next attempt sends the same immutable record.
+        // Retain the entry as a retryable failure: by contract this is not acceptance, so the next
+        // attempt sends the same immutable record. The stamp is written BEFORE release here too —
+        // an unknown outcome is as retryable as a 503 and deserves the same enforced delay.
+        let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
+        queue.setNotBefore(clock().addingTimeInterval(delay), for: entry)
         _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
         return .unknownOutcome(reason: reason)
     }
@@ -208,6 +224,12 @@ final class VoiceSharingUploader {
         entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, attempt: Int,
         serverRetryAfter: Double?
     ) -> Outcome {
+        // ORDER IS THE GUARANTEE: the not-before stamp is persisted BEFORE the lease is released.
+        // Written afterwards, another owner could admit the entry in the gap and start a retry
+        // that this owner's stamp never governed — exactly the "advisory delay" the reviewer
+        // rejected. Stamping first means no owner can observe the entry as retryable-but-undelayed.
+        let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
+        queue.setNotBefore(clock().addingTimeInterval(delay), for: entry)
         do {
             try queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
         } catch VoiceSharingUploadQueue.PrepareError.resultStale {
@@ -215,9 +237,6 @@ final class VoiceSharingUploader {
         } catch {
             return .unavailable(reason: "settlement failed: \(type(of: error))")
         }
-        // The DELAY is advisory here: scheduling is the caller's (this type does not sleep, and
-        // does not hold a lease across a wait). The policy supplies the honest, jittered delay.
-        let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
         return .retry(serverRetryAfterSeconds: delay, attempt: attempt)
     }
 
@@ -234,13 +253,12 @@ final class VoiceSharingUploader {
         return .abandoned(reason: "http \(statusCode)")
     }
 
-    // MARK: - request
-
-    private func makeRequest(
-        entry: VoiceSharingUploadQueue.Entry, url: URL
-    ) throws -> URLRequest {
-        let metadata = try queue.metadata(of: entry)
-        let audio = try queue.audio(of: entry)
+    /// Builds the multipart body for an entry, plus the boundary used. Exposed so the production
+    /// transport can send EXACTLY these bytes (one builder, no drift between what is tested and
+    /// what is sent).
+    static func multipartBody(
+        metadata: Data, audio: Data
+    ) -> (body: Data, boundary: String) {
         let boundary = "auris-\(UUID().uuidString)"
         var body = Data()
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -253,6 +271,19 @@ final class VoiceSharingUploader {
         body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
         body.append(audio)
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        return (body, boundary)
+    }
+
+    // MARK: - request
+
+    /// Public so the production transport can obtain the EXACT request the uploader built (and so
+    /// controls can assert on it) without duplicating body construction.
+    func makeRequest(
+        entry: VoiceSharingUploadQueue.Entry, url: URL
+    ) throws -> URLRequest {
+        let metadata = try queue.metadata(of: entry)
+        let audio = try queue.audio(of: entry)
+        let (body, boundary) = Self.multipartBody(metadata: metadata, audio: audio)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -276,7 +307,9 @@ final class VoiceSharingUploader {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ReceiptError.notJSON
         }
-        guard let schemaVersion = object["schema_version"] as? Int, schemaVersion == 1 else {
+        // schema_version must be the INTEGER 1. `as? Int` would bridge a JSON boolean to 1, which
+        // would let `true` authorize a receipt (reviewer 7dd1e357).
+        guard Self.isExactInteger(object["schema_version"], 1) else {
             throw ReceiptError.missingField("schema_version")
         }
         func string(_ key: String) throws -> String {
@@ -287,17 +320,62 @@ final class VoiceSharingUploader {
         }
         let captureID = try string("capture_id")
         let recordSHA = try string("record_sha256")
-        let status = try string("status")
-        guard status == "accepted" || status == "duplicate" else {
-            throw ReceiptError.unexpectedStatus(status)
+        // Digests are lowercase hex of a SHA-256: anything else is not a digest.
+        guard recordSHA.count == 64,
+            recordSHA.allSatisfy({ ($0.isNumber && $0.isASCII) || ("a"..."f").contains($0) })
+        else {
+            throw ReceiptError.missingField("record_sha256")
+        }
+        let rawStatus = try string("status")
+        guard let status = ReceiptStatus(rawValue: rawStatus) else {
+            throw ReceiptError.unexpectedStatus(rawStatus)
         }
         let receiptID = try string("receipt_id")
-        // accepted_at / retention_expires_at must be present; their VALUES are not this type's
-        // business, but a receipt without them is not a receipt.
-        _ = try string("accepted_at")
-        _ = try string("retention_expires_at")
+        // Timestamps are part of the contract, not decoration: a receipt whose times do not parse
+        // cannot be reasoned about for retention, so it is refused.
+        _ = try timestamp(object, "accepted_at")
+        _ = try timestamp(object, "retention_expires_at")
         return Receipt(captureID: captureID, recordSHA256: recordSHA, status: status,
                        receiptID: receiptID)
+    }
+
+    /// Accepts only a genuine JSON number that is integral and equal to `expected`. Booleans are
+    /// rejected explicitly because `as? Int` bridges them.
+    static func isExactInteger(_ value: Any?, _ expected: Int) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        // CFBoolean is an NSNumber subclass: refuse it by type.
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+        guard number.doubleValue.isFinite, number.doubleValue == Double(expected) else {
+            return false
+        }
+        return true
+    }
+
+    /// ISO-8601 with a timezone designator; fractional seconds are accepted, a zone is required.
+    static func timestamp(_ object: [String: Any], _ key: String) throws -> Date {
+        guard let raw = object[key] as? String, !raw.isEmpty else {
+            throw ReceiptError.missingField(key)
+        }
+        guard raw.hasSuffix("Z") || raw.range(of: "[+-]\\d{2}:\\d{2}$", options: .regularExpression)
+            != nil
+        else {
+            throw ReceiptError.missingField(key)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let date = formatter.date(from: raw) else {
+            throw ReceiptError.missingField(key)
+        }
+        return date
+    }
+
+    /// The ONLY two statuses a trustworthy receipt may carry. A string field would let new server
+    /// values silently read as accepted.
+    enum ReceiptStatus: String {
+        case accepted
+        case duplicate
     }
 
     /// Retry-After is advisory server guidance; unparseable values are simply absent (the policy

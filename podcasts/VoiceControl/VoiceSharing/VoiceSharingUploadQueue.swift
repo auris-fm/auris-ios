@@ -235,7 +235,7 @@ final class VoiceSharingUploadQueue {
     /// Testable time source for the immutable queue-age bound.
     private let clock: () -> Date
     private let synchronizer: (_ path: URL, _ isDirectory: Bool) throws -> Void
-    private let failureRecordWriter: (URL) throws -> Void
+    private let failureRecordWriter: (URL, Data) throws -> Void
 
     /// Whether the most recent refused publication could be disqualified DURABLY. `unavailable`
     /// means neither the failure record nor marker removal succeeded, so only this process knows the
@@ -303,7 +303,9 @@ final class VoiceSharingUploadQueue {
         fileManager: FileManager = .default,
         clock: @escaping () -> Date = Date.init,
         synchronizer: @escaping (_ path: URL, _ isDirectory: Bool) throws -> Void = VoiceSharingUploadQueue.defaultSynchronizer,
-        failureRecordWriter: @escaping (URL) throws -> Void = { try Data([0x01]).write(to: $0, options: .atomic) },
+        failureRecordWriter: @escaping (URL, Data) throws -> Void = {
+            try $1.write(to: $0, options: .atomic)
+        },
         markerReplacer: @escaping (URL, URL) throws -> URL? = {
             try FileManager.default.replaceItemAt($0, withItemAt: $1)
         },
@@ -498,7 +500,7 @@ final class VoiceSharingUploadQueue {
         // the state a fresh queue would mistake for "nothing happened". The memory hold is set
         // regardless, so even an unwritable intent refuses serving for this process.
         do {
-            try failureRecordWriter(revocationIntentPath)
+            try failureRecordWriter(revocationIntentPath, Data([0x01]))
             try synchronizer(revocationIntentPath, false)
             try synchronizer(rootDirectory, true)
         } catch {
@@ -596,7 +598,7 @@ final class VoiceSharingUploadQueue {
     private func disqualifyLocked(_ item: URL) -> Bool {
         let intent = item.appendingPathComponent(Self.failedName)
         do {
-            try failureRecordWriter(intent)
+            try failureRecordWriter(intent, Data([0x01]))
             try synchronizer(intent, false)
             try synchronizer(item, true)
             return true
@@ -828,6 +830,103 @@ final class VoiceSharingUploadQueue {
     /// Whether the entry has attempts remaining.
     func isAttemptable(_ entry: Entry) throws -> Bool {
         try serialQueue.sync { try isAttemptableLocked(entry) }
+    }
+
+    /// The admitted attempt: the lease AND the attempt number, returned TOGETHER. Reviewer
+    /// 7dd1e357: three separate reads (beginAttempt → currentLease → attemptNumber) let a reclaim
+    /// land in between, so the uploader could settle using a SUCCESSOR's lease. One transaction
+    /// produces one immutable token, and only that token may settle.
+    struct AdmittedAttempt {
+        let lease: AttemptLease
+        let attemptNumber: Int
+    }
+
+    /// Admits one attempt atomically. Returns nil when the entry is owned elsewhere or exhausted.
+    ///
+    /// Optional `deferUntil` is the ENFORCED not-before discipline (reviewer 7dd1e357): a caller
+    /// that must wait for a policy delay persists that instant here, so ANY owner — including a
+    /// fresh one after restart or reclaim — is refused until it passes. An advisory delay returned
+    /// to a caller is not enforcement; this is.
+    func admitAttempt(_ entry: Entry) throws -> AdmittedAttempt? {
+        try serialQueue.sync { () -> AdmittedAttempt? in
+            guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/")
+            else { throw CocoaError(.fileNoSuchFile) }
+            try refuseIfNotYetDueLocked(entry)
+            guard inFlightAttempts[entry] == nil else { return nil }
+            let discovered = try strictOwnerCoverageLocked()
+            guard discovered.contains(entry) else { return nil }
+            guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
+            do {
+                guard try isAttemptableLocked(entry) else {
+                    // Exhausted is a terminal disposition for this record: it stops serving so it
+                    // is not retried forever. The removal is best-effort here — a failure leaves
+                    // the entry visible-but-unservable via the attempt limit itself.
+                    if isCompleteEntryLocked(at: entry) {
+                        _ = try? disqualifyLocked(try validatedEntryDirectoryLocked(entry))
+                    }
+                    releaseLeaseLocked(for: entry, owner: lease)
+                    return nil
+                }
+            } catch {
+                releaseLeaseLocked(for: entry, owner: lease)
+                throw error
+            }
+            // The attempt is CONSUMED here — the same transaction that grants the lease — and the
+            // resulting number is what the caller settles with. Reading either separately would
+            // reintroduce the window reviewer 7dd1e357 identified.
+            do {
+                try recordAttemptLocked(entry)
+            } catch {
+                releaseLeaseLocked(for: entry, owner: lease)
+                throw error
+            }
+            let count = (try? attemptCountLocked(for: entry)) ?? 0
+            inFlightAttempts[entry] = lease
+            return AdmittedAttempt(lease: lease, attemptNumber: count)
+        }
+    }
+
+    /// Persists a not-before instant for the entry (survives restart, applies to every owner).
+    func setNotBefore(_ instant: Date, for entry: Entry) {
+        serialQueue.sync {
+            guard entry.root == rootDirectory, UUID(uuidString: entry.name) != nil else { return }
+            let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entry.name))
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: ["notBefore": instant.timeIntervalSince1970]) else { return }
+            // A failed write leaves NO stamp, which is a hole in the enforced delay; report it via
+            // the synchronizer-free path and let admission stay permissive only for this record.
+            try? failureRecordWriter(url, data)
+            try? synchronizer(url, false)
+        }
+    }
+
+    /// Refuses an attempt that is not yet due. Unreadable/unparseable state refuses (fail closed):
+    /// a not-before we cannot read is not permission to proceed.
+    private func refuseIfNotYetDueLocked(_ entry: Entry) throws {
+        let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entry.name))
+
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let stamp = object["notBefore"] as? Double
+        else {
+            throw PrepareError.leaseHeld
+        }
+        if clock().timeIntervalSince1970 < stamp {
+            throw PrepareError.leaseHeld
+        }
+        // Due: retire the record so it cannot outlive its purpose.
+        try? fileManager.removeItem(at: url)
+        try? synchronizer(rootDirectory, true)
+    }
+
+    static let notBeforePrefix = "attempt.notbefore."
+
+    static func notBeforeName(for entryName: String) -> String {
+        notBeforePrefix + entryName
     }
 
     /// Acquires single-request ownership and consumes one attempt. Returns `false` when another
@@ -2151,6 +2250,14 @@ final class VoiceSharingUploadQueue {
                 if name.hasPrefix(Self.settlementRecordName + "."),
                    name.hasSuffix(".json"),
                    Self.parseSettlementName(name) != nil {
+                    continue
+                }
+                // Not-before stamps are DURABLE RETRY STATEMENTS, not debris: they are what makes
+                // a policy delay apply to a fresh owner after restart. Deleting them here (as this
+                // debris sweep used to) silently turned every enforced delay back into an advisory
+                // one on the next launch — exactly what the reviewer rejected.
+                if name.hasPrefix(Self.notBeforePrefix),
+                   UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) != nil {
                     continue
                 }
                 try? fileManager.removeItem(at: stray)
