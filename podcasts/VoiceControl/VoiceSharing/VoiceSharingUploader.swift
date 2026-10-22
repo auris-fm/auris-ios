@@ -160,13 +160,16 @@ final class VoiceSharingUploader {
                 // Request timeout: transient by the owning table, never a judgement on the record.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
-            case 400, 402, 403, 404, 405, 406, 407, 409, 410, 411, 412, 413, 414, 415, 416, 417,
-                 418, 421, 422, 423, 424, 425, 426, 428, 431, 451:
-                // EXPLICIT terminal table (spec ruling, not a catchall): each of these is the
-                // server refusing THIS record or this client outright (validation, conflict,
-                // expiry, forbidden). The record is immutable, so repeating cannot help. Every
-                // 4xx NOT in this list and not matched above has no owning disposition — and an
-                // unknown disposition must never delete: it falls through to the retry default.
+            case 400, 409, 410, 413, 415, 422:
+                // THE OWNING TABLE's terminal dispositions ONLY (specs/voice-recording-uploads.md):
+                // 400 invalid_request, 409 capture_conflict, 410 record_gone/retired, 413
+                // payload_too_large, 415/422 unsupported_audio/integrity_mismatch. Nothing outside
+                // this list deletes: every code without an owning disposition retains as unknown.
+                return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
+            case 403:
+                // The table's stop disposition: not_enrolled / collection_disabled. Stop THIS
+                // entry and surface the refusal; account/config refresh is the account client's
+                // separate flow. The record is not "invalid" — it is not permitted to upload.
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
                 // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's

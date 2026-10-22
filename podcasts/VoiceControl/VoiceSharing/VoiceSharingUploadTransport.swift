@@ -19,6 +19,49 @@ final class VoiceSharingUploadTransport {
     static let uploadPath = "/api/v1/voice-recordings"
     /// Receipt bodies are small JSON objects; anything larger is not one.
     static let maxResponseBytes = 64 * 1024
+    /// Full body deadline: the transfer must COMPLETE within this budget, not merely stay active.
+    static let bodyDeadline: TimeInterval = 90
+
+    /// Receives the response body with a hard byte ceiling (cancel past it) and a hard total
+    /// deadline. Returns nil for any violation — the record's fate stays unknown.
+    private static func receive(
+        session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval
+    ) async throws -> (HTTPURLResponse, Data)? {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { return nil }
+        var data = Data()
+        data.reserveCapacity(min(byteLimit, 4096))
+        var task: Task<Void, Never>?
+        return try await withThrowingTaskGroup(of: (HTTPURLResponse, Data)?.self) { group in
+            defer { task?.cancel() }
+            // Deadline task: fails the group if the body has not COMPLETED in time.
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
+                if !Task.isCancelled { throw URLError(.timedOut) }
+                return nil
+            }
+            // Receive task: accumulate with the ceiling; past it, cancel the stream.
+            group.addTask {
+                do {
+                    for try await byte in bytes {
+                        data.append(byte)
+                        if data.count > byteLimit {
+                            throw URLError(.dataNotAllowed)
+                        }
+                    }
+                    return (http, data)
+                } catch {
+                    // Ceiling exceeded or stream error: violation.
+                    return nil
+                }
+            }
+            // First finish decides: a completed transfer returns it; a violation (nil) or a
+            // deadline throw cancels the sibling immediately — no waiting out the deadline.
+            guard let first = try await group.next() else { return nil }
+            group.cancelAll()
+            return first
+        }
+    }
 
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
@@ -65,15 +108,15 @@ final class VoiceSharingUploadTransport {
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
 
         do {
-            let (data, response) = try await session.data(for: request)
-            // BOUNDED response (reviewer ce001b9a): a receipt is a small JSON object. An
-            // oversized or non-small body is not a receipt — it is refused as a transport-class
-            // failure (unknown, retryable) rather than parsed or buffered further.
-            guard data.count <= Self.maxResponseBytes else { return .transportFailure }
-            guard let http = response as? HTTPURLResponse else {
-                // A non-HTTP response is not an answer about this record.
-                return .transportFailure
-            }
+            // STREAMING bound (reviewer 8ba9c45f): `session.data` allocates the WHOLE body before
+            // this code runs, so a post-hoc count check is a parse bound, not a memory bound. The
+            // byte ceiling is enforced WHILE receiving and the transfer is cancelled the moment it
+            // is exceeded. A full-body deadline bounds the transfer's total lifetime as well.
+            let transfer = try await Self.receive(
+                session: session, request: request,
+                byteLimit: Self.maxResponseBytes, deadline: Self.bodyDeadline)
+            guard let (http, data) = transfer else { return .transportFailure }
+
             if http.statusCode == 401 {
                 // Report WHICH credential was rejected, then let the caller retry: a 401 is an
                 // authentication event, not a verdict on the record.

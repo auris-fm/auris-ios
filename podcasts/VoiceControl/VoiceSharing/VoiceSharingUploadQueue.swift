@@ -897,13 +897,36 @@ final class VoiceSharingUploadQueue {
     static let retryHoldIntentName = "attempt.pause.intent"
     private var retryHoldLocked = false
 
-    private func engageRetryHoldLocked() {
+    /// WRITE-AHEAD (reviewer 8ba9c45f): the pause intent is durably established BEFORE the
+    /// boundary publication is attempted, so a boundary failure can never leave "released lease,
+    /// no durable statement". A failed intent write engages the memory hold AND throws — it is
+    /// never swallowed into a best-effort claim.
+    private func engageRetryHoldLocked() throws {
         retryHoldLocked = true
         let url = rootDirectory.appendingPathComponent(Self.retryHoldIntentName)
         let data = Data([0x01])
-        _ = try? failureRecordWriter(url, data)
-        _ = try? synchronizer(url, false)
-        _ = try? synchronizer(rootDirectory, true)
+        do {
+            try failureRecordWriter(url, data)
+            try synchronizer(url, false)
+            try synchronizer(rootDirectory, true)
+        } catch {
+            // The memory hold stands even though the durable statement could not land; the
+            // uncertainty propagates rather than pretending the hold is durable.
+            throw PrepareError.publicationUncertain
+        }
+    }
+
+    /// Clears the write-ahead pause intent after a successful boundary publication. A FAILED
+    /// clear RETAINS the hold (fail closed): an unprovable clear is not a clear.
+    private func clearRetryHoldIfEstablishedLocked() {
+        let url = rootDirectory.appendingPathComponent(Self.retryHoldIntentName)
+        do {
+            try fileManager.removeItem(at: url)
+            try synchronizer(rootDirectory, true)
+            retryHoldLocked = false
+        } catch {
+            retryHoldLocked = true
+        }
     }
 
     /// Publishes a not-before stamp with REAL error propagation: write, file barrier, root barrier.
@@ -1390,12 +1413,25 @@ final class VoiceSharingUploadQueue {
                 // because a released lease without its boundary is exactly the advisory-delay
                 // fail-open state this design forbids.
                 if let boundary = retryNotBefore {
+                    // 1. WRITE-AHEAD: hold intent durable BEFORE anything uncertain.
+                    try engageRetryHoldLocked()
+                    // 2. Boundary publication. On failure the hold (memory + disk) stands and the
+                    // uncertainty propagates; the lease is NOT released.
                     do {
                         try publishNotBeforeLocked(boundary, for: entry)
                     } catch {
-                        engageRetryHoldLocked()
                         throw PrepareError.publicationUncertain
                     }
+                    // 3. Release, then clear the hold — a failed clear keeps the hold (fail closed).
+                    do {
+                        try fileManager.removeItem(at: leaseURL)
+                        try confirmLeaseRemovalDurability()
+                    } catch {
+                        throw PrepareError.publicationUncertain
+                    }
+                    try finishSettlement()
+                    clearRetryHoldIfEstablishedLocked()
+                    return
                 }
                 do {
                     try fileManager.removeItem(at: leaseURL)
@@ -1846,8 +1882,10 @@ final class VoiceSharingUploadQueue {
     func readyEntries() -> [Entry] {
         serialQueue.sync {
             // LEGACY serving path also honors the owner-wide hold (reviewer 35e67a87): an empty
-            // list, never a stale one — this path has no unknown-coverage channel.
-            guard !revocationHoldLocked else { return [] }
+            // list, never a stale one — this path has no unknown-coverage channel. ADOPTION
+            // (ce001b9a follow-through): it honors the retry hold too — a failed attempt barrier
+            // pauses serving at every entry point, not only admission.
+            guard !revocationHoldLocked, !retryHoldLocked else { return [] }
             return entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
@@ -2296,6 +2334,12 @@ final class VoiceSharingUploadQueue {
                 if name.hasPrefix(Self.settlementRecordName + "."),
                    name.hasSuffix(".json"),
                    Self.parseSettlementName(name) != nil {
+                    continue
+                }
+                // The hold intents ARE the durable evidence for owner-wide holds: recovery reads
+                // them into memory, and deleting them here would let a SECOND fresh queue forget
+                // the hold (reviewer 8ba9c45f). They are reconciled explicitly, never swept.
+                if name == Self.retryHoldIntentName || name == Self.revocationIntentName {
                     continue
                 }
                 // Not-before stamps are DURABLE RETRY STATEMENTS, not debris: they are what makes

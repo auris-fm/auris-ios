@@ -267,20 +267,70 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(after.contains(entry), "a 401 must not destroy a valid recording")
     }
 
-    /// An unrecognized 4xx is not silently terminal either: unknown means preserve.
+    /// An unrecognized 4xx has NO owning disposition: unknown means RETAIN and retry, never
+    /// delete (spec dc6a00ab: only the owning table's codes are terminal).
     func test_unrecognized4xxPreservesTheEntry() async throws {
         let entry = try makeReadyEntry()
         let uploader = makeUploader(transport: { _ in
             .response(statusCode: 418, body: Data())
         })
         let outcome = await uploader.upload(entry)
-        guard case .abandoned = outcome else {
-            return XCTFail("expected terminal, got \(outcome)")
+        guard case .retry = outcome else {
+            return XCTFail("an unknown 4xx must retain and retry, got \(outcome)")
         }
         guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
-        XCTAssertFalse(after.contains(entry))
+        XCTAssertTrue(after.contains(entry), "no owning disposition = no deletion")
+    }
+
+    /// The owning table's terminal codes exactly: each abandons; the ones just outside it
+    /// (402, 404, 407, 451 — NOT in the table) retain.
+    func test_terminalTableIsExactlyTheOwningCodes() async throws {
+        let terminal: [Int] = [400, 409, 410, 413, 415, 422]
+        for code in terminal {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: code, body: Data())
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .abandoned = outcome else {
+                return XCTFail("\(code): owning terminal code must abandon, got \(outcome)")
+            }
+        }
+        for code in [402, 404, 407, 451] {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: code, body: Data())
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .retry = outcome else {
+                return XCTFail("\(code): NOT an owning code — must retain, got \(outcome)")
+            }
+        }
+    }
+
+    /// Holds survive TWO consecutive fresh initializations (reviewer 8ba9c45f): recovery must not
+    /// delete the durable evidence it just read.
+    func test_retryHoldSurvivesTwoRestarts() throws {
+        let entry = try makeReadyEntry()
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(60)))
+        let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(first.readyEntries().isEmpty, "first restart holds")
+        let second = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(second.readyEntries().isEmpty,
+                      "SECOND restart must still hold — the intent must survive the first")
     }
 
     /// 503's server minimum is not discarded: it is both reported AND persisted, and a FRESH owner
@@ -466,6 +516,30 @@ final class VoiceSharingUploaderTests: XCTestCase {
             return XCTFail("coverage known")
         }
         XCTAssertTrue(after.contains(entry))
+    }
+
+    /// Legacy serving adopts the retry hold: a failed barrier pauses readyEntries() too.
+    func test_legacyServingHonorsTheRetryHold() throws {
+        let entry = try makeReadyEntry()
+        XCTAssertEqual(queue.readyEntries().count, 1, "ready before the barrier")
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(60)))
+        // The legacy serving path is held like every other entry point. Recovery happens at
+        // construction, so the probe is a NEWLY constructed instance.
+        XCTAssertTrue(failing.readyEntries().isEmpty)
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(fresh.readyEntries().isEmpty,
+                      "a fresh instance re-derives the hold from disk")
     }
 
     /// A strict receipt parser: every required field, or nothing.
