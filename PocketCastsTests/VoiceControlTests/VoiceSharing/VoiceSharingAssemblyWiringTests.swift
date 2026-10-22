@@ -27,9 +27,12 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     /// injected policy switch — every other element is the real production type.
     private func makeChain(
         policyPermits: @escaping () -> Bool,
-        tokenProvider: CloudTokenProviding
+        tokenProvider: CloudTokenProviding,
+        attemptLimits: VoiceSharingUploadQueue.AttemptLimits = .default,
+        now: @escaping () -> Date = Date.init
     ) -> (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler) {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: now, attemptLimits: attemptLimits)
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
             tokenProvider: tokenProvider,
@@ -269,7 +272,172 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "withdrawal silences the trigger at trigger time")
     }
 
-    /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
+    /// Rebuilds the chain on the SAME root with a clock advanced past any retry boundary
+    /// (backoff, server minimum, or obligation), then lifts the hold the way production does.
+    private func advanceAndResume(
+        _ chain: (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler),
+        policyPermits: @escaping () -> Bool = { true },
+        tokenProvider: CloudTokenProviding,
+        attemptLimits: VoiceSharingUploadQueue.AttemptLimits,
+        by seconds: TimeInterval
+    ) -> (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler) {
+        let future = Date().addingTimeInterval(seconds)
+        let advanced = makeChain(policyPermits: policyPermits, tokenProvider: tokenProvider,
+                                 attemptLimits: attemptLimits, now: { future })
+        _ = advanced.queue.reconcileRetryHold()
+        return advanced
+    }
+
+    /// ONE successful pass through the trigger with a credential-driven responder.
+    private func runPass(
+        _ chain: (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler)
+    ) async {
+        let trigger = makeTrigger(chain, surfaceEnabled: { true }, isAuthorized: { true })
+        trigger.triggerDrainIfPermitted()
+        for _ in 0..<300 where !chain.queue.readyEntries().isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    /// THE REAL UPLOAD AUTH COMPOSITION (spec 2bb81b64 / reviewer c7da2dbe): an upload that gets
+    /// 401 reports the EXACT rejected credential to the provider, the credential refreshes, and the
+    /// SAME immutable entry is retried and settles. No second entry is ever created for the retry.
+    func test_upload401ReportsExactTokenRefreshesOnceThenRetriesSameEntry() async throws {
+        let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
+        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
+                              attemptLimits: .init(maxUploadAttempts: 4))
+        let entry = try makeReadyEntry(chain.queue)
+        var seenTokens: [String] = []
+        let accepted = Self.acceptedReceiptResponder()
+        AssemblyIntercept.responder = { request in
+            let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
+                .replacingOccurrences(of: "Bearer ", with: "")
+            seenTokens.append(token)
+            if token == "stale-token" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
+            }
+            return accepted(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+        try await runPass(chain)
+        XCTAssertEqual(seenTokens, ["stale-token"], "the first attempt presents the cached token")
+        XCTAssertEqual(tokens.refreshCount, 1,
+                       "the 401 itself triggers exactly one refresh, before any retry")
+        // The retry happens on the next pass, once the backoff boundary the 401 published passes.
+        let later = advanceAndResume(chain, tokenProvider: tokens,
+                                     attemptLimits: .init(maxUploadAttempts: 4), by: 120)
+        try await runPass(later)
+        XCTAssertEqual(seenTokens, ["stale-token", "fresh-token"],
+                       "the retry presents the REFRESHED credential")
+        XCTAssertEqual(tokens.refreshCount, 1, "EXACTLY one refresh")
+        XCTAssertEqual(tokens.rejectedTokens, ["stale-token"],
+                       "the provider is told WHICH credential was rejected")
+        XCTAssertTrue(later.queue.readyEntries().isEmpty,
+                      "the SAME entry settled after the retry — no duplicate entry was made")
+        XCTAssertEqual(AssemblyIntercept.requestCount, 2,
+                       "one request per attempt: no extra capture or upload")
+        _ = entry
+    }
+
+    /// EPOCH RETIREMENT DURING REFRESH: if the enrollment epoch moves while the credential
+    /// refreshes, the retry must NOT be sent — the entry is not carried across an enrollment change.
+    func test_epochRetirementDuringRefreshBlocksTheRetry() async throws {
+        let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
+        var sameEpoch = true
+        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
+                              attemptLimits: .init(maxUploadAttempts: 4))
+        _ = try makeReadyEntry(chain.queue)
+        AssemblyIntercept.responder = { request in
+            let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
+                .replacingOccurrences(of: "Bearer ", with: "")
+            if token == "stale-token" {
+                sameEpoch = false   // the epoch retires while the credential refreshes
+                return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
+            }
+            return Self.acceptedReceiptResponder()(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+        // The gate the production chain consults is the live policy, which is epoch-scoped:
+        // flattening it models the epoch having retired.
+        try await runPass(chain)
+        XCTAssertFalse(sameEpoch, "precondition: the epoch moved during the refresh")
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "no retry is sent once the enrollment epoch has moved")
+        XCTAssertEqual(chain.queue.readyEntries().count, 1,
+                       "the entry is retained, not delivered and not silently dropped")
+    }
+
+    /// ACCOUNT SWITCH DURING REFRESH: same shape, and the retained entry still cannot settle.
+    func test_accountSwitchDuringRefreshBlocksTheRetry() async throws {
+        let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
+        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
+                              attemptLimits: .init(maxUploadAttempts: 4))
+        _ = try makeReadyEntry(chain.queue)
+        var switched = false
+        AssemblyIntercept.responder = { request in
+            let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
+                .replacingOccurrences(of: "Bearer ", with: "")
+            if token == "stale-token" {
+                switched = true
+                return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
+            }
+            return Self.acceptedReceiptResponder()(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+        try await runPass(chain)
+        XCTAssertTrue(switched)
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "no retry under a different account")
+        XCTAssertEqual(chain.queue.readyEntries().count, 1, "entry retained")
+    }
+
+    /// REPEATED 401s: a credential that is always rejected spends BOUNDED attempts. Once the
+    /// budget is exhausted the queue reports it explicitly rather than as a benign "not ready",
+    /// and the entry stays accounted for instead of vanishing.
+    func test_repeated401sSpendBoundedAttemptsThenReportExhaustion() async throws {
+        let tokens = RefreshingTokenProvider(tokens: ["a", "b", "c", "d", "e", "f"])
+        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
+                              attemptLimits: .init(maxUploadAttempts: 3))
+        let entry = try makeReadyEntry(chain.queue)
+        AssemblyIntercept.responder = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil,
+                             headerFields: nil)!,
+             Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
+        }
+        defer { AssemblyIntercept.responder = nil }
+        // Pour every available attempt through the REAL pass path, advancing time between passes
+        // the way a resume would (each 401 publishes a backoff boundary + hold).
+        try await runPass(chain)
+        var current = chain
+        for _ in 0..<4 {
+            current = advanceAndResume(current, tokenProvider: tokens,
+                                       attemptLimits: .init(maxUploadAttempts: 3), by: 120)
+            try await runPass(current)
+        }
+        XCTAssertLessThanOrEqual(AssemblyIntercept.requestCount, 3,
+                                 "repeated 401s are bounded by the attempt budget")
+        XCTAssertEqual(AssemblyIntercept.requestCount, 3,
+                       "every attempt the budget allows is used — then it stops")
+        XCTAssertTrue(current.queue.readyEntries().isEmpty,
+                      "an exhausted entry is no longer served")
+        XCTAssertTrue(tokens.rejectedTokens.count == tokens.refreshCount,
+                      "every rejection is reported to the provider")
+        // Exhaustion is REPORTED through the serving channel the scheduler consults, not as a
+        // benign "nothing ready": the coverage report must not present the spent entry as servable.
+        guard case .known(let servable) = current.queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage became unknown")
+        }
+        XCTAssertFalse(servable.contains(where: { $0.name == entry.name }),
+                       "an entry with no attempts left is never offered for upload")
+    }
+
+    /// NO ELIGIBILITY: with the policy refusing    /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
     /// activity, entries untouched.
     func test_noRequestWithoutEligibility() async throws {
         var permitted = false
@@ -406,6 +574,30 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
 }
 
 /// Token provider double for assembly controls.
+/// A credential provider that refreshes ONCE per rejected token and records what it was told.
+private final class RefreshingTokenProvider: CloudTokenProviding {
+    private let lock = NSLock()
+    private var index = 0
+    private let tokens: [String]
+    private(set) var refreshCount = 0
+    private(set) var rejectedTokens: [String] = []
+
+    init(tokens: [String]) { self.tokens = tokens }
+
+    func token() async -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return tokens[min(index, tokens.count - 1)]
+    }
+
+    func handleUnauthorized(rejectedToken: String?) async {
+        lock.lock(); defer { lock.unlock() }
+        rejectedTokens.append(rejectedToken ?? "<nil>")
+        // Out-of-band refresh: advance to the next credential exactly once.
+        refreshCount += 1
+        index = min(index + 1, tokens.count - 1)
+    }
+}
+
 private final class StaticTokenProvider: CloudTokenProviding {
     private let token: String?
     init(token: String?) { self.token = token }

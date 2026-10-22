@@ -140,6 +140,9 @@ final class VoiceSharingUploadQueue {
         case attemptsExhausted
         /// Another owner holds the attempt lease.
         case leaseHeld
+        /// A retry delay is still owed: the entry is admitted no earlier than `retryAt`. Distinct
+        /// from `leaseHeld` — nobody owns the entry, the schedule does.
+        case notYetDue(retryAt: Date)
         /// A completion arrived from an owner that no longer holds the lease.
         case resultStale
         /// A retry reports a DIFFERENT outcome than the durably recorded pending settlement.
@@ -1062,7 +1065,10 @@ final class VoiceSharingUploadQueue {
         if let owed = readObligationLocked(entry) {
             if owed.isNaN { throw PrepareError.leaseHeld } // unknown ⇒ hold
             if clock().timeIntervalSince1970 < owed {
-                throw PrepareError.leaseHeld
+                // NOT-YET-DUE must be DISTINGUISHABLE from "someone else owns this entry"
+                // (reviewer c7da2dbe's bounded-attempts evidence exposed the ambiguity): the
+                // caller's budget/stopping rules depend on knowing a delay is owed.
+                throw PrepareError.notYetDue(retryAt: Date(timeIntervalSince1970: owed))
             }
             // Due: retire the obligation so it cannot outlive its purpose.
             try? fileManager.removeItem(
@@ -1085,7 +1091,7 @@ final class VoiceSharingUploadQueue {
             throw PrepareError.leaseHeld
         }
         if clock().timeIntervalSince1970 < stamp {
-            throw PrepareError.leaseHeld
+            throw PrepareError.notYetDue(retryAt: Date(timeIntervalSince1970: stamp))
         }
         // Due: retire the record so it cannot outlive its purpose.
         try? fileManager.removeItem(at: url)

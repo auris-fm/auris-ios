@@ -138,6 +138,29 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         }
     }
 
+    /// MEASURED CANCELLATION (open item from spec/reviewer): a LIVE transfer that keeps dribbling
+    /// is stopped by the transport, and the cancellation is OBSERVED (URLSession calls
+    /// stopLoading) rather than merely inferred from the return value.
+    func test_liveDribblingTransferIsMeasurablyCancelled() async {
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        UploadRecordingURLProtocol.drip = true
+        UploadRecordingURLProtocol.dripInterval = 0.05
+        // A tight wall deadline so the test is fast; the ceiling is what actually stops it.
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session,
+            bodyDeadline: 2)
+        let started = Date()
+        let result = await transport.send(request: makeRequest())
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(result, .transportFailure,
+                       "a body that never finishes is never a delivered record")
+        XCTAssertGreaterThanOrEqual(UploadRecordingURLProtocol.stopLoadingCount, 1,
+                                    "the live transfer must be told to stop")
+        XCTAssertTrue(UploadRecordingURLProtocol.dripWasLiveWhenStopped,
+                      "the drip was still running when cancellation arrived — measured, not inferred")
+        XCTAssertLessThan(elapsed, 10, "the deadline bounds the transfer's lifetime")
+    }
+
     /// The production endpoint is the mounted worker route.
     func test_endpointIsTheMountdWorkerRoute() {
         let transport = VoiceSharingUploadTransport(
@@ -181,24 +204,58 @@ private final class RecordingTokenProvider: CloudTokenProviding {
 private final class UploadRecordingURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
     static var stall = false
+    /// Drip mode: send headers, then one byte every `dripInterval` forever — a live transfer that
+    /// only the WALL/cap bound can stop.
+    static var drip = false
+    static var dripInterval: TimeInterval = 0
     private(set) static var lastRequest: URLRequest?
     private(set) static var requestCount = 0
+    /// MEASURED CANCELLATION (spec/reviewer open item): how many times URLSession told the live
+    /// transfer to stop, and whether a drip was still running when it did.
+    private(set) static var stopLoadingCount = 0
+    private(set) static var dripWasLiveWhenStopped = false
+    private static var dripTask: Task<Void, Never>?
+    static let lock = NSLock()
 
     static func reset() {
         handler = nil
         stall = false
+        drip = false
+        dripInterval = 0
         lastRequest = nil
         requestCount = 0
+        stopLoadingCount = 0
+        dripWasLiveWhenStopped = false
+        dripTask?.cancel()
+        dripTask = nil
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        UploadRecordingURLProtocol.lock.lock()
         UploadRecordingURLProtocol.requestCount += 1
         UploadRecordingURLProtocol.lastRequest = request
+        UploadRecordingURLProtocol.lock.unlock()
         // A genuine stall: the transfer exists but NEVER yields headers or bytes.
         if UploadRecordingURLProtocol.stall { return }
+        if UploadRecordingURLProtocol.drip {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            let interval = UploadRecordingURLProtocol.dripInterval
+            let protocolInstance = self
+            UploadRecordingURLProtocol.dripTask = Task { [weak protocolInstance] in
+                while !Task.isCancelled, let protocolInstance {
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(max(interval, 0.001) * 1_000_000_000))
+                    if Task.isCancelled { break }
+                    protocolInstance.client?.urlProtocol(protocolInstance, didLoad: Data([0x41]))
+                }
+            }
+            return
+        }
         guard let handler = UploadRecordingURLProtocol.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
@@ -213,5 +270,13 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        UploadRecordingURLProtocol.lock.lock()
+        UploadRecordingURLProtocol.stopLoadingCount += 1
+        let taskWasLive = UploadRecordingURLProtocol.dripTask.map { !$0.isCancelled } ?? false
+        if taskWasLive { UploadRecordingURLProtocol.dripWasLiveWhenStopped = true }
+        UploadRecordingURLProtocol.dripTask?.cancel()
+        UploadRecordingURLProtocol.dripTask = nil
+        UploadRecordingURLProtocol.lock.unlock()
+    }
 }
