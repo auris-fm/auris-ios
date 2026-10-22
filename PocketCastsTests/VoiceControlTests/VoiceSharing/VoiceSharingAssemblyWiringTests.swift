@@ -29,10 +29,11 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         policyPermits: @escaping () -> Bool,
         tokenProvider: CloudTokenProviding,
         attemptLimits: VoiceSharingUploadQueue.AttemptLimits = .default,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        overrideRoot: URL? = nil
     ) -> (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler) {
         let queue = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: now, attemptLimits: attemptLimits)
+            rootDirectory: overrideRoot ?? root, clock: now, attemptLimits: attemptLimits)
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
             tokenProvider: tokenProvider,
@@ -437,49 +438,63 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "an entry with no attempts left is never offered for upload")
     }
 
-    /// GENUINELY OVERLAPPING SUCCESSOR (spec 2bb81b64 / reviewer c7da2dbe's stated limit): a
-    /// SUCCESSOR uploader on the same queue, driven concurrently while the first attempt is still
-    /// in flight, must not settle the entry on the first attempt's late success — and must not
-    /// borrow its lease. The sequential-successor limit is replaced by a concurrent one.
-    func test_overlappingSuccessorCannotSettleOnALateSuccess() async throws {
+    /// GENUINELY OVERLAPPING SUCCESSOR (spec 2bb81b64, rebuilt per spec 3e35973a): the successor
+    /// shares the SAME root explicitly, and every assertion is bound to the EXACT entry attempted —
+    /// a different entry can no longer masquerade as a successor violation (the withdrawn
+    /// fixture-artifact failure, receipts labelled withdrawn).
+    func test_overlappingSuccessorCannotAttemptTheEntryUnderALiveLease() async throws {
+        let sharedRoot = root!
         var permitted = true
-        let chain = makeChain(policyPermits: { true }, tokenProvider: StaticTokenProvider(token: "tok"),
+        // The chain must consult the LIVE flag, not a constant: hardcoding `{ true }` here is what
+        // made an earlier version of this control prove nothing about withdrawal.
+        let chain = makeChain(policyPermits: { permitted },
+                              tokenProvider: StaticTokenProvider(token: "tok"),
                               attemptLimits: .init(maxUploadAttempts: 4))
-        // A SECOND uploader + scheduler over the SAME durable queue: a successor instance.
-        let successor = makeChain(policyPermits: { true },
-                                  tokenProvider: StaticTokenProvider(token: "tok"),
-                                  attemptLimits: .init(maxUploadAttempts: 4))
-        XCTAssertEqual(successor.queue.rootDirectory, chain.queue.rootDirectory)
         let entry = try makeReadyEntry(chain.queue)
-        let accepted = Self.acceptedReceiptResponder()
+        let requestedNames = RequestRecorder()
         let releaseFirst = AsyncGate()
+        let accepted = Self.acceptedReceiptResponder()
         AssemblyIntercept.responder = { request in
-            // The FIRST attempt is held on the wire until the successor has had its chance to run.
-            if releaseFirst.isFirst() { releaseFirst.waitForRelease() }
-            // Withdrawal lands while the first attempt is STILL in flight.
-            permitted = false
+            if let identity = try? Self.attemptedIdentity(from: request) {
+                requestedNames.record(identity.captureID)
+            }
+            // Withdrawal lands exactly ONCE, on the FIRST request, while it is on the wire. The
+            // successor's own (refused) request must not be able to fake the withdrawal — the
+            // shared gate would otherwise make this control pass or fail on somebody else's timing.
+            if releaseFirst.isFirst() {
+                permitted = false
+                releaseFirst.waitForRelease()
+            }
             return accepted(request)
         }
         defer { AssemblyIntercept.responder = nil }
-        // Start the first attempt; it blocks in the responder.
         let firstDrain = Task { await chain.scheduler.drainOnce() }
-        // Wait until the first request is genuinely ON THE WIRE before the successor runs.
         let start = Date()
         while AssemblyIntercept.requestCount == 0, Date().timeIntervalSince(start) < 5 {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
-        // While it is in flight, the successor tries the same entry CONCURRENTLY.
 
-        var successorRequests = 0
+        // A SECOND chain over the SAME durable root — an explicit shared-root successor.
+        let successor = makeChain(policyPermits: { permitted },
+                                  tokenProvider: StaticTokenProvider(token: "tok"),
+                                  attemptLimits: .init(maxUploadAttempts: 4),
+                                  overrideRoot: sharedRoot)
+        XCTAssertEqual(successor.queue.rootDirectory, chain.queue.rootDirectory,
+                       "the successor must share the durable root, or it proves nothing")
         let successorOutcome = await successor.scheduler.drainOnce()
+        // A pass reports every entry it CONSIDERED, including refusals — so the correct assertion
+        // is not "no result" but "no request and no acquisition". The earlier version read the
+        // result count as an attempt count, which is what produced the withdrawn finding.
         if case .drained(let results) = successorOutcome {
-            successorRequests = results.count
+            XCTAssertEqual(results.count, 1, "the successor saw the entry")
+            for result in results {
+                guard case .unavailable = result.outcome else {
+                    return XCTFail("a successor must be REFUSED under a live lease, got \(result.outcome)")
+                }
+            }
         }
 
-        XCTAssertEqual(successorRequests, 0,
-                       "a concurrent successor cannot attempt an entry under a live lease")
-        // Now let the first attempt's late success arrive.
         releaseFirst.release()
         let firstOutcome = await firstDrain.value
         guard case .drained(let results) = firstOutcome, let first = results.first else {
@@ -488,10 +503,10 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         guard case .revoked = first.outcome else {
             return XCTFail("the late success must not beat the withdrawal, got \(first.outcome)")
         }
-        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
-                       "exactly one request: the successor added none")
-        XCTAssertEqual(chain.queue.readyEntries().map(\.name), [entry.name],
-                       "the entry is retained: the late success did not complete it")
+        XCTAssertEqual(requestedNames.count, 1,
+                       "exactly one request reached the wire: the successor added none")
+        XCTAssertTrue(chain.queue.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained: the late success did not complete it")
     }
 
     /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
@@ -681,6 +696,14 @@ private final class RefreshingTokenProvider: CloudTokenProviding {
         refreshCount += 1
         index = min(index + 1, tokens.count - 1)
     }
+}
+
+/// Records the capture ids of requests that actually reached the wire.
+private final class RequestRecorder {
+    private let lock = NSLock()
+    private var names: [String] = []
+    func record(_ name: String) { lock.lock(); names.append(name); lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return names.count }
 }
 
 private final class StaticTokenProvider: CloudTokenProviding {
