@@ -112,7 +112,7 @@ final class VoiceSharingUploadQueue {
     /// defined over exactly these.
     /// The closed set of fixed file names an entry directory may contain.
     static let knownEntryNames: Set<String> = [
-        attemptRecordName, attemptLeaseName, attemptLeaseLockName,
+        attemptRecordName, attemptLeaseName,
         audioName, metadataName, createdName, readyMarkerName, stageName, failedName
     ]
     /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
@@ -179,15 +179,27 @@ final class VoiceSharingUploadQueue {
     /// Name of the root-scoped lease for an in-flight attempt. It lives NEXT TO the entry (inside
     /// the entry directory, as `attempt.lease`) so a stale lease travels with its entry.
     static let attemptLeaseName = "attempt.lease"
-    /// Stable lock file serializing every lease transition (claim, reclaim, release) for one entry.
-    /// A generation COMPARISON is not conditional unlink: two expired reclaimers can both read the
-    /// old generation, one replaces the lease, and the other deletes the successor's. `flock` on a
-    /// stable file is the OS-backed serialization the comparison lacks.
-    static let attemptLeaseLockName = "attempt.lease.lock"
-    /// Root-level lease-lock file name for an entry. Lives at the ROOT because entry directories
-    /// are removed whole by recovery/exhaustion, which would invalidate the lock's inode.
+    /// Number of fixed lock files. A stable hash maps every entry to exactly ONE of these, so the
+    /// same entry always locks the same inode — mutual exclusion holds — while the namespace never
+    /// grows. UUID-per-entry locks accumulated forever and, past the root's bounded discovery limit,
+    /// permanently disabled admission. Hash collisions only over-serialize unrelated entries.
+    static let leaseLockPoolSize = 16
+    static let maxRootLockFiles = leaseLockPoolSize
+
+    /// Root-level lease-lock file for an entry. Lives at the ROOT because entry directories are
+    /// removed whole by recovery/exhaustion, which would invalidate the lock's inode. The name is
+    /// drawn from a FIXED pool so lifetime entries cannot accumulate root artifacts.
     static func rootLeaseLockName(for entryName: String) -> String {
-        "attempt.lease.\(entryName).lock"
+        "attempt.lock.\(stableLockIndex(for: entryName))"
+    }
+
+    /// Stable, dependency-free hash: FNV-1a over the entry name.
+    static func stableLockIndex(for entryName: String) -> Int {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in entryName.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return Int(hash % UInt64(leaseLockPoolSize))
     }
     static let maxAttemptLeaseBytes = 256
     /// How long a lease is considered live without renewal. A killed owner cannot renew, so after
@@ -1277,10 +1289,9 @@ final class VoiceSharingUploadQueue {
                 // inode live lock holders rely on. Only well-formed names are skipped; anything
                 // else is debris as before.
                 let name = stray.lastPathComponent
-                if name.hasPrefix("attempt.lease."),
-                   name.hasSuffix(".lock"),
-                   UUID(uuidString: String(name.dropFirst("attempt.lease.".count)
-                       .dropLast(".lock".count))) != nil {
+                if name.hasPrefix("attempt.lock."),
+                   let index = Int(name.dropFirst("attempt.lock.".count)),
+                   index >= 0, index < Self.leaseLockPoolSize {
                     continue
                 }
                 try? fileManager.removeItem(at: stray)

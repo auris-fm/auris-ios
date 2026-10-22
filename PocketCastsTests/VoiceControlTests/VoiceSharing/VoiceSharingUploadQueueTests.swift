@@ -1278,14 +1278,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             .filter { !$0.hasPrefix(".") }
         // The entry directory must be gone. Root lease locks legitimately survive their entry (the
         // inode must stay stable while any holder exists), but ONLY well-formed owned ones.
-        let locks = leftover.filter { $0.hasPrefix("attempt.lease.") && $0.hasSuffix(".lock") }
+        let locks = leftover.filter { name in
+            guard name.hasPrefix("attempt.lock.") else { return false }
+            return Int(name.dropFirst("attempt.lock.".count)).map { $0 >= 0 } == true
+        }
         let debris = leftover.filter { !(locks.contains($0)) }
         XCTAssertTrue(debris.isEmpty, "no debris may remain, got \(debris)")
-        for lock in locks {
-            let entryName = String(lock.dropFirst("attempt.lease.".count).dropLast(".lock".count))
-            XCTAssertNotNil(UUID(uuidString: entryName),
-                            "surviving lock files must be well-formed owned names")
-        }
     }
 
     func test_onlyOneInFlightAttemptPerEntryIsOwned() throws {
@@ -1851,6 +1849,52 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath.path),
                       "recovery must not delete a well-formed lease lock")
+    }
+
+    func test_lifetimeEntriesDoNotAccumulateRootLockFiles() throws {
+        // Reviewer 17c4310f: UUID-per-entry locks accumulated forever, and past the root's bounded
+        // discovery limit admission was permanently disabled even with an empty queue. The fixed
+        // lock pool must bound root artifacts across repeated acquire/exhaust/remove cycles.
+        let limits = VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32)
+        for cycle in 0..<80 {
+            let q = VoiceSharingUploadQueue(
+                rootDirectory: root, clock: Date.init,
+                aggregateLimits: limits,
+                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+            let audio = cycle % 2 == 0 ? audioA : audioB
+            let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audio), audio: audio)
+            try q.finalize(prep)
+            _ = try q.beginAttempt(prep)
+            q.endAttempt(prep)
+            // Second attempt is refused (exhausted) and removes the entry.
+            _ = try? q.beginAttempt(prep)
+        }
+        let rootNames = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { !$0.hasPrefix(".") }
+        let lockFiles = rootNames.filter { $0.hasPrefix("attempt.lock.") }
+        XCTAssertLessThanOrEqual(lockFiles.count, VoiceSharingUploadQueue.maxRootLockFiles,
+                                 "the lock namespace is fixed, not per-entry")
+        // Admission still works after all those cycles: an empty queue is an usable queue.
+        let fresh = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init, aggregateLimits: limits)
+        let prep = try fresh.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try fresh.finalize(prep)
+        XCTAssertEqual(fresh.readyEntries().count, 1,
+                       "admission must survive a lifetime of entries")
+        XCTAssertTrue(try fresh.beginAttempt(prep))
+    }
+
+    func test_sameEntryAlwaysMapsToTheSameLockFile() throws {
+        // Mutual exclusion depends on the same entry locking the same inode every time.
+        let names = Set((0..<50).map { _ in UUID().uuidString }.map {
+            VoiceSharingUploadQueue.rootLeaseLockName(for: $0)
+        })
+        XCTAssertLessThanOrEqual(names.count, VoiceSharingUploadQueue.leaseLockPoolSize)
+        // And deterministically: the same name always maps identically.
+        for name in names.prefix(5) {}
+        let sample = UUID().uuidString
+        XCTAssertEqual(VoiceSharingUploadQueue.rootLeaseLockName(for: sample),
+                       VoiceSharingUploadQueue.rootLeaseLockName(for: sample))
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
