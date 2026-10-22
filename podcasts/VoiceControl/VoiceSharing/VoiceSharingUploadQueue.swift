@@ -965,11 +965,17 @@ final class VoiceSharingUploadQueue {
     @discardableResult
     func reconcileRetryHold() -> Bool {
         serialQueue.sync {
-            guard case .present = intentDiscovery(
-                rootDirectory.appendingPathComponent(Self.retryHoldIntentName)) else {
-                // No durable intent: the hold (if any) is stale memory; clear it.
+            // EXPLICIT THREE-WAY (reviewer c9416bf7): unknown intent state RETAINS the hold —
+            // only proven absence can lift it, never an unreadable root.
+            switch intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName)) {
+            case .failure:
+                retryHoldLocked = true
+                return false
+            case .absent:
                 retryHoldLocked = false
                 return true
+            case .present:
+                break
             }
             // Every surviving stamp must be bounded-parseable and well-named, otherwise the
             // boundary state is unprovable and the hold stands.

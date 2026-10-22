@@ -713,6 +713,34 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertEqual(readmitted.attemptNumber, 2, "the retry is the SECOND attempt")
     }
 
+    /// Discovery FAILURE during reconciliation retains the hold (reviewer c9416bf7): an
+    /// unreadable root is never read as "no intent".
+    func test_reconciliationKeepsTheHoldWhenDiscoveryFails() throws {
+        let entry = try makeReadyEntry()
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(600)))
+        // A queue whose intent DISCOVERY fails (chmod-000 root): reconciliation must not lift.
+        let unreadable = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            intentDiscovery: { _ in
+                // Simulate exactly what statKind returns on stat failure.
+                return .failure
+            })
+        XCTAssertFalse(unreadable.reconcileRetryHold(),
+                       "discovery failure must retain the hold")
+        XCTAssertTrue(unreadable.readyEntries().isEmpty, "held owners serve nothing")
+    }
+
     /// 410 carries either owning code: record_gone or enrollment_retired.
     func test_410AcceptsBothOwningCodes() async throws {
         for code in ["record_gone", "enrollment_retired"] {

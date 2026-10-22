@@ -156,28 +156,49 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertTrue(ready.isEmpty, "delivered entries leave the serving set")
     }
 
-    /// REVOCATION mid-pass: the pass STOPS, nothing after it is attempted, and the late/successor
-    /// world cannot borrow the attempt.
-    func test_revocationEndsThePass() async throws {
+    /// REVOCATION mid-pass with a LATE SUCCESSFUL response (spec 7980bf44): the withdrawal lands
+    /// while a valid 201 receipt is in flight — the late success must NOT complete the entry, the
+    /// pass stops, and a successor instance cannot borrow the attempt either.
+    func test_lateSuccessCannotCompleteARevokedEntry() async throws {
         var permitted = true
         let chain = makeChain(policyPermits: { permitted },
                               tokenProvider: StaticTokenProvider(token: "tok"))
         let first = try makeReadyEntry(chain.queue)
         let second = try makeReadyEntry(chain.queue)
+        let identity = try chain.queue.boundIdentity(of: first)
         AssemblyIntercept.responder = { request in
-            // Withdrawal lands while the FIRST request is on the wire.
+            // Withdrawal lands while a VALID receipt is on the wire.
             permitted = false
-            _ = first
-            _ = second
-            return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
-                                    headerFields: nil)!, Data())
+            let receipt: [String: Any] = [
+                "schema_version": 1,
+                "capture_id": identity.captureID,
+                "record_sha256": identity.recordSHA256,
+                "status": "accepted",
+                "receipt_id": "rcpt-late",
+                "accepted_at": "2026-10-22T14:00:00Z",
+                "retention_expires_at": "2026-11-22T14:00:00Z",
+            ]
+            return (HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil,
+                                    headerFields: nil)!,
+                    try! JSONSerialization.data(withJSONObject: receipt))
         }
         let outcome = await chain.scheduler.drainOnce()
-        guard case .drained(let results) = outcome else {
-            return XCTFail("expected a drained pass, got \(outcome)")
+        guard case .drained(let results) = outcome, results.count == 1 else {
+            return XCTFail("revocation must end the pass after one attempt, got \(outcome)")
         }
-        XCTAssertEqual(results.count, 1,
-                       "revocation during the first attempt must end the pass")
+        guard case .revoked = results[0].outcome else {
+            return XCTFail("a late 2xx must not beat revocation, got \(results[0].outcome)")
+        }
+        // A SUCCESSOR instance on the same disk: with consent still revoked it must attempt
+        // NOTHING — the late receipt neither delivered the entry nor left it borrowable.
+        AssemblyIntercept.requestCount = 0
+        let successor = makeChain(policyPermits: { permitted },
+                                  tokenProvider: StaticTokenProvider(token: "tok"))
+        let successorOutcome = await successor.scheduler.drainOnce()
+        guard case .idle = successorOutcome else {
+            return XCTFail("a successor must not serve under revocation, got \(successorOutcome)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0, "no bytes from the successor either")
     }
 }
 
