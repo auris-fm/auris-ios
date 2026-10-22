@@ -4,10 +4,11 @@ import PocketCastsUtils
 /// The collector's production sink: turns completed collector events into durable queue entries
 /// (encode → `prepare` → `finalize`), gated on the live collection policy.
 ///
-/// Authorization binding (reviewer 5357d089/5b1ba085): each event captures the CURRENT
-/// revocation generation at enqueue, and the publication transaction — the policy/epoch gate,
-/// the final re-check and `finalize` — runs inside ONE critical section shared with
-/// `noteRevocation()`. A withdrawal cannot interleave between the final check and publication;
+/// Authorization binding (reviewer 5357d089/5b1ba085/70e5fc58): each event captures the CURRENT
+/// revocation generation at enqueue (slot lock, short), and the publication transaction — the
+/// final gate re-checks and `finalize` — runs inside ONE critical section (`publicationLock`)
+/// shared with `noteRevocation()`. A withdrawal cannot interleave between the final check and
+/// publication;
 /// an event queued under a superseded authorization never publishes even if the gate later reads
 /// true again (account switch / off→on). Revocation also routes through the ASSEMBLY gate-lost
 /// handler, which purges both the collector and the durable queue.
@@ -32,8 +33,14 @@ final class VoiceSharingContributionSink {
     private let observations: () -> [String: VoiceSharingContributionEncoder.StageOutcome]
     private let workerQueue = DispatchQueue(label: "fm.auris.voicesharing.contribution-sink")
 
-    /// Shared publication/revocation transaction state.
-    private let stateLock = NSLock()
+    /// TWO locks, deliberately (reviewer 70e5fc58): `slotLock` is held ONLY for the short
+    /// admission/accounting steps (slot reservation, generation capture, the final gate read), so
+    /// `handle` returns promptly on the audio caller even while a slow publication is running disk
+    /// work. `publicationLock` serializes the publication transaction with `noteRevocation()` so a
+    /// withdrawal cannot interleave between the final checks and `finalize`. Never nest them in the
+    /// opposite order: publicationLock → slotLock only, never slotLock → publicationLock.
+    private let slotLock = NSLock()
+    private let publicationLock = NSLock()
     private var revocationGeneration = 0
     /// Bounded pending slot accounting, OUTSIDE the worker (the bound must hold while the worker
     /// is blocked or slow, so the check cannot live inside the serialized worker block).
@@ -63,31 +70,40 @@ final class VoiceSharingContributionSink {
     /// generation under the SAME lock the publication transaction holds, so no publication can
     /// interleave between its final check and `finalize`.
     func noteRevocation() {
-        stateLock.lock()
+        publicationLock.lock()
+        slotLock.lock()
         revocationGeneration += 1
-        stateLock.unlock()
+        slotLock.unlock()
+        publicationLock.unlock()
     }
 
     /// Audio-callback safe: slot reservation under lock, then enqueue. No disk, no encode.
     func handle(_ event: VoiceSharingCollector.SegmentEvent) {
-        stateLock.lock()
+        slotLock.lock()
         guard pendingSlots < Self.maxPendingEvents else {
-            stateLock.unlock()
+            slotLock.unlock()
             FileLog.shared.addMessage(
                 "[VoiceSharing] sink saturated, event dropped capture=\(event.captureID)")
             return
         }
         pendingSlots += 1
         let captured = revocationGeneration
-        stateLock.unlock()
+        slotLock.unlock()
         workerQueue.async { [self] in
             defer {
-                stateLock.lock()
+                slotLock.lock()
                 pendingSlots -= 1
-                stateLock.unlock()
+                slotLock.unlock()
             }
             process(PendingEvent(event: event, capturedGeneration: captured))
         }
+    }
+
+    /// Reads the live revocation generation under the slot lock (short, never held across disk).
+    private func currentGeneration() -> Int {
+        slotLock.lock()
+        defer { slotLock.unlock() }
+        return revocationGeneration
     }
 
     /// Test seam: blocks until every enqueued event has been processed.
@@ -110,12 +126,13 @@ final class VoiceSharingContributionSink {
             return
         }
 
-        // The publication transaction: gate + encode + prepare + final revocation check +
-        // finalize run inside the critical section shared with noteRevocation.
-        stateLock.lock()
-        defer { stateLock.unlock() }
+        // The publication transaction: encode + prepare + final revocation check + finalize run
+        // inside the critical section shared with noteRevocation. Only the WORKER takes this lock
+        // for a long interval; `handle` on the audio caller never waits on it.
+        publicationLock.lock()
+        defer { publicationLock.unlock() }
         // Gate check 1: authorization still current (live switch AND captured generation).
-        guard isEnabled(), revocationGeneration == pending.capturedGeneration else { return }
+        guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
         var provenance = encoderProvenance()
         if let session = pending.event.authorizationSession {
             provenance.captureSessionID = session
@@ -124,12 +141,12 @@ final class VoiceSharingContributionSink {
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: pending.event, provenance: provenance, observations: observations())
             // Gate check 2: the encoded bytes must not become a queue entry under a closed gate.
-            guard isEnabled(), revocationGeneration == pending.capturedGeneration else { return }
+            guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
             // Gate check 3 + finalize in the SAME critical section: a noteRevocation() cannot
             // land between this check and publication — it waits for the lock, and the next
             // reader (purge in the assembly) removes what this transaction published.
-            guard isEnabled(), revocationGeneration == pending.capturedGeneration else {
+            guard isEnabled(), currentGeneration() == pending.capturedGeneration else {
                 do { try queue.discardUnready(entry) } catch {
                     FileLog.shared.addMessage(
                         "[VoiceSharing] revocation discard failed (entry retained, charged) capture=\(pending.event.captureID)")

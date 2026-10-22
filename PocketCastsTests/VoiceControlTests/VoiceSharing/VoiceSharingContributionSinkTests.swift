@@ -88,8 +88,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         }
         XCTAssertEqual(ready.count, 2)
         let result = queue.purgeAll()
-        XCTAssertEqual(result?.removed, 2)
-        XCTAssertEqual(result?.retainedDisqualified, 0)
+        XCTAssertEqual(result, .reconciled(removed: 2, retained: 0))
         let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
         XCTAssertEqual(leftover.count, 0, "no entry or bookkeeping survives consent revocation")
         guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
@@ -109,21 +108,34 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let sink = makeSink()
         let blocked = XCTestExpectation(description: "worker blocked")
         let release = NSCondition()
-        var firstBlock = true
+        var inside = false
+        var proceed = false
         sink.testingWorkerGate = {
-            guard firstBlock else { return }
-            firstBlock = false
-            blocked.fulfill()
             release.lock()
-            release.wait()
+            guard !inside else { release.unlock(); return }
+            inside = true
+            release.signal()
+            while !proceed { release.wait() }
             release.unlock()
         }
-        for _ in 0..<(VoiceSharingContributionSink.maxPendingEvents + 5) {
+        // Submit ONE event so the worker actually runs and blocks inside the gate; wait until it
+        // is verifiably stalled, THEN submit the rest so the bound is exercised against a
+        // provably blocked worker.
+        sink.handle(event())
+        release.lock()
+        while !inside { release.wait() }
+        release.unlock()
+        blocked.fulfill()
+        for _ in 1..<VoiceSharingContributionSink.maxPendingEvents {
+            sink.handle(event())
+        }
+        // These 5 arrive with the worker still blocked and all 16 slots held: refused at ENQUEUE.
+        for _ in 0..<5 {
             sink.handle(event())
         }
         // While the worker is blocked, 20 closures are queued; only 15 more slots exist, so the
         // last 5 submissions must have been refused at ENQUEUE time.
-        release.lock(); release.broadcast(); release.unlock()
+        release.lock(); proceed = true; release.signal(); release.unlock()
         sink.waitForIdleForTesting()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
@@ -181,9 +193,8 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         refusingFM.refuse = true
         let result = refusingQueue.purgeAll()
         refusingFM.refuse = false // allow tearDown cleanup
-        XCTAssertEqual(result?.removed, 0)
-        XCTAssertEqual(result?.retainedDisqualified, 1,
-                       "a removal failure must be reported, never collapsed into success")
+        XCTAssertEqual(result, .reconciled(removed: 0, retained: 1),
+                       "a removal failure is retained-but-durably-disqualified, never collapsed")
         // NON-VACUITY: the retained entry is structurally COMPLETE — the ONLY reason it cannot
         // serve is the durable disqualification marker written by the purge.
         let entryDir = root.appendingPathComponent(name)
@@ -199,6 +210,115 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             return XCTFail("coverage known after purge")
         }
         XCTAssertEqual(after.count, 0, "a disqualified retained entry never serves")
+    }
+
+    /// Reviewer 70e5fc58 (1): `handle` must return PROMPTLY on the audio caller even while a
+    /// publication transaction is stalled in encode/fsync. The control stalls the worker inside
+    /// the publication lock, then measures `handle`'s return time from the caller thread.
+    func test_handleReturnsPromptlyWhilePublicationIsStalled() {
+        let sink = makeSink()
+        let entered = XCTestExpectation(description: "publication started")
+        let release = NSCondition()
+        var stalled = false
+        var proceed = false
+        sink.testingWorkerGate = {
+            release.lock()
+            stalled = true
+            release.signal()
+            while !proceed { release.wait() }
+            release.unlock()
+            entered.fulfill()
+        }
+        sink.handle(event())
+        // Wait until the worker is verifiably INSIDE the publication gate (predicate, not a
+        // racy fulfill-before-lock: a lost broadcast would hang the worker forever).
+        release.lock()
+        while !stalled { release.wait() }
+        release.unlock()
+        // Worker is now stalled inside the publication path (holding publicationLock). A caller
+        // submission must still return immediately: the slot lock is separate and short.
+        let start = Date()
+        for _ in 0..<5 { sink.handle(event()) }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 1.0,
+                          "handle must not wait on the publication lock (audio caller latency)")
+        release.lock(); proceed = true; release.signal(); release.unlock()
+        sink.waitForIdleForTesting()
+    }
+
+    /// Reviewer 70e5fc58 (2): the REAL assembly path invalidates authorization. Off→on and an
+    /// account transition must reach the sink's generation, so an event queued under the old
+    /// authorization never publishes after the gate reads true again.
+    func test_gateLostThroughCoordinatorRegistrySupersedesQueuedEvents() throws {
+        let coordinator = VoiceSharingCoordinator.shared
+        let baseline = coordinator.gateLostHandlerCountForTesting
+        let sink = makeSink()
+        let subscription = coordinator.registerGateLostHandler { sink.noteRevocation() }
+        defer { _ = subscription }
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, baseline + 1,
+                       "the production registry must actually hold the handler")
+        let release = NSCondition()
+        var inside = false
+        var proceed = false
+        sink.testingWorkerGate = {
+            release.lock()
+            inside = true
+            release.signal()
+            while !proceed { release.wait() }
+            release.unlock()
+        }
+        sink.handle(event()) // queued under the CURRENT authorization
+        release.lock()
+        while !inside { release.wait() }
+        release.unlock()
+        // Off: the coordinator fires EVERY registered handler — the production signal the assembly
+        // installs. Nothing here calls noteRevocation directly.
+        coordinator.fireGateLostHandlersForTesting()
+        // On again: the live gate reads true, so only the captured generation can stop publication.
+        release.lock(); proceed = true; release.signal(); release.unlock()
+        sink.waitForIdleForTesting()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 0,
+                       "off→on must not republish an event authorized in the previous epoch")
+    }
+
+    /// Reviewer 70e5fc58 (3): a disqualification whose MARKER cannot be confirmed durable must not
+    /// be claimed. The purge holds the owner and leaves the entry untouched.
+    func test_unconfirmedDisqualificationHoldsOwnerAndClaimsNothing() throws {
+        makeSink().handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+              let name = ready.first?.name else { return XCTFail("expected one ready entry") }
+        // Marker byte-sync fails (a directory barrier alone does NOT persist a file's bytes).
+        var syncCalls = 0
+        let failingFileSyncQueue = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: Date.init,
+            synchronizer: { path, isDirectory in
+                syncCalls += 1
+                if !isDirectory, path.lastPathComponent.hasPrefix("publication.failed") {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+            })
+        let result = failingFileSyncQueue.purgeAll()
+        guard case .held(let removed, let retained) = result else {
+            return XCTFail("an unconfirmed marker must HOLD the owner, got \(result)")
+        }
+        XCTAssertEqual(removed, 0, "nothing may be deleted without a confirmed disqualification")
+        XCTAssertEqual(retained, 1, "the survivor is reported as retained, never as disqualified")
+        // The entry is untouched and STILL structurally complete.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(name).path)
+        XCTAssertEqual(
+            contents.filter { ["audio.wav", "metadata.json", "created.at", "ready.marker"].contains($0) }.count,
+            4, "an unconfirmable disqualification must not damage the entry")
+        // The owner-wide hold blocks serving AND admission.
+        guard case .unknownCoverage = failingFileSyncQueue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("the owner-wide hold must block serving after an unconfirmed purge")
+        }
+        XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance(forBytes: 1_000))
     }
 
     private func drain() {

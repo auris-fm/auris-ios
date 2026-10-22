@@ -130,6 +130,21 @@ final class VoiceSharingCoordinator {
     }
 
     // MARK: - Test seams
+    /// Number of live gate-lost handlers. Controls use this to prove the PRODUCTION registry —
+    /// not a manual call — is what carries authorization invalidation to the sink.
+    var gateLostHandlerCountForTesting: Int {
+        gateLostHandlersLock.lock(); let n = gateLostHandlers.count; gateLostHandlersLock.unlock()
+        return n
+    }
+
+    /// Fires every registered gate-lost handler exactly as production consent loss does.
+    func fireGateLostHandlersForTesting() {
+        gateLostHandlersLock.lock()
+        let handlers = Array(gateLostHandlers.values)
+        gateLostHandlersLock.unlock()
+        for handler in handlers { handler() }
+    }
+
     var registerGateLostHandlerForTestingCount: Int {
         gateLostHandlersLock.lock(); let n = gateLostHandlers.count; gateLostHandlersLock.unlock()
         return n

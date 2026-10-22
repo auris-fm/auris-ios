@@ -264,6 +264,13 @@ final class VoiceSharingUploadQueue {
     /// attempt STARTED (so the count survives restart) but is never read as "still running".
     private var inFlightAttempts: [Entry: AttemptLease] = [:]
 
+    /// OWNER-WIDE HOLD (round 66): set when a purge could not durably reconcile. While held, no
+    /// entry may serve, admit, or begin an attempt — the in-memory view and storage disagree, and
+    /// only a later purge whose barriers all succeed may release the hold. This is the honest
+    /// answer to "the disqualification might not be durable": refuse everything rather than
+    /// report success or miscount an unmarked survivor as disqualified.
+    private var revocationHoldLocked = false
+
     /// Injectable directory listing. Exists so accounting failure is testable: FileManager's
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
@@ -307,6 +314,12 @@ final class VoiceSharingUploadQueue {
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
         serialQueue.sync { recoverLocked() }
+    }
+
+    /// Test seam: the REAL synchronizer, so injected wrappers can fail selectively and delegate
+    /// the rest to production behaviour.
+    static func testSynchronizer(path: URL, isDirectory: Bool) throws {
+        try defaultSynchronizer(path: path, isDirectory: isDirectory)
     }
 
     /// REAL synchronization: stat/open/fsync results are checked and failures THROW — a storage
@@ -373,6 +386,9 @@ final class VoiceSharingUploadQueue {
     /// entry). `prepare` remains the exact authority at write time.
     func hasAdmissionAllowance(forBytes: Int) -> Bool {
         serialQueue.sync {
+            // The owner-wide hold also blocks admission: a purge that could not reconcile means
+            // storage may still hold entries we cannot account for.
+            guard !revocationHoldLocked else { return false }
             guard let usage = try? storedUsageLocked() else { return false }
             return usage.bytes + forBytes <= aggregateLimits.maxBytes
                 && usage.records < aggregateLimits.maxRecords
@@ -423,60 +439,102 @@ final class VoiceSharingUploadQueue {
     ///     intent): it can never serve after restart, and it stays charged.
     ///   * The root directory is synchronized AFTER the removals, so a crash cannot resurrect a
     ///     purged recording from a stale directory entry.
-    func purgeAll() -> (removed: Int, retainedDisqualified: Int)? {
-        serialQueue.sync {
-            let listing: [URL]
-            do {
-                let (urls, overflowed) = try listDirectoryBounded(
-                    rootDirectory, [.isDirectoryKey], Self.maxQueueEntries * 4)
-                if overflowed { return nil }
-                listing = urls
-            } catch {
-                // Listing failure is NOT "nothing to remove": refuse the purge explicitly.
-                return nil
+    enum PurgeOutcome: Equatable {
+        /// Every retained entry was removed or durably disqualified, and every barrier confirmed.
+        /// `retained` counts survivors that are KNOWN-disqualified.
+        case reconciled(removed: Int, retained: Int)
+        /// A removal or disqualification could not be completed AND CONFIRMED durable. The
+        /// owner-wide hold is SET: nothing serves or admits until a later purge fully reconciles.
+        case held(removed: Int, retained: Int)
+        /// The root could not be listed (I/O failure or overflow past the bound). Nothing was
+        /// attempted; the hold keeps whatever value it already had.
+        case refused
+    }
+
+    /// Owner-wide revocation of every retained contribution. Semantics (reviewer 70e5fc58):
+    ///
+    /// - EXPLICIT about what could not be proven: `.refused` when the root cannot be listed at all
+    ///   or overflows (never collapsed into "nothing to remove"); `.held` when a durable
+    ///   disqualification or barrier could not be confirmed.
+    /// - Disqualification is a TWO-STEP durable write: marker bytes are synced as a FILE (a
+    ///   directory barrier alone does NOT persist a file's bytes), then the entry directory, then
+    ///   the root. Any failure clears the "disqualified" claim — an unmarked survivor is reported
+    ///   as retained, never as disqualified.
+    /// - Any unreconciled step sets the owner-wide hold; only a fully reconciled purge clears it.
+    @discardableResult
+    func purgeAll() -> PurgeOutcome {
+        serialQueue.sync { purgeLocked() }
+    }
+
+    private func purgeLocked() -> PurgeOutcome {
+        let listing: [URL]
+        do {
+            let (urls, overflowed) = try listDirectoryBounded(
+                rootDirectory, [.isDirectoryKey], Self.maxQueueEntries * 4)
+            // Overflow means we cannot SEE the whole root, so we cannot prove revocation.
+            if overflowed { return .refused }
+            listing = urls
+        } catch {
+            return .refused
+        }
+        var removed = 0
+        var retained = 0
+        var reconciled = true
+        for item in listing {
+            let name = item.lastPathComponent
+            guard UUID(uuidString: name) != nil || Self.parseSettlementName(name) != nil else {
+                continue
             }
-            var removed = 0
-            var retainedDisqualified = 0
-            for item in listing {
-                let name = item.lastPathComponent
-                guard UUID(uuidString: name) != nil || Self.parseSettlementName(name) != nil else {
+            if let settlementEntry = Self.parseSettlementName(name) {
+                // Settlement evidence: removed only when its entry is already gone; one orphaned
+                // by a FAILED entry removal survives as evidence of that entry's disposition.
+                if listing.contains(where: { $0.lastPathComponent == settlementEntry }) {
+                    reconciled = false
                     continue
                 }
-                if let settlementEntry = Self.parseSettlementName(name) {
-                    // Settlement evidence: removed only when its entry is already gone; a
-                    // settlement orphaned by a FAILED entry removal survives as evidence of the
-                    // retained entry's disposition.
-                    if listing.contains(where: { $0.lastPathComponent == settlementEntry }) {
-                        retainedDisqualified += 1
-                        continue
-                    }
-                }
-                // MARK-THEN-REMOVE: an entry is DISQUALIFIED before any deletion attempt, so a
-                // partially-failing recursive removal can never leave a half-damaged entry that
-                // still qualifies (reviewer: failed purge must not damage or resurrect).
-                if UUID(uuidString: name) != nil {
-                    let intent = item.appendingPathComponent(Self.failedName)
-                    do {
-                        try failureRecordWriter(intent)
-                        try synchronizer(item, true)
-                    } catch {
-                        // Cannot durably disqualify: refuse to touch the entry at all.
-                        retainedDisqualified += 1
-                        continue
-                    }
-                }
-                do {
-                    try fileManager.removeItem(at: item)
-                    removed += 1
-                } catch {
-                    retainedDisqualified += 1
+            }
+            // MARK-THEN-REMOVE: an entry is DISQUALIFIED before any deletion attempt, so a
+            // partially-failing recursive removal cannot leave a half-damaged entry that still
+            // qualifies.
+            if UUID(uuidString: name) != nil {
+                guard disqualifyLocked(item) else {
+                    // Cannot prove this entry will never serve after restart: leave it ALONE (no
+                    // deletion, no "disqualified" claim) and hold the owner.
+                    reconciled = false
+                    retained += 1
+                    continue
                 }
             }
-            inFlightAttempts.removeAll()
-            uncertainEntriesLocked.removeAll()
-            // Durability barrier: the ROOT listing must reflect the removals on storage.
-            do { try synchronizer(rootDirectory, true) } catch { /* root still lists some removed entries; recovery's strict scan re-derives truth */ }
-            return (removed, retainedDisqualified)
+            do {
+                try fileManager.removeItem(at: item)
+                removed += 1
+            } catch {
+                // Removal failed but disqualification IS durable: retained and provably dead.
+                retained += 1
+            }
+        }
+        // Root barrier: the listing must reflect the removals. Failure means on-disk truth is
+        // unknown, so the hold cannot be released.
+        do { try synchronizer(rootDirectory, true) } catch { reconciled = false }
+        inFlightAttempts.removeAll()
+        uncertainEntriesLocked.removeAll()
+        revocationHoldLocked = !reconciled
+        return reconciled ? .reconciled(removed: removed, retained: retained)
+                          : .held(removed: removed, retained: retained)
+    }
+
+    /// Durably disqualifies one entry: marker bytes synced as a FILE, then the entry directory.
+    /// Returns FALSE if any step fails — the caller must then make no disqualification claim and
+    /// must not delete the entry.
+    private func disqualifyLocked(_ item: URL) -> Bool {
+        let intent = item.appendingPathComponent(Self.failedName)
+        do {
+            try failureRecordWriter(intent)
+            try synchronizer(intent, false)
+            try synchronizer(item, true)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -697,6 +755,9 @@ final class VoiceSharingUploadQueue {
     @discardableResult
     func beginAttempt(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
+            // OWNER-WIDE HOLD blocks attempt admission for the same reason serving is blocked:
+            // the on-disk entry set is not provable, so no attempt may be spent on it.
+            guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
             guard inFlightAttempts[entry] == nil else { return false }
             // Handle identity is checked BEFORE coverage (a foreign handle is a refusal, not a
             // coverage question). Clarification 7e9606b (spec c988cb1b): attempts must then honor
@@ -1532,6 +1593,10 @@ final class VoiceSharingUploadQueue {
 
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
+            // OWNER-WIDE HOLD: an unreconciled purge means the on-disk set is not provable, so
+            // NOTHING may serve. Reported as unknown coverage (the same all-or-nothing channel
+            // every caller already handles), never as an empty known set.
+            guard !revocationHoldLocked else { return .unknownCoverage }
             // Reviewer c4d5ecb4: coverage is ALL-OR-NOTHING for the owner. Any required check
             // whose outcome is UNKNOWN (listing failure, required-stat failure, required-file
             // read failure, unconfirmable durability) holds serving for the WHOLE root — one

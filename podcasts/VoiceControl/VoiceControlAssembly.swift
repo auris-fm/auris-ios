@@ -96,9 +96,18 @@ class VoiceControlAssembly {
         // Consent loss purges BOTH holders of retained contribution state: the collector's
         // in-memory capture/FIFO, and the durable queue (any entry prepared before the gate
         // closed, ready or not). Cleanup failures inside purge leave entries retained + charged.
+        // AUTHORIZATION INVALIDATION goes through the REAL production path (reviewer 70e5fc58):
+        // this handler is the coordinator's single gate-lost signal — withdrawal, sign-out, the
+        // refresh observing the switch off, and the scheduled lease-expiry trigger. It must reach
+        // the SINK's revocation generation, not just purge storage, or a queued event from the
+        // superseded epoch could publish after the switch reads true again.
         contributionCollector.gateLostSubscription =
-            VoiceSharingCoordinator.shared.registerGateLostHandler { [weak contributionCollector] in
+            VoiceSharingCoordinator.shared.registerGateLostHandler {
+                [weak contributionCollector, weak contributionSink] in
+                contributionSink?.noteRevocation()
                 contributionCollector?.gateLost()
+                // Purge failures leave the sink's generation already bumped and the queue's own
+                // hold set by purgeAll; nothing serves or admits until a purge reconciles.
                 _ = contributionQueue.purgeAll()
             }
 
