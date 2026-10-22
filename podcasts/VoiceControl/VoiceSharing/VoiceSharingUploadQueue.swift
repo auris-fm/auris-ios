@@ -619,7 +619,16 @@ final class VoiceSharingUploadQueue {
     /// refused — an old owner must not delete an entry a successor is now uploading.
     func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
         try serialQueue.sync {
-            let directory = try validatedEntryDirectoryLocked(entry)
+            let directory = entryDirectoryLocked(for: entry)
+            // IDEMPOTENT RE-SETTLEMENT: an earlier settlement may have removed the entry and then
+            // failed its durability confirmation. If the entry directory is gone, the removal DID
+            // land — re-applying is a success, not an error, and ownership is simply released.
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                inFlightAttempts.removeValue(forKey: entry)
+                return
+            }
             let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
             defer { lock.close() }
             try lock.lockExclusive()
@@ -628,14 +637,37 @@ final class VoiceSharingUploadQueue {
                   current.generation == lease.generation else {
                 throw PrepareError.resultStale
             }
+            // A lock serializes transitions; it does NOT make failed filesystem operations succeed
+            // or persist. Settlement failures propagate as UNCERTAIN and retain the caller's owner
+            // state, so the caller can retry settlement rather than believe a removal happened.
+            // After ENTRY removal the entry directory no longer exists; the durable fact is the
+            // root's changed listing. After LEASE-only removal the entry directory is the naming
+            // directory whose change must persist.
+            func confirmEntryRemovalDurability() throws {
+                try synchronizer(rootDirectory, true)
+            }
+            func confirmLeaseRemovalDurability() throws {
+                try synchronizer(directory, true)
+            }
             switch outcome {
             case .delivered, .abandoned:
                 // Entry removal takes the lease file with it; both happen under one lock hold.
-                try? fileManager.removeItem(at: directory)
+                do {
+                    try fileManager.removeItem(at: directory)
+                    try confirmEntryRemovalDurability()
+                } catch {
+                    // Unknown whether the removal landed. Ownership is RETAINED so the caller can
+                    // settle again; reporting success here would claim a removal that may not exist.
+                    throw PrepareError.publicationUncertain
+                }
                 inFlightAttempts.removeValue(forKey: entry)
             case .retryableFailure:
-                try? fileManager.removeItem(at: leaseURL)
-                try? synchronizer(directory, true)
+                do {
+                    try fileManager.removeItem(at: leaseURL)
+                    try confirmLeaseRemovalDurability()
+                } catch {
+                    throw PrepareError.publicationUncertain
+                }
                 inFlightAttempts.removeValue(forKey: entry)
             }
         }

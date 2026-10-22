@@ -1982,6 +1982,63 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(try next.beginAttempt(prep))
     }
 
+    func test_settlementFailureIsNotReportedAsSuccess() throws {
+        // Reviewer d258d06a: a lock serializes transitions; it does not make failed filesystem
+        // operations succeed. Removal failure must surface as uncertain, and ownership must be
+        // RETAINED so the caller can settle again.
+        final class RemovingFailingFileManager: FileManager {
+            var failRemovals = false
+            override func removeItem(at URL: URL) throws {
+                if failRemovals { throw CocoaError(.fileWriteUnknown) }
+                try super.removeItem(at: URL)
+            }
+        }
+        let fm = RemovingFailingFileManager()
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, fileManager: fm, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        fm.failRemovals = true
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                           "unknown settlement is uncertain, not success")
+        }
+        XCTAssertTrue(owner.isAttemptInFlight(prep),
+                      "ownership is retained so the caller can settle again")
+        fm.failRemovals = false
+        // Settlement can then succeed.
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
+    }
+
+    func test_postRemovalSyncFailureIsAlsoUncertainAndRetainsOwnership() throws {
+        // The removal can succeed and its durability confirmation can still fail: that too is
+        // uncertain, and ownership must be retained for re-settlement.
+        var failSync = false
+        let rootPath = root.path
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if failSync, isDirectory, url.path == rootPath {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        failSync = true
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                           "unconfirmed removal durability is uncertain")
+        }
+        XCTAssertTrue(owner.isAttemptInFlight(prep), "ownership retained for re-settlement")
+        failSync = false
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(owner.isAttemptInFlight(prep))
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.
