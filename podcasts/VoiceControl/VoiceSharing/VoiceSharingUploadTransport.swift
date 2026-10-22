@@ -109,17 +109,27 @@ final class VoiceSharingUploadTransport {
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
+    private let identityFence: (() -> VoiceSharingUploadIdentity?)?
+    private let admittedIdentity: VoiceSharingUploadIdentity?
 
     init(
         baseURLProvider: @escaping () -> String,
         tokenProvider: CloudTokenProviding,
         session: URLSession = .shared,
-        bodyDeadline: TimeInterval = 90
+        bodyDeadline: TimeInterval = 90,
+        /// Identity snapshot fence for credential acquisition (reviewer ee5b4547): the CALLER
+        /// declares the identity the request is admitted under; `send` re-reads it after the
+        /// credential resolves and refuses to put bytes on the wire if it moved. Nil disables
+        /// fencing (no identity authority in this process).
+        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil,
+        admittedIdentity: VoiceSharingUploadIdentity? = nil
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
         self.session = session
         self.bodyDeadline = bodyDeadline
+        self.identityFence = identityFence
+        self.admittedIdentity = admittedIdentity
     }
 
     /// The endpoint this transport will use, or nil when configuration is missing. Nil is NOT
@@ -139,6 +149,13 @@ final class VoiceSharingUploadTransport {
         // No bearer, no call — nothing is created, nothing is sent.
         guard let credential = await tokenProvider.token(), !credential.isEmpty else {
             return .transportFailure
+        }
+        // CREDENTIAL-BOUNDARY FENCE (reviewer ee5b4547): the identity may have moved WHILE the
+        // credential was being acquired. The declared admitted snapshot must still be live before
+        // a single byte leaves; A's bytes are never sent under B's credential. Checking after the
+        // response cannot repair a disclosure, so this runs at the launch boundary.
+        if let fence = identityFence, let admitted = admittedIdentity {
+            guard let live = fence(), live == admitted else { return .transportFailure }
         }
         var request = built
         // The CONFIGURED endpoint decides, not anything the caller supplied: a build with no base

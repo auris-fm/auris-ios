@@ -105,6 +105,13 @@ class VoiceControlAssembly {
         let uploadAuthorized: () -> Bool = {
             VoiceSharingCoordinator.shared.policy.permitsCollection
         }
+        // ONE identity reader for the whole upload path: queue, uploader and transport all
+        // consult it, so the fence spans admission, credential acquisition and settlement.
+        let uploadIdentity: () -> VoiceSharingUploadIdentity? = {
+            VoiceSharingUploadIdentity(
+                accountScope: ServerSettings.userId,
+                enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
+        }
         let uploadTransport = VoiceSharingUploadTransport(
             baseURLProvider: { CloudConfig.shared.baseUrl },
             tokenProvider: CloudTokenProviderRouter.provider())

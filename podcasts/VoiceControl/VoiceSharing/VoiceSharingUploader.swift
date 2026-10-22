@@ -126,6 +126,14 @@ final class VoiceSharingUploader {
             return .unavailable(reason: "entry unreadable: \(type(of: error))")
         }
 
+        // LAUNCH FENCE — THE LAST POINT BEFORE BYTES LEAVE (reviewer ee5b4547): the request is
+        // built and about to go to the transport, which will acquire the credential and send.
+        // An identity move since admission must stop here: A's bytes are never launched under
+        // B's authority, and a post-response check cannot repair that disclosure.
+        if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
+            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
+            return .revoked
+        }
         let result = await transport(request)
 
         // ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the identity this attempt was ADMITTED under must
