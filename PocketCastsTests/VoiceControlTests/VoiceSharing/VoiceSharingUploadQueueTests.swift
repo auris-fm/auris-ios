@@ -1929,6 +1929,59 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(failures.value.isEmpty, "unexpected failures: \(failures.value)")
     }
 
+    // MARK: Atomic result application (reviewer d3972319)
+
+    func test_resultApplicationIsRefusedAfterLeaseReclaim() throws {
+        // An intervening expiry/reclaim means the old owner's result is STALE: it must not delete
+        // an entry a successor is now uploading.
+        let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try first.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try first.finalize(prep)
+        let lease = try XCTUnwrap(first.beginLeaseForTesting(prep))
+
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertTrue(try successor.beginAttempt(prep))
+
+        // The old owner reports DELIVERED. It no longer owns the lease.
+        XCTAssertThrowsError(try first.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale,
+                           "a stale owner's result must be refused")
+        }
+        // The entry must still exist: the successor owns it now.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path),
+                      "a stale result must not delete the successor's entry")
+    }
+
+    func test_deliveredResultRemovesEntryAndReleasesLeaseAtomically() throws {
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path),
+                       "a delivered entry is removed")
+        XCTAssertFalse(owner.isAttemptInFlight(prep), "ownership is released with the result")
+    }
+
+    func test_retryableFailureKeepsTheEntryForTheNextAttempt() throws {
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path),
+                      "a retryable failure keeps the entry")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(prep.name).appendingPathComponent("attempt.lease").path),
+            "the failed request releases its lease")
+        // And the entry is attemptable again.
+        let next = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(try next.beginAttempt(prep))
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

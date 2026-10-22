@@ -140,6 +140,8 @@ final class VoiceSharingUploadQueue {
         case attemptsExhausted
         /// Another owner holds the attempt lease.
         case leaseHeld
+        /// A completion arrived from an owner that no longer holds the lease.
+        case resultStale
         case expired
         /// The ready transition may have occurred but its final synchronization could not be
         /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
@@ -601,6 +603,43 @@ final class VoiceSharingUploadQueue {
 
     /// Releases single-request ownership. Only the CURRENT owner's release deletes the lease; a
     /// stale owner (whose lease was reclaimed after expiry) must not delete its successor's.
+
+    /// Outcome of an upload attempt, applied atomically with ownership validation.
+    enum AttemptOutcome {
+        /// Delivered: the entry is removed and the lease released, atomically.
+        case delivered
+        /// Retryable failure: only the lease is released; the entry stays for the next attempt.
+        case retryableFailure
+        /// Permanent failure: the entry is removed (content-free terminal state).
+        case abandoned
+    }
+
+    /// Applies an attempt result. The caller's lease is REVALIDATED under the entry's flock before
+    /// anything happens: an intervening expiry/reclaim means this result is stale and must be
+    /// refused — an old owner must not delete an entry a successor is now uploading.
+    func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
+        try serialQueue.sync {
+            let directory = try validatedEntryDirectoryLocked(entry)
+            let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
+            defer { lock.close() }
+            try lock.lockExclusive()
+            let leaseURL = directory.appendingPathComponent(Self.attemptLeaseName)
+            guard let current = leaseOwnerLocked(at: leaseURL),
+                  current.generation == lease.generation else {
+                throw PrepareError.resultStale
+            }
+            switch outcome {
+            case .delivered, .abandoned:
+                // Entry removal takes the lease file with it; both happen under one lock hold.
+                try? fileManager.removeItem(at: directory)
+                inFlightAttempts.removeValue(forKey: entry)
+            case .retryableFailure:
+                try? fileManager.removeItem(at: leaseURL)
+                try? synchronizer(directory, true)
+                inFlightAttempts.removeValue(forKey: entry)
+            }
+        }
+    }
 
     /// Whether the given owner token still holds the lease. A stale completion must check this
     /// before reporting a result: elapsed time alone does not prove the old writer died.
