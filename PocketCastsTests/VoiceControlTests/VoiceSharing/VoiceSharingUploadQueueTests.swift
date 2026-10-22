@@ -1689,6 +1689,95 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "a refused attempt must not leave a lease behind")
     }
 
+    // MARK: Lease transition serialization (reviewer 08baa9f0)
+
+    func test_simultaneousExpiredReclaimAdmitsExactlyOneSuccessor() throws {
+        // Two reclaimers over the same expired lease must not both read the old generation, both
+        // remove, and let the later remover destroy the first successor's lease.
+        let setup = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try setup.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try setup.finalize(prep)
+        // Seed an EXPIRED lease.
+        let expired = Date().addingTimeInterval(-1)
+        let seeder = VoiceSharingUploadQueue(rootDirectory: root, clock: { expired })
+        _ = try seeder.beginLeaseForTesting(prep)
+
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let reclaimers = (0..<8).map { _ in
+            VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        }
+        let barrier = DispatchGroup()
+        let results = LockedBox<[Bool]>([])
+        for queue in reclaimers { barrier.enter() }
+        for queue in reclaimers {
+            DispatchQueue.global().async {
+                barrier.wait()
+                let won = (try? queue.beginAttempt(prep)) ?? false
+                results.mutate { $0.append(won) }
+            }
+            barrier.leave()
+        }
+        barrier.wait()
+        let deadline = Date().addingTimeInterval(2)
+        while results.value.count < reclaimers.count, Date() < deadline { usleep(10_000) }
+        XCTAssertEqual(results.value.filter { $0 }.count, 1,
+                       "exactly one reclaimer may win an expired lease")
+        // The surviving lease must be the WINNER's, not a stale remnant.
+        let winner = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertFalse(try winner.beginAttempt(prep),
+                       "the winner's fresh lease must hold against new contenders")
+    }
+
+    func test_endAttemptFromAnInstanceThatNeverAcquiredRemovesNothing() throws {
+        // Reviewer 08baa9f0: releaseLeaseLocked(owner: nil) unconditionally removed whatever lease
+        // existed, so a bystander's endAttempt could delete another owner's lease.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        XCTAssertTrue(try owner.beginAttempt(prep))
+
+        let bystander = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        bystander.endAttempt(prep) // never acquired
+        let checker = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(try checker.beginAttempt(prep),
+                       "the owner's lease must survive a bystander's release")
+    }
+
+    func test_leaseLockActuallyExcludesAcrossInstances() throws {
+        // Reviewer 08baa9f0: a comparison alone is not conditional unlink; the flock must genuinely
+        // serialize. Hold the lock from one instance and verify another instance cannot run its
+        // critical section until it is released.
+        let dir = temporaryRoot()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let type = VoiceSharingUploadQueue.self
+        let lockA = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+        try lockA.lockExclusive()
+        let lockB = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+
+        let acquired = LockedBox<Bool>(false)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            // A non-blocking attempt must FAIL while A holds the lock.
+            do {
+                let fd = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+                try fd.tryLockForTesting()
+                acquired.mutate { $0 = true }
+            } catch { acquired.mutate { $0 = false } }
+            done.signal()
+        }
+        done.wait()
+        XCTAssertFalse(acquired.value,
+                       "a second holder must not acquire while the first holds the lock")
+
+        lockA.close()
+        // After release, acquisition must succeed.
+        let second = try type.LeaseLock(directory: dir, fileManager: FileManager.default)
+        try second.tryLockForTesting()
+        XCTAssertTrue(true, "acquisition after release succeeds")
+        second.close()
+        _ = lockB
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

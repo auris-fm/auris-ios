@@ -112,7 +112,7 @@ final class VoiceSharingUploadQueue {
     /// defined over exactly these.
     /// The closed set of fixed file names an entry directory may contain.
     static let knownEntryNames: Set<String> = [
-        attemptRecordName, attemptLeaseName,
+        attemptRecordName, attemptLeaseName, attemptLeaseLockName,
         audioName, metadataName, createdName, readyMarkerName, stageName, failedName
     ]
     /// Prefix of this queue's own temporary marker names (`ready.marker.tmp-<UUID>`). A replacement
@@ -179,6 +179,11 @@ final class VoiceSharingUploadQueue {
     /// Name of the root-scoped lease for an in-flight attempt. It lives NEXT TO the entry (inside
     /// the entry directory, as `attempt.lease`) so a stale lease travels with its entry.
     static let attemptLeaseName = "attempt.lease"
+    /// Stable lock file serializing every lease transition (claim, reclaim, release) for one entry.
+    /// A generation COMPARISON is not conditional unlink: two expired reclaimers can both read the
+    /// old generation, one replaces the lease, and the other deletes the successor's. `flock` on a
+    /// stable file is the OS-backed serialization the comparison lacks.
+    static let attemptLeaseLockName = "attempt.lease.lock"
     static let maxAttemptLeaseBytes = 256
     /// How long a lease is considered live without renewal. A killed owner cannot renew, so after
     /// this window another owner may reclaim. Compiled bound, NOT an activation value.
@@ -695,6 +700,12 @@ final class VoiceSharingUploadQueue {
     private func acquireLeaseLocked(for entry: Entry) throws -> AttemptLease? {
         let directory = try validatedEntryDirectoryLocked(entry)
         let lease = directory.appendingPathComponent(Self.attemptLeaseName)
+        // Serialize the whole read-decide-delete/create transition against other processes. Without
+        // this, two expired reclaimers can both read the old generation and the later remover would
+        // delete the first reclaimer's successor lease.
+        let lock = try LeaseLock(directory: directory, fileManager: fileManager)
+        defer { lock.close() }
+        try lock.lockExclusive()
         // Policy decision first (absent or expired), then an EXCLUSIVE OS CLAIM. `stat` then
         // `write` is check-then-act: two instances can both observe absence and both replace the
         // file. `O_CREAT|O_EXCL` is the atomic primitive — exactly one caller creates the file.
@@ -778,13 +789,66 @@ final class VoiceSharingUploadQueue {
     private func releaseLeaseLocked(for entry: Entry, owner: AttemptLease?) {
         let directory = entryDirectoryLocked(for: entry)
         let lease = directory.appendingPathComponent(Self.attemptLeaseName)
-        if let owner, let current = leaseOwnerLocked(at: lease),
-           current.generation != owner.generation {
-            // We no longer own this lease. Do not delete someone else's.
-            return
+        // An exact NONNIL owned token is required. A nil owner (an instance that never acquired)
+        // must not remove whatever lease exists — that could delete another owner's lease. An
+        // unknown or unreadable current identity is also refused: trust nothing we cannot confirm.
+        guard let owner else { return }
+        let lock = try? LeaseLock(directory: directory, fileManager: fileManager)
+        lock?.closeAfter { [self] in
+            guard let current = leaseOwnerLocked(at: lease) else { return }
+            guard current.generation == owner.generation else { return }
+            try? fileManager.removeItem(at: lease)
+            try? synchronizer(directory, true)
         }
-        try? fileManager.removeItem(at: lease)
-        try? synchronizer(directory, true)
+    }
+
+    /// Exclusive advisory lock over a STABLE per-entry file, held across a lease transition.
+    /// `flock(LOCK_EX)` serializes claim/reclaim/release across instances and processes; the file
+    /// itself is never removed, so two instances always lock the same inode.
+    final class LeaseLock {
+        private let fd: Int32
+        private var locked = false
+
+        init(directory: URL, fileManager: FileManager) throws {
+            let url = directory.appendingPathComponent(
+                VoiceSharingUploadQueue.attemptLeaseLockName)
+            if !fileManager.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            fd = url.withUnsafeFileSystemRepresentation { path in
+                guard let path else { return -1 }
+                return open(path, O_RDWR, 0o600)
+            }
+            guard fd >= 0 else { throw CocoaError(.fileReadUnknown) }
+        }
+
+        /// Test-only non-blocking acquisition.
+        func tryLockForTesting() throws {
+            guard !locked else { return }
+            guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw CocoaError(.fileReadUnknown) }
+            locked = true
+        }
+
+        func lockExclusive() throws {
+            guard !locked else { return }
+            guard flock(fd, LOCK_EX) == 0 else { throw CocoaError(.fileReadUnknown) }
+            locked = true
+        }
+
+        /// Runs `body` under the exclusive lock, then releases and closes.
+        func closeAfter(_ body: () -> Void) {
+            do { try lockExclusive() } catch { close(); return }
+            body()
+            close()
+        }
+
+        func close() {
+            if locked { flock(fd, LOCK_UN) }
+            locked = false
+            if fd >= 0 { Darwin.close(fd) }
+        }
+
+        deinit { close() }
     }
 
     /// Releases the lease. Best-effort: an unreleased lease still expires, so a failure here costs a
