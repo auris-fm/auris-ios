@@ -115,6 +115,13 @@ class VoiceControlAssembly {
                 retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
                 random: { Double.random(in: 0...1) }),
             isAuthorized: uploadAuthorized,
+            // SAME live reader the queue uses: the attempt is fenced to the identity it was
+            // admitted under for its whole lifetime, not just at admission.
+            currentIdentity: {
+                VoiceSharingUploadIdentity(
+                    accountScope: ServerSettings.userId,
+                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
+            },
             endpoint: { uploadTransport.endpoint },
             transport: { [uploadTransport] request in
                 await uploadTransport.send(request: request)

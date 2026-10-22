@@ -1255,6 +1255,20 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(try reopened.attemptCount(for: prep), 2)
     }
 
+    /// Asserts an admission attempt produced NO admitted attempt — either refusal shape is
+    /// acceptable, but a granted lease is not.
+    private func XCTAssertNoAdmission(
+        _ expression: @autoclosure () throws -> VoiceSharingUploadQueue.AdmittedAttempt?,
+        _ message: String = "expected no admission", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        do {
+            let admitted = try expression()
+            XCTAssertNil(admitted, message, file: file, line: line)
+        } catch {
+            // A thrown PrepareError is a refusal too: nothing was admitted.
+        }
+    }
+
     /// Mutable identity box: the reader closure captures the BOX, so the value can move after
     /// `bindIdentity` without capturing a `var` mutated after escaping.
     private final class IdentityBox {
@@ -1279,6 +1293,38 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                                metadata: validRecord(captureID: UUID().uuidString, epoch: epoch,
                                                      audio: audioA),
                                audio: audioA)
+    }
+
+    /// UNREADABLE OWNERSHIP HOLDS THE WHOLE OWNER (reviewer e8dd9c35): an owner file that exists
+    /// but cannot be read is unknown coverage, not a per-entry skip. A second, perfectly healthy
+    /// entry must NOT be admitted or served — one corrupted entry must not coexist with a working
+    /// queue behind it.
+    func test_unreadableOwnershipBlocksAdmissionAndServingForTheWholeQueue() throws {
+        let box = IdentityBox(account: "acct-A", "epoch-1")
+        let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        let broken = try makeCompleteEntry(q, epoch: "epoch-1")
+        let healthy = try makeCompleteEntry(q, epoch: "epoch-1")
+        XCTAssertEqual(q.readyEntries().count, 2, "precondition: both entries serve")
+
+        // Corrupt ONE entry's owner record into unreadable storage.
+        let ownerURL = root.appendingPathComponent(broken.name)
+            .appendingPathComponent("owner.account")
+        try FileManager.default.removeItem(at: ownerURL)
+        try FileManager.default.createDirectory(at: ownerURL, withIntermediateDirectories: true)
+
+        switch q.readyEntriesReportingUnknownCoverage() {
+        case .unknownCoverage:
+            break
+        case .known(let entries):
+            XCTFail("unreadable ownership is unknown coverage for the whole owner, got \(entries.count) entries")
+        }
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "the legacy serving path also refuses, rather than serving the healthy entry")
+        // Admission REFUSES. It may refuse by returning nil or by throwing a PrepareError — both
+        // mean "no request is issued"; what matters is that nothing is admitted.
+        XCTAssertNoAdmission(try q.admitAttempt(healthy),
+                             "no entry is admitted while any entry's ownership is unreadable")
+        XCTAssertNoAdmission(try q.admitAttempt(broken))
     }
 
     /// ACCOUNT SCOPE IS PART OF THE IDENTITY (reviewer 2b121320): an entry owned by account A must

@@ -20,6 +20,26 @@ final class VoiceSharingUploaderTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
+    /// A ready entry prepared on a SPECIFIC queue (needed when the queue carries an identity).
+    private func makeReadyEntryOwned(_ queue: VoiceSharingUploadQueue) throws
+        -> VoiceSharingUploadQueue.Entry {
+        let samples: [Float] = [0, 0.25, -0.5, 0.5]
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed, captureID: UUID(),
+            enrollmentEpoch: "epoch-1", authorizationSession: "acct-A",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+            conversionVersion: "v1")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: [:])
+        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
+        try queue.finalize(entry)
+        return entry
+    }
+
     private func makeReadyEntry() throws -> VoiceSharingUploadQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
@@ -48,11 +68,13 @@ final class VoiceSharingUploaderTests: XCTestCase {
         retryPolicy: VoiceSharingRetryPolicy? = nil,
         authorized: @escaping () -> Bool = { true },
         endpoint: @escaping () -> URL? = { URL(string: "https://unit.test/api/v1/contributions") },
-        transport: @escaping (URLRequest) async -> VoiceSharingUploader.TransportResult
+        transport: @escaping (URLRequest) async -> VoiceSharingUploader.TransportResult,
+        identity: @escaping () -> VoiceSharingUploadIdentity? = { nil }
     ) -> VoiceSharingUploader {
         VoiceSharingUploader(
             queue: queue, retryPolicy: retryPolicy ?? self.retryPolicy(),
-            isAuthorized: authorized, endpoint: endpoint, transport: transport)
+            isAuthorized: authorized, currentIdentity: identity,
+            endpoint: endpoint, transport: transport)
     }
 
     private func receiptBody(captureID: String, recordSHA: String, status: String = "accepted") -> Data {
@@ -66,6 +88,47 @@ final class VoiceSharingUploaderTests: XCTestCase {
             "retention_expires_at": "2026-11-22T14:00:00Z",
         ]
         return try! JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the account/epoch moves WHILE the request is on the
+    /// wire, so a late 2xx arrives for an identity the entry no longer belongs to. It must not
+    /// settle: the outcome is revoked, and the entry is retained rather than delivered.
+    func test_identityChangeDuringFlightStopsALateSuccessFromSettling() async throws {
+        let box = IdentityBox(
+            VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let owned = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        queue = owned
+        let entry = try makeReadyEntryOwned(owned)
+        let receipt = receiptBody(captureID: entry.name, recordSHA: "unused")
+        let uploader = VoiceSharingUploader(
+            queue: owned, retryPolicy: retryPolicy(),
+            isAuthorized: { true },
+            currentIdentity: { box.current },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { _ in
+                // The account re-enrolls while this request is in flight.
+                box.current = VoiceSharingUploadIdentity(
+                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                return .response(statusCode: 201, body: receipt)
+            })
+
+        let outcome = await uploader.upload(entry)
+        guard case .revoked = outcome else {
+            return XCTFail("a late success for a retired identity must not settle, got \(outcome)")
+        }
+        XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained: not delivered under the old identity")
+    }
+
+    /// Mutable identity holder for the fence control.
+    private final class IdentityBox {
+        private let lock = NSLock()
+        private var value: VoiceSharingUploadIdentity?
+        init(_ initial: VoiceSharingUploadIdentity?) { value = initial }
+        var current: VoiceSharingUploadIdentity? {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
     }
 
     // MARK: - the real path

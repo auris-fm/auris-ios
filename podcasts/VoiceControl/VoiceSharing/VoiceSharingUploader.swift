@@ -67,6 +67,9 @@ final class VoiceSharingUploader {
     private let queue: VoiceSharingUploadQueue
     private let retryPolicy: VoiceSharingRetryPolicy
     private let isAuthorized: () -> Bool
+    /// Live identity reader for attempt-lifetime fencing. Returns nil when this process has no
+    /// identity authority (an unbound queue), in which case nothing is fenced.
+    private let currentIdentity: () -> VoiceSharingUploadIdentity?
     private let transport: (URLRequest) async -> TransportResult
     private let endpoint: () -> URL?
     private let clock: () -> Date
@@ -75,6 +78,7 @@ final class VoiceSharingUploader {
         queue: VoiceSharingUploadQueue,
         retryPolicy: VoiceSharingRetryPolicy,
         isAuthorized: @escaping () -> Bool,
+        currentIdentity: @escaping () -> VoiceSharingUploadIdentity? = { nil },
         endpoint: @escaping () -> URL?,
         clock: @escaping () -> Date = Date.init,
         transport: @escaping (URLRequest) async -> TransportResult
@@ -82,6 +86,7 @@ final class VoiceSharingUploader {
         self.queue = queue
         self.retryPolicy = retryPolicy
         self.isAuthorized = isAuthorized
+        self.currentIdentity = currentIdentity
         self.endpoint = endpoint
         self.clock = clock
         self.transport = transport
@@ -123,6 +128,15 @@ final class VoiceSharingUploader {
 
         let result = await transport(request)
 
+        // ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the identity this attempt was ADMITTED under must
+        // still be the live one. Admission-time binding alone cannot see an account/epoch move that
+        // lands while the request is in flight, and a late 2xx must not settle an entry whose
+        // identity has since changed. Only checked when the queue supplied an identity.
+        if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
+            // The lease must still be released; the entry belongs to the retired identity.
+            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
+            return .revoked
+        }
         // REVOCATION CHECK IMMEDIATELY AFTER THE AWAIT (reviewer/spec obligation): a withdrawal
         // that landed while the request was in flight must not be overridden by a late 2xx.
         if !isAuthorized() {
@@ -190,6 +204,14 @@ final class VoiceSharingUploader {
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             }
         }
+    }
+
+    /// True while the identity the attempt was admitted under is still live. A reader that cannot
+    /// establish an identity (nil) is NOT a match: an unknown live identity cannot confirm a stale
+    /// one, so the fence holds.
+    private func isIdentityCurrent(_ admitted: VoiceSharingUploadIdentity) -> Bool {
+        guard let live = currentIdentity() else { return false }
+        return live == admitted
     }
 
     // MARK: - settlement

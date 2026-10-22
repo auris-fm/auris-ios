@@ -430,8 +430,18 @@ final class VoiceSharingUploadQueue {
                 if let readOwner = currentIdentityLocked, let owner = readOwner() {
                     let data = Data(owner.accountScope.utf8)
                     guard data.count <= Self.maxOwnerBytes else { throw PrepareError.metadataTooLarge }
-                    try data.write(to: entryDirectory.appendingPathComponent(Self.ownerName),
-                                   options: .atomic)
+                    let ownerURL = entryDirectory.appendingPathComponent(Self.ownerName)
+                    try data.write(to: ownerURL, options: .atomic)
+                    // DURABILITY: ownership backs a publication decision, so it must be on stable
+                    // storage BEFORE the entry can become ready — a marker that outlives a lost
+                    // owner file would let recovery admit an unattributed entry (reviewer e8dd9c35).
+                    // Failure here is publication-uncertain, not a silently missing owner.
+                    do {
+                        try synchronizer(ownerURL, false)
+                        try synchronizer(entryDirectory, true)
+                    } catch {
+                        throw PrepareError.publicationUncertain
+                    }
                 }
                 return Entry(root: rootDirectory, name: name)
             } catch {
@@ -871,6 +881,10 @@ final class VoiceSharingUploadQueue {
     struct AdmittedAttempt {
         let lease: AttemptLease
         let attemptNumber: Int
+        /// The identity this attempt was admitted under (reviewer/spec: attempt-lifetime fencing).
+        /// Nil for an UNBOUND queue, meaning "no identity authority in this process" — the caller
+        /// then has nothing to fence against, exactly as before. A bound queue always supplies it.
+        let identity: VoiceSharingUploadIdentity?
     }
 
     /// Admits one attempt atomically. Returns nil when the entry is owned elsewhere or exhausted.
@@ -896,16 +910,24 @@ final class VoiceSharingUploadQueue {
             // against the live identity NOW, so a surviving entry from a previous epoch is refused
             // after a transition, while a NEW entry under the current epoch is admitted — the
             // decision follows the entry, not the process's construction time.
+            // Resolve the entry's own identity ONCE; the same value is what this attempt is
+            // fenced to for its whole lifetime (no second parse that could drift).
+            var admittedIdentity: VoiceSharingUploadIdentity?
             if let readIdentity = currentIdentityLocked {
                 // A BOUND queue refuses when the identity cannot be established at all. Both halves
                 // are compared structurally: an equal epoch under a different account is not the
                 // same identity (reviewer 2b121320).
                 guard let live = readIdentity() else { return nil }
                 let bound = try boundIdentityLocked(of: entry)
+                // ABSENT owner means this entry predates sign-in and belongs to no account yet:
+                // it cannot be attributed, so it is refused (never inherited by the current account).
+                guard case .present(let capturedScope) = try ownerScopeLocked(for: entry) else {
+                    return nil
+                }
                 let captured = VoiceSharingUploadIdentity(
-                    accountScope: ownerScopeLocked(for: entry),
-                    enrollmentEpoch: bound.enrollmentEpoch)
+                    accountScope: capturedScope, enrollmentEpoch: bound.enrollmentEpoch)
                 guard captured == live else { return nil }
+                admittedIdentity = captured
             }
             guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
             do {
@@ -945,7 +967,7 @@ final class VoiceSharingUploadQueue {
                 throw error
             }
             inFlightAttempts[entry] = lease
-            return AdmittedAttempt(lease: lease, attemptNumber: count)
+            return AdmittedAttempt(lease: lease, attemptNumber: count, identity: admittedIdentity)
         }
     }
 
@@ -1677,18 +1699,31 @@ final class VoiceSharingUploadQueue {
     /// Only a CONFIRMED ABSENCE means zero. A missing file is absence; an unreadable, oversized,
     /// malformed or negative record is NOT — treating those as zero would silently reset the retry
     /// budget and let an entry retry forever. They throw instead, so the caller must refuse.
-    /// The account recorded beside the entry at preparation. Absent or unreadable ⇒ nil, which
-    /// admission treats as "no identity", never as "any account will do".
-    private func ownerScopeLocked(for entry: Entry) -> String? {
-        guard let directory = try? validatedEntryDirectoryLocked(entry) else { return nil }
+    /// Where an entry's recorded owner stands. ABSENT and UNKNOWN are different facts: an entry
+    /// prepared before sign-in has no owner (absent), while an owner file that exists but cannot be
+    /// read is unreadable storage. Collapsing both into nil would report a fault as a benign
+    /// absence, which is the same class of error the attempt record refuses to make.
+    private enum OwnerState { case present(String); case absent }
+
+    /// Reads the account recorded beside the entry at preparation. Throws on unreadable storage so
+    /// admission refuses rather than guessing; `.absent` means "not yet attributed".
+    private func ownerScopeLocked(for entry: Entry) throws -> OwnerState {
+        let directory = try validatedEntryDirectoryLocked(entry)
         let url = directory.appendingPathComponent(Self.ownerName)
-        guard case .present = Self.statKind(of: url),
-              let size = fileSizeIfRegularLocked(at: url), size.isRegular, size.bytes > 0,
-              size.bytes <= Self.maxOwnerBytes,
+        switch Self.statKind(of: url) {
+        case .absent:
+            return .absent
+        case .failure:
+            throw PrepareError.accountingUnavailable
+        case .present:
+            break
+        }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+              size.bytes > 0, size.bytes <= Self.maxOwnerBytes,
               let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .utf8), !text.isEmpty
-        else { return nil }
-        return text
+        else { throw PrepareError.accountingUnavailable }
+        return .present(text)
     }
 
     private func attemptCountLocked(for entry: Entry) throws -> Int {
@@ -2050,6 +2085,14 @@ final class VoiceSharingUploadQueue {
             // confirmation does not apply to them.
             if case .bound = state {
                 try confirmDurableLocked(directory: entryDirectoryLocked(for: entry))
+                // OWNERSHIP IS PART OF THE SHARED AUTHORITY (reviewer e8dd9c35): an owner file that
+                // exists but cannot be read is UNKNOWN coverage for the WHOLE owner, exactly like an
+                // unconfirmable marker — not a quiet per-entry skip. `ownerScopeLocked` throws for
+                // unreadable storage and returns `.absent` only for a genuinely missing file, so a
+                // fault can never be mistaken for "not attributed yet".
+                if currentIdentityLocked != nil {
+                    _ = try ownerScopeLocked(for: entry)
+                }
             }
         }
         return all
@@ -2096,6 +2139,12 @@ final class VoiceSharingUploadQueue {
             // (ce001b9a follow-through): it honors the retry hold too — a failed attempt barrier
             // pauses serving at every entry point, not only admission.
             guard !revocationHoldLocked, !retryHoldLocked else { return [] }
+            // The legacy path has no unknown-coverage channel, so it must FAIL CLOSED: if the
+            // strict owner authority cannot prove every entry's required state (unreadable
+            // ownership included), serve nothing rather than the entries that happen to parse.
+            if currentIdentityLocked != nil {
+                guard (try? strictOwnerCoverageLocked()) != nil else { return [] }
+            }
             return entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
