@@ -266,6 +266,18 @@ final class VoiceSharingUploadQueue {
     /// extension and cannot be overridden.
     private let markerReplacer: (URL, URL) throws -> URL?
     private var aggregateLimits: AggregateLimits
+    /// The live account + enrollment identity, or nil when the process cannot establish one.
+    ///
+    /// UNBOUND (`nil`) means this queue was constructed without identity authority — every existing
+    /// test and caller. Binding is explicit (`bindIdentity`), so the no-identity behaviour of an
+    /// unbound queue is unchanged. Once BOUND, a reader that returns nil is a FAILED identity read
+    /// (signed out, epoch not yet loaded) and admission refuses: that is the startup case where a
+    /// surviving entry must not be uploaded before enrollment is known.
+    private let currentIdentityLocked: (() -> String?)?
+    private var identityIsBound: Bool { currentIdentityLocked != nil }
+    /// Installs the live identity reader. Read under the queue's serial queue on every admission, so
+    /// a transition between admissions is observed rather than pinned at construction.
+
     private let attemptLimits: AttemptLimits
     /// In-flight ownership is deliberately IN-MEMORY ONLY: a live request belongs to the process
     /// that opened it, so a killed process cannot leave one behind. The durable file records that an
@@ -320,7 +332,8 @@ final class VoiceSharingUploadQueue {
         listDirectoryBounded: @escaping (URL, [URLResourceKey], Int) throws
             -> (urls: [URL], overflowed: Bool) = VoiceSharingUploadQueue.defaultBoundedLister
     ,
-        intentDiscovery: @escaping (URL) -> StatKind = { VoiceSharingUploadQueue.statKind(of: $0) }
+        intentDiscovery: @escaping (URL) -> StatKind = { VoiceSharingUploadQueue.statKind(of: $0) },
+        currentIdentity: (() -> String?)? = nil
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -333,6 +346,7 @@ final class VoiceSharingUploadQueue {
         self.listDirectory = listDirectory
         self.listDirectoryBounded = listDirectoryBounded
         self.intentDiscovery = intentDiscovery
+        self.currentIdentityLocked = currentIdentity
         try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // Serialize recovery with any future mutations; construction happens before the queue is
         // shared, but the same discipline keeps restart accounting on the owning queue.
@@ -862,6 +876,17 @@ final class VoiceSharingUploadQueue {
             guard inFlightAttempts[entry] == nil else { return nil }
             let discovered = try strictOwnerCoverageLocked()
             guard discovered.contains(entry) else { return nil }
+            // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036): an entry carries the enrollment
+            // epoch it was CAPTURED under in its own durable metadata. Admission compares that
+            // against the live identity NOW, so a surviving entry from a previous epoch is refused
+            // after a transition, while a NEW entry under the current epoch is admitted — the
+            // decision follows the entry, not the process's construction time.
+            if let readIdentity = currentIdentityLocked {
+                // A BOUND queue refuses when the identity cannot be established at all.
+                guard let expected = readIdentity() else { return nil }
+                let bound = try boundIdentityLocked(of: entry)
+                guard bound.enrollmentEpoch == expected else { return nil }
+            }
             guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
             do {
                 guard try isAttemptableLocked(entry) else {
@@ -2056,12 +2081,18 @@ final class VoiceSharingUploadQueue {
     /// uploader uses this to check a receipt against what was actually queued — never against a
     /// value carried in memory that may not match disk.
     func boundIdentity(of entry: Entry) throws -> VoiceSharingRecordBinding.BoundEntry {
-        try serialQueue.sync {
-            let directory = try validatedEntryDirectoryLocked(entry)
-            let metadata = try Data(contentsOf: directory.appendingPathComponent(Self.metadataName))
-            let audio = try Data(contentsOf: directory.appendingPathComponent(Self.audioName))
-            return try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
-        }
+        try serialQueue.sync { try boundIdentityLocked(of: entry) }
+    }
+
+    /// Lock-held variant: REENTRANT-SAFE. `admitAttempt` already runs inside `serialQueue`, so it
+    /// must call this rather than the public entry point (calling `sync` from inside the same
+    /// serial queue deadlocks, which is exactly what a crash on first use showed).
+    private func boundIdentityLocked(of entry: Entry) throws
+        -> VoiceSharingRecordBinding.BoundEntry {
+        let directory = try validatedEntryDirectoryLocked(entry)
+        let metadata = try Data(contentsOf: directory.appendingPathComponent(Self.metadataName))
+        let audio = try Data(contentsOf: directory.appendingPathComponent(Self.audioName))
+        return try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
     }
 
     /// Attempts already consumed for this entry (durable count, survives restart).

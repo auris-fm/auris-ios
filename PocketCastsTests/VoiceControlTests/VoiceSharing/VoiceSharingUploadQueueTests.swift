@@ -1255,6 +1255,71 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(try reopened.attemptCount(for: prep), 2)
     }
 
+    /// Mutable identity box: the reader closure captures the BOX, so the value can move after
+    /// `bindIdentity` without capturing a `var` mutated after escaping.
+    private final class IdentityBox {
+        private let lock = NSLock()
+        private var value: String?
+        init(_ initial: String?) { value = initial }
+        var current: String? {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
+    }
+
+    private func makeCompleteEntry(
+        _ queue: VoiceSharingUploadQueue, epoch: String
+    ) throws -> VoiceSharingUploadQueue.Entry {
+        try prepareAndFinalize(queue,
+                               metadata: validRecord(captureID: UUID().uuidString, epoch: epoch,
+                                                     audio: audioA),
+                               audio: audioA)
+    }
+
+    /// STARTUP BEFORE PROJECTION (reviewer fd6b8036): a BOUND queue whose identity cannot be
+    /// established yet (signed out, epoch not loaded) must refuse every entry.
+    func test_boundQueueRefusesEntriesUntilTheIdentityIsKnown() throws {
+        let box = IdentityBox(nil)
+        let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        let entry = try makeCompleteEntry(q, epoch: "epoch-1")
+
+        XCTAssertNil(try q.admitAttempt(entry), "no identity yet ⇒ nothing is admitted")
+
+        box.current = "epoch-1"
+        XCTAssertNotNil(try q.admitAttempt(entry), "a known matching identity admits the entry")
+    }
+
+    /// RE-ENROLLMENT: after A→B, a NEW entry captured under B is admitted while the surviving A
+    /// entry is refused. A construction-time pin cannot express this — it blocks both or admits both.
+    func test_reEnrollmentAdmitsNewEpochEntriesAndRefusesSurvivingOldOnes() throws {
+        let box = IdentityBox("epoch-1")
+        let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        let oldEntry = try makeCompleteEntry(q, epoch: "epoch-1")
+        // Admit AND SETTLE it, so the lease is released: otherwise the second admission would be
+        // refused merely because the first lease is still held, and the control would not be
+        // testing the epoch at all (that is exactly how an earlier version passed its mutant).
+        let firstAdmission = try XCTUnwrap(try q.admitAttempt(oldEntry), "the A entry is admitted under A")
+        try q.applyAttemptResult(oldEntry, lease: firstAdmission.lease, outcome: .retryableFailure)
+
+        box.current = "epoch-2"
+        XCTAssertNil(try q.admitAttempt(oldEntry), "the surviving A entry is refused under B")
+        let newEntry = try makeCompleteEntry(q, epoch: "epoch-2")
+        XCTAssertNotNil(try q.admitAttempt(newEntry), "a new B entry is admitted under B")
+    }
+
+    /// RESTART WITH A SURVIVING OLD ENTRY: a FRESH queue over the same durable root, whose live
+    /// identity is already B, must still refuse a surviving A entry.
+    func test_freshQueueOnTheSameDiskStillRefusesASurvivingOldEpochEntry() throws {
+        let box = IdentityBox("epoch-1")
+        let first = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        let oldEntry = try makeCompleteEntry(first, epoch: "epoch-1")
+
+        box.current = "epoch-2"
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        XCTAssertNil(try restarted.admitAttempt(oldEntry),
+                     "a fresh process must not admit a stale-epoch entry just because it started under B")
+    }
+
     func test_entryIsRemovedWhenAttemptsAreExhausted() throws {
         // Spec: "Exhaustion or expiry removes the local entry with a content-free terminal counter."
         let q = VoiceSharingUploadQueue(

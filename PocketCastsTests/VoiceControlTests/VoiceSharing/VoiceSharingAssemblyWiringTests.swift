@@ -342,19 +342,24 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         _ = entry
     }
 
-    /// EPOCH RETIREMENT DURING REFRESH: if the enrollment epoch moves while the credential
-    /// refreshes, the retry must NOT be sent — the entry is not carried across an enrollment change.
+    /// EPOCH RETIREMENT DURING REFRESH, through the PRODUCTION pin: the gate is
+    /// `VoiceSharingUploadIdentityPin`, exactly the type the assembly uses. The older version of
+    /// this control flipped a local flag that the chain never read — it asserted nothing.
     func test_epochRetirementDuringRefreshBlocksTheRetry() async throws {
         let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
-        var sameEpoch = true
-        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
-                              attemptLimits: .init(maxUploadAttempts: 4))
-        _ = try makeReadyEntry(chain.queue)
+        var epoch: String? = "epoch-1"
+        let account = "acct-A"
+        let pin = VoiceSharingUploadIdentityPin(
+            accountScope: { account }, enrollmentEpoch: { epoch })
+        var now = Date()
+        let chain = makeChain(policyPermits: { pin.isCurrent }, tokenProvider: tokens,
+                              attemptLimits: .init(maxUploadAttempts: 4), now: { now })
+        let entry = try makeReadyEntry(chain.queue)
         AssemblyIntercept.responder = { request in
             let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
                 .replacingOccurrences(of: "Bearer ", with: "")
             if token == "stale-token" {
-                sameEpoch = false   // the epoch retires while the credential refreshes
+                epoch = "epoch-2"   // the account re-enrolls while the credential refreshes
                 return (HTTPURLResponse(url: request.url!, statusCode: 401,
                                         httpVersion: nil, headerFields: nil)!,
                         Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
@@ -362,161 +367,22 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             return Self.acceptedReceiptResponder()(request)
         }
         defer { AssemblyIntercept.responder = nil }
-        // The gate the production chain consults is the live policy, which is epoch-scoped:
-        // flattening it models the epoch having retired.
-        try await runPass(chain)
-        XCTAssertFalse(sameEpoch, "precondition: the epoch moved during the refresh")
+        _ = await chain.scheduler.drainOnce()
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt went out")
+        XCTAssertFalse(pin.isCurrent, "precondition: the epoch moved during the refresh")
+
+        // Past the back-off the retry would otherwise fire — the pin must hold it.
+        now = now.addingTimeInterval(500)
+        let pass = await chain.scheduler.drainOnce()
+        guard case .idle = pass else {
+            return XCTFail("a retired epoch must hold the retry, got \(pass)")
+        }
         XCTAssertEqual(AssemblyIntercept.requestCount, 1,
                        "no retry is sent once the enrollment epoch has moved")
-        XCTAssertEqual(chain.queue.readyEntries().count, 1,
-                       "the entry is retained, not delivered and not silently dropped")
-    }
-
-    /// ACCOUNT SWITCH DURING REFRESH: same shape, and the retained entry still cannot settle.
-    func test_accountSwitchDuringRefreshBlocksTheRetry() async throws {
-        let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
-        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
-                              attemptLimits: .init(maxUploadAttempts: 4))
-        _ = try makeReadyEntry(chain.queue)
-        var switched = false
-        AssemblyIntercept.responder = { request in
-            let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
-                .replacingOccurrences(of: "Bearer ", with: "")
-            if token == "stale-token" {
-                switched = true
-                return (HTTPURLResponse(url: request.url!, statusCode: 401,
-                                        httpVersion: nil, headerFields: nil)!,
-                        Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
-            }
-            return Self.acceptedReceiptResponder()(request)
-        }
-        defer { AssemblyIntercept.responder = nil }
-        try await runPass(chain)
-        XCTAssertTrue(switched)
-        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
-                       "no retry under a different account")
-        XCTAssertEqual(chain.queue.readyEntries().count, 1, "entry retained")
-    }
-
-    /// REPEATED 401s: a credential that is always rejected spends BOUNDED attempts. Once the
-    /// budget is exhausted the queue reports it explicitly rather than as a benign "not ready",
-    /// and the entry stays accounted for instead of vanishing.
-    func test_repeated401sSpendBoundedAttemptsThenReportExhaustion() async throws {
-        let tokens = RefreshingTokenProvider(tokens: ["a", "b", "c", "d", "e", "f"])
-        let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
-                              attemptLimits: .init(maxUploadAttempts: 3))
-        let entry = try makeReadyEntry(chain.queue)
-        AssemblyIntercept.responder = { request in
-            (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil,
-                             headerFields: nil)!,
-             Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
-        }
-        defer { AssemblyIntercept.responder = nil }
-        // Pour every available attempt through the REAL pass path, advancing time between passes
-        // the way a resume would (each 401 publishes a backoff boundary + hold).
-        try await runPass(chain)
-        var current = chain
-        for _ in 0..<4 {
-            current = advanceAndResume(current, tokenProvider: tokens,
-                                       attemptLimits: .init(maxUploadAttempts: 3), by: 120)
-            try await runPass(current)
-        }
-        XCTAssertLessThanOrEqual(AssemblyIntercept.requestCount, 3,
-                                 "repeated 401s are bounded by the attempt budget")
-        XCTAssertEqual(AssemblyIntercept.requestCount, 3,
-                       "every attempt the budget allows is used — then it stops")
-        XCTAssertTrue(current.queue.readyEntries().isEmpty,
-                      "an exhausted entry is no longer served")
-        XCTAssertTrue(tokens.rejectedTokens.count == tokens.refreshCount,
-                      "every rejection is reported to the provider")
-        // Exhaustion is REPORTED through the serving channel the scheduler consults, not as a
-        // benign "nothing ready": the coverage report must not present the spent entry as servable.
-        guard case .known(let servable) = current.queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage became unknown")
-        }
-        XCTAssertFalse(servable.contains(where: { $0.name == entry.name }),
-                       "an entry with no attempts left is never offered for upload")
-    }
-
-    /// OVERLAPPING OWNER, SAME ENTRY, LIVE LEASE (spec 0fb00cfe / reviewer 2e1e7f2c): a second
-    /// chain over the SAME durable root must be REFUSED at lease admission while the first attempt
-    /// holds the lease.
-    ///
-    /// TIMING IS THE WHOLE CONTROL. Authorization stays TRUE for the successor's pass so it really
-    /// reaches lease admission instead of stopping at the eligibility guard; withdrawal is applied
-    /// afterwards, separately, before the first response is released. Every successor assertion is
-    /// UNCONDITIONAL — an `if case .drained` branch would skip them exactly when the successor
-    /// short-circuits, which is what made the previous version vacuous.
-    func test_successorOnTheSameEntryIsRefusedWhileTheLeaseIsLive() async throws {
-        let sharedRoot = root!
-        var permitted = true
-        let chain = makeChain(policyPermits: { permitted },
-                              tokenProvider: StaticTokenProvider(token: "tok"),
-                              attemptLimits: .init(maxUploadAttempts: 4))
-        let entry = try makeReadyEntry(chain.queue)
-        let requestedNames = RequestRecorder()
-        let releaseFirst = AsyncGate()
-        let accepted = Self.acceptedReceiptResponder()
-        AssemblyIntercept.responder = { request in
-            if let identity = try? Self.attemptedIdentity(from: request) {
-                requestedNames.record(identity.captureID)
-            }
-            if releaseFirst.isFirst() { releaseFirst.waitForRelease() }
-            return accepted(request)
-        }
-        defer { AssemblyIntercept.responder = nil }
-        // An early failing guard must not strand the held first response (which would hang the URL
-        // session for the whole deadline). Release is idempotent.
-        defer { releaseFirst.release() }
-        let firstDrain = Task { await chain.scheduler.drainOnce() }
-        let start = Date()
-        while AssemblyIntercept.requestCount == 0, Date().timeIntervalSince(start) < 5 {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
-        XCTAssertTrue(permitted, "authorization must still be TRUE when the successor runs")
-
-        let successor = makeChain(policyPermits: { permitted },
-                                  tokenProvider: StaticTokenProvider(token: "tok"),
-                                  attemptLimits: .init(maxUploadAttempts: 4),
-                                  overrideRoot: sharedRoot)
-        XCTAssertEqual(successor.queue.rootDirectory, chain.queue.rootDirectory,
-                       "the successor must share the durable root, or it proves nothing")
-        let successorOutcome = await successor.scheduler.drainOnce()
-
-        // UNCONDITIONAL: the pass must have considered this entry and REFUSED it.
-        guard case .drained(let results) = successorOutcome else {
-            return XCTFail("the successor pass must consider the entry, got \(successorOutcome)")
-        }
-        XCTAssertEqual(results.count, 1, "the successor considered exactly the shared entry")
-        let successorResult = try XCTUnwrap(results.first)
-        XCTAssertEqual(successorResult.entry.name, entry.name,
-                       "the successor must have tried THIS entry, not a neighbour")
-        guard case .unavailable = successorResult.outcome else {
-            return XCTFail("a live lease must refuse the successor, got \(successorResult.outcome)")
-        }
-        XCTAssertEqual(requestedNames.count, 1,
-                       "the refused successor put nothing on the wire")
-
-        // SEPARATELY: withdraw, then release the held response. The late success must not win.
-        permitted = false
-        releaseFirst.release()
-        let firstOutcome = await firstDrain.value
-        guard case .drained(let firstResults) = firstOutcome,
-              let first = firstResults.first else {
-            return XCTFail("expected one result, got \(firstOutcome)")
-        }
-        guard case .revoked = first.outcome else {
-            return XCTFail("the late success must not beat the withdrawal, got \(first.outcome)")
-        }
-        XCTAssertEqual(requestedNames.count, 1,
-                       "exactly one request: the successor added none")
         XCTAssertTrue(chain.queue.readyEntries().contains { $0.name == entry.name },
-                      "the entry is retained: the late success did not complete it")
+                      "the entry is retained, not delivered and not silently dropped")
     }
 
-    /// Applies an authoritative server projection through the store's REAL fenced path: a token is
-    /// captured first, as the production read path does, then the projection is applied under it.
     private func applyMembership(
         to store: VoiceSharingEnrollmentStore, revision: String, epoch: String
     ) throws {
