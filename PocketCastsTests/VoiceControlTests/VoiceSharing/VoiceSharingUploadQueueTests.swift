@@ -1590,6 +1590,105 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "reclaiming spends a new attempt")
     }
 
+    // MARK: Atomic claim and fencing (reviewer 3ab75638)
+
+    func test_simultaneousAcquisitionAdmitsExactlyOneOwner() throws {
+        // A sequential test cannot prove mutual exclusion: stat->write lets both instances observe
+        // absence. This releases N instances from a barrier at the same instant; the OS-backed
+        // exclusive create must admit exactly one.
+        let setup = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try setup.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try setup.finalize(prep)
+
+        let instances = (0..<8).map { _ in
+            VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        }
+        let barrier = DispatchGroup()
+        let results = LockedBox<[Bool]>([])
+        for queue in instances {
+            barrier.enter()
+        }
+        for queue in instances {
+            DispatchQueue.global().async {
+                // Wait until every contender is ready, then race.
+                barrier.wait()
+                let won = (try? queue.beginAttempt(prep)) ?? false
+                results.mutate { $0.append(won) }
+            }
+            barrier.leave()
+        }
+        barrier.wait()
+        // Give the racers a moment to finish appending (the group only covers the start).
+        let deadline = Date().addingTimeInterval(2)
+        while results.value.count < instances.count, Date() < deadline {
+            usleep(10_000)
+        }
+        XCTAssertEqual(results.value.count, instances.count, "every contender must report")
+        XCTAssertEqual(results.value.filter { $0 }.count, 1,
+                       "exactly one owner may win a simultaneous acquisition")
+        XCTAssertEqual(try setup.attemptCount(for: prep), 1,
+                       "only the winner may have spent an attempt")
+    }
+
+    func test_staleOwnerCannotReleaseItsSuccessorsLease() throws {
+        // Reviewer 3ab75638/2: elapsed time does not prove the old writer died. After expiry a
+        // successor acquires; the old owner's endAttempt must not delete the successor's lease.
+        let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try first.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try first.finalize(prep)
+        XCTAssertTrue(try first.beginAttempt(prep))
+
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertTrue(try successor.beginAttempt(prep), "an expired lease is reclaimable")
+
+        // The stale owner now "finishes". Its release must be fenced by identity.
+        first.endAttempt(prep)
+        let another = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertFalse(try another.beginAttempt(prep),
+                       "the successor's lease must survive the stale owner's release")
+
+    }
+
+    func test_staleOwnerIsNotStillOwnerAfterReclaim() throws {
+        // A stale completion must be checkable: the old owner must see that it no longer holds the
+        // lease, so it cannot report a result as current.
+        let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try first.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try first.finalize(prep)
+        let lease = try XCTUnwrap(first.beginLeaseForTesting(prep))
+        XCTAssertTrue(first.stillOwns(prep, lease: lease), "the live owner still owns it")
+
+        let later = Date().addingTimeInterval(VoiceSharingUploadQueue.attemptLeaseDuration + 1)
+        let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: { later })
+        XCTAssertTrue(try successor.beginAttempt(prep))
+        XCTAssertFalse(first.stillOwns(prep, lease: lease),
+                       "after reclaim the old owner must NOT believe it still owns the lease")
+    }
+
+    func test_refusedAttemptLeavesNoLeaseBehind() throws {
+        // Reviewer 3ab75638/3: a refusal after claiming must settle the lease.
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+        let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(prep)
+        // A NOT-READY entry is refused AFTER the lease is claimed, and this refusal does NOT delete
+        // the entry — so only explicit settlement can clear the lease. (The exhausted path removes
+        // the whole directory, which would make this control unable to distinguish anything.)
+        let notReady = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        XCTAssertFalse(try q.beginAttempt(notReady),
+                       "a preparing entry is refused")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(notReady.name).appendingPathComponent("attempt.lease").path),
+            "a refused attempt must not leave a lease behind")
+        _ = prep
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(prep.name).appendingPathComponent("attempt.lease").path),
+            "a refused attempt must not leave a lease behind")
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.
@@ -1741,5 +1840,23 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let leftovers = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
         XCTAssertTrue(leftovers.isEmpty,
                       "the queue owns its root: any directory it did not create is abandoned preparation")
+    }
+}
+
+/// Minimal thread-safe box for the concurrency control.
+private final class LockedBox<T> {
+    private let lock = NSLock()
+    private var storage: T
+
+    init(_ value: T) { storage = value }
+
+    var value: T {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+
+    func mutate(_ body: (inout T) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        body(&storage)
     }
 }
