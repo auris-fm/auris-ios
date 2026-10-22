@@ -2428,6 +2428,24 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path))
     }
 
+    private func directorySize(at url: URL) throws -> Int {
+        var total = 0
+        let files = (try? FileManager.default.subpathsOfDirectory(atPath: url.path)) ?? []
+        if !files.isEmpty {
+            for f in files {
+                let full = url.appendingPathComponent(f)
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: full.path, isDirectory: &isDir),
+                    !isDir.boolValue,
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: full.path),
+                    let bytes = attrs[.size] as? Int {
+                    total += bytes
+                }
+            }
+        }
+        return total
+    }
+
     // MARK: Shared-queue coverage clarification 7e9606b (spec 0b5841c2)
 
     func test_unknownCoverageHoldsServingUntilSuccessfulScan() throws {
@@ -2487,13 +2505,96 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
         XCTAssertEqual(Set(ready.map(\.name)), [livePrep.name],
                        "the disqualified entry is never served")
-        // ...but it remains owned and charged.
-        let limits = VoiceSharingUploadQueue.AggregateLimits(maxBytes: 1, maxRecords: 1)
+        // ...but it remains owned and charged. ISOLATE the survivor: measure the candidate
+        // entry's real bytes in a scratch root first, then size maxBytes to EXACTLY live +
+        // candidate. Only the DISQUALIFIED survivor's charge can then explain a refusal.
+        let liveBytes = try directorySize(at: root.appendingPathComponent(livePrep.name))
+        let scratchRoot = root.appendingPathComponent("scratch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratchRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: root.appendingPathComponent(livePrep.name),
+            to: scratchRoot.appendingPathComponent(livePrep.name))
+        // Admission charges each stored entry physical bytes + protocolOverheadBytes and reserves
+        // audio+metadata+overhead for the incoming one. Mirror that math exactly so the uncrowded
+        // root fits and ONLY the survivor's charge can push the crowded root over.
+        let candidateOverhead = VoiceSharingUploadQueue.protocolOverheadBytes
+        let liveCharge = liveBytes + candidateOverhead
+        // The candidate uses the SAME audio as the live entry, and UUID capture IDs are fixed
+        // length, so the reserved incoming bytes are computed exactly.
+        let incoming = audioA.count
+            + validRecord(captureID: UUID().uuidString, audio: audioA).count + candidateOverhead
+        let limits = VoiceSharingUploadQueue.AggregateLimits(
+            maxBytes: liveCharge + incoming, maxRecords: 8)
+        let uncrowded = VoiceSharingUploadQueue(
+            rootDirectory: scratchRoot, clock: Date.init, aggregateLimits: limits)
+        XCTAssertNoThrow(try uncrowded.prepare(
+            metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "without the survivor, live + candidate fits the budget")
         let crowded = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init, aggregateLimits: limits)
         XCTAssertThrowsError(try crowded.prepare(
             metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
-            "the retained survivor still consumes budget: a second entry cannot fit")
+            "the retained survivor's charge is what refuses the new entry")
+    }
+
+    func test_attemptsWithHeldHandlesHoldUnderUnknownCoverage() throws {
+        // Spec c988cb1b: attempt paths honor unknown coverage even for already-held entry
+        // handles. A failed bounded scan HOLDS the attempt; a successful scan admits it.
+        var failListing = false
+        let rootPath = root.path
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            listDirectoryBounded: { url, keys, limit in
+                if failListing, url.path == rootPath {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                let urls = try FileManager.default.contentsOfDirectory(
+                    at: url, includingPropertiesForKeys: keys)
+                return (urls: Array(urls.prefix(limit)), overflowed: urls.count > limit)
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+
+        failListing = true
+        // The handle is valid and the entry directory readable — coverage is not.
+        XCTAssertThrowsError(try owner.beginAttempt(prep)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "unknown coverage holds attempts, even with a held handle")
+        }
+        XCTAssertFalse(owner.isAttemptInFlight(prep), "no lease survives a coverage hold")
+        // Restoration: a successful scan admits the attempt.
+        failListing = false
+        XCTAssertTrue(try owner.beginAttempt(prep))
+        owner.endAttempt(prep)
+    }
+
+    func test_inaccessibleRequiredFileHoldsServingForTheWholeOwner() throws {
+        // Reviewer c4d5ecb4: one inaccessible required file must hold coverage for the WHOLE
+        // owner — it must not coexist with .known(otherReadyEntries).
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let good = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(good)
+        let broken = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+        try owner.finalize(broken)
+        // Make the broken entry's REQUIRED files stat-fail: strip all permissions from its
+        // directory. No-follow lstat of its children then fails with EACCES — a FAILURE, which
+        // must never collapse into absence.
+        let brokenDir = root.appendingPathComponent(broken.name)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: brokenDir.path)
+        defer { try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: brokenDir.path) }
+
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("one inaccessible entry must hold coverage for the whole owner")
+        }
+        // Restoration: permissions back => known coverage, broken entry filtered, good served.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: brokenDir.path)
+        guard case .known(let ready) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("restored access reports known coverage")
+        }
+        XCTAssertEqual(ready.count, 2, "restored: both entries are valid and served")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {

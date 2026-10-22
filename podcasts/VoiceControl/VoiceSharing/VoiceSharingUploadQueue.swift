@@ -579,6 +579,17 @@ final class VoiceSharingUploadQueue {
     func beginAttempt(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
             guard inFlightAttempts[entry] == nil else { return false }
+            // Handle identity is checked BEFORE coverage (a foreign handle is a refusal, not a
+            // coverage question). Clarification 7e9606b (spec c988cb1b): attempts must then honor
+            // unknown coverage even for an already-held entry handle — a held handle proves
+            // nothing about whether the root scan could see this entry. The bounded scan MUST
+            // succeed and must contain the entry; its failure is a HOLD, never "go ahead".
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/")
+            else { throw CocoaError(.fileNoSuchFile) }
+            let discovered = try entriesStrictLocked()
+            guard discovered.contains(entry) else { return false }
             // EVERY non-dispatch path settles explicitly: a lease acquired here must never survive
             // a later refusal or throw, or the entry would be blocked by its own failed attempt.
             let lease = try acquireLeaseLocked(for: entry)
@@ -1383,20 +1394,37 @@ final class VoiceSharingUploadQueue {
 
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
-            guard let all = try? entriesStrictLocked() else { return .unknownCoverage }
-            let ready = all
-                .filter { isCompleteEntryLocked(at: $0) }
-                // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
-                // after an uncertain transition a marker may be visible without durable backing.
-                .filter { (try? self.confirmDurableLocked(directory: self.entryDirectoryLocked(for: $0))) != nil }
-                .filter { Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: $0).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge }
-                .sorted { lhs, rhs in
-                    let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
-                    let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
-                    if lDate == rDate { return lhs.name < rhs.name }
-                    return lDate < rDate
+            // Reviewer c4d5ecb4: coverage is ALL-OR-NOTHING for the owner. Any required check
+            // whose outcome is UNKNOWN (listing failure, required-stat failure, required-file
+            // read failure, unconfirmable durability) holds serving for the WHOLE root — one
+            // inaccessible entry must not coexist with `.known(others)`.
+            let all: [Entry]
+            do { all = try entriesStrictLocked() } catch { return .unknownCoverage }
+            var ready: [Entry] = []
+            for entry in all {
+                let state: EntryState
+                do { state = try entryStateLocked(at: entry) } catch {
+                    return .unknownCoverage
                 }
-            return .known(ready)
+                guard case .bound = state else { continue }
+                // Exposure also requires CONFIRMED durability, not just a structurally valid
+                // marker: after an uncertain transition a marker may be visible without durable
+                // backing. Unconfirmable durability is UNKNOWN coverage, not "not ready".
+                do {
+                    try confirmDurableLocked(directory: entryDirectoryLocked(for: entry))
+                } catch {
+                    return .unknownCoverage
+                }
+                if Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge {
+                    ready.append(entry)
+                }
+            }
+            return .known(ready.sorted { lhs, rhs in
+                let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
+                let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
+                if lDate == rDate { return lhs.name < rhs.name }
+                return lDate < rDate
+            })
         }
     }
 
@@ -1619,33 +1647,91 @@ final class VoiceSharingUploadQueue {
     // the same durable state, and the contract requires both to agree. Ambiguity is therefore
     // expressed by `uncertainEntriesLocked` (a hint only) and resolved from disk.
 
-    private func boundEntryLocked(at entry: Entry) -> VoiceSharingRecordBinding.BoundEntry? {
+    /// Reviewer c4d5ecb4: `fileExists`/`try?` collapse I/O failure into absence, so one
+    /// inaccessible entry could coexist with `.known(otherEntries)`. The strict state read
+    /// distinguishes: REQUIRED-check failure (unknown) throws; genuine absence or a durable
+    /// disqualifier classifies the entry.
+    private enum EntryState {
+        case bound(VoiceSharingRecordBinding.BoundEntry)
+        case disqualified
+        case incomplete
+
+        var flatBound: VoiceSharingRecordBinding.BoundEntry? {
+            if case .bound(let b) = self { return b }
+            return nil
+        }
+    }
+
+    private func entryStateLocked(at entry: Entry) throws -> EntryState {
         let directory = entryDirectoryLocked(for: entry)
         let marker = directory.appendingPathComponent(Self.readyMarkerName)
         let audioURL = directory.appendingPathComponent(Self.audioName)
         let metadataURL = directory.appendingPathComponent(Self.metadataName)
 
-        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedName).path)
-        else { return nil }
+        func requiredFileKind(_ url: URL) throws -> StatKind {
+            switch Self.statKind(of: url) {
+            case .failure: throw PrepareError.accountingUnavailable
+            case .absent: return .absent
+            case .present: return .present
+            }
+        }
+        func readIfPresent(_ url: URL) throws -> Data? {
+            // Absent => nil (classified by the caller); present-but-unreadable => UNKNOWN.
+            guard try requiredFileKind(url) == .present else { return nil }
+            guard let data = try? Data(contentsOf: url) else {
+                throw PrepareError.accountingUnavailable
+            }
+            return data
+        }
+
+        // Disposal/disqualification intents are DURABLE state: present => disqualified;
+        // stat failure => unknown coverage (never "absent" by collapse).
+        if try requiredFileKind(directory.appendingPathComponent(Self.failedName)) == .present {
+            return .disqualified
+        }
         // A recorded publication stage means publication began. Until the marker is confirmed and
         // the stage cleared, the entry is not trustworthy — this is the discriminator that makes
         // "marker present with no disqualifier" unreachable for a restart.
-        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(Self.stageName).path)
-        else { return nil }
-        guard fileManager.fileExists(atPath: marker.path),
-            let createdAt = creationInstantLocked(in: directory),
-            clock().timeIntervalSince(createdAt) <= Self.maxEntryAge,
-            let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular,
+        if try requiredFileKind(directory.appendingPathComponent(Self.stageName)) == .present {
+            return .disqualified
+        }
+        guard try requiredFileKind(marker) == .present else { return .incomplete }
+        // The immutable instant: absent => incomplete; present-but-unreadable/unparseable =>
+        // UNKNOWN (its content bounds the entry's lifetime; guessing is not allowed).
+        let createdURL = directory.appendingPathComponent(Self.createdName)
+        guard let createdData = try readIfPresent(createdURL),
+            let text = String(data: createdData, encoding: .utf8),
+            let seconds = TimeInterval(text), seconds.isFinite
+        else { return .incomplete }
+        let createdAt = Date(timeIntervalSince1970: seconds)
+        guard clock().timeIntervalSince(createdAt) <= Self.maxEntryAge else { return .incomplete }
+
+        guard let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular,
             audioSize.bytes > 0, audioSize.bytes <= Self.maxEntryAudioBytes,
             let metadataSize = fileSizeIfRegularLocked(at: metadataURL), metadataSize.isRegular,
             metadataSize.bytes > 0, metadataSize.bytes <= Self.maxMetadataBytes
-        else { return nil }
+        else {
+            // fileSizeIfRegularLocked returns nil on stat failure: for an entry whose marker is
+            // PRESENT, the audio/metadata are required — a stat failure is unknown, not absent.
+            let audioKind = try requiredFileKind(audioURL)
+            let metadataKind = try requiredFileKind(metadataURL)
+            if audioKind == .absent || metadataKind == .absent {
+                return .incomplete
+            }
+            throw PrepareError.accountingUnavailable
+        }
 
-        guard let audioData = try? Data(contentsOf: audioURL),
-            let metadataData = try? Data(contentsOf: metadataURL),
+        guard let audioData = try readIfPresent(audioURL),
+            let metadataData = try readIfPresent(metadataURL),
             let bound = try? VoiceSharingRecordBinding.bind(envelope: metadataData, audio: audioData)
-        else { return nil }
-        return bound
+        else { return .incomplete }
+        return .bound(bound)
+    }
+
+    private func boundEntryLocked(at entry: Entry) -> VoiceSharingRecordBinding.BoundEntry? {
+        // Lenient wrapper for cleanup/recovery contexts. Coverage-sensitive callers use
+        // entryStateLocked.
+        (try? entryStateLocked(at: entry))?.flatBound
     }
 
     private func isCompleteEntryLocked(at entry: Entry) -> Bool {
