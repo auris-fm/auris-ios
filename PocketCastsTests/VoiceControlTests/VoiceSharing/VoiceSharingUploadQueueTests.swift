@@ -2211,7 +2211,6 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
         XCTAssertTrue(FileManager.default.fileExists(atPath: settlementURL.path),
                       "the intent must be on disk after the failed barrier")
-        print("SETTLEMENT-CONTENT: \(try? String(contentsOf: settlementURL, encoding: .utf8) ?? "unreadable")")
         let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         try successor.applyAttemptResult(prep, lease: lease, outcome: .delivered)
         let settlementGone = !FileManager.default.fileExists(
@@ -2237,34 +2236,50 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_confirmedPhaseSurvivesFinalClearBarrierFailure() throws {
-        // Reviewer 3aa2b731 (2): clearSettlement must not remove the only recovery record before
-        // its barrier. The confirmed-phase WRITE is the durable completion; a failure removing the
-        // record afterwards leaves a state later retries still accept.
+        // Reviewer 737cba7c (3): arm relative to a captured BASELINE, and assert WHICH barrier
+        // failed and what phase is on disk — an absolute sync count can fail the intent barrier
+        // instead of the confirmed-phase one.
         let rootPath = root.path
         var rootSyncCount = 0
-        var failAfter = Int.max
+        var armAt: Int? = nil
         let owner = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             synchronizer: { url, isDirectory in
                 guard isDirectory, url.path == rootPath else { return }
                 rootSyncCount += 1
-                if rootSyncCount > failAfter { throw CocoaError(.fileWriteUnknown) }
+                if let armAt, rootSyncCount > armAt { throw CocoaError(.fileWriteUnknown) }
             })
         let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try owner.finalize(prep)
         let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let settlementURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
 
-        // Settlement proceeds: intent write (sync 1), removal barrier (sync 2), confirmed-phase
-        // write barrier (sync 3) FAILS => uncertain; confirmed file written + file-synced.
-        failAfter = 2
+        // Baseline: how many root syncs happen before this settlement starts. The settlement
+        // performs, in order: (a) intent write barrier, (b) entry-removal barrier,
+        // (c) confirmed-phase write barrier. Arming at baseline+2 fails exactly (c).
+        let baseline = rootSyncCount
+        armAt = baseline + 2
         XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
         }
-        // The confirmed record is on disk; a retry reconciles to SUCCESS without re-removing.
-        failAfter = Int.max
+        // Exactly three settlement root syncs were attempted, failing on the third (confirmed).
+        XCTAssertEqual(rootSyncCount, baseline + 3, "the CONFIRMED-phase barrier is the one that failed")
+        // The confirmed phase IS on disk despite the failed barrier: completion is recoverable.
+        let onDisk = try String(contentsOf: settlementURL, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("\"phase\":\"confirmed\""),
+                      "completion was durably recorded before the failing barrier, got \(onDisk)")
+        // RESTORED RETRY: the confirmed record is already durable, so the retry reconciles it
+        // (verify state, retire record) and succeeds without re-removing anything.
+        armAt = nil
         try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path),
+                       "confirmed record retired")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path),
+                       "confirmed record retired after reconciliation")
         XCTAssertFalse(owner.isAttemptInFlight(prep))
+        // The entry stays removed.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
     }
 
     func test_malformedIntentRefusesSettlementInsteadOfOverwriting() throws {
@@ -2291,6 +2306,79 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
         }
+    }
+
+    func test_confirmedRecordRejectsForeignGenerationAndContradictoryOutcome() throws {
+        // Reviewer 737cba7c (1): a SURVIVING confirmed record must not let a foreign token or a
+        // contradictory outcome claim success.
+        let rootPath = root.path
+        var armed = false
+        var rootSyncs = 0
+        var armAt: Int? = nil
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                guard isDirectory, url.path == rootPath else { return }
+                rootSyncs += 1
+                if let armAt, rootSyncs > armAt { throw CocoaError(.fileWriteUnknown) }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let settlementURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
+
+        // Leave a CONFIRMED record on disk by failing its confirmed-phase barrier.
+        let baseline = rootSyncs
+        armAt = baseline + 2
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered))
+        armAt = nil
+        XCTAssertTrue(try String(contentsOf: settlementURL, encoding: .utf8).contains("confirmed"))
+
+        // Foreign generation against a surviving confirmed record.
+        let foreign = VoiceSharingUploadQueue.AttemptLease(
+            generation: UUID().uuidString, acquiredAt: Date(), owner: Int32(getpid()))
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: foreign, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale,
+                           "a foreign token must not settle a surviving confirmed record")
+        }
+        // Contradictory outcome, correct generation.
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .settlementConflict,
+                           "a different outcome must not claim the recorded transition")
+        }
+        // The record survives both refusals; the correct retry then reconciles it.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: settlementURL.path))
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settlementURL.path))
+    }
+
+    func test_recoveryRetiresOnlyConfirmedRecordsAndNeverPending() throws {
+        // Reviewer 737cba7c (2): recovery must not touch a PENDING record (its owner/successor
+        // needs it) and must retire a CONFIRMED one whose state verifies.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let pendingEntry = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(pendingEntry)
+        _ = try owner.beginLeaseForTesting(pendingEntry)
+        // A PENDING record with the entry still present.
+        let pendingURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: pendingEntry.name))
+        try Data("{\"generation\":\"G\",\"outcome\":\"delivered\",\"owner\":1,\"phase\":\"pending\"}"
+            .utf8).write(to: pendingURL)
+
+        // A CONFIRMED record whose entry is gone.
+        let goneName = UUID().uuidString
+        let confirmedURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: goneName))
+        try Data("{\"generation\":\"G\",\"outcome\":\"delivered\",\"owner\":1,\"phase\":\"confirmed\"}"
+            .utf8).write(to: confirmedURL)
+
+        // A fresh instance's recovery runs on construction.
+        _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pendingURL.path),
+                      "recovery must never retire a PENDING record")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: confirmedURL.path),
+                       "recovery retires a CONFIRMED record whose state verifies")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
