@@ -2039,6 +2039,86 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(owner.isAttemptInFlight(prep))
     }
 
+    // MARK: Reconciliation across repeated settlement (reviewer 64629ed5)
+
+    func test_persistentRootSyncFailureStaysUncertainAcrossTwoSettlements() throws {
+        // Retry is a REPEAT of the durability barrier, not a shortcut around it: while the root
+        // barrier keeps failing, settlement keeps reporting uncertain and keeps ownership.
+        var failSync = false
+        let rootPath = root.path
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if failSync, isDirectory, url.path == rootPath { throw CocoaError(.fileWriteUnknown) }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        failSync = true
+        for round in 1...2 {
+            XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+                XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain,
+                               "round \(round): unconfirmed is uncertain")
+            }
+            XCTAssertTrue(owner.isAttemptInFlight(prep), "round \(round): ownership retained")
+        }
+        failSync = false
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(owner.isAttemptInFlight(prep))
+    }
+
+    func test_leaseRemovalThenSyncFailureThenRetryReconcilesWithoutResultStale() throws {
+        // Lease removal landed, entry-dir sync failed: the retained owner's RETRY must finish the
+        // settlement, not be told resultStale by its own successful earlier mutation.
+        var failSync = false
+        var failingDir: URL?
+        let owner2 = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if failSync, isDirectory, let target = failingDir, url.path == target.path {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            })
+        let prep = try owner2.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner2.finalize(prep)
+        let lease = try XCTUnwrap(owner2.beginLeaseForTesting(prep))
+        failingDir = root.appendingPathComponent(prep.name)
+
+        failSync = true
+        XCTAssertThrowsError(try owner2.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
+        }
+        XCTAssertTrue(owner2.isAttemptInFlight(prep))
+        // Retry: the lease file is gone but the sync now succeeds -> reconcile, release.
+        failSync = false
+        try owner2.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)
+        XCTAssertFalse(owner2.isAttemptInFlight(prep))
+        // Entry still present and attemptable by a fresh instance.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(try fresh.beginAttempt(prep), "fresh-owner recovery after reconciled retry")
+    }
+
+    func test_absentLeaseIsNotReconciledByAForeignHandle() throws {
+        // Absence reconciliation is reserved for the recorded owner: a different lease token must
+        // get resultStale even when no lease file exists.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let entryDir = root.appendingPathComponent(prep.name)
+        try FileManager.default.removeItem(at: entryDir.appendingPathComponent("attempt.lease"))
+
+        let foreign = VoiceSharingUploadQueue.AttemptLease(
+            generation: UUID().uuidString, acquiredAt: Date(), owner: Int32(getpid()))
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: foreign, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale)
+        }
+        // And the recorded owner still reconciles.
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)
+        XCTAssertFalse(owner.isAttemptInFlight(prep))
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

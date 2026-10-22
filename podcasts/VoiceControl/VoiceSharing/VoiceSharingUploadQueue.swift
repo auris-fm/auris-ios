@@ -58,7 +58,7 @@ final class VoiceSharingUploadQueue {
 
     /// Durable proof of attempt ownership. `generation` is the FENCE: identity, not elapsed time,
     /// is what stops a stale owner from releasing or completing a successor's work.
-    struct AttemptLease {
+    struct AttemptLease: Equatable {
         let generation: String
         let acquiredAt: Date
         let owner: Int32
@@ -619,23 +619,55 @@ final class VoiceSharingUploadQueue {
     /// refused — an old owner must not delete an entry a successor is now uploading.
     func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
         try serialQueue.sync {
-            let directory = entryDirectoryLocked(for: entry)
-            // IDEMPOTENT RE-SETTLEMENT: an earlier settlement may have removed the entry and then
-            // failed its durability confirmation. If the entry directory is gone, the removal DID
-            // land — re-applying is a success, not an error, and ownership is simply released.
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
-                  isDirectory.boolValue else {
-                inFlightAttempts.removeValue(forKey: entry)
-                return
-            }
+            // Reviewer 64629ed5: visible absence is not durable absence — fileExists(false) does
+            // not prove anything, and the durability barrier must be REPEATED, not skipped. All
+            // reconciliation happens under the stable root flock (the entry directory itself may
+            // already be gone), only for the caller still recorded as owner, and with real I/O
+            // failure distinguished from true absence via no-follow stat.
             let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
             defer { lock.close() }
             try lock.lockExclusive()
+            let directory = entryDirectoryLocked(for: entry)
+
+            switch Self.statKind(of: directory) {
+            case .failure:
+                // Cannot distinguish absence from I/O error: uncertain, ownership retained.
+                throw PrepareError.publicationUncertain
+            case .absent:
+                // A prior ENTRY removal plausibly landed but was never durably confirmed.
+                guard inFlightAttempts[entry] == lease else { throw PrepareError.resultStale }
+                do { try synchronizer(rootDirectory, true) } catch {
+                    throw PrepareError.publicationUncertain
+                }
+                inFlightAttempts.removeValue(forKey: entry)
+                return
+            case .present:
+                break
+            }
+
             let leaseURL = directory.appendingPathComponent(Self.attemptLeaseName)
-            guard let current = leaseOwnerLocked(at: leaseURL),
-                  current.generation == lease.generation else {
+            let current = leaseOwnerLocked(at: leaseURL)
+            if let held = current, held.generation != lease.generation {
                 throw PrepareError.resultStale
+            }
+            if current == nil {
+                let leaseStat = Self.statKind(of: leaseURL)
+                switch leaseStat {
+                case .failure:
+                    throw PrepareError.publicationUncertain
+                case .absent:
+                    // A prior LEASE-only removal plausibly landed but was never durably confirmed.
+                    // Only the recorded owner may reconcile: this must not accept another
+                    // instance's unrelated settlement.
+                    guard inFlightAttempts[entry] == lease else { throw PrepareError.resultStale }
+                    do { try synchronizer(directory, true) } catch {
+                        throw PrepareError.publicationUncertain
+                    }
+                    inFlightAttempts.removeValue(forKey: entry)
+                    return
+                case .present:
+                    throw PrepareError.resultStale
+                }
             }
             // A lock serializes transitions; it does NOT make failed filesystem operations succeed
             // or persist. Settlement failures propagate as UNCERTAIN and retain the caller's owner
