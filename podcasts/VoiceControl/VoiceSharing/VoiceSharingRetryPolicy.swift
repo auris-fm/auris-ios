@@ -17,6 +17,11 @@ import Foundation
 ///     header must not manufacture an immediate retry.
 ///   * Numeric values are compiled bounds, NOT owner-approved activation values.
 struct VoiceSharingRetryPolicy {
+    /// Compiled resource defaults (spec: `retry_initial_s` / `retry_max_s`, validated against
+    /// compiled ceilings). Production assembly uses these; controls inject smaller ones.
+    static let compiledInitialDelaySeconds: TimeInterval = 2
+    static let compiledMaximumDelaySeconds: TimeInterval = 60
+
     /// `retry_initial_s` (spec). Base of the exponential ceiling growth.
     let retryBaseDelay: TimeInterval
     /// `retry_max_s` (spec). Ceiling of the local jittered component only — never applied to a

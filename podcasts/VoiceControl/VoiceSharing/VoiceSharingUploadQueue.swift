@@ -895,6 +895,11 @@ final class VoiceSharingUploadQueue {
     /// synced BEFORE the error propagates, so a fresh instance re-derives the hold from disk
     /// instead of resuming an unbounded retry.
     static let retryHoldIntentName = "attempt.pause.intent"
+    /// The EXACT pending retry obligation (reviewer a29e62a2 / spec bb2a3fbf): entry identity AND
+    /// the original boundary, persisted BEFORE its owner is released. A scan of surviving stamps
+    /// cannot prove a failed stamp never existed — this record is what proves one did. Written
+    /// per entry as `attempt.obligation.<entryName>`.
+    static let obligationPrefix = "attempt.obligation."
     private var retryHoldLocked = false
 
     /// WRITE-AHEAD (reviewer 8ba9c45f): the pause intent is durably established BEFORE the
@@ -914,6 +919,39 @@ final class VoiceSharingUploadQueue {
             // uncertainty propagates rather than pretending the hold is durable.
             throw PrepareError.publicationUncertain
         }
+    }
+
+    /// Persists the per-entry retry obligation: `notBefore` (the ORIGINAL server minimum is
+    /// already inside it — computed once by the policy) is durable before the owner can release.
+    private func writeObligationLocked(_ boundary: Date, for entry: Entry) throws {
+        let url = rootDirectory.appendingPathComponent(Self.obligationPrefix + entry.name)
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["entry": entry.name,
+                             "notBefore": boundary.timeIntervalSince1970],
+            options: [.sortedKeys]) else {
+            throw PrepareError.accountingUnavailable
+        }
+        try failureRecordWriter(url, data)
+        try synchronizer(url, false)
+        try synchronizer(rootDirectory, true)
+    }
+
+    /// Bounded required-read of an obligation record. Unknown/oversized/malformed is UNKNOWN
+    /// (which holds) — it is never treated as absence.
+    private func readObligationLocked(_ entry: Entry) -> Double? {
+        let url = rootDirectory.appendingPathComponent(Self.obligationPrefix + entry.name)
+        switch Self.statKind(of: url) {
+        case .absent: return nil
+        case .failure: return .nan // unknown ⇒ caller holds
+        case .present: break
+        }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+            size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+            let data = try? Data(contentsOf: url),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let stamp = object["notBefore"] as? Double, stamp.isFinite
+        else { return .nan }
+        return stamp
     }
 
     /// BOUNDED RECONCILIATION (reviewer 3814f4be / spec c3175492): a fresh retry-held queue can
@@ -936,6 +974,23 @@ final class VoiceSharingUploadQueue {
                 rootDirectory, [], Self.maxDirectoryEntries), !listed.overflowed else {
                 retryHoldLocked = true
                 return false
+            }
+            // Obligations are proved too (reviewer a29e62a2): a scanned-stamp walk cannot prove
+            // a failed stamp never existed, so reconciliation checks the pending-obligation
+            // records — an unparseable one keeps the hold.
+            for url in listed.urls
+            where url.lastPathComponent.hasPrefix(Self.obligationPrefix) {
+                guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+                    let data = try? Data(contentsOf: url),
+                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    object["notBefore"] is Double,
+                    let entryName = object["entry"] as? String,
+                    UUID(uuidString: entryName) != nil
+                else {
+                    retryHoldLocked = true
+                    return false
+                }
             }
             for url in listed.urls where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
                 let name = url.lastPathComponent
@@ -993,12 +1048,30 @@ final class VoiceSharingUploadQueue {
     /// Refuses an attempt that is not yet due. Unreadable/unparseable state refuses (fail closed):
     /// a not-before we cannot read is not permission to proceed.
     private func refuseIfNotYetDueLocked(_ entry: Entry) throws {
+        // THE OBLIGATION IS AUTHORITATIVE (reviewer a29e62a2): a missing stamp does not mean no
+        // delay is owed — the obligation record proves it even when stamp publication failed.
+        if let owed = readObligationLocked(entry) {
+            if owed.isNaN { throw PrepareError.leaseHeld } // unknown ⇒ hold
+            if clock().timeIntervalSince1970 < owed {
+                throw PrepareError.leaseHeld
+            }
+            // Due: retire the obligation so it cannot outlive its purpose.
+            try? fileManager.removeItem(
+                at: rootDirectory.appendingPathComponent(Self.obligationPrefix + entry.name))
+            try? synchronizer(rootDirectory, true)
+        }
         let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entry.name))
-
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let stamp = object["notBefore"] as? Double
+        // REQUIRED-stat + bounded read (reviewer ce001b9a): no `fileExists`, no unbounded `Data`.
+        switch Self.statKind(of: url) {
+        case .absent: return
+        case .failure: throw PrepareError.leaseHeld
+        case .present: break
+        }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+            size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+            let data = try? Data(contentsOf: url),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let stamp = object["notBefore"] as? Double, stamp.isFinite
         else {
             throw PrepareError.leaseHeld
         }
@@ -1461,16 +1534,20 @@ final class VoiceSharingUploadQueue {
                 // because a released lease without its boundary is exactly the advisory-delay
                 // fail-open state this design forbids.
                 if let boundary = retryNotBefore {
-                    // 1. WRITE-AHEAD: hold intent durable BEFORE anything uncertain.
+                    // 1. WRITE-AHEAD THE EXACT OBLIGATION: entry identity + original boundary are
+                    // durable BEFORE the intent, stamp or anything else. If the stamp later fails
+                    // to land, this record still proves a delay was owed (reviewer a29e62a2).
+                    try writeObligationLocked(boundary, for: entry)
+                    // 2. Owner-wide hold marker, also write-ahead.
                     try engageRetryHoldLocked()
-                    // 2. Boundary publication. On failure the hold (memory + disk) stands and the
+                    // 3. Boundary publication. On failure the hold (memory + disk) stands and the
                     // uncertainty propagates; the lease is NOT released.
                     do {
                         try publishNotBeforeLocked(boundary, for: entry)
                     } catch {
                         throw PrepareError.publicationUncertain
                     }
-                    // 3. Release, then clear the hold — a failed clear keeps the hold (fail closed).
+                    // 4. Release, then clear — a failed clear keeps the hold (fail closed).
                     do {
                         try fileManager.removeItem(at: leaseURL)
                         try confirmLeaseRemovalDurability()
@@ -2396,6 +2473,13 @@ final class VoiceSharingUploadQueue {
                 // one on the next launch — exactly what the reviewer rejected.
                 if name.hasPrefix(Self.notBeforePrefix),
                    UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) != nil {
+                    continue
+                }
+                // Retry obligations are the SAME class (reviewer a29e62a2): the write-ahead proof
+                // that a delay was owed. Sweeping one on restart erases the only record of the
+                // original server minimum.
+                if name.hasPrefix(Self.obligationPrefix),
+                   UUID(uuidString: String(name.dropFirst(Self.obligationPrefix.count))) != nil {
                     continue
                 }
                 try? fileManager.removeItem(at: stray)

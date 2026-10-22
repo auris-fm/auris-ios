@@ -72,6 +72,33 @@ class VoiceControlAssembly {
         let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
         try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
         let contributionQueue = VoiceSharingUploadQueue(rootDirectory: queueRoot)
+        // PRODUCTION WIRE (spec 18:38Z): the real transport (bearer credential + the configured
+        // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
+        // The whole chain sits behind the live authorization gate, so nothing here can mint a
+        // request without eligibility AND a credential — and the surface itself is still compiled
+        // OFF (VoiceSharingSettingsModel.surfaceEnabled == false): no caller invokes drains yet.
+        let uploadTransport = VoiceSharingUploadTransport(
+            baseURLProvider: { CloudConfig.shared.baseUrl },
+            tokenProvider: CloudTokenProviderRouter.provider())
+        let uploadUploader = VoiceSharingUploader(
+            queue: contributionQueue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
+                retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
+                random: { Double.random(in: 0...1) }),
+            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            endpoint: { uploadTransport.endpoint },
+            transport: { [uploadTransport] request in
+                await uploadTransport.send(request: request)
+            })
+        let uploadScheduler = VoiceSharingUploadScheduler(
+            queue: contributionQueue,
+            uploader: uploadUploader,
+            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection })
+        // Wired but NOT invoked: no production caller drains yet (the surface is compiled off and
+        // activation is owner-gated). The wire exists so activation cannot outpace the reviewed
+        // path; retaining the reference keeps the chain alive for that future caller.
+        _ = uploadScheduler
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },

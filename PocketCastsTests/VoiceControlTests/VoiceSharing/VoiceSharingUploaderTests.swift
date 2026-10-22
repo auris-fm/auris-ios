@@ -649,6 +649,60 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(reconciler.readyEntries().isEmpty)
     }
 
+    /// Reviewer a29e62a2's exact scenario: the STAMP writer fails but the write-ahead obligation
+    /// carries the original 600s server minimum. Two restarts hold; reconciliation cannot lift it
+    /// into an early retry; the entry stays refused until the boundary passes.
+    func test_stampFailureKeepsTheOriginalMinimumThroughReconciliation() throws {
+        let entry = try makeReadyEntry()
+        let stampFails = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try stampFails.admitAttempt(entry))
+        XCTAssertThrowsError(try stampFails.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(600)))
+        // The obligation SURVIVED even though the stamp never landed.
+        let rootListing = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertTrue(rootListing.contains { $0.hasPrefix(VoiceSharingUploadQueue.obligationPrefix) },
+                      "obligation file must exist; got \(rootListing)")
+        let fresh1 = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertThrowsError(try fresh1.admitAttempt(entry)) { error in
+            // The owner-wide hold refuses first (accountingUnavailable); the per-entry obligation
+            // boundary is what keeps refusing AFTER the hold lifts (asserted below).
+            XCTAssertEqual(
+                error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+        }
+        _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init) // second restart
+        // Reconciliation may lift the owner-wide marker (state is provable)...
+        let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        _ = reconciler.reconcileRetryHold()
+        // ...but the ORIGINAL MINIMUM still refuses early attempts.
+        XCTAssertThrowsError(try reconciler.admitAttempt(entry)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .leaseHeld,
+                           "reconciliation must not convert a 600s minimum into an early retry")
+        }
+    }
+
+    /// 410 carries either owning code: record_gone or enrollment_retired.
+    func test_410AcceptsBothOwningCodes() async throws {
+        for code in ["record_gone", "enrollment_retired"] {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: 410, body: Data(
+                    "{\"schema_version\":1,\"code\":\"\(code)\"}".utf8))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .abandoned = outcome else {
+                return XCTFail("410+\(code) must abandon, got \(outcome)")
+            }
+        }
+    }
+
     /// A strict receipt parser: every required field, or nothing.
     func test_receiptParsingIsStrict() throws {
         let good = receiptBody(captureID: "c", recordSHA: String(repeating: "a", count: 64))

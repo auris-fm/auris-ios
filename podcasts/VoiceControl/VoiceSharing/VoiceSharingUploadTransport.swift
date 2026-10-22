@@ -62,7 +62,7 @@ final class VoiceSharingUploadTransport {
         return try await withThrowingTaskGroup(
             of: (HTTPURLResponse, Data)?.self
         ) { group in
-            group.addTask { [transferTask, deadlineTask] in
+            group.addTask { [transferTask, deadlineTask] () -> (HTTPURLResponse, Data)? in
                 let outcome = try await transferTask.value
                 // Transfer decided: release the deadline sleeper immediately. It is a SEPARATE
                 // top-level task, so group cancellation cannot reach it — only this explicit
@@ -71,21 +71,27 @@ final class VoiceSharingUploadTransport {
                 deadlineTask.cancel()
                 return outcome
             }
-            group.addTask { [transferTask] in
+            group.addTask { [transferTask] () -> (HTTPURLResponse, Data)? in
+                var timedOut = true
                 do {
                     _ = try await deadlineTask.value
+                } catch is CancellationError {
+                    // The LOSER's cancellation (the transfer finished first and released the
+                    // timer) is NOT a timeout (reviewer a29e62a2): a successful transfer must
+                    // never race into transportFailure through this child.
+                    timedOut = false
                 } catch {
-                    // The deadline (or its own cancellation) fired: kill the underlying URL
-                    // transfer FIRST so the transfer child can actually finish.
+                    // REAL deadline expiry: kill the underlying URL transfer FIRST so the
+                    // transfer child can actually finish, then report the timeout.
                     transferTask.cancel()
-                    if !Task.isCancelled { throw error }
-                    return nil
+                    timedOut = true
                 }
-                transferTask.cancel()
-                throw URLError(.timedOut)
+                if timedOut { throw URLError(.timedOut) }
+                return nil
             }
             guard let first = try await group.next() else { return nil }
             group.cancelAll()
+            if first == nil { return nil } // violation path: no fabricated answer
             return first
         }
     }

@@ -166,7 +166,10 @@ final class VoiceSharingUploader {
                 // unrelated code under a terminal-looking status is NOT proof; it retains.
                 // 400 invalid_request, 409 capture_conflict, 410 record_gone/enrollment_retired,
                 // 413 payload_too_large, 415 unsupported_audio, 422 integrity_mismatch.
-                guard Self.errorCode(body) == Self.owningCode[statusCode] else {
+                let code = Self.errorCode(body)
+        let owning = code == Self.owningCode[statusCode]
+            || (statusCode == 410 && code == "enrollment_retired")
+        guard owning else {
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "terminal status with non-owning body")
                 }
