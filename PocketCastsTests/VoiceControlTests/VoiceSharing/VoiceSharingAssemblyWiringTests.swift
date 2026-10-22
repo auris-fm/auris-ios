@@ -465,6 +465,9 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             return accepted(request)
         }
         defer { AssemblyIntercept.responder = nil }
+        // An early failing guard must not strand the held first response (which would hang the URL
+        // session for the whole deadline). Release is idempotent.
+        defer { releaseFirst.release() }
         let firstDrain = Task { await chain.scheduler.drainOnce() }
         let start = Date()
         while AssemblyIntercept.requestCount == 0, Date().timeIntervalSince(start) < 5 {
@@ -510,6 +513,90 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "exactly one request: the successor added none")
         XCTAssertTrue(chain.queue.readyEntries().contains { $0.name == entry.name },
                       "the entry is retained: the late success did not complete it")
+    }
+
+    /// Applies an authoritative server projection through the store's REAL fenced path: a token is
+    /// captured first, as the production read path does, then the projection is applied under it.
+    private func applyMembership(
+        to store: VoiceSharingEnrollmentStore, revision: String, epoch: String
+    ) throws {
+        let token = try XCTUnwrap(store.projectionToken(), "no session generation for the fence")
+        let applied = store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: revision,
+                plan: .free,
+                voiceSharingEnrolled: true,
+                enrollmentEpoch: epoch,
+                acceptedDisclosureVersion: "v1",
+                withdrawalState: .active),
+            readUnder: token)
+        XCTAssertTrue(applied, "the store must accept an authoritative projection under a live token")
+        store.setLocalOptIn(true)
+    }
+
+    /// AUTH CHAIN FED BY REAL IDENTITY (spec 65fc3c75): the retry decision must consult what the
+    /// REAL authorization path folds on — the account scope plus the server-issued enrollment
+    /// epoch, as held by `VoiceSharingEnrollmentStore` — not an injected boolean only the fixture
+    /// understands.
+    ///
+    /// Sequence: attempt 1 gets a 401 and the entry is retained; the account's epoch then moves
+    /// BEFORE the back-off elapses; the next pass must not send the retained entry.
+    func test_retryIsBlockedAfterTheAccountEpochMoves() async throws {
+        let suite = "auth-chain-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        var accountID = "acct-A"
+        let store = VoiceSharingEnrollmentStore(
+            defaults: defaults,
+            accountScopeProvider: { accountID },
+            sessionIdentityProvider: { "gen-1" })
+        try applyMembership(to: store, revision: "rev-1", epoch: "epoch-1")
+        XCTAssertEqual(store.activeEnrollmentEpoch, "epoch-1",
+                       "precondition: the server epoch backs collection")
+
+        // The authority the retry must respect: account scope + epoch, read from the REAL store.
+        func authority() -> String? {
+            guard let epoch = store.activeEnrollmentEpoch else { return nil }
+            return "\(accountID)|\(epoch)"
+        }
+        let pinned = authority()
+        XCTAssertEqual(pinned, "acct-A|epoch-1")
+
+        var now = Date()
+        let chain = makeChain(
+            policyPermits: { store.currentEffectiveEnrolled && authority() == pinned },
+            tokenProvider: StaticTokenProvider(token: "tok"),
+            attemptLimits: .init(maxUploadAttempts: 4),
+            now: { now })
+        let entry = try makeReadyEntry(chain.queue)
+        var attempts = 0
+        AssemblyIntercept.responder = { request in
+            attempts += 1
+            if attempts == 1 {
+                return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                        httpVersion: nil, headerFields: nil)!, Data())
+            }
+            return Self.acceptedReceiptResponder()(request)
+        }
+        defer { AssemblyIntercept.responder = nil }
+
+        _ = await chain.scheduler.drainOnce()
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
+
+        // The account's epoch moves: same account, re-enrolled under a new epoch.
+        try applyMembership(to: store, revision: "rev-2", epoch: "epoch-2")
+        XCTAssertEqual(authority(), "acct-A|epoch-2", "the identity really moved")
+        XCTAssertEqual(store.activeEnrollmentEpoch, "epoch-2")
+
+        // Past the back-off: the retained entry must not be sent under the old authority.
+        now = now.addingTimeInterval(500)
+        let secondPass = await chain.scheduler.drainOnce()
+        guard case .idle = secondPass else {
+            return XCTFail("a moved account/epoch must hold the retry, got \(secondPass)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "no second request under the previous identity's authority")
+        XCTAssertTrue(chain.queue.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained: neither sent nor dropped")
     }
 
     /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
