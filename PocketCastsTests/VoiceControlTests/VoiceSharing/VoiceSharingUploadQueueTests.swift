@@ -1897,6 +1897,38 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        VoiceSharingUploadQueue.rootLeaseLockName(for: sample))
     }
 
+    func test_concurrentAttemptRecordingLosesNoCounts() throws {
+        // Reviewer da806c31 follow-through: attempts.json read-increment-write was a lost-update
+        // race across instances. N concurrent recorders must yield exactly N.
+        let setup = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try setup.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try setup.finalize(prep)
+
+        let recorders = (0..<12).map { _ in
+            VoiceSharingUploadQueue(
+                rootDirectory: root, clock: Date.init,
+                aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 100))
+        }
+        let barrier = DispatchGroup()
+        let failures = LockedBox<[Error]>([])
+        for queue in recorders { barrier.enter() }
+        for queue in recorders {
+            DispatchQueue.global().async {
+                barrier.wait()
+                do { try queue.recordAttempt(prep) } catch { failures.mutate { $0.append(error) } }
+            }
+            barrier.leave()
+        }
+        barrier.wait()
+        let deadline = Date().addingTimeInterval(2)
+        while failures.value.count + 0 < recorders.count, Date() < deadline { usleep(10_000) }
+        // Every increment must be counted: no lost updates, none refused by a stale read.
+        XCTAssertEqual(try setup.attemptCount(for: prep), recorders.count,
+                       "N concurrent recorders must produce exactly N counted attempts")
+        XCTAssertTrue(failures.value.isEmpty, "unexpected failures: \(failures.value)")
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

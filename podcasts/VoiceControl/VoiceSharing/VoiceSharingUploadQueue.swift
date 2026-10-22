@@ -683,6 +683,12 @@ final class VoiceSharingUploadQueue {
     /// for the attempt rather than permitting an uncounted request.
     private func recordAttemptLocked(_ entry: Entry) throws {
         let directory = try validatedEntryDirectoryLocked(entry)
+        // Read-increment-write is a lost-update race across instances: two could read the same
+        // count and both write the same "next", spending one attempt for two requests. The whole
+        // transition serializes under the SAME per-entry flock the lease uses.
+        let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
+        defer { lock.close() }
+        try lock.lockExclusive()
         let current = try attemptCountLocked(for: entry)
         // Every increment path enforces the limit, not only `beginAttempt`.
         guard current < attemptLimits.maxUploadAttempts else {
