@@ -1,5 +1,6 @@
 import AVFoundation
 import PocketCastsDataModel
+import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
@@ -80,6 +81,17 @@ class VoiceControlAssembly {
         // The whole chain sits behind the live authorization gate, so nothing here can mint a
         // request without eligibility AND a credential — and the surface itself is still compiled
         // OFF (VoiceSharingSettingsModel.surfaceEnabled == false): no caller invokes drains yet.
+        // IDENTITY PIN (spec 724577f3 / reviewer d9e99a5e): `permitsCollection` answers "may this
+        // account collect NOW", which is not the question a queued entry asks. An entry queued
+        // under one enrollment epoch must not be uploaded after the account's epoch moves, even
+        // when the new epoch also permits collection. The pin is sampled from the SAME store the
+        // policy folds on, so account switch and re-enrollment both invalidate it.
+        let uploadIdentityPin = VoiceSharingUploadIdentityPin(
+            accountScope: { ServerSettings.userId ?? "signed-out" },
+            enrollmentEpoch: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
+        let uploadAuthorized: () -> Bool = {
+            VoiceSharingCoordinator.shared.policy.permitsCollection && uploadIdentityPin.isCurrent
+        }
         let uploadTransport = VoiceSharingUploadTransport(
             baseURLProvider: { CloudConfig.shared.baseUrl },
             tokenProvider: CloudTokenProviderRouter.provider())
@@ -89,7 +101,7 @@ class VoiceControlAssembly {
                 retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
                 retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
                 random: { Double.random(in: 0...1) }),
-            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            isAuthorized: uploadAuthorized,
             endpoint: { uploadTransport.endpoint },
             transport: { [uploadTransport] request in
                 await uploadTransport.send(request: request)
@@ -97,7 +109,7 @@ class VoiceControlAssembly {
         let uploadScheduler = VoiceSharingUploadScheduler(
             queue: contributionQueue,
             uploader: uploadUploader,
-            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection })
+            isAuthorized: uploadAuthorized)
         // GUARDED TRIGGER WIRING (spec 55f636fe): the lifecycle trigger is the production caller,
         // but it is unreachable while `VoiceSharingSettingsModel.surfaceEnabled` is false — and
         // the live policy gate is re-read at every trigger. Flipping the constant is an owner
@@ -106,7 +118,7 @@ class VoiceControlAssembly {
         let uploadTrigger = VoiceSharingUploadTrigger(
             scheduler: uploadScheduler,
             surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
-            isAuthorized: { VoiceSharingCoordinator.shared.policy.permitsCollection })
+            isAuthorized: uploadAuthorized)
         // A retained reference keeps the notification observer alive for the app's lifetime.
         self.voiceSharingUploadTrigger = uploadTrigger
         let contributionSink = VoiceSharingContributionSink(

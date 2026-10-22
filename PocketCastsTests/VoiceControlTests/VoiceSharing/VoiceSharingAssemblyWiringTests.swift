@@ -599,6 +599,33 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                       "the entry is retained: neither sent nor dropped")
     }
 
+    /// THE PRODUCTION PIN (spec 724577f3): `VoiceSharingUploadIdentityPin` is the type the assembly
+    /// now uses. It must invalidate on an epoch move, on an account switch, and stay invalid when no
+    /// epoch is known — and it must do so by itself, with no fixture-supplied closure.
+    func test_identityPinInvalidatesOnEpochMoveAndAccountSwitch() {
+        var account = "acct-A"
+        var epoch: String? = "epoch-1"
+        let pin = VoiceSharingUploadIdentityPin(
+            accountScope: { account }, enrollmentEpoch: { epoch })
+        XCTAssertTrue(pin.isCurrent, "the identity it was pinned under is the live one")
+
+        epoch = "epoch-2"
+        XCTAssertFalse(pin.isCurrent, "a re-enrollment under a new epoch must invalidate the pin")
+
+        epoch = "epoch-1"
+        account = "acct-B"
+        XCTAssertFalse(pin.isCurrent,
+                       "another account's identical epoch string must not satisfy the pin")
+
+        // Unknown epoch is never a valid identity — fail closed rather than pin to "no epoch".
+        epoch = nil
+        let unknown = VoiceSharingUploadIdentityPin(
+            accountScope: { account }, enrollmentEpoch: { epoch })
+        XCTAssertFalse(unknown.isCurrent, "an absent epoch cannot authorize uploads")
+        epoch = ""
+        XCTAssertFalse(unknown.isCurrent, "an empty epoch cannot authorize uploads")
+    }
+
     /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network
     /// activity, entries untouched.
     func test_noRequestWithoutEligibility() async throws {
