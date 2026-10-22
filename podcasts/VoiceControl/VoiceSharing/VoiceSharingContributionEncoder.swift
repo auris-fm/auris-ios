@@ -33,7 +33,7 @@ enum VoiceSharingContributionEncoder {
         let platform: String
         let appVersion: String
         let build: String
-        let captureSessionID: String
+        var captureSessionID: String
         let models: Models
         /// Conversion pipeline version for float→PCM s16le. Compiled, NOT an activation value.
         let conversionVersion: Int

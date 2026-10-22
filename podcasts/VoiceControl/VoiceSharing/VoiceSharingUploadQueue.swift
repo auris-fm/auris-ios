@@ -368,6 +368,64 @@ final class VoiceSharingUploadQueue {
         }
     }
 
+    /// Consent revocation between prepare and finalize: removes an UNREADY entry, releasing its
+    /// charge. A ready entry is refused (publication goes through the settlement protocol, never
+    /// an unowned delete), a foreign handle is a refusal, and a cleanup FAILURE throws with the
+    /// entry left in place — retained, still charged, never silently "gone".
+    @discardableResult
+    func discardUnready(_ entry: Entry) throws -> Bool {
+        try serialQueue.sync {
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/")
+            else { throw CocoaError(.fileNoSuchFile) }
+            let directory = try validatedEntryDirectoryLocked(entry)
+            switch Self.statKind(of: directory.appendingPathComponent(Self.readyMarkerName)) {
+            case .present:
+                return false
+            case .failure:
+                throw PrepareError.accountingUnavailable
+            case .absent:
+                break
+            }
+            do {
+                try fileManager.removeItem(at: directory)
+            } catch {
+                // Cleanup failure: the entry REMAINS (charged, unready). Never collapse into gone.
+                throw PrepareError.accountingUnavailable
+            }
+            return true
+        }
+    }
+
+    /// Consent revocation (withdrawal, sign-out, switch-off, lease loss): removes EVERY entry —
+    /// ready, unready or disqualified — together with its root-level bookkeeping (settlement
+    /// records). The stable lock pool and the root itself are NOT removed. In-memory attempt state
+    /// is cleared under the serial queue. Removal failures leave the offending entry in place
+    /// (still charged) and are counted in the result; they never abort the whole purge.
+    func purgeAll() -> (removed: Int, retainedFailures: Int) {
+        serialQueue.sync {
+            var removed = 0
+            var failures = 0
+            let listing = (try? fileManager.contentsOfDirectory(
+                at: rootDirectory, includingPropertiesForKeys: nil)) ?? []
+            for item in listing {
+                let name = item.lastPathComponent
+                let isEntry = UUID(uuidString: name) != nil
+                let isSettlement = Self.parseSettlementName(name) != nil
+                guard isEntry || isSettlement else { continue }
+                if (try? fileManager.removeItem(at: item)) != nil {
+                    removed += 1
+                } else {
+                    failures += 1
+                }
+            }
+            inFlightAttempts.removeAll()
+            uncertainEntriesLocked.removeAll()
+            return (removed, failures)
+        }
+    }
+
     /// Atomically marks a prepared entry ready AFTER its bytes are durable: audio and metadata are
     /// synchronized, then the entry directory is synchronized, and only then is the marker written
     /// (atomic replace) and synchronized. A crash before the marker leaves an unready entry that

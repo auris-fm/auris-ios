@@ -51,16 +51,74 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         ]
     }
 
+    func test_gateClosedBetweenPrepareAndFinalizeDiscardsTheUnreadyEntry() throws {
+        // Reviewer 5357d089: the gate must be re-checked after prepare — consent loss during the
+        // queue transaction must not publish. The gate flips closed on its THIRD read (encode,
+        // prepare, finalize), so the entry exists but must never become ready.
+        var calls = 0
+        let sink = VoiceSharingContributionSink(
+            queue: queue,
+            isEnabled: {
+                calls += 1
+                return calls <= 2
+            },
+            encoderProvenance: { [self] in provenance },
+            observations: { [self] in observations })
+        lastSink = sink
+        sink.handle(event())
+        // DRAIN, then assert: the worker must have FINISHED the full transaction (including the
+        // post-prepare revocation check), not merely "not started yet" — an early-empty poll
+        // would mask a mutant that skips the check entirely.
+        drain()
+        let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(leftover.count, 0,
+                       "revocation between prepare and finalize must discard the unready entry")
+    }
+
+    func test_purgeAllRemovesEveryEntryAndRootBookkeeping() throws {
+        makeSink().handle(event())
+        makeSink().handle(event())
+        for _ in 0..<100 {
+            if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+                ready.count == 2 { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 2)
+        let result = queue.purgeAll()
+        XCTAssertEqual(result.removed, 2)
+        XCTAssertEqual(result.retainedFailures, 0)
+        let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(leftover.count, 0, "no entry or bookkeeping survives consent revocation")
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known after purge")
+        }
+        XCTAssertEqual(after.count, 0)
+    }
+
+    /// Last sink instance used by the current test — the drain seam needs it.
+    private var lastSink: VoiceSharingContributionSink?
+
+    private func drain() {
+        lastSink?.waitForIdleForTesting()
+    }
+
     private func makeSink() -> VoiceSharingContributionSink {
-        VoiceSharingContributionSink(
-            queue: queue, isEnabled: { self.enabled },
-            encoderProvenance: provenance, observations: { self.observations })
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { [weak self] in self?.enabled ?? false },
+            encoderProvenance: { [weak self] in self!.provenance },
+            observations: { [weak self] in self!.observations })
+        lastSink = sink
+        return sink
     }
 
     func test_completedEventBecomesAReadyDurableQueueEntry() throws {
         let sink = makeSink()
         let e = event()
         sink.handle(e)
+        drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("the queue must report known coverage after a gated contribution")
         }
@@ -76,20 +134,23 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
                        SHA256.hash(data: audioData).map { String(format: "%02x", $0) }.joined())
     }
 
-    func test_disabledGateProducesNoQueueEntry() {
+    func test_disabledGateProducesNoQueueEntry() throws {
         enabled = false
         makeSink().handle(event())
+        drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
         XCTAssertEqual(ready.count, 0, "a disabled gate must not mint upload work")
     }
 
-    func test_reEnablingTheGateResumesCollection() {
+    func test_reEnablingTheGateResumesCollection() throws {
         enabled = false
         makeSink().handle(event())
+        drain()
         enabled = true
         makeSink().handle(event())
+        drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
@@ -99,6 +160,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     func test_tamperedPersistedAudioNeverServes() throws {
         let sink = makeSink()
         sink.handle(event())
+        drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
@@ -122,8 +184,11 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         bad["wake"] = .init(state: "failed", reason: "definitely-not-enumerated")
         let sink = VoiceSharingContributionSink(
             queue: queue, isEnabled: { true },
-            encoderProvenance: provenance, observations: { bad })
+            encoderProvenance: { [weak self] in self!.provenance },
+            observations: { bad })
+        lastSink = sink
         sink.handle(event())
+        drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }

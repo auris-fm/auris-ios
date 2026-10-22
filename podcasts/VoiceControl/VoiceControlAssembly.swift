@@ -75,13 +75,15 @@ class VoiceControlAssembly {
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },
-            encoderProvenance: VoiceSharingContributionEncoder.Provenance(
-                platform: "ios",
-                appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
-                build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-                captureSessionID: UUID().uuidString,
-                models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
-                conversionVersion: 1))
+            encoderProvenance: {
+                VoiceSharingContributionEncoder.Provenance(
+                    platform: "ios",
+                    appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                    build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                    captureSessionID: UUID().uuidString,
+                    models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+                    conversionVersion: 1)
+            })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             sink: { event in
@@ -91,9 +93,13 @@ class VoiceControlAssembly {
         asrEngine.contributionCollector = contributionCollector
         // The COLLECTOR owns its registration: a held sink or queued drain can keep the collector
         // alive after the engine is gone, and that collector must still be purged at consent loss.
+        // Consent loss purges BOTH holders of retained contribution state: the collector's
+        // in-memory capture/FIFO, and the durable queue (any entry prepared before the gate
+        // closed, ready or not). Cleanup failures inside purge leave entries retained + charged.
         contributionCollector.gateLostSubscription =
             VoiceSharingCoordinator.shared.registerGateLostHandler { [weak contributionCollector] in
                 contributionCollector?.gateLost()
+                _ = contributionQueue.purgeAll()
             }
 
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
