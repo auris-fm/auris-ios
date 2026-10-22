@@ -88,8 +88,8 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         }
         XCTAssertEqual(ready.count, 2)
         let result = queue.purgeAll()
-        XCTAssertEqual(result.removed, 2)
-        XCTAssertEqual(result.retainedFailures, 0)
+        XCTAssertEqual(result?.removed, 2)
+        XCTAssertEqual(result?.retainedDisqualified, 0)
         let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
         XCTAssertEqual(leftover.count, 0, "no entry or bookkeeping survives consent revocation")
         guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
@@ -99,7 +99,107 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     }
 
     /// Last sink instance used by the current test — the drain seam needs it.
+    /// Last sink instance used by the current test — the drain seam needs it.
     private var lastSink: VoiceSharingContributionSink?
+
+    func test_pendingBoundHoldsWhileWorkerIsBlocked() {
+        // Reviewer 5b1ba089: the bound must be enforced BEFORE enqueue (the serialized worker
+        // block can never see more than one). Block the worker, submit max+5, assert exactly
+        // max accepted.
+        let sink = makeSink()
+        let blocked = XCTestExpectation(description: "worker blocked")
+        let release = NSCondition()
+        var firstBlock = true
+        sink.testingWorkerGate = {
+            guard firstBlock else { return }
+            firstBlock = false
+            blocked.fulfill()
+            release.lock()
+            release.wait()
+            release.unlock()
+        }
+        for _ in 0..<(VoiceSharingContributionSink.maxPendingEvents + 5) {
+            sink.handle(event())
+        }
+        // While the worker is blocked, 20 closures are queued; only 15 more slots exist, so the
+        // last 5 submissions must have been refused at ENQUEUE time.
+        release.lock(); release.broadcast(); release.unlock()
+        sink.waitForIdleForTesting()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, VoiceSharingContributionSink.maxPendingEvents,
+                       "the bound, not the queue's own limits, must cap pending events")
+    }
+
+    func test_eventQueuedUnderSupersededAuthorizationNeverPublishes() {
+        // Prior-epoch binding: capture the event while the gate is open at generation 0, revoke
+        // BEFORE the worker processes it (worker blocked), then release. The stale-authorization
+        // event must never publish even though the gate boolean still reads true.
+        let sink = makeSink()
+        let blockedInWorker = XCTestExpectation(description: "blocked")
+        var releaseGate = false
+        let cond = NSCondition()
+        sink.testingWorkerGate = {
+            cond.lock()
+            while !releaseGate { cond.wait() }
+            cond.unlock()
+            blockedInWorker.fulfill()
+        }
+        sink.handle(event()) // enqueued, generation 0
+        sink.noteRevocation() // generation 1 — BEFORE processing
+        cond.lock(); releaseGate = true; cond.broadcast(); cond.unlock()
+        wait(for: [blockedInWorker], timeout: 5)
+        sink.waitForIdleForTesting()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 0,
+                       "a queued event from a superseded authorization must never publish")
+    }
+
+    func test_purgeDisqualifiesEntriesWhoseRemovalFails() throws {
+        makeSink().handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+              let name = ready.first?.name else { return XCTFail("expected one ready entry") }
+        // Deterministic, DAMAGE-FREE removal failure: the injected fileManager refuses removal of
+        // the ENTRY directory (real storage would fail mid-recursion and partially delete
+        // children, which would make any "still complete" assertion vacuous).
+        final class EntryRemovalRefusingFM: FileManager {
+            var refuse = true
+            override func removeItem(at URL: URL) throws {
+                if refuse, UUID(uuidString: URL.lastPathComponent) != nil {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try super.removeItem(at: URL)
+            }
+        }
+        let refusingFM = EntryRemovalRefusingFM()
+        let refusingQueue = VoiceSharingUploadQueue(
+            rootDirectory: root, fileManager: refusingFM, clock: Date.init)
+        refusingFM.refuse = true
+        let result = refusingQueue.purgeAll()
+        refusingFM.refuse = false // allow tearDown cleanup
+        XCTAssertEqual(result?.removed, 0)
+        XCTAssertEqual(result?.retainedDisqualified, 1,
+                       "a removal failure must be reported, never collapsed into success")
+        // NON-VACUITY: the retained entry is structurally COMPLETE — the ONLY reason it cannot
+        // serve is the durable disqualification marker written by the purge.
+        let entryDir = root.appendingPathComponent(name)
+        let contents = try FileManager.default.contentsOfDirectory(atPath: entryDir.path)
+        XCTAssertEqual(
+            contents.filter { ["audio.wav", "metadata.json", "created.at", "ready.marker"].contains($0) }.count,
+            4, "the retained entry must be structurally complete — otherwise this control proves nothing")
+        XCTAssertEqual(contents.filter { $0.hasPrefix("publication.failed") }.count, 1,
+                       "the disqualification marker must be durably present")
+        // The query on a FRESH queue (production recovery authority) must not serve it.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .known(let after) = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known after purge")
+        }
+        XCTAssertEqual(after.count, 0, "a disqualified retained entry never serves")
+    }
 
     private func drain() {
         lastSink?.waitForIdleForTesting()

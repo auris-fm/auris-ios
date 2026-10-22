@@ -368,6 +368,17 @@ final class VoiceSharingUploadQueue {
         }
     }
 
+    /// Measured, NON-CONSUMING admission check for callers that must refuse before allocating
+    /// (the contribution sink encodes its WAV copies only if the budget can carry the worst-case
+    /// entry). `prepare` remains the exact authority at write time.
+    func hasAdmissionAllowance(forBytes: Int) -> Bool {
+        serialQueue.sync {
+            guard let usage = try? storedUsageLocked() else { return false }
+            return usage.bytes + forBytes <= aggregateLimits.maxBytes
+                && usage.records < aggregateLimits.maxRecords
+        }
+    }
+
     /// Consent revocation between prepare and finalize: removes an UNREADY entry, releasing its
     /// charge. A ready entry is refused (publication goes through the settlement protocol, never
     /// an unowned delete), a foreign handle is a refusal, and a cleanup FAILURE throws with the
@@ -403,26 +414,69 @@ final class VoiceSharingUploadQueue {
     /// records). The stable lock pool and the root itself are NOT removed. In-memory attempt state
     /// is cleared under the serial queue. Removal failures leave the offending entry in place
     /// (still charged) and are counted in the result; they never abort the whole purge.
-    func purgeAll() -> (removed: Int, retainedFailures: Int) {
+    /// Consent revocation purge — FAIL-EXPLICIT, bounded, durable (reviewer 5b1ba089):
+    ///   * Bounded listing with explicit overflow: an unbounded or collapsed listing failure
+    ///     REFUSES the purge (`nil` result) instead of masquerading as "nothing to remove".
+    ///   * A settlement record is removed only AFTER its entry's removal SUCCEEDED — evidence
+    ///     must never outlive-or-orphan wrongly: entry first, then its settlement proof.
+    ///   * An entry whose removal FAILS is DISQUALIFIED in place (`publication.failed` disposal
+    ///     intent): it can never serve after restart, and it stays charged.
+    ///   * The root directory is synchronized AFTER the removals, so a crash cannot resurrect a
+    ///     purged recording from a stale directory entry.
+    func purgeAll() -> (removed: Int, retainedDisqualified: Int)? {
         serialQueue.sync {
+            let listing: [URL]
+            do {
+                let (urls, overflowed) = try listDirectoryBounded(
+                    rootDirectory, [.isDirectoryKey], Self.maxQueueEntries * 4)
+                if overflowed { return nil }
+                listing = urls
+            } catch {
+                // Listing failure is NOT "nothing to remove": refuse the purge explicitly.
+                return nil
+            }
             var removed = 0
-            var failures = 0
-            let listing = (try? fileManager.contentsOfDirectory(
-                at: rootDirectory, includingPropertiesForKeys: nil)) ?? []
+            var retainedDisqualified = 0
             for item in listing {
                 let name = item.lastPathComponent
-                let isEntry = UUID(uuidString: name) != nil
-                let isSettlement = Self.parseSettlementName(name) != nil
-                guard isEntry || isSettlement else { continue }
-                if (try? fileManager.removeItem(at: item)) != nil {
+                guard UUID(uuidString: name) != nil || Self.parseSettlementName(name) != nil else {
+                    continue
+                }
+                if let settlementEntry = Self.parseSettlementName(name) {
+                    // Settlement evidence: removed only when its entry is already gone; a
+                    // settlement orphaned by a FAILED entry removal survives as evidence of the
+                    // retained entry's disposition.
+                    if listing.contains(where: { $0.lastPathComponent == settlementEntry }) {
+                        retainedDisqualified += 1
+                        continue
+                    }
+                }
+                // MARK-THEN-REMOVE: an entry is DISQUALIFIED before any deletion attempt, so a
+                // partially-failing recursive removal can never leave a half-damaged entry that
+                // still qualifies (reviewer: failed purge must not damage or resurrect).
+                if UUID(uuidString: name) != nil {
+                    let intent = item.appendingPathComponent(Self.failedName)
+                    do {
+                        try failureRecordWriter(intent)
+                        try synchronizer(item, true)
+                    } catch {
+                        // Cannot durably disqualify: refuse to touch the entry at all.
+                        retainedDisqualified += 1
+                        continue
+                    }
+                }
+                do {
+                    try fileManager.removeItem(at: item)
                     removed += 1
-                } else {
-                    failures += 1
+                } catch {
+                    retainedDisqualified += 1
                 }
             }
             inFlightAttempts.removeAll()
             uncertainEntriesLocked.removeAll()
-            return (removed, failures)
+            // Durability barrier: the ROOT listing must reflect the removals on storage.
+            do { try synchronizer(rootDirectory, true) } catch { /* root still lists some removed entries; recovery's strict scan re-derives truth */ }
+            return (removed, retainedDisqualified)
         }
     }
 
