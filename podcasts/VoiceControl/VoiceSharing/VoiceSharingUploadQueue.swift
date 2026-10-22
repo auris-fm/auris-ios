@@ -807,6 +807,19 @@ final class VoiceSharingUploadQueue {
         try serialQueue.sync { try attemptCountLocked(for: entry) }
     }
 
+    /// The lease THIS process holds for the entry, if any. `beginAttempt` acquires it internally;
+    /// a caller that must report a result (the uploader) needs the same token, and reading it back
+    /// is strictly narrower than exposing lease acquisition itself.
+    func currentLease(for entry: Entry) throws -> AttemptLease? {
+        try serialQueue.sync {
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/")
+            else { throw CocoaError(.fileNoSuchFile) }
+            return inFlightAttempts[entry]
+        }
+    }
+
     /// Whether this process currently owns a live request for the entry.
     func isAttemptInFlight(_ entry: Entry) -> Bool {
         serialQueue.sync { inFlightAttempts[entry] != nil }
@@ -1710,6 +1723,23 @@ final class VoiceSharingUploadQueue {
                     return lDate < rDate
                 }
         }
+    }
+
+    /// Read-only identity of a prepared entry, re-derived from its OWN persisted bytes. The
+    /// uploader uses this to check a receipt against what was actually queued — never against a
+    /// value carried in memory that may not match disk.
+    func boundIdentity(of entry: Entry) throws -> VoiceSharingRecordBinding.BoundEntry {
+        try serialQueue.sync {
+            let directory = try validatedEntryDirectoryLocked(entry)
+            let metadata = try Data(contentsOf: directory.appendingPathComponent(Self.metadataName))
+            let audio = try Data(contentsOf: directory.appendingPathComponent(Self.audioName))
+            return try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+        }
+    }
+
+    /// Attempts already consumed for this entry (durable count, survives restart).
+    func attemptNumber(for entry: Entry) throws -> Int {
+        try serialQueue.sync { try attemptCountLocked(for: entry) }
     }
 
     func metadata(of entry: Entry) throws -> Data {

@@ -23,19 +23,42 @@ final class VoiceSharingSettingsModel {
     static let surfaceEnabled = false
 
     struct ContributionStatus: Equatable {
-        /// Entries that are ready and would be served by an uploader (0 when the owner is held).
-        let readyEntries: Int
-        /// True when the queue reports unknown coverage or an unreconciled revocation.
-        let held: Bool
-        /// True when the live policy currently permits collection.
+        /// Whether the queue's own state could be DETERMINED. `unknown` is a first-class state, not
+        /// a zero count: an unreadable or unreconciled owner has stored items we cannot count.
+        enum Storage: Equatable {
+            /// Known ready-to-upload count (queue coverage is known and the owner is not held).
+            case knownReady(Int)
+            /// Could not determine: unknown coverage or an unreconciled revocation.
+            case unknown
+        }
+        let storage: Storage
+        /// True when the live policy currently permits collection. Read-only projection.
         let collectionPermitted: Bool
     }
 
+    /// The outcome of a LOCAL deletion, carrying the queue's typed purge result through unchanged.
+    /// Nothing here may be flattened into "success" — the spec's rule is that local removal never
+    /// stands for server completion, and the purge's own three states must remain distinguishable.
     struct DeleteResult: Equatable {
-        let removed: Int
-        let retained: Int
-        /// False when revocation could NOT be proven complete; the UI must say so plainly.
-        let fullyRevoked: Bool
+        enum Disposition: Equatable {
+            /// Every retained entry was removed or is durably disqualified; nothing is pending.
+            case reconciled(removed: Int, durablyDisqualified: Int)
+            /// Some survivors could not be CONFIRMED revoked; they stay on this device.
+            case incomplete(removed: Int, survivorsUnknown: Int)
+            /// The purge could not even enumerate storage; nothing was attempted or proven.
+            case refused
+        }
+        let disposition: Disposition
+
+        /// True only when storage was fully enumerated AND no survivor remains unconfirmed.
+        var isFullyResolvedLocally: Bool {
+            switch disposition {
+            case .reconciled(let removed, let durablyDisqualified):
+                return removed >= 0 && durablyDisqualified >= 0
+            case .incomplete, .refused:
+                return false
+            }
+        }
     }
 
     private let queue: VoiceSharingUploadQueue
@@ -48,34 +71,49 @@ final class VoiceSharingSettingsModel {
 
     var isSurfaceEnabled: Bool { Self.surfaceEnabled }
 
-    /// Read-only projection. Errors are reported as `held` rather than as an empty, healthy list:
-    /// "we could not determine" must never render as "nothing to delete".
+    /// Read-only projection. "Could not determine" is reported as `.unknown`, never as a zero
+    /// count — the reviewer's point that a held owner must not render "Stored contributions: 0".
     func status() -> ContributionStatus {
         switch queue.readyEntriesReportingUnknownCoverage() {
         case .unknownCoverage:
-            return ContributionStatus(readyEntries: 0, held: true,
+            return ContributionStatus(storage: .unknown,
                                       collectionPermitted: isCollectionPermitted())
         case .known(let entries):
-            return ContributionStatus(readyEntries: entries.count, held: false,
+            return ContributionStatus(storage: .knownReady(entries.count),
                                       collectionPermitted: isCollectionPermitted())
         }
     }
 
     /// Deletes ALL retained contributions through the owner-wide purge. Never claims success it
     /// cannot prove: a refused or held purge reports `fullyRevoked == false`.
-    func deleteAllContributions() -> DeleteResult {
+    /// LOCAL scope, stated in the name: this deletes recordings held ON THIS DEVICE. It is not
+    /// account-wide deletion — accepted data on the server is a separate operation the client does
+    /// not perform here (spec: local removal never stands for server completion).
+    func deletePendingRecordingsOnThisDevice() -> DeleteResult {
         switch queue.purgeAll() {
         case .reconciled(let removed, let retained):
-            return DeleteResult(removed: removed, retained: retained, fullyRevoked: true)
+            // `retained` here are entries whose removal failed but whose disqualification IS
+            // durable: they stay on disk, provably dead, and the UI must say both things.
+            return DeleteResult(disposition: .reconciled(removed: removed,
+                                                         durablyDisqualified: retained))
         case .held(let removed, let retained):
-            return DeleteResult(removed: removed, retained: retained, fullyRevoked: false)
+            return DeleteResult(disposition: .incomplete(removed: removed,
+                                                         survivorsUnknown: retained))
         case .refused:
-            return DeleteResult(removed: 0, retained: 0, fullyRevoked: false)
+            // Nothing could be enumerated: do NOT report 0 removed / 0 retained as if that were a
+            // measurement of an empty device.
+            return DeleteResult(disposition: .refused)
         }
     }
 
     /// The compiled bounds, for a read-only "what the app will do" line. Not editable, not
     /// activation values.
+    /// Explicitly LOCAL wording, so the surface can never imply account/server deletion.
+    var deletionScopeDescription: String {
+        "Deletes voice recordings still waiting to upload on this device. "
+            + "It does not delete contributions already accepted by the service."
+    }
+
     var compiledBoundsDescription: String {
         "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
             + "retained for at most \(Int(VoiceSharingUploadQueue.maxEntryAge / 3600)) hours."
