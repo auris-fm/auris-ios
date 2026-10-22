@@ -161,15 +161,24 @@ final class VoiceSharingUploader {
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
             case 400, 409, 410, 413, 415, 422:
-                // THE OWNING TABLE's terminal dispositions ONLY (specs/voice-recording-uploads.md):
-                // 400 invalid_request, 409 capture_conflict, 410 record_gone/retired, 413
-                // payload_too_large, 415/422 unsupported_audio/integrity_mismatch. Nothing outside
-                // this list deletes: every code without an owning disposition retains as unknown.
+                // THE OWNING TABLE's terminal dispositions ONLY — and the BODY must carry the
+                // code the table pairs with this status (spec 8c5eb290): a malformed body or an
+                // unrelated code under a terminal-looking status is NOT proof; it retains.
+                // 400 invalid_request, 409 capture_conflict, 410 record_gone/enrollment_retired,
+                // 413 payload_too_large, 415 unsupported_audio, 422 integrity_mismatch.
+                guard Self.errorCode(body) == Self.owningCode[statusCode] else {
+                    return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
+                                          reason: "terminal status with non-owning body")
+                }
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             case 403:
-                // The table's stop disposition: not_enrolled / collection_disabled. Stop THIS
-                // entry and surface the refusal; account/config refresh is the account client's
-                // separate flow. The record is not "invalid" — it is not permitted to upload.
+                // The table's stop disposition — only when the body names it:
+                // not_enrolled / collection_disabled. An unrelated 403 is just unknown.
+                guard let code = Self.errorCode(body),
+                    code == "not_enrolled" || code == "collection_disabled" else {
+                    return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
+                                          reason: "403 without owning code")
+                }
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
                 // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's
@@ -405,6 +414,27 @@ final class VoiceSharingUploader {
             default: return true
             }
         }
+    }
+
+    /// The owning status→code pairs (specs/voice-recording-uploads.md). A terminal disposition
+    /// requires BOTH halves.
+    static let owningCode: [Int: String] = [
+        400: "invalid_request",
+        409: "capture_conflict",
+        410: "record_gone",
+        413: "payload_too_large",
+        415: "unsupported_audio",
+        422: "integrity_mismatch",
+    ]
+
+    /// Strict error-body read: `{schema_version: 1, code: nonempty}` exactly (the worker's
+    /// errorBody shape). Anything else yields nil — which retains.
+    static func errorCode(_ body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            isExactInteger(object["schema_version"], 1),
+            let code = object["code"] as? String, !code.isEmpty
+        else { return nil }
+        return code
     }
 
     /// Retry-After is advisory server guidance; unparseable values are simply absent (the policy

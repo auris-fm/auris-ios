@@ -220,11 +220,12 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// A 4xx is terminal for this immutable record: the entry is abandoned, not retried forever.
+    /// A 4xx with its OWNING body code is terminal: the entry is abandoned, not retried forever.
     func test_clientErrorAbandonsTheEntry() async throws {
         let entry = try makeReadyEntry()
         let uploader = makeUploader(transport: { _ in
-            .response(statusCode: 422, body: Data())
+            .response(statusCode: 422, body: Data(
+                "{\"schema_version\":1,\"code\":\"integrity_mismatch\"}".utf8))
         })
         let outcome = await uploader.upload(entry)
         guard case .abandoned(let reason) = outcome else {
@@ -287,11 +288,15 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// The owning table's terminal codes exactly: each abandons; the ones just outside it
     /// (402, 404, 407, 451 — NOT in the table) retain.
     func test_terminalTableIsExactlyTheOwningCodes() async throws {
-        let terminal: [Int] = [400, 409, 410, 413, 415, 422]
-        for code in terminal {
+        let terminal: [(Int, String)] = [
+            (400, "invalid_request"), (409, "capture_conflict"), (410, "record_gone"),
+            (413, "payload_too_large"), (415, "unsupported_audio"), (422, "integrity_mismatch"),
+        ]
+        for (code, bodyCode) in terminal {
             let entry = try makeReadyEntry()
             let uploader = makeUploader(transport: { _ in
-                .response(statusCode: code, body: Data())
+                .response(statusCode: code, body: Data(
+                    "{\"schema_version\":1,\"code\":\"\(bodyCode)\"}".utf8))
             })
             let outcome = await uploader.upload(entry)
             guard case .abandoned = outcome else {
@@ -540,6 +545,108 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertTrue(fresh.readyEntries().isEmpty,
                       "a fresh instance re-derives the hold from disk")
+    }
+
+    // MARK: - reviewer 3814f4be: status+body agreement, hold reconciliation, transport lifetime
+
+    /// A terminal-looking status with the WRONG body code is not proof: unrelated 403s and
+    /// malformed 409s RETAIN. Only status+code pairs agreeing with the owning table abandon.
+    func test_terminalRequiresOwningStatusCodePair() async throws {
+        func errorBody(_ code: String?) -> Data {
+            var object: [String: Any] = ["schema_version": 1]
+            if let code { object["code"] = code }
+            return try! JSONSerialization.data(withJSONObject: object)
+        }
+        // Proxy 403 without an owning code → retain.
+        do {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: 403, body: errorBody("proxy_forbidden"))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .unknownOutcome = outcome else {
+                return XCTFail("proxy 403 must retain, got \(outcome)")
+            }
+            guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+                return XCTFail("coverage known")
+            }
+            XCTAssertTrue(after.contains(entry))
+        }
+        // Malformed 409 (no code) → retain.
+        do {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: 409, body: Data("{".utf8))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .unknownOutcome = outcome else {
+                return XCTFail("malformed 409 must retain, got \(outcome)")
+            }
+        }
+        // Status/code AGREEMENT abandons: 409 + capture_conflict.
+        do {
+            let entry = try makeReadyEntry()
+            let uploader = makeUploader(transport: { _ in
+                .response(statusCode: 409, body: errorBody("capture_conflict"))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .abandoned = outcome else {
+                return XCTFail("409+capture_conflict must abandon, got \(outcome)")
+            }
+        }
+    }
+
+    /// Fault → two restarts held → bounded reconciliation lifts → uploads resume, with the
+    /// original boundary minimum preserved (spec c3175492).
+    func test_retryHoldReconcilesAfterFaultAndRestarts() throws {
+        let entry = try makeReadyEntry()
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(60)))
+        // Two restarts: both hold.
+        for _ in 0..<2 {
+            XCTAssertTrue(VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+                .readyEntries().isEmpty, "held across restart")
+        }
+        // Bounded reconciliation on a fresh instance: state is provable (the failing writer only
+        // failed the STAMP, which never landed; the intent did), so it lifts.
+        let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(reconciler.reconcileRetryHold(), "provable state lifts the hold")
+        // Service resumed: the entry serves again, and the boundary (never landed) is not enforced.
+        XCTAssertEqual(reconciler.readyEntries().count, 1, "resume after reconciliation")
+    }
+
+    /// Reconciliation REFUSES on unprovable state: a corrupt stamp keeps the hold.
+    func test_reconciliationRefusesUnprovableState() throws {
+        let entry = try makeReadyEntry()
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        let admitted = try XCTUnwrap(try failing.admitAttempt(entry))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            entry, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(60)))
+        // Corrupt a stamp into existence (valid name, garbage body).
+        let stampName = VoiceSharingUploadQueue.notBeforePrefix + entry.name
+        try Data("garbage".utf8).write(
+            to: root.appendingPathComponent(stampName), options: .atomic)
+        let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertFalse(reconciler.reconcileRetryHold(), "unprovable state keeps the hold")
+        XCTAssertTrue(reconciler.readyEntries().isEmpty)
     }
 
     /// A strict receipt parser: every required field, or nothing.

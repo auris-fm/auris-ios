@@ -916,6 +916,54 @@ final class VoiceSharingUploadQueue {
         }
     }
 
+    /// BOUNDED RECONCILIATION (reviewer 3814f4be / spec c3175492): a fresh retry-held queue can
+    /// never start a retry (admission refuses), so success-only clearing would deadlock. This path
+    /// lifts the hold ONLY after required state is re-confirmed: the intent is required-stat'd,
+    /// every surviving stamp is bounded-parsed, and the removal is barriered. ANY uncertainty
+    /// keeps the hold and reports it; nothing here trusts memory.
+    @discardableResult
+    func reconcileRetryHold() -> Bool {
+        serialQueue.sync {
+            guard case .present = intentDiscovery(
+                rootDirectory.appendingPathComponent(Self.retryHoldIntentName)) else {
+                // No durable intent: the hold (if any) is stale memory; clear it.
+                retryHoldLocked = false
+                return true
+            }
+            // Every surviving stamp must be bounded-parseable and well-named, otherwise the
+            // boundary state is unprovable and the hold stands.
+            guard let listed = try? listDirectoryBounded(
+                rootDirectory, [], Self.maxDirectoryEntries), !listed.overflowed else {
+                retryHoldLocked = true
+                return false
+            }
+            for url in listed.urls where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
+                let name = url.lastPathComponent
+                guard UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) != nil,
+                    let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+                    (try? Data(contentsOf: url)) != nil,
+                    ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url)))
+                        as? [String: Any])?["notBefore"] is Double
+                else {
+                    retryHoldLocked = true
+                    return false
+                }
+            }
+            // State proven: remove the intent with barriers, then lift.
+            do {
+                try fileManager.removeItem(
+                    at: rootDirectory.appendingPathComponent(Self.retryHoldIntentName))
+                try synchronizer(rootDirectory, true)
+                retryHoldLocked = false
+                return true
+            } catch {
+                retryHoldLocked = true
+                return false
+            }
+        }
+    }
+
     /// Clears the write-ahead pause intent after a successful boundary publication. A FAILED
     /// clear RETAINS the hold (fail closed): an unprovable clear is not a clear.
     private func clearRetryHoldIfEstablishedLocked() {

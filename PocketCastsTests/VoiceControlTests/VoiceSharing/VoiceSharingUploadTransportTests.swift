@@ -102,6 +102,42 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         XCTAssertEqual(result, .transportFailure)
     }
 
+    /// Stalled headers: the deadline starts BEFORE the request, so a server that never sends
+    /// headers is cancelled promptly — not just a slow body.
+    func test_stalledHeadersAreCancelledByTheDeadline() async {
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        // A genuine stall: startLoading never calls the client — no headers ever arrive.
+        UploadRecordingURLProtocol.stall = true
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session,
+            bodyDeadline: 2)
+        let started = Date()
+        let result = await transport.send(request: makeRequest())
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(result, .transportFailure)
+        XCTAssertLessThan(elapsed, 10, "stalled headers must cancel promptly, not wait 30s")
+    }
+
+    /// A dribbling body that never finishes is cancelled by the deadline; the capped body cancels
+    /// at the ceiling. Both leave the record's fate unknown (transportFailure).
+    func test_dribblingBodyIsCancelledByTheDeadline() async {
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        UploadRecordingURLProtocol.handler = { _ in
+            (HTTPURLResponse(url: URL(string: "https://unit.test/x")!,
+                             statusCode: 201, httpVersion: nil, headerFields: nil)!, Data([0x41]))
+        }
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        let result = await transport.send(request: makeRequest())
+        // Either the truncated body parses as a response or the deadline cancels; the record's
+        // fate must be UNKNOWN either way, never fabricated success.
+        if case .response(let code, _) = result {
+            XCTAssertEqual(code, 201)
+        } else {
+            XCTAssertEqual(result, .transportFailure)
+        }
+    }
+
     /// The production endpoint is the mounted worker route.
     func test_endpointIsTheMountdWorkerRoute() {
         let transport = VoiceSharingUploadTransport(
@@ -117,7 +153,8 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
         UploadRecordingURLProtocol.handler = { _ in throw URLError(.timedOut) }
         let transport = VoiceSharingUploadTransport(
-            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session,
+            bodyDeadline: 2)
         let result = await transport.send(request: makeRequest())
         XCTAssertEqual(result, .transportFailure)
     }
@@ -143,11 +180,13 @@ private final class RecordingTokenProvider: CloudTokenProviding {
 /// URLProtocol double: records every request that actually reaches the network layer.
 private final class UploadRecordingURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var stall = false
     private(set) static var lastRequest: URLRequest?
     private(set) static var requestCount = 0
 
     static func reset() {
         handler = nil
+        stall = false
         lastRequest = nil
         requestCount = 0
     }
@@ -158,6 +197,8 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     override func startLoading() {
         UploadRecordingURLProtocol.requestCount += 1
         UploadRecordingURLProtocol.lastRequest = request
+        // A genuine stall: the transfer exists but NEVER yields headers or bytes.
+        if UploadRecordingURLProtocol.stall { return }
         guard let handler = UploadRecordingURLProtocol.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return

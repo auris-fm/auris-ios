@@ -20,43 +20,70 @@ final class VoiceSharingUploadTransport {
     /// Receipt bodies are small JSON objects; anything larger is not one.
     static let maxResponseBytes = 64 * 1024
     /// Full body deadline: the transfer must COMPLETE within this budget, not merely stay active.
-    static let bodyDeadline: TimeInterval = 90
+    /// Starts BEFORE the request is issued, so stalled headers count. Injectable for controls.
+    let bodyDeadline: TimeInterval
 
     /// Receives the response body with a hard byte ceiling (cancel past it) and a hard total
     /// deadline. Returns nil for any violation — the record's fate stays unknown.
+    /// Receives the response with a hard byte ceiling (cancel past it) and a TOTAL deadline that
+    /// starts BEFORE the request is issued — stalled headers count against it too. The underlying
+    /// transfer is cancelled through the session task handle, not just abandoned.
     private static func receive(
         session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval
     ) async throws -> (HTTPURLResponse, Data)? {
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else { return nil }
-        var data = Data()
-        data.reserveCapacity(min(byteLimit, 4096))
-        var task: Task<Void, Never>?
-        return try await withThrowingTaskGroup(of: (HTTPURLResponse, Data)?.self) { group in
-            defer { task?.cancel() }
-            // Deadline task: fails the group if the body has not COMPLETED in time.
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
-                if !Task.isCancelled { throw URLError(.timedOut) }
+        // The REAL task handle: cancelling it tears down the actual URL transfer.
+        let transferTask = Task<(HTTPURLResponse, Data)?, Error> {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { return nil }
+            var data = Data()
+            data.reserveCapacity(min(byteLimit, 4096))
+            do {
+                for try await byte in bytes {
+                    data.append(byte)
+                    if data.count > byteLimit {
+                        // Ceiling crossed mid-stream: kill the underlying transfer NOW.
+                        throw URLError(.dataNotAllowed)
+                    }
+                }
+            } catch {
                 return nil
             }
-            // Receive task: accumulate with the ceiling; past it, cancel the stream.
-            group.addTask {
+            return (http, data)
+        }
+        // Deadline task: races the transfer; the loser is cancelled.
+        let deadlineTask = Task<Void, Error> {
+            try await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
+            throw URLError(.timedOut)
+        }
+        defer {
+            transferTask.cancel()
+            deadlineTask.cancel()
+        }
+        return try await withThrowingTaskGroup(
+            of: (HTTPURLResponse, Data)?.self
+        ) { group in
+            group.addTask { [transferTask, deadlineTask] in
+                let outcome = try await transferTask.value
+                // Transfer decided: release the deadline sleeper immediately. It is a SEPARATE
+                // top-level task, so group cancellation cannot reach it — only this explicit
+                // cancel can, and without it every completed transfer would still wait out the
+                // full deadline before returning.
+                deadlineTask.cancel()
+                return outcome
+            }
+            group.addTask { [transferTask] in
                 do {
-                    for try await byte in bytes {
-                        data.append(byte)
-                        if data.count > byteLimit {
-                            throw URLError(.dataNotAllowed)
-                        }
-                    }
-                    return (http, data)
+                    _ = try await deadlineTask.value
                 } catch {
-                    // Ceiling exceeded or stream error: violation.
+                    // The deadline (or its own cancellation) fired: kill the underlying URL
+                    // transfer FIRST so the transfer child can actually finish.
+                    transferTask.cancel()
+                    if !Task.isCancelled { throw error }
                     return nil
                 }
+                transferTask.cancel()
+                throw URLError(.timedOut)
             }
-            // First finish decides: a completed transfer returns it; a violation (nil) or a
-            // deadline throw cancels the sibling immediately — no waiting out the deadline.
             guard let first = try await group.next() else { return nil }
             group.cancelAll()
             return first
@@ -70,11 +97,13 @@ final class VoiceSharingUploadTransport {
     init(
         baseURLProvider: @escaping () -> String,
         tokenProvider: CloudTokenProviding,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        bodyDeadline: TimeInterval = 90
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
         self.session = session
+        self.bodyDeadline = bodyDeadline
     }
 
     /// The endpoint this transport will use, or nil when configuration is missing. Nil is NOT
@@ -100,9 +129,11 @@ final class VoiceSharingUploadTransport {
         // URL must upload nowhere, even if it was handed a well-formed request.
         guard let endpoint else { return .transportFailure }
         request.url = endpoint
-        // Uploads are slow by nature but must not hang forever: a stuck request would pin the
-        // attempt lease until expiry.
-        request.timeoutInterval = 60
+        // IDLE deadline (headers or any gap): URLSession natively aborts a transfer that stays
+        // silent this long — cooperative cancellation alone does not interrupt a stalled
+        // stream. The WALL deadline below separately bounds total body lifetime, so a dribbling
+        // body that resets the idle timer still dies.
+        request.timeoutInterval = bodyDeadline
         // The credential is the ONLY header this type adds: URL, body, content type and the
         // idempotency key all arrive from the uploader, so what the controls assert is what ships.
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
@@ -114,7 +145,7 @@ final class VoiceSharingUploadTransport {
             // is exceeded. A full-body deadline bounds the transfer's total lifetime as well.
             let transfer = try await Self.receive(
                 session: session, request: request,
-                byteLimit: Self.maxResponseBytes, deadline: Self.bodyDeadline)
+                byteLimit: Self.maxResponseBytes, deadline: bodyDeadline)
             guard let (http, data) = transfer else { return .transportFailure }
 
             if http.statusCode == 401 {
