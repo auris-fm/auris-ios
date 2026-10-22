@@ -64,14 +64,28 @@ class VoiceControlAssembly {
         // TRIGGER — routes straight into the collector's purge. The feature itself stays disabled
         // until the owner approves activation; wiring exists so consent loss acts on real audio the
         // moment anything upstream produces it.
+        // The queue-backed contribution sink (round 62/63): collector event → encoder → durable
+        // queue entry. The gate reads the live policy on EVERY event and the remote switch
+        // defaults to disabled, so no upload work is minted until owner-approved activation.
+        // Encode/queue failures are logged (opaque IDs only) and dropped — never into the
+        // recognition pipeline.
+        let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
+        try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
+        let contributionQueue = VoiceSharingUploadQueue(rootDirectory: queueRoot)
+        let contributionSink = VoiceSharingContributionSink(
+            queue: contributionQueue,
+            isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            encoderProvenance: VoiceSharingContributionEncoder.Provenance(
+                platform: "ios",
+                appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                captureSessionID: UUID().uuidString,
+                models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+                conversionVersion: 1))
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             sink: { event in
-                // Upload queue is a later task; until it exists the receipt is logged, never dropped
-                // silently. The collector's own bounds decide what reaches here.
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] segment event kind=\(event.kind) capture=\(event.captureID) samples=\(event.retainedSamples)"
-                )
+                contributionSink.handle(event)
             }
         )
         asrEngine.contributionCollector = contributionCollector

@@ -208,6 +208,13 @@ final class VoiceSharingUploadQueue {
     static let maxAttemptLeaseBytes = 256
     /// How long a lease is considered live without renewal. A killed owner cannot renew, so after
     /// this window another owner may reclaim. Compiled bound, NOT an activation value.
+    /// App-private queue storage root (Application Support, per account-agnostic feature dir).
+    /// Created lazily by callers; the queue itself requires the directory to exist at init.
+    static func defaultRootDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("VoiceContributions", isDirectory: true)
+    }
+
     static let attemptLeaseDuration: TimeInterval = 120
     /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
     static let maxUploadAttemptsCeiling = 1_000
