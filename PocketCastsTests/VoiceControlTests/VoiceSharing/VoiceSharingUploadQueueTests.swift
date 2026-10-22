@@ -2597,6 +2597,50 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(ready.count, 2, "restored: both entries are valid and served")
     }
 
+    func test_oversizedCreatedAtHoldsCoverageInsteadOfLoading() throws {
+        // Reviewer f2d68c23 (1): the created-at read keeps the bounded-reader discipline — an
+        // oversized/nonregular file is UNKNOWN coverage, refused before allocation.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let createdURL = root.appendingPathComponent(prep.name).appendingPathComponent("created.at")
+        try Data(repeating: 0x41, count: VoiceSharingUploadQueue.maxCreationInstantBytes + 1)
+            .write(to: createdURL)
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("oversized created-at must hold coverage for the whole owner")
+        }
+        // Nonregular created-at is equally unknown.
+        try FileManager.default.removeItem(at: createdURL)
+        try FileManager.default.createDirectory(at: createdURL, withIntermediateDirectories: true)
+        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("nonregular created-at must hold coverage")
+        }
+    }
+
+    func test_attemptGateSharesTheStrictOwnerWideCoverageAuthority() throws {
+        // Reviewer f2d68c23 (2): beginAttempt must establish STRICT owner-wide coverage, not just
+        // its own entry's. Entry B's unknown coverage holds entry A's attempt.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let a = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(a)
+        let b = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+        try owner.finalize(b)
+        // B's required coverage becomes unknown.
+        let bDir = root.appendingPathComponent(b.name)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: bDir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bDir.path) }
+
+        XCTAssertThrowsError(try owner.beginAttempt(a)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
+                           "B's unknown coverage holds A's attempt")
+        }
+        XCTAssertFalse(owner.isAttemptInFlight(a), "no lease survives the coverage hold")
+        // Restore B: A's attempt is admitted.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bDir.path)
+        XCTAssertTrue(try owner.beginAttempt(a))
+        owner.endAttempt(a)
+    }
+
     func test_realWavFailureReasonsAreRejected() throws {
         let audio = wav()
         // 1. Float samples (format tag 3) — same shape, wrong representation.

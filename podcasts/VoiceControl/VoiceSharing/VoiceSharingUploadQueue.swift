@@ -581,14 +581,15 @@ final class VoiceSharingUploadQueue {
             guard inFlightAttempts[entry] == nil else { return false }
             // Handle identity is checked BEFORE coverage (a foreign handle is a refusal, not a
             // coverage question). Clarification 7e9606b (spec c988cb1b): attempts must then honor
-            // unknown coverage even for an already-held entry handle — a held handle proves
-            // nothing about whether the root scan could see this entry. The bounded scan MUST
-            // succeed and must contain the entry; its failure is a HOLD, never "go ahead".
+            // unknown coverage even for an already-held entry handle. The STRICT owner-wide
+            // coverage authority is the same one the serving query uses: root listing AND every
+            // entry's required state must be KNOWN, not merely the target entry's — another
+            // entry's stat/read failure holds attempts for the whole owner.
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
                 !entry.name.contains("/")
             else { throw CocoaError(.fileNoSuchFile) }
-            let discovered = try entriesStrictLocked()
+            let discovered = try strictOwnerCoverageLocked()
             guard discovered.contains(entry) else { return false }
             // EVERY non-dispatch path settles explicitly: a lease acquired here must never survive
             // a later refusal or throw, or the entry would be blocked by its own failed attempt.
@@ -1392,6 +1393,17 @@ final class VoiceSharingUploadQueue {
         case unknownCoverage
     }
 
+    /// THE strict owner-wide coverage authority: root listing and every entry's required state
+    /// must be KNOWN. Serving queries and attempt gates share this one implementation so neither
+    /// can hold a weaker standard than the other.
+    private func strictOwnerCoverageLocked() throws -> [Entry] {
+        let all = try entriesStrictLocked()
+        for entry in all {
+            _ = try entryStateLocked(at: entry)
+        }
+        return all
+    }
+
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
             // Reviewer c4d5ecb4: coverage is ALL-OR-NOTHING for the owner. Any required check
@@ -1399,7 +1411,7 @@ final class VoiceSharingUploadQueue {
             // read failure, unconfirmable durability) holds serving for the WHOLE root — one
             // inaccessible entry must not coexist with `.known(others)`.
             let all: [Entry]
-            do { all = try entriesStrictLocked() } catch { return .unknownCoverage }
+            do { all = try strictOwnerCoverageLocked() } catch { return .unknownCoverage }
             var ready: [Entry] = []
             for entry in all {
                 let state: EntryState
@@ -1696,10 +1708,22 @@ final class VoiceSharingUploadQueue {
             return .disqualified
         }
         guard try requiredFileKind(marker) == .present else { return .incomplete }
-        // The immutable instant: absent => incomplete; present-but-unreadable/unparseable =>
-        // UNKNOWN (its content bounds the entry's lifetime; guessing is not allowed).
+        // The immutable instant bounds the entry's lifetime, so its read keeps the ORIGINAL
+        // bounded-reader discipline (regular file, 1..maxCreationInstantBytes) while still
+        // distinguishing absence (incomplete) from stat/read failure (UNKNOWN). A huge or
+        // special created-at file must be refused BEFORE allocation, never loaded.
         let createdURL = directory.appendingPathComponent(Self.createdName)
-        guard let createdData = try readIfPresent(createdURL),
+        switch try requiredFileKind(createdURL) {
+        case .absent: return .incomplete
+        case .failure: throw PrepareError.accountingUnavailable
+        case .present: break
+        }
+        guard let createdSize = fileSizeIfRegularLocked(at: createdURL),
+            createdSize.isRegular, createdSize.bytes > 0,
+            createdSize.bytes <= Self.maxCreationInstantBytes else {
+            throw PrepareError.accountingUnavailable
+        }
+        guard let createdData = try? Data(contentsOf: createdURL),
             let text = String(data: createdData, encoding: .utf8),
             let seconds = TimeInterval(text), seconds.isFinite
         else { return .incomplete }
