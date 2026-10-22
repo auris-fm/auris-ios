@@ -629,26 +629,39 @@ final class VoiceSharingUploadQueue {
     }
     static let maxSettlementRecordBytes = 256
 
+    enum SettlementPhase: String {
+        /// The transition is authorized but not yet durably completed.
+        case pending
+        /// The transition was applied AND its durability barrier succeeded.
+        case confirmed
+    }
+
     struct SettlementRecord {
         let generation: String
         let owner: Int32
         let outcome: AttemptOutcome
+        var phase: SettlementPhase = .pending
 
         var jsonObject: [String: Any] {
             ["generation": generation,
              "owner": Int(owner),
-             "outcome": outcome.rawValue]
+             "outcome": outcome.rawValue,
+             "phase": phase.rawValue]
         }
 
+        /// Strict parse: malformed records are UNKNOWN pending state and must refuse settlement,
+        /// never be treated as absent intent or overwritten by a fresh transition.
         static func parse(_ data: Data) -> SettlementRecord? {
             guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let generation = obj["generation"] as? String,
                   let owner = obj["owner"] as? Int,
                   let outcomeRaw = obj["outcome"] as? String,
                   let outcome = AttemptOutcome(rawValue: outcomeRaw),
+                  let phaseRaw = obj["phase"] as? String,
+                  let phase = SettlementPhase(rawValue: phaseRaw),
                   Int32(exactly: owner) != nil else { return nil }
             return SettlementRecord(generation: generation, owner: Int32(exactly: owner)!,
-                                    outcome: outcome)
+                                    outcome: outcome, phase: phase)
         }
 
         func encoded() throws -> Data {
@@ -658,6 +671,98 @@ final class VoiceSharingUploadQueue {
             }
             return data
         }
+    }
+
+    /// Best-effort retirement of a settled record: the confirmed phase already made completion
+    /// durable, so cleanup failure leaves a record reconciliation still accepts.
+    private func clearSettlementBestEffort(for entryName: String) {
+        let url = rootDirectory.appendingPathComponent(Self.settlementRecordName(for: entryName))
+        try? fileManager.removeItem(at: url)
+        try? synchronizer(rootDirectory, true)
+    }
+
+    /// Entry name encoded in a well-formed root settlement record name, else nil.
+    static func parseSettlementName(_ fileName: String) -> String? {
+        guard fileName.hasPrefix(settlementRecordName + "."),
+              fileName.hasSuffix(".json") else { return nil }
+        let entryName = String(fileName.dropFirst((settlementRecordName + ".").count)
+            .dropLast(".json".count))
+        guard UUID(uuidString: entryName) != nil else { return nil }
+        return entryName
+    }
+
+    /// Recovery for settlement records whose owner is gone. A PENDING record whose transition may
+    /// or may not have been applied is retried by its owner/successor through the normal apply
+    /// path — recovery here only retires CONFIRMED records (completion already durable) whose
+    /// state verifies, and PENDING records for entries that no longer exist and can never be
+    /// reconciled by anyone (the entry removal landed; the confirmed... they behave like
+    /// confirmed-pending-confirmation: run the root barrier and retire).
+    func recoverAbandonedSettlements() {
+        guard let listed = try? listDirectoryBounded(
+            rootDirectory, [.isDirectoryKey], Self.maxDirectoryEntries), !listed.overflowed else {
+            return
+        }
+        for url in listed.urls {
+            let entryName = Self.parseSettlementName(url.lastPathComponent)
+            guard let entryName else { continue }
+            let directory = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
+            switch Self.statKind(of: url) {
+            case .absent, .failure:
+                continue
+            case .present:
+                break
+            }
+            guard let data = try? Data(contentsOf: url),
+                  let record = SettlementRecord.parse(data) else {
+                // Unknown pending state is NEVER deleted by recovery: only its owner path may
+                // classify it. Leave it; applyAttemptResult will refuse with accountingUnavailable.
+                continue
+            }
+            let lock = try? LeaseLock(entryName: entryName, rootDirectory: rootDirectory)
+            guard let lock else { continue }
+            defer { lock.close() }
+            do { try lock.lockExclusive() } catch { continue }
+            switch record.phase {
+            case .pending:
+                // The transition may not have been applied; the pending record is the ONLY thing
+                // that lets its owner (or a fresh successor) reconcile the exact transition.
+                // Recovery must NOT retire it — applyAttemptResult handles every pending case:
+                // entry present (apply), entry absent (repeat the root barrier and complete).
+                continue
+            case .confirmed:
+                // Completion is durable: verify state matches, then retire.
+                let stateOK: Bool
+                switch record.outcome {
+                case .delivered, .abandoned:
+                    stateOK = Self.statKind(of: directory) == .absent
+                case .retryableFailure:
+                    stateOK = Self.statKind(
+                        of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
+                }
+                guard stateOK else { continue }
+                try? fileManager.removeItem(at: url)
+                try? synchronizer(rootDirectory, true)
+            }
+        }
+    }
+
+    /// Whether the given owner token still holds the lease. Verify the
+    /// durable state still matches the recorded outcome, then retire the record best-effort.
+    private func reconcileConfirmedSettlement(
+        _ record: SettlementRecord, entry: Entry, directory: URL) throws {
+        switch record.outcome {
+        case .delivered, .abandoned:
+            guard Self.statKind(of: directory) == .absent else {
+                // Confirmed says removed; state says present. Unexplainable: refuse.
+                throw PrepareError.accountingUnavailable
+            }
+        case .retryableFailure:
+            guard Self.statKind(of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
+            else {
+                throw PrepareError.accountingUnavailable
+            }
+        }
+        clearSettlementBestEffort(for: entry.name)
     }
 
     func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
@@ -676,32 +781,81 @@ final class VoiceSharingUploadQueue {
             let settlementURL = rootDirectory.appendingPathComponent(
                 Self.settlementRecordName(for: entry.name))
 
-            // Read the durably recorded pending transition, if any.
-            func readSettlement() -> SettlementRecord? {
+            enum IntentRead { case record(SettlementRecord); case absent; case unknown }
+            // Reviewer 3aa2b731 (3): oversized, nonregular, unreadable or malformed intent is
+            // UNKNOWN pending state — refuse, never treat as absent or overwrite as fresh.
+            func readSettlement() throws -> IntentRead {
                 switch Self.statKind(of: settlementURL) {
+                case .absent:
+                    return .absent
+                case .failure:
+                    return .unknown
                 case .present:
-                    guard let data = try? Data(contentsOf: settlementURL) else { return nil }
-                    return SettlementRecord.parse(data)
-                default:
-                    return nil
+                    let attrs = try? fileManager.attributesOfItem(atPath: settlementURL.path)
+                    let size = attrs?[.size] as? Int
+                    guard let size, size > 0, size <= Self.maxSettlementRecordBytes else {
+                        return .unknown
+                    }
+                    guard let data = try? Data(contentsOf: settlementURL),
+                          let record = SettlementRecord.parse(data) else {
+                        return .unknown
+                    }
+                    return .record(record)
                 }
             }
+            // Reviewer 3aa2b731 (1): the intent file ITSELF is barrier-confirmed (file, then its
+            // naming directory), not just the root.
             func writeSettlement(_ record: SettlementRecord) throws {
                 let data = try record.encoded()
                 try data.write(to: settlementURL, options: [.atomic])
+                try synchronizer(settlementURL, false)
                 try synchronizer(rootDirectory, true)
             }
-            func clearSettlement() throws {
-                try fileManager.removeItem(at: settlementURL)
+            /// Reviewer 3aa2b731 (1): before every DESTRUCTIVE continuation on a recorded intent,
+            /// re-confirm that the intent is durably in place (content re-read + file + root
+            /// barriers, under the lock). An unconfirmed record must not authorize deletion.
+            func confirmIntentDurability(_ expected: SettlementRecord) throws {
+                let reread = try readSettlement()
+                guard case .record(let live) = reread,
+                      live.generation == expected.generation,
+                      live.owner == expected.owner,
+                      live.outcome == expected.outcome,
+                      live.phase == expected.phase else {
+                    throw PrepareError.publicationUncertain
+                }
+                try synchronizer(settlementURL, false)
                 try synchronizer(rootDirectory, true)
             }
+            /// Reviewer 3aa2b731 (2): clearing is two-phase. First REWRITE the record as
+            /// `confirmed` and barrier it — that write is what makes completion durable and
+            /// recoverable. Only then remove the record. If the final removal or its barrier
+            /// fails, the confirmed record survives and retry/fresh-instance reconciliation
+            /// still succeeds.
+            func confirmPhase(_ record: SettlementRecord) throws {
+                var confirmed = record
+                confirmed.phase = .confirmed
+                try writeSettlement(confirmed)
+            }
+
 
             // Record the pending transition DURABLY before mutating anything. A crash between
             // this write and the mutation leaves the intent recoverable; a crash after mutation
             // but before confirmation leaves it reconcilable. The record binds generation, owner
             // AND outcome, so a retry can only complete the exact transition it started.
-            let recorded = readSettlement()
-            if let prior = recorded {
+            let intentRead = try readSettlement()
+            let recorded: SettlementRecord?
+            switch intentRead {
+            case .unknown:
+                // Unknown pending state: refuse rather than guess or overwrite.
+                throw PrepareError.accountingUnavailable
+            case .record(let prior):
+                if prior.phase == .confirmed {
+                    // The transition was applied and its durability barrier SUCCEEDED. Completion
+                    // is durable; this call (and any later retry) just verifies and cleans up.
+                    try reconcileConfirmedSettlement(prior, entry: entry, directory: directory)
+                    inFlightAttempts.removeValue(forKey: entry)
+                    return
+                }
                 // A pending settlement already exists for this entry.
                 guard prior.generation == lease.generation else {
                     throw PrepareError.resultStale
@@ -711,7 +865,16 @@ final class VoiceSharingUploadQueue {
                     // claim a removal that the pending record never authorized.
                     throw PrepareError.settlementConflict
                 }
-            } else {
+                // Reviewer 3aa2b731 (1): an UNCONFIRMED record must not authorize deletion until
+                // its own durability is re-established under this lock.
+                do {
+                    try confirmIntentDurability(prior)
+                } catch {
+                    // Unknown whether the intent is durably in place: uncertain, retained.
+                    throw PrepareError.publicationUncertain
+                }
+                recorded = prior
+            case .absent:
                 // No pending record: this is a FRESH settlement, which requires the lease to be
                 // live and owned by this caller. Absence without intent is NOT settled success.
                 let current = leaseOwnerLocked(
@@ -719,15 +882,18 @@ final class VoiceSharingUploadQueue {
                 guard Self.statKind(of: directory) == .present,
                     let held = current, held.generation == lease.generation
                 else { throw PrepareError.resultStale }
+                let fresh = SettlementRecord(
+                    generation: lease.generation, owner: lease.owner, outcome: outcome)
                 // If the intent cannot be durably recorded, the transition must not start:
                 // uncertain, ownership retained, retry starts over from a live lease.
                 do {
-                    try writeSettlement(SettlementRecord(
-                        generation: lease.generation, owner: lease.owner, outcome: outcome))
+                    try writeSettlement(fresh)
                 } catch {
                     throw PrepareError.publicationUncertain
                 }
+                recorded = fresh
             }
+            guard let recorded else { throw PrepareError.accountingUnavailable }
 
             // A lock serializes transitions; it does NOT make failed filesystem operations succeed
             // or persist. Settlement failures propagate as UNCERTAIN and keep the intent record
@@ -738,8 +904,17 @@ final class VoiceSharingUploadQueue {
             func confirmLeaseRemovalDurability() throws {
                 try synchronizer(directory, true)
             }
+            /// Two-phase completion: first make the CONFIRMED phase durable (that write is the
+            /// recoverable completion), then remove the record best-effort. A failure in the final
+            /// removal leaves a confirmed record that reconciliation still accepts.
             func finishSettlement() throws {
-                try clearSettlement()
+                do {
+                    try confirmPhase(recorded)
+                } catch {
+                    // The confirmed phase could not be recorded: completion is NOT established.
+                    throw PrepareError.publicationUncertain
+                }
+                clearSettlementBestEffort(for: entry.name)
                 inFlightAttempts.removeValue(forKey: entry)
             }
 
@@ -770,7 +945,7 @@ final class VoiceSharingUploadQueue {
                     throw PrepareError.publicationUncertain
                 case .absent:
                     // Pending LEASE-only removal landed but was not confirmed: repeat the barrier.
-                    guard recorded?.outcome == .retryableFailure else {
+                    guard recorded.outcome == .retryableFailure else {
                         throw PrepareError.resultStale
                     }
                     do { try confirmLeaseRemovalDurability() } catch {
@@ -1503,8 +1678,19 @@ final class VoiceSharingUploadQueue {
                    index >= 0, index < Self.leaseLockPoolSize {
                     continue
                 }
+                // Settlement records are the durable intent a crashed owner (or its successor)
+                // still needs to reconcile. Deleting one here would erase the only recovery
+                // state. Well-formed names are preserved here; `recoverAbandonedSettlements`
+                // reconciles and retires them explicitly.
+                if name.hasPrefix(Self.settlementRecordName + "."),
+                   name.hasSuffix(".json"),
+                   Self.parseSettlementName(name) != nil {
+                    continue
+                }
                 try? fileManager.removeItem(at: stray)
             }
         }
+        // Settlement records are recovery state, not debris: reconcile-retire them here.
+        recoverAbandonedSettlements()
     }
 }

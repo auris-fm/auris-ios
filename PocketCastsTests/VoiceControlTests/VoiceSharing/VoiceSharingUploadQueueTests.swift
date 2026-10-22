@@ -2182,26 +2182,38 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Removal landed, confirmation failed: the intent record is still on disk. A FRESH
         // instance (crashed original gone) retries the SAME outcome and reconciles exactly that
         // transition.
-        var failSync = false
+        // Reviewer 3aa2b731: the recovery must be proven AFTER the entry removal, not at the
+        // intent write. Fail only root syncs AFTER the first (the intent write's own barrier).
         let rootPath = root.path
+        var armed = false
+        var armedRootSyncs = 0
         let crashed = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             synchronizer: { url, isDirectory in
-                if failSync, isDirectory, url.path == rootPath { throw CocoaError(.fileWriteUnknown) }
+                guard armed, isDirectory, url.path == rootPath else { return }
+                armedRootSyncs += 1
+                if armedRootSyncs > 1 { throw CocoaError(.fileWriteUnknown) }
             })
         let prep = try crashed.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try crashed.finalize(prep)
         let lease = try XCTUnwrap(crashed.beginLeaseForTesting(prep))
-        // First settlement attempt: the intent write or its confirmation fails (root barrier
-        // failing) => uncertain, intent possibly on disk unconfirmed.
-        failSync = true
-        XCTAssertThrowsError(try crashed.applyAttemptResult(prep, lease: lease, outcome: .delivered))
-        // "Crash": the original instance is gone. A fresh instance sees the durable intent.
+        // The intent is durably written (armed root sync #1), the entry removal LANDS, then its
+        // root barrier (#2) fails => uncertain, removal unconfirmed, intent on disk.
+        armed = true
+        XCTAssertThrowsError(try crashed.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path),
+                       "the removal landed; only its barrier failed")
+        // "Crash": the original instance is gone. A fresh instance sees the durable intent and
+        // reconciles exactly that transition.
+        let settlementURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: settlementURL.path),
+                      "the intent must be on disk after the failed barrier")
+        print("SETTLEMENT-CONTENT: \(try? String(contentsOf: settlementURL, encoding: .utf8) ?? "unreadable")")
         let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        // Successor cannot settle with a token it does not hold in memory? It can: the intent
-        // binds generation+owner+outcome; the retry carries the same token.
         try successor.applyAttemptResult(prep, lease: lease, outcome: .delivered)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
         let settlementGone = !FileManager.default.fileExists(
             atPath: root.appendingPathComponent(
                 VoiceSharingUploadQueue.settlementRecordName(for: prep.name)).path)
@@ -2222,6 +2234,63 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                            "no intent, no settled success")
         }
         XCTAssertTrue(owner.isAttemptInFlight(prep), "ownership retained: nothing was settled")
+    }
+
+    func test_confirmedPhaseSurvivesFinalClearBarrierFailure() throws {
+        // Reviewer 3aa2b731 (2): clearSettlement must not remove the only recovery record before
+        // its barrier. The confirmed-phase WRITE is the durable completion; a failure removing the
+        // record afterwards leaves a state later retries still accept.
+        let rootPath = root.path
+        var rootSyncCount = 0
+        var failAfter = Int.max
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                guard isDirectory, url.path == rootPath else { return }
+                rootSyncCount += 1
+                if rootSyncCount > failAfter { throw CocoaError(.fileWriteUnknown) }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+
+        // Settlement proceeds: intent write (sync 1), removal barrier (sync 2), confirmed-phase
+        // write barrier (sync 3) FAILS => uncertain; confirmed file written + file-synced.
+        failAfter = 2
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
+        }
+        // The confirmed record is on disk; a retry reconciles to SUCCESS without re-removing.
+        failAfter = Int.max
+        try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
+        XCTAssertFalse(owner.isAttemptInFlight(prep))
+    }
+
+    func test_malformedIntentRefusesSettlementInsteadOfOverwriting() throws {
+        // Reviewer 3aa2b731 (3): an unreadable/malformed/oversized intent is UNKNOWN pending
+        // state — refuse (accountingUnavailable); never overwrite as a fresh transition.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let settlementURL = root.appendingPathComponent(
+            VoiceSharingUploadQueue.settlementRecordName(for: prep.name))
+
+        try Data("not json at all".utf8).write(to: settlementURL)
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+        }
+        XCTAssertEqual(try Data(contentsOf: settlementURL), Data("not json at all".utf8),
+                       "the unknown intent is preserved, not overwritten")
+        XCTAssertTrue(owner.isAttemptInFlight(prep))
+
+        // Oversized intent is equally unknown.
+        try Data(repeating: 0x41, count: VoiceSharingUploadQueue.maxSettlementRecordBytes + 1)
+            .write(to: settlementURL)
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+        }
     }
 
     func test_realWavFailureReasonsAreRejected() throws {
