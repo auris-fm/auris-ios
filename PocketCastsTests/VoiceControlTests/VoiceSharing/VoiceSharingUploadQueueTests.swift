@@ -2114,9 +2114,114 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: foreign, outcome: .retryableFailure)) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale)
         }
-        // And the recorded owner still reconciles.
+        // Round 50: reconciliation is bound to a DURABLY RECORDED intent. A lease removed by
+        // another path — no settlement record exists — is refused even for the recorded owner:
+        // absence without intent is not settled success. Ownership is retained; the live-lease
+        // path (fresh settlement) remains available for a genuine completion.
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale)
+        }
+        XCTAssertTrue(owner.isAttemptInFlight(prep))
+        // Restoring the lease lets a fresh settlement proceed normally.
+        try Data("{}".utf8).write(to: entryDir.appendingPathComponent("attempt.lease"))
+    }
+
+    // MARK: Recorded settlement intent (reviewer 4b02a457)
+
+    func test_contradictoryRetryIsRejected() throws {
+        // retryable lease removal -> sync failure -> DELIVERED retry: the pending record says
+        // retryable; delivered would claim a removal that intent never authorized.
+        var failSync = false
+        var failingDir: URL?
+        let owner = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if failSync, isDirectory, let target = failingDir, url.path == target.path {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            })
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        failingDir = root.appendingPathComponent(prep.name)
+
+        failSync = true
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .publicationUncertain)
+        }
+        // Contradictory retry is REJECTED, entry retained.
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .settlementConflict,
+                           "the pending intent binds the outcome; delivered contradicts it")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
+        // Consistent retry completes the recorded transition.
+        failSync = false
         try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)
         XCTAssertFalse(owner.isAttemptInFlight(prep))
+    }
+
+    func test_leaseRemovedByAnotherPathIsNotMistakenForSettlement() throws {
+        // No intent recorded + lease gone (removed externally): absence must NOT be read as
+        // settled success, even for the recorded in-flight owner.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        let entryDir = root.appendingPathComponent(prep.name)
+        try FileManager.default.removeItem(at: entryDir.appendingPathComponent("attempt.lease"))
+
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .retryableFailure)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale,
+                           "no recorded intent: absence proves nothing")
+        }
+        XCTAssertTrue(owner.isAttemptInFlight(prep), "ownership retained; nothing was settled")
+    }
+
+    func test_settlementIntentSurvivesCrashForFreshOwnerRecovery() throws {
+        // Removal landed, confirmation failed: the intent record is still on disk. A FRESH
+        // instance (crashed original gone) retries the SAME outcome and reconciles exactly that
+        // transition.
+        var failSync = false
+        let rootPath = root.path
+        let crashed = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { url, isDirectory in
+                if failSync, isDirectory, url.path == rootPath { throw CocoaError(.fileWriteUnknown) }
+            })
+        let prep = try crashed.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try crashed.finalize(prep)
+        let lease = try XCTUnwrap(crashed.beginLeaseForTesting(prep))
+        // First settlement attempt: the intent write or its confirmation fails (root barrier
+        // failing) => uncertain, intent possibly on disk unconfirmed.
+        failSync = true
+        XCTAssertThrowsError(try crashed.applyAttemptResult(prep, lease: lease, outcome: .delivered))
+        // "Crash": the original instance is gone. A fresh instance sees the durable intent.
+        let successor = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        // Successor cannot settle with a token it does not hold in memory? It can: the intent
+        // binds generation+owner+outcome; the retry carries the same token.
+        try successor.applyAttemptResult(prep, lease: lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(prep.name).path))
+        let settlementGone = !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(
+                VoiceSharingUploadQueue.settlementRecordName(for: prep.name)).path)
+        XCTAssertTrue(settlementGone, "the intent record is cleared after confirmation")
+    }
+
+    func test_entryRemovedByAnotherPathIsNotMistakenForSettlement() throws {
+        // Entry directory removed externally, no settlement intent recorded: the caller's
+        // in-memory token proves nothing about WHO removed it or whether it persisted.
+        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try owner.finalize(prep)
+        let lease = try XCTUnwrap(owner.beginLeaseForTesting(prep))
+        try FileManager.default.removeItem(at: root.appendingPathComponent(prep.name))
+
+        XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: lease, outcome: .delivered)) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale,
+                           "no intent, no settled success")
+        }
+        XCTAssertTrue(owner.isAttemptInFlight(prep), "ownership retained: nothing was settled")
     }
 
     func test_realWavFailureReasonsAreRejected() throws {

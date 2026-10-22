@@ -142,6 +142,8 @@ final class VoiceSharingUploadQueue {
         case leaseHeld
         /// A completion arrived from an owner that no longer holds the lease.
         case resultStale
+        /// A retry reports a DIFFERENT outcome than the durably recorded pending settlement.
+        case settlementConflict
         case expired
         /// The ready transition may have occurred but its final synchronization could not be
         /// confirmed. Distinct from every other case here, which are all known-uncommitted. Callers
@@ -605,7 +607,7 @@ final class VoiceSharingUploadQueue {
     /// stale owner (whose lease was reclaimed after expiry) must not delete its successor's.
 
     /// Outcome of an upload attempt, applied atomically with ownership validation.
-    enum AttemptOutcome {
+    enum AttemptOutcome: String {
         /// Delivered: the entry is removed and the lease released, atomically.
         case delivered
         /// Retryable failure: only the lease is released; the entry stays for the next attempt.
@@ -617,29 +619,139 @@ final class VoiceSharingUploadQueue {
     /// Applies an attempt result. The caller's lease is REVALIDATED under the entry's flock before
     /// anything happens: an intervening expiry/reclaim means this result is stale and must be
     /// refused — an old owner must not delete an entry a successor is now uploading.
+    /// Durable record of WHICH settlement transition is pending for an entry. Written at the ROOT
+    /// (outside removable scopes) BEFORE any mutation and removed only after the mutation is
+    /// durably confirmed. This is what makes reconciliation exact: the absent lease/entry is
+    /// reconciled as THIS transition, not merely as "some owner did something".
+    static let settlementRecordName = "attempt.settlement"
+    static func settlementRecordName(for entryName: String) -> String {
+        "\(settlementRecordName).\(entryName).json"
+    }
+    static let maxSettlementRecordBytes = 256
+
+    struct SettlementRecord {
+        let generation: String
+        let owner: Int32
+        let outcome: AttemptOutcome
+
+        var jsonObject: [String: Any] {
+            ["generation": generation,
+             "owner": Int(owner),
+             "outcome": outcome.rawValue]
+        }
+
+        static func parse(_ data: Data) -> SettlementRecord? {
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let generation = obj["generation"] as? String,
+                  let owner = obj["owner"] as? Int,
+                  let outcomeRaw = obj["outcome"] as? String,
+                  let outcome = AttemptOutcome(rawValue: outcomeRaw),
+                  Int32(exactly: owner) != nil else { return nil }
+            return SettlementRecord(generation: generation, owner: Int32(exactly: owner)!,
+                                    outcome: outcome)
+        }
+
+        func encoded() throws -> Data {
+            let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [.sortedKeys])
+            guard data.count <= VoiceSharingUploadQueue.maxSettlementRecordBytes else {
+                throw PrepareError.accountingUnavailable
+            }
+            return data
+        }
+    }
+
     func applyAttemptResult(_ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome) throws {
         try serialQueue.sync {
-            // Reviewer 64629ed5: visible absence is not durable absence — fileExists(false) does
-            // not prove anything, and the durability barrier must be REPEATED, not skipped. All
-            // reconciliation happens under the stable root flock (the entry directory itself may
-            // already be gone), only for the caller still recorded as owner, and with real I/O
-            // failure distinguished from true absence via no-follow stat.
+            // Reviewer 4b02a457: handle validation is restored — this entry must belong to THIS
+            // root and carry a name this queue could have minted, before any path is constructed.
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/")
+            else { throw CocoaError(.fileNoSuchFile) }
+
             let lock = try LeaseLock(entryName: entry.name, rootDirectory: rootDirectory)
             defer { lock.close() }
             try lock.lockExclusive()
             let directory = entryDirectoryLocked(for: entry)
+            let settlementURL = rootDirectory.appendingPathComponent(
+                Self.settlementRecordName(for: entry.name))
+
+            // Read the durably recorded pending transition, if any.
+            func readSettlement() -> SettlementRecord? {
+                switch Self.statKind(of: settlementURL) {
+                case .present:
+                    guard let data = try? Data(contentsOf: settlementURL) else { return nil }
+                    return SettlementRecord.parse(data)
+                default:
+                    return nil
+                }
+            }
+            func writeSettlement(_ record: SettlementRecord) throws {
+                let data = try record.encoded()
+                try data.write(to: settlementURL, options: [.atomic])
+                try synchronizer(rootDirectory, true)
+            }
+            func clearSettlement() throws {
+                try fileManager.removeItem(at: settlementURL)
+                try synchronizer(rootDirectory, true)
+            }
+
+            // Record the pending transition DURABLY before mutating anything. A crash between
+            // this write and the mutation leaves the intent recoverable; a crash after mutation
+            // but before confirmation leaves it reconcilable. The record binds generation, owner
+            // AND outcome, so a retry can only complete the exact transition it started.
+            let recorded = readSettlement()
+            if let prior = recorded {
+                // A pending settlement already exists for this entry.
+                guard prior.generation == lease.generation else {
+                    throw PrepareError.resultStale
+                }
+                guard prior.outcome == outcome else {
+                    // Contradictory retry: the pending transition says retryable; delivered would
+                    // claim a removal that the pending record never authorized.
+                    throw PrepareError.settlementConflict
+                }
+            } else {
+                // No pending record: this is a FRESH settlement, which requires the lease to be
+                // live and owned by this caller. Absence without intent is NOT settled success.
+                let current = leaseOwnerLocked(
+                    at: directory.appendingPathComponent(Self.attemptLeaseName))
+                guard Self.statKind(of: directory) == .present,
+                    let held = current, held.generation == lease.generation
+                else { throw PrepareError.resultStale }
+                // If the intent cannot be durably recorded, the transition must not start:
+                // uncertain, ownership retained, retry starts over from a live lease.
+                do {
+                    try writeSettlement(SettlementRecord(
+                        generation: lease.generation, owner: lease.owner, outcome: outcome))
+                } catch {
+                    throw PrepareError.publicationUncertain
+                }
+            }
+
+            // A lock serializes transitions; it does NOT make failed filesystem operations succeed
+            // or persist. Settlement failures propagate as UNCERTAIN and keep the intent record
+            // (and the caller's ownership) so the exact transition can be retried.
+            func confirmEntryRemovalDurability() throws {
+                try synchronizer(rootDirectory, true)
+            }
+            func confirmLeaseRemovalDurability() throws {
+                try synchronizer(directory, true)
+            }
+            func finishSettlement() throws {
+                try clearSettlement()
+                inFlightAttempts.removeValue(forKey: entry)
+            }
 
             switch Self.statKind(of: directory) {
             case .failure:
-                // Cannot distinguish absence from I/O error: uncertain, ownership retained.
                 throw PrepareError.publicationUncertain
             case .absent:
-                // A prior ENTRY removal plausibly landed but was never durably confirmed.
-                guard inFlightAttempts[entry] == lease else { throw PrepareError.resultStale }
-                do { try synchronizer(rootDirectory, true) } catch {
+                // Pending ENTRY removal landed but was not confirmed: repeat the root barrier.
+                do { try confirmEntryRemovalDurability() } catch {
                     throw PrepareError.publicationUncertain
                 }
-                inFlightAttempts.removeValue(forKey: entry)
+                try finishSettlement()
                 return
             case .present:
                 break
@@ -648,51 +760,39 @@ final class VoiceSharingUploadQueue {
             let leaseURL = directory.appendingPathComponent(Self.attemptLeaseName)
             let current = leaseOwnerLocked(at: leaseURL)
             if let held = current, held.generation != lease.generation {
+                // A successor owns the entry now; our pending transition is obsolete.
+                try? fileManager.removeItem(at: settlementURL)
                 throw PrepareError.resultStale
             }
             if current == nil {
-                let leaseStat = Self.statKind(of: leaseURL)
-                switch leaseStat {
+                switch Self.statKind(of: leaseURL) {
                 case .failure:
                     throw PrepareError.publicationUncertain
                 case .absent:
-                    // A prior LEASE-only removal plausibly landed but was never durably confirmed.
-                    // Only the recorded owner may reconcile: this must not accept another
-                    // instance's unrelated settlement.
-                    guard inFlightAttempts[entry] == lease else { throw PrepareError.resultStale }
-                    do { try synchronizer(directory, true) } catch {
+                    // Pending LEASE-only removal landed but was not confirmed: repeat the barrier.
+                    guard recorded?.outcome == .retryableFailure else {
+                        throw PrepareError.resultStale
+                    }
+                    do { try confirmLeaseRemovalDurability() } catch {
                         throw PrepareError.publicationUncertain
                     }
-                    inFlightAttempts.removeValue(forKey: entry)
+                    try finishSettlement()
                     return
                 case .present:
                     throw PrepareError.resultStale
                 }
             }
-            // A lock serializes transitions; it does NOT make failed filesystem operations succeed
-            // or persist. Settlement failures propagate as UNCERTAIN and retain the caller's owner
-            // state, so the caller can retry settlement rather than believe a removal happened.
-            // After ENTRY removal the entry directory no longer exists; the durable fact is the
-            // root's changed listing. After LEASE-only removal the entry directory is the naming
-            // directory whose change must persist.
-            func confirmEntryRemovalDurability() throws {
-                try synchronizer(rootDirectory, true)
-            }
-            func confirmLeaseRemovalDurability() throws {
-                try synchronizer(directory, true)
-            }
+
+            // The lease is live and ours: apply the recorded outcome.
             switch outcome {
             case .delivered, .abandoned:
-                // Entry removal takes the lease file with it; both happen under one lock hold.
                 do {
                     try fileManager.removeItem(at: directory)
                     try confirmEntryRemovalDurability()
                 } catch {
-                    // Unknown whether the removal landed. Ownership is RETAINED so the caller can
-                    // settle again; reporting success here would claim a removal that may not exist.
                     throw PrepareError.publicationUncertain
                 }
-                inFlightAttempts.removeValue(forKey: entry)
+                try finishSettlement()
             case .retryableFailure:
                 do {
                     try fileManager.removeItem(at: leaseURL)
@@ -700,7 +800,7 @@ final class VoiceSharingUploadQueue {
                 } catch {
                     throw PrepareError.publicationUncertain
                 }
-                inFlightAttempts.removeValue(forKey: entry)
+                try finishSettlement()
             }
         }
     }
