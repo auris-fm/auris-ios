@@ -65,6 +65,15 @@ enum VoiceSharingContributionEncoder {
 
     static let sampleRateHz = 16_000
 
+    enum EncodeError: Error, Equatable {
+        /// A nonfinite sample (NaN/±inf) is malformed capture audio: REFUSED, never clamped into
+        /// a fake value and never allowed to trap the process.
+        case nonFiniteSample
+        /// The collector's own ceiling bounds one capture; exceeding it is refused BEFORE WAV
+        /// capacity arithmetic and the UInt32 header sizes are computed.
+        case sampleCountExceedsCeiling
+    }
+
     static func encode(
         event: VoiceSharingCollector.SegmentEvent,
         provenance: Provenance,
@@ -101,6 +110,15 @@ enum VoiceSharingContributionEncoder {
     // MARK: WAV (pcm_s16le, mono, 16 kHz, canonical 44-byte header)
 
     private static func wavBytes(from samples: [Float]) throws -> Data {
+        // Reviewer 9fbb9d24: Float→Int conversion TRAPS on NaN/infinity/overflow — validate and
+        // clamp in the FLOAT domain first, so the advertised rejection policy runs before any
+        // integer conversion exists to crash.
+        guard samples.count <= VoiceSharingCollector.maxRetainedSamples else {
+            throw EncodeError.sampleCountExceedsCeiling
+        }
+        for sample in samples where !sample.isFinite {
+            throw EncodeError.nonFiniteSample
+        }
         var data = Data(capacity: VoiceSharingRecordBinding.wavHeaderBytes + samples.count * 2)
         let byteRate = sampleRateHz * 2
         func append(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
@@ -119,8 +137,11 @@ enum VoiceSharingContributionEncoder {
         data.append(contentsOf: Array("data".utf8))
         append(UInt32(samples.count * 2))
         for sample in samples {
-            // Round-nearest with clamping: ±1.0 maps to ±32768's representable bound.
-            let scaled = (sample * 32768).rounded()
+            // Round-nearest with FLOAT-domain clamping: finite out-of-range values pin to ±1
+            // BEFORE scaling, so ±1.0 maps to ±int16's representable bound and no finite input
+            // can overflow the integer conversion.
+            let clampedSample = min(max(sample, -1), 1)
+            let scaled = (clampedSample * 32768).rounded()
             let clamped = Int16(clamping: Int(scaled))
             withUnsafeBytes(of: clamped.littleEndian) { data.append(contentsOf: $0) }
         }

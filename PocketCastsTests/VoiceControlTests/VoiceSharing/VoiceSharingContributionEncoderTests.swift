@@ -62,6 +62,61 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         XCTAssertEqual(Int16(bitPattern: thirdLE), 32440, "Float 0.99 -> round-nearest, not truncated")
     }
 
+    func test_nonFiniteSamplesAreRefusedNotClampedAndNeverTrap() throws {
+        // Reviewer 9fbb9d24: NaN/±inf must throw BEFORE any Float→Int conversion; a large finite
+        // value must clamp in the float domain without trapping.
+        for bad: [Float] in [[.nan], [.infinity], [-.infinity], [0.5, .nan]] {
+            XCTAssertThrowsError(
+                try VoiceSharingContributionEncoder.encode(
+                    event: eventReplaced(audio: bad), provenance: provenance, observations: observations)
+            ) { error in
+                XCTAssertEqual(
+                    error as? VoiceSharingContributionEncoder.EncodeError,
+                    .nonFiniteSample, "nonfinite audio is malformed, refused at encode time")
+            }
+        }
+        let huge: [Float] = [.greatestFiniteMagnitude, -.greatestFiniteMagnitude]
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: eventReplaced(audio: huge), provenance: provenance, observations: observations)
+        let payload = encoded.wav.subdata(in: VoiceSharingRecordBinding.wavHeaderBytes..<encoded.wav.count)
+        let hi = Int16(bitPattern: payload.subdata(in: 0..<2).withUnsafeBytes { $0.load(as: UInt16.self) })
+        let lo = Int16(bitPattern: payload.subdata(in: 2..<4).withUnsafeBytes { $0.load(as: UInt16.self) })
+        XCTAssertEqual(hi, 32767)
+        XCTAssertEqual(lo, -32768)
+        // ±1 exactly maps to the representable bounds.
+        let exact = try VoiceSharingContributionEncoder.encode(
+            event: eventReplaced(audio: [1, -1]), provenance: provenance, observations: observations)
+        let exactPayload = exact.wav.subdata(
+            in: VoiceSharingRecordBinding.wavHeaderBytes..<exact.wav.count)
+        let p1 = Int16(bitPattern: exactPayload.subdata(in: 0..<2).withUnsafeBytes { $0.load(as: UInt16.self) })
+        let n1 = Int16(bitPattern: exactPayload.subdata(in: 2..<4).withUnsafeBytes { $0.load(as: UInt16.self) })
+        XCTAssertEqual(p1, 32767)
+        XCTAssertEqual(n1, -32768)
+    }
+
+    func test_sampleCountAboveCollectorCeilingIsRefusedBeforeSizing() {
+        var oversized = samples
+        oversized.append(
+            contentsOf: [Float](repeating: 0, count: VoiceSharingCollector.maxRetainedSamples + 1))
+        XCTAssertThrowsError(
+            try VoiceSharingContributionEncoder.encode(
+                event: eventReplaced(audio: oversized), provenance: provenance, observations: observations)
+        ) { error in
+            XCTAssertEqual(
+                error as? VoiceSharingContributionEncoder.EncodeError,
+                .sampleCountExceedsCeiling)
+        }
+    }
+
+    private func eventReplaced(audio: [Float]) -> VoiceSharingCollector.SegmentEvent {
+        let e = event()
+        return VoiceSharingCollector.SegmentEvent(
+            kind: e.kind, captureID: e.captureID, enrollmentEpoch: e.enrollmentEpoch,
+            authorizationSession: e.authorizationSession, retainedSamples: audio.count,
+            truncated: e.truncated, droppedSpans: [], originalSampleCount: nil,
+            audio: audio, isGateControl: false)
+    }
+
     func test_truncationFactsAreRecordedExplicitly() throws {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(truncated: true), provenance: provenance, observations: observations)
