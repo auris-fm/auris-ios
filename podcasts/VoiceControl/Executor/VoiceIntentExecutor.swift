@@ -99,7 +99,14 @@ extension PlaybackManager: PlaybackStateProviding {
 
 extension FingerprintTimingManager: FingerprintMappingProviding {}
 
-class VoiceIntentExecutor {
+/// The single entry point `VoiceControlService` needs from the executor. Extracted (spec 85cec5b7) so the
+/// service's routing branches can be driven with a chosen RESULT — including a failure — without
+/// constructing every sink.
+protocol VoiceIntentExecuting: AnyObject {
+    func execute(_ intent: any VoiceIntent) async -> VoiceResponse
+}
+
+class VoiceIntentExecutor: VoiceIntentExecuting {
     private let playbackSink: VoicePlaybackSink
     private let effectsSink: VoiceEffectsSink
     private let volumeSink: VoiceVolumeSink

@@ -22,8 +22,8 @@ class VoiceControlService: ObservableObject {
     private let interruptionHandler: AudioSessionInterruptionHandler
     private let asrEngine: VoiceAsrEngine
     private let wakeWordDetector: WakeWordDetectorProtocol
-    private let intentRouter: LfmIntentRouter
-    private let executor: VoiceIntentExecutor
+    private let intentRouter: any IntentClassifying
+    private let executor: any VoiceIntentExecuting
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
@@ -98,8 +98,8 @@ class VoiceControlService: ObservableObject {
         interruptionHandler: AudioSessionInterruptionHandler,
         asrEngine: VoiceAsrEngine,
         wakeWordDetector: WakeWordDetectorProtocol,
-        intentRouter: LfmIntentRouter,
-        executor: VoiceIntentExecutor,
+        intentRouter: any IntentClassifying,
+        executor: any VoiceIntentExecuting,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
@@ -373,6 +373,14 @@ class VoiceControlService: ObservableObject {
         default: return "refused"
         }
     }
+
+    #if DEBUG
+    /// Test seam: put the service in the listening state the routing branches require, without starting
+    /// audio. Only the flag moves — no route, no capture, no wake detector.
+    func enterListeningStateForTesting() {
+        isListening = true
+    }
+    #endif
 
     #if DEBUG
     /// Test seam: the PRODUCTION interpreter, so a control cannot restate the mapping and pass alone.

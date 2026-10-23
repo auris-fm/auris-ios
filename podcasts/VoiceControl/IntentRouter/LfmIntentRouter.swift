@@ -9,8 +9,17 @@ enum ClassificationResult {
     case none
 }
 
+/// The one classification entry point `VoiceControlService` needs. Extracted so a test can drive the
+/// real routing branches with a deterministic result — the LFM model is not required to exercise
+/// branch composition, only to exercise the model (spec 85cec5b7).
+protocol IntentClassifying: AnyObject {
+    func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?) -> ClassificationResult
+    var onMetrics: ((RouterStageDiagnostic) -> Void)? { get set }
+    func ensureReady() async -> Result<Void, Error>
+}
+
 /// Classify-then-generate intent router backed by CPU llama.cpp + LFMC head.
-final class LfmIntentRouter {
+final class LfmIntentRouter: IntentClassifying {
     private let modelManager: ModelManager
     private let inference: LfmInference
     private let mapper = ToolCallMapper()
