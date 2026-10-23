@@ -538,6 +538,104 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                       "the entry is retained for its owning identity")
     }
 
+    /// FINAL PRE-LAUNCH WINDOW (reviewer 1244fd5e / 376a2518): the transport's own
+    /// baseURLProvider/endpoint resolution runs AFTER the credential-boundary check. Flipping the
+    /// identity inside baseURLProvider lands the move between the credential fence and the
+    /// launch; the FINAL fence (after request building, before receive) must stop it.
+    func test_identityChangeInsideBaseURLProviderEmitsNoRequest() async throws {
+        let sharedRoot = root!
+        let box = IdentityBox(VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let owned = VoiceSharingUploadQueue(
+            rootDirectory: sharedRoot, currentIdentity: { box.current })
+        let entry = try makeReadyEntryOwned(owned, root: sharedRoot)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AssemblyIntercept.self]
+        let realTransport = VoiceSharingUploadTransport(
+            baseURLProvider: {
+                // This callback runs between the two fences — exactly where a move must be caught.
+                box.current = VoiceSharingUploadIdentity(
+                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                return "https://unit.test"
+            },
+            tokenProvider: StaticTokenProvider(token: "tok"),
+            session: URLSession(configuration: configuration))
+
+        AssemblyIntercept.responder = { _ in
+            XCTFail("no request may reach the wire for a baseURLProvider-window move")
+            return (HTTPURLResponse(url: URL(string: "https://unit.test/x")!, statusCode: 500,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { AssemblyIntercept.responder = nil }
+
+        let admitted = try XCTUnwrap(try owned.admitAttempt(entry))
+        let request = URLRequest(url: URL(string: "https://unit.test/api/v1/voice-recordings")!)
+        let result = await realTransport.send(
+            request: request, admittedIdentity: admitted.identity,
+            identityFence: { box.current })
+
+        guard case .transportFailure = result else {
+            return XCTFail("a move inside baseURLProvider must send nothing, got \(result)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0,
+                       "the real transport emitted no request")
+        try owned.applyAttemptResult(entry, lease: admitted.lease, outcome: .retryableFailure)
+        XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name })
+    }
+
+    /// ASSEMBLED CREDENTIAL-WINDOW CONTROL (reviewer 1244fd5e): the direct-send test above proves
+    /// the transport check; this one drives the PRODUCTION path — assembly-built uploader and
+    /// transport, real admission, real fence forwarding — with the move inside the token await.
+    func test_assembledUploadStopsWhenIdentityMovesDuringCredentialAwait() async throws {
+        let sharedRoot = root!
+        let box = IdentityBox(VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: sharedRoot, currentIdentity: { box.current })
+        let entry = try makeReadyEntryOwned(queue, root: sharedRoot)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AssemblyIntercept.self]
+        let realTransport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: SuspendingTokenProvider {
+                box.current = VoiceSharingUploadIdentity(
+                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+            },
+            session: URLSession(configuration: configuration))
+        // Rebuild the uploader exactly as the assembly does, but with the real transport — the
+        // production closure signature forwards snapshot + fence unchanged.
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { box.current },
+            endpoint: { realTransport.endpoint },
+            transport: { request, admitted, fence in
+                await realTransport.send(
+                    request: request, admittedIdentity: admitted, identityFence: fence)
+            })
+
+        AssemblyIntercept.responder = { _ in
+            XCTFail("assembled path: no request may reach the wire during the credential await")
+            return (HTTPURLResponse(url: URL(string: "https://unit.test/x")!, statusCode: 500,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { AssemblyIntercept.responder = nil }
+
+        let outcome = await uploader.upload(entry)
+        // The transport refusal surfaces as .retry; the uploader's own post-await fence then
+        // escalates the SAME move to .revoked — either way nothing was sent (asserted below).
+        guard case .revoked = outcome else {
+            return XCTFail("the assembled upload must be revoked on a credential-window move, got \(outcome)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0,
+                       "assembled path emitted no request")
+        XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained for its owning identity")
+    }
+
     /// Token provider that runs a hook inside `token()` — proves a move happens while the
     /// credential await is in flight.
     private final class SuspendingTokenProvider: CloudTokenProviding {

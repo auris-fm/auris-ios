@@ -171,6 +171,15 @@ final class VoiceSharingUploadTransport {
         // idempotency key all arrive from the uploader, so what the controls assert is what ships.
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
 
+        // FINAL PRE-LAUNCH FENCE (reviewer 1244fd5e): `baseURLProvider`/endpoint evaluation is a
+        // callback that could itself move the identity after the credential-boundary check — the
+        // same window shape as the uploader's endpoint hook. With every mutable callback resolved
+        // and the request fully built, the LAST read before `receive` launches must still see the
+        // admitted snapshot.
+        if let fence = identityFence, let admitted = admittedIdentity {
+            guard let live = fence(), live == admitted else { return .transportFailure }
+        }
+
         do {
             // STREAMING bound (reviewer 8ba9c45f): `session.data` allocates the WHOLE body before
             // this code runs, so a post-hoc count check is a parse bound, not a memory bound. The
