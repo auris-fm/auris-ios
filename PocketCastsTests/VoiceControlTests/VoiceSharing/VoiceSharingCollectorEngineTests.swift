@@ -374,6 +374,165 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
 /// Backend stand-in that also gives the test a handle on the engine's capture callback and the bleed verdict,
 /// neither of which is otherwise reachable without a real audio session or playback tap.
+/// The FULL production chain: real `VoiceAsrEngine` → real segmenter → real collector → the REAL
+/// `VoiceSharingContributionSink` → the REAL durable queue. `VoiceSharingCollectorEngineTests` stops at
+/// the collector's event callback; `VoiceSharingContributionSinkTests` starts at a hand-built event. This
+/// closes the seam between them, with bounded fixtures instead of microphone capture.
+final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+    private var storeState = VoiceSharingEnrollmentStore.State()
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        storeState = VoiceSharingEnrollmentStore.State()
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func openGate(enrolled: Bool) -> VoiceSharingPolicy {
+        let policy = VoiceSharingPolicy(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { [weak self] in self?.storeState.effectiveEnrolled ?? false })
+        storeState.localOptIn = enrolled
+        storeState.hasAuthoritativeProjection = enrolled
+        if !enrolled { storeState.membership = .unavailable }
+        if enrolled {
+            storeState.membership = VoiceSharingMembership(
+                membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
+                withdrawalState: .active)
+        }
+        policy.identityBecameReadable()
+        _ = policy.refreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
+        return policy
+    }
+
+    private var provenance: VoiceSharingContributionEncoder.Provenance {
+        .init(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "gen-A",
+            models: .init(
+                vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
+                asr: .init(id: "asr-1", version: "1"), translation: nil,
+                router: .init(id: "router-1", version: "1")),
+            conversionVersion: "v1")
+    }
+
+    /// Claims with an explicitly UNOBSERVED ASR stage, so the delta-736d3180 pair is what reaches the
+    /// queue at the end of the real pipeline.
+    private var claims: [String: VoiceSharingContributionEncoder.StageOutcome] {
+        [
+            "wake": .init(state: "completed"),
+            "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+            "asr": .init(state: "unknown", reason: "observation_unavailable"),
+            "translation": .init(state: "not_run", reason: "no_text"),
+            "routing": .init(state: "not_run", reason: "no_candidates"),
+            "execution": .init(state: "not_run", reason: "client_refused"),
+        ]
+    }
+
+    private func makeChain(
+        policy: VoiceSharingPolicy,
+        claims: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome]
+    ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink, backend: EngineStubBackend) {
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { policy.permitsCollection },
+            encoderProvenance: { [self] in provenance }, observations: claims)
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "epoch-1" },
+            sessionIdentity: { "gen-A" },
+            sink: { event in sink.handle(event) })
+        collector.deliversSynchronouslyForTesting = true
+        let backend = EngineStubBackend()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
+            backend: backend, signalFilter: SignalFilter(),
+            wakeWordDetector: NotDetectedWake(), gracePeriodSignal: GracePeriodSignal(),
+            translationStage: nil)
+        engine.contributionCollector = collector
+        backend.engine = engine
+        engine.start()
+        return (engine, sink, backend)
+    }
+
+    private func records_seenForTesting() -> Int {
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else { return 0 }
+        return entries.count
+    }
+
+    private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+                ready.count >= count { return ready }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() { return ready }
+        return []
+    }
+
+    /// THE control: speech driven through the real engine's capture callback becomes a durable ready
+    /// entry, and the record inside it carries the unknown/observation_unavailable pair.
+    func test_theRealEnginePipelineReachesTheDurableQueueWithTheUnobservedPair() throws {
+        let policy = openGate(enrolled: true)
+        let chain = makeChain(policy: policy, claims: { [self] in claims })
+        // A wake-triggered continuous capture, then one bounded burst of speech frames.
+        chain.engine.listeningMode = .continuous
+        chain.backend.emitSpeech(level: 0.3, totalSamples: 16_000)
+
+        let ready = waitForReadyEntries(1)
+        XCTAssertEqual(ready.count, 1,
+                       "the real engine's observer must produce a durable ready entry, not just a callback")
+        // ANTI-VACUITY: the entry must be produced by a real capture, and its record must actually carry
+        // the unknown/observation_unavailable pair — not merely "some entry exists".
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            let entry = entries.first else { return XCTFail("a ready entry is required") }
+        let metadataURL = entry.root.appendingPathComponent(entry.name)
+            .appendingPathComponent("metadata.json")
+        let envelope = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+        let record = envelope?["record"] as? [String: Any]
+        let observations = record?["observations"] as? [String: Any]
+        let asr = observations?["asr"] as? [String: Any]
+        XCTAssertEqual(asr?["state"] as? String, "unknown",
+                       "the durable entry must carry the engine-produced unknown state")
+        XCTAssertEqual(asr?["reason"] as? String, "observation_unavailable")
+        XCTAssertEqual(records_seenForTesting(), 1, "exactly one capture reached the queue")
+    }
+
+    /// The refusal half on the SAME chain: with the pairing broken, the pipeline reaches the sink and the
+    /// sink drops it — nothing becomes ready. This is what makes the positive control above meaningful:
+    /// an entry appearing is not automatic.
+    func test_theRealEnginePipelineDropsTheRecordWhenThePairingIsBroken() throws {
+        let policy = openGate(enrolled: true)
+        let chain = makeChain(policy: policy, claims: { [self] in
+            var broken = self.claims
+            broken["asr"] = .init(state: "failed", reason: "observation_unavailable")
+            return broken
+        })
+        chain.engine.listeningMode = .continuous
+        chain.backend.emitSpeech(level: 0.3, totalSamples: 16_000)
+
+        // Give the pipeline at least as long as the positive control takes, then assert emptiness.
+        _ = waitForReadyEntries(1, timeout: 2)
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 0,
+                       "a record the validator refuses must never become ready, even from the real engine")
+    }
+}
+
 final class EngineStubBackend: AsrBackend {
     weak var engine: VoiceAsrEngine?
     private(set) var transcribeCalls = 0
