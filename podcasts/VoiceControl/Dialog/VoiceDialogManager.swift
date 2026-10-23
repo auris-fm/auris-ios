@@ -5,6 +5,16 @@ class VoiceDialogManager {
     struct Result {
         let intent: (any VoiceIntent)?
         let question: String?
+        /// A `new_command` control's value: the dialog was CANCELLED and this value must be
+        /// re-processed as a fresh transcript (spec 0443b70). `nil` for every other outcome —
+        /// `question` for those is prose to render.
+        var reprocessValue: String?
+
+        init(intent: (any VoiceIntent)?, question: String?, reprocessValue: String? = nil) {
+            self.intent = intent
+            self.question = question
+            self.reprocessValue = reprocessValue
+        }
     }
 
     func handle(_ action: DialogControlAction) -> Result {
@@ -78,10 +88,16 @@ class VoiceDialogManager {
     }
 
     private func cancelAndReprocess(_ value: String) -> Result {
+        // A new_command CANCELS a dialog and re-processes its value. With NO pending dialog there
+        // is nothing to cancel — and re-processing anyway would loop forever (each re-processed
+        // transcript that classifies as new_command would schedule itself again).
+        guard pendingDialog != nil || pendingAction != nil else {
+            return Result(intent: nil, question: nil)
+        }
         pendingDialog = nil
         pendingAction = nil
-        // Signal caller to re-process the new value as a fresh transcript
-        return Result(intent: nil, question: value)
+        // The caller re-processes this value as a fresh transcript — see `Result.reprocessValue`.
+        return Result(intent: nil, question: nil, reprocessValue: value)
     }
 
     // MARK: - Slot Requirements

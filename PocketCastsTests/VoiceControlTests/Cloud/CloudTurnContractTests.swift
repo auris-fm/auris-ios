@@ -6,14 +6,64 @@ import XCTest
 /// Field names/semantics are pinned against `docs/specs/cloud-assistant.md`
 /// ("Turn control fields").
 final class CloudTurnContractTests: XCTestCase {
+    // MARK: - source-first runtime request + optional source_language (core b6eafe25)
+
+    /// The runtime `request` carries the complete wake-trimmed SOURCE utterance when one is
+    /// available; the English routing translation never replaces the original on the wire.
+    /// The optional `source_language` carries the ASR pipeline's actual LID — yue stays yue.
+    func testSourceUtteranceAndLanguageRideTheAuthFrameWhenAvailable() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let json = try await authFrame(
+            request: "play something upbeat",   // English routing translation
+            turn: turn,
+            sourceTranscript: "来点欢快的",       // wake-trimmed source utterance
+            sourceLanguage: "yue"                // actual ASR LID — yue, not zh
+        )
+        XCTAssertEqual(json["request"] as? String, "来点欢快的",
+                       "the original source utterance must be the runtime request, not the routing translation")
+        XCTAssertEqual(json["source_language"] as? String, "yue",
+                       "the actual detected language must ride the frame, preserving yue vs zh")
+    }
+
+    /// Translated-only (backend translate exposes English only): no original exists, so the
+    /// available English text is used WITHOUT fabricating an original, and `source_language` is
+    /// omitted — unknown is omitted, never invented (not the OS locale, not "en").
+    func testTranslatedOnlyTurnSendsAvailableTextAndOmitsUnknownLanguage() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let json = try await authFrame(
+            request: "play something upbeat",
+            turn: turn,
+            sourceTranscript: nil,
+            sourceLanguage: nil
+        )
+        XCTAssertEqual(json["request"] as? String, "play something upbeat",
+                       "without an original, the available text is the request — nothing fabricated")
+        XCTAssertFalse(json.keys.contains("source_language"),
+                       "an unknown language must be OMITTED from the frame, never defaulted")
+    }
+
+    /// An EMPTY source transcript is not an original: the routing request is used and the
+    /// language rides only if actually present.
+    func testEmptySourceTranscriptFallsBackToRoutingRequest() async throws {
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let json = try await authFrame(
+            request: "pause",
+            turn: turn,
+            sourceTranscript: "",
+            sourceLanguage: "zh"
+        )
+        XCTAssertEqual(json["request"] as? String, "pause",
+                       "an empty source transcript must not replace the routing request")
+        XCTAssertEqual(json["source_language"] as? String, "zh")
+    }
+
     // MARK: - request_id
 
     func testRequestIdIsPresentAndStableWhenReused() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
-            recentConversation: []
-        )
+            recentConversation: [], conversation: testPreparedConversation())
         let json = try await authFrame(request: "what did they say about AI?", turn: turn)
 
         XCTAssertEqual(json["request_id"] as? String, turn.requestId, "request_id must come from the envelope")
@@ -25,8 +75,8 @@ final class CloudTurnContractTests: XCTestCase {
     }
 
     func testDistinctTurnsGetDistinctRequestIds() {
-        let a = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        let b = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let a = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let b = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         XCTAssertNotEqual(a.requestId, b.requestId)
     }
 
@@ -35,7 +85,7 @@ final class CloudTurnContractTests: XCTestCase {
     /// turn rather than two. (A turn recorded under a server-assigned id must
     /// never be auto-retried at all — there is no client retry loop.)
     func testDuplicateTransportAttemptsReuseTheSameRequestId() async throws {
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         self.pendingFixture =
             """
             event: done
@@ -54,7 +104,7 @@ final class CloudTurnContractTests: XCTestCase {
         capturedTasks.removeAll()
         let retry = makeClient()
         for await _ in retry.route(request: "same logical turn", context: sampleContext(), turn: turn) {}
-        let secondTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let secondTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let fresh = makeClient()
         for await _ in fresh.route(request: "next turn", context: sampleContext(), turn: secondTurn) {}
 
@@ -79,7 +129,8 @@ final class CloudTurnContractTests: XCTestCase {
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: false),
             routeHint: nil,
-            recentConversation: []
+            recentConversation: [],
+            conversation: testPreparedConversation()
         )
         XCTAssertTrue(turn.capabilities.isEmpty)
 
@@ -91,7 +142,7 @@ final class CloudTurnContractTests: XCTestCase {
         let capabilities = CloudClientCapabilities.advertised(rendersStructuredResults: true)
         XCTAssertEqual(capabilities, ["search_results_v1"])
 
-        let turn = CloudTurnEnvelope.make(capabilities: capabilities, routeHint: nil, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: capabilities, routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let json = try await authFrame(request: "x", turn: turn)
         XCTAssertEqual(json["capabilities"] as? [String], ["search_results_v1"])
     }
@@ -127,7 +178,7 @@ final class CloudTurnContractTests: XCTestCase {
     // MARK: - route_hint
 
     func testRouteHintOmittedForFreeTextTurns() async throws {
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let json = try await authFrame(request: "play the bit about AI", turn: turn)
         XCTAssertNil(json["route_hint"], "free-text cloud_route keeps working without a hint")
     }
@@ -137,7 +188,7 @@ final class CloudTurnContractTests: XCTestCase {
             operation: "search_spoken_content",
             arguments: ["query": .string("climate"), "scope": .string("current_episode")]
         )
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: hint, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: hint, recentConversation: [], conversation: testPreparedConversation())
         let json = try await authFrame(request: "x", turn: turn)
 
         let hintJSON = try XCTUnwrap(json["route_hint"] as? [String: Any])
@@ -170,30 +221,37 @@ final class CloudTurnContractTests: XCTestCase {
     }
 
     func testRecentConversationOmittedWhenEmpty() async throws {
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
         let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
         XCTAssertNil(context["recent_conversation"])
     }
 
-    func testRecentConversationSerializesRoleAndText() async throws {
+    /// Superseded by the owning paragraph, which retains history server-side and forbids
+    /// client-supplied history in the frame. This case asserted the OLD contract — that the
+    /// client serialized `context.recent_conversation` — and it held the frame to a shape the
+    /// spec now refuses, so it is inverted rather than deleted: the field must be absent even
+    /// when the client still holds local context, or the model would receive text the server
+    /// never authenticated.
+    func testRecentConversationIsNeverSerializedIntoTheFrame() async throws {
         let turn = CloudTurnEnvelope.make(
             capabilities: [],
             routeHint: nil,
-            recentConversation: [RecentConversationTurn(role: .user, text: "who is speaking?")]
+            recentConversation: [RecentConversationTurn(role: .user, text: "who is speaking?")],
+            conversation: testPreparedConversation()
         )
         let json = try await authFrame(request: "x", turn: turn)
         let context = try XCTUnwrap(json["context"] as? [String: Any])
-        let conversation = try XCTUnwrap(context["recent_conversation"] as? [[String: Any]])
-        XCTAssertEqual(conversation.count, 1)
-        XCTAssertEqual(conversation[0]["role"] as? String, "user")
-        XCTAssertEqual(conversation[0]["text"] as? String, "who is speaking?")
+        XCTAssertNil(
+            context["recent_conversation"],
+            "client-supplied conversation history was sent; the server retains history itself"
+        )
     }
 
     // MARK: - existing contract preserved
 
     func testExistingContextFieldsUnchanged() async throws {
-        let json = try await authFrame(request: "hello", turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: []))
+        let json = try await authFrame(request: "hello", turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()))
         XCTAssertEqual(json["request"] as? String, "hello")
         let context = try XCTUnwrap(json["context"] as? [String: Any])
         XCTAssertEqual(context["episode_id"] as? String, "ep")
@@ -223,7 +281,9 @@ final class CloudTurnContractTests: XCTestCase {
     private func authFrame(
         request: String,
         turn: CloudTurnEnvelope,
-        token: String? = "test_token"
+        token: String? = "test_token",
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) async throws -> [String: Any] {
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
@@ -233,7 +293,13 @@ final class CloudTurnContractTests: XCTestCase {
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
         )
-        for await _ in client.route(request: request, context: sampleContext(), turn: turn) {}
+        for await _ in client.route(
+            request: request,
+            context: sampleContext(),
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        ) {}
         return try XCTUnwrap(task.sentAuthFrame)
     }
 
@@ -246,4 +312,67 @@ final class CloudTurnContractTests: XCTestCase {
         capturedTasks.append(built.task)
         return built.client
     }
+    /// A send that TRANSMITS and then fails is reported as an ordinary transport failure.
+    ///
+    /// The distinction that matters is preserved even though the never-submitted case is gone: a
+    /// frame that left the client is NOT treated as one that never did, so nothing may re-drive it.
+    /// The assertion is that the failure is surfaced at all and the frame is recorded as sent —
+    /// there is no separate "never submitted" outcome for a transmitted frame to be misclassified
+    /// into, which is the stronger position.
+    func testASendThatTransmitsThenThrowsIsReportedAsATransportFailure() async {
+        let built = CloudRouteClient.stubbed(baseURL: "https://cloud.test", fixture: "")
+        let task = built.task
+        let client = built.client
+        task.transmitsThenThrows = true
+
+        var sawError = false
+        for await event in client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        ) {
+            if case .error = event { sawError = true }
+        }
+
+        XCTAssertEqual(task.sent.count, 1, "the frame was not transmitted, so the case is vacuous")
+        XCTAssertTrue(sawError, "the failure was not surfaced at all")
+    }
+
+    /// The PRODUCTION task must not be left suspended. A `URLSessionWebSocketTask` starts suspended
+    /// and must be resumed to begin connecting; without the resume the task never reached startup,
+    /// so a turn could not begin. (Startup is the observed requirement; "every suspended send
+    /// fails" was not measured and is not claimed.)
+    ///
+    /// This case deliberately does NOT inject `webSocketTaskFactory`: injecting it bypasses the
+    /// default path, which is exactly how the missing resume survived the entire suite. It drives
+    /// the real factory and reads the state of the task that factory produced.
+    func testTheProductionWebSocketTaskIsNotLeftSuspended() async {
+        let client = CloudRouteClient(baseURL: "wss://cloud.test", userId: "user_test")
+        // Drive the production path far enough to create its task. The connection itself cannot
+        // succeed here, which is fine: the assertion is about the task's STATE, not its outcome.
+        let stream = client.route(
+            request: "x",
+            context: CloudRouteContext(
+                episodeId: nil, podcastId: nil, referencePositionMs: nil,
+                clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        )
+        let consumer = Task { for await _ in stream {} }
+        // Give the production path a moment to create and resume its task.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        consumer.cancel()
+
+        let state = client.lastProductionTaskStateForTesting
+        XCTAssertNotNil(state, "the production path never created a task, so this case is vacuous")
+        XCTAssertNotEqual(
+            state, .suspended,
+            "the production WebSocket task was left SUSPENDED, so it never began connecting and "
+                + "a turn could not start"
+        )
+    }
+
 }

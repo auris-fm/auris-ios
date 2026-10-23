@@ -29,6 +29,19 @@ struct AudioRouteIdentity: Equatable {
     let inputUID: String?
 }
 
+/// The service's acquisition dedup key: a route identity plus the epoch of the
+/// physical-device change it was observed on. See `IOSAudioRouteMonitor.acquisitionKey`.
+///
+/// The epoch is what makes a *physical route-change notification* grant one attempt
+/// even when the route identity is unchanged. It is deliberately per-notification:
+/// each received physical notification advances it, so each is entitled to one
+/// attempt on its own. Distinct notifications are NOT inferred to be one physical
+/// event (spec 5d418579) — that is not required, and the counter cannot establish it.
+struct AcquisitionRouteKey: Equatable {
+    let route: AudioRouteIdentity
+    let deviceChangeEpoch: UInt
+}
+
 enum MicExposureClassifier {
     static func classify(_ route: AudioRoute) -> MicExposure {
         guard let input = route.input else { return .noMic }
@@ -256,6 +269,31 @@ class IOSAudioRouteMonitor: ObservableObject {
             input: currentRoute.input,
             inputUID: audioSession.currentInputs.first?.uid
         )
+    }
+
+    /// The acquisition dedup key: the live route identity **paired with the
+    /// physical-device-change epoch**.
+    ///
+    /// The identity alone cannot express the retry contract. After a headset
+    /// disconnect and reconnect the session is in `.playback`, so it selects no
+    /// input: the identity is type-level (`input: nil`) and *identical* to the
+    /// failed attempt that preceded the disconnect — yet the device is genuinely
+    /// re-presented and the contract grants one fresh attempt (spec 5d418579).
+    /// The epoch distinguishes the two: it advances once per received physical
+    /// route-change notification, so a later notification produces a key that
+    /// differs from the failed attempt's key even with an unchanged identity.
+    ///
+    /// Note the actual publication ordering — the epoch is incremented by the
+    /// monitor's route-change handler, not atomically with `refreshRoute()`. The
+    /// handler calls `refreshRoute()` first (which publishes `micExposure` →
+    /// one gate evaluation carrying the OLD epoch) and only then increments the
+    /// epoch and breaks grace (whose `isActive` publication → a second gate
+    /// evaluation carrying the NEW epoch). So a single physical notification can
+    /// reach `considerAcquisition` twice; the first sees the old key and is
+    /// deduped, and the second sees the new epoch and is the attempt the contract
+    /// grants. This key is read at each evaluation, so it is correct in both.
+    var acquisitionKey: AcquisitionRouteKey {
+        AcquisitionRouteKey(route: currentRouteIdentity, deviceChangeEpoch: physicalDeviceChangeEpoch)
     }
 
     /// The live external input candidate (from `availableInputs`) — the physical
@@ -486,17 +524,46 @@ class IOSAudioRouteMonitor: ObservableObject {
             return false
         }
     }
+    func classifyOutputForTesting(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        classifyOutput(port)
+    }
 
-    private func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
-        guard let port else { return .builtInSpeaker }
-        switch port.portType {
+    /// Classifies the current output port, defaulting to `unknown` rather than to any named
+    /// route.
+    ///
+    /// A missing port and an unrecognised port type are both "not known to be the built-in
+    /// speaker", and they must not acquire its alignment: `forOutput` gives `.builtInSpeaker`
+    /// the correlation window, which is justified by that route's bounded local latency. A USB
+    /// DAC, car head unit, hearing aid or any future port type has codec latency this client
+    /// has not measured, so claiming the built-in window for it would align the filter against
+    /// a latency that is not there. `unknown` maps to `.external`, which is the honest scope
+    /// for a route whose behaviour has not been established.
+    /// The ABSTRACTION-side overload: `audioSession.currentOutputs` yields `AudioPort` values, so the
+    /// monitor's own callers classify through this. It dispatches on the port TYPE only, so it shares
+    /// the classification with the AVAudioSession overload rather than duplicating it.
+    func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
+        classifyOutput(portType: port?.portType)
+    }
+
+    private func classifyOutput(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        classifyOutput(portType: port?.portType)
+    }
+
+    /// Shared classification: dispatches on the port TYPE raw value, so both overloads agree on every
+    /// route. A missing port and an unrecognised type both map to `unknown`.
+    private func classifyOutput(portType: AVAudioSession.Port?) -> AudioRouteOutput {
+        guard let portType else { return .unknown }
+        switch portType {
         case .headphones: return .headphones
         case .bluetoothHFP: return .bluetoothHFP
         case .bluetoothA2DP: return .bluetoothA2DP
         case .bluetoothLE: return .bluetoothLE
         case .builtInSpeaker: return .builtInSpeaker
         case .airPlay: return .airPlay
-        default: return .builtInSpeaker
+        // Every other port type — USB, car audio, hearing aids, and anything Apple adds — is
+        // unknown rather than assumed. The previous `.builtInSpeaker` default silently enabled
+        // the correlation window on routes the alignment does not hold for.
+        default: return .unknown
         }
     }
 

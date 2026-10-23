@@ -2067,6 +2067,16 @@
 		9AF646942E5E081400627836 /* PlaylistDetailViewController+TableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlaylistDetailViewController+TableView.swift"; sourceTree = "<group>"; };
 		9AF646962E5E0BB700627836 /* PlaylistDetailViewController+Search.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlaylistDetailViewController+Search.swift"; sourceTree = "<group>"; };
 		AA0C375526D831E3008B36A1 /* en */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000001 /* de */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = de; path = de.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000002 /* es */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000003 /* fr */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = fr; path = fr.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000004 /* ja */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000005 /* ko */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = ko; path = ko.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+		AB0C000000000000000006 /* "zh-Hans" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+		AB0C000000000000000007 /* "zh-Hant" */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+		AB0C000000000000000008 /* yue */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = yue; path = yue.lproj/VoiceTemplates.strings; sourceTree = "<group>"; };
+AB0C000000000000000009 /* fr-CA */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "fr-CA"; path = "fr-CA.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
+AB0C00000000000000000A /* es-MX */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.strings; name = "es-MX"; path = "es-MX.lproj/VoiceTemplates.strings"; sourceTree = "<group>"; };
 		A13200320100000000000003 /* SetSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000004 /* MigratedSleepTimerIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigratedSleepTimerIntent.swift; sourceTree = "<group>"; };
 		A13200320100000000000006 /* PocketCastsAppShortcutsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PocketCastsAppShortcutsProvider.swift; sourceTree = "<group>"; };
@@ -2763,6 +2773,7 @@
 		FFEE59C22EB37F4300D4B145 /* playback2025_listening_time.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = playback2025_listening_time.json; sourceTree = "<group>"; };
 		FFF23E892CC91E2A0046D3AD /* ServerPodcastManager+Subscription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServerPodcastManager+Subscription.swift"; sourceTree = "<group>"; };
 		FFFCD23E2C7768F900A345ED /* Referrals.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Referrals.xcassets; sourceTree = "<group>"; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -3674,6 +3685,14 @@
 		3FDAD5122F46D79100CC3259 /* Pocket Casts App Clip */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (3FDAD51A2F46D79100CC3259 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Pocket Casts App Clip"; sourceTree = "<group>"; };
 		3FDAD5A22F46D82100CC3259 /* Test Plans */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (3FDAD5A42F46D82200CC3259 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Test Plans"; sourceTree = "<group>"; };
 		FF4B83AF2F981D8E001B8C56 /* Pocket Casts TV App */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (FF6033FB2FAB4B8600EB3AD5 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = "Pocket Casts TV App"; sourceTree = "<group>"; };
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			sourceTree = "<group>";
+		};
+
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -3783,6 +3802,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1C76A5AA5DE94C1E907663C9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -6646,6 +6673,21 @@
 			productReference = FF4B83AE2F981D8E001B8C56 /* Pocket Casts TV App.app */;
 			productType = "com.apple.product-type.application";
 		};
+			isa = PBXNativeTarget;
+			buildPhases = (
+				878ECD97121F4A7D99852097 /* Sources */,
+				1C76A5AA5DE94C1E907663C9 /* Frameworks */,
+				09EF0C0BB55E4505B7D55F0C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+			);
+			productType = "com.apple.product-type.application";
+		};
+
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -6754,6 +6796,8 @@
 				"fr-CA",
 				"es-MX",
 				ca,
+				ko,
+				yue,
 			);
 			mainGroup = BDBD53E317019B290048C8C5;
 			packageReferences = (
@@ -7371,6 +7415,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		09EF0C0BB55E4505B7D55F0C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
@@ -8464,6 +8516,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		878ECD97121F4A7D99852097 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -8599,6 +8659,16 @@
 			isa = PBXVariantGroup;
 			children = (
 				AA0C375526D831E3008B36A1 /* en */,
+				AB0C000000000000000001 /* de */,
+				AB0C000000000000000002 /* es */,
+				AB0C000000000000000003 /* fr */,
+				AB0C000000000000000004 /* ja */,
+				AB0C000000000000000005 /* ko */,
+				AB0C000000000000000006 /* "zh-Hans" */,
+				AB0C000000000000000007 /* "zh-Hant" */,
+				AB0C000000000000000008 /* yue */,
+				AB0C000000000000000009 /* "fr-CA" */,
+				AB0C00000000000000000A /* "es-MX" */,
 			);
 			name = VoiceTemplates.strings;
 			sourceTree = "<group>";
@@ -10796,6 +10866,90 @@
 			};
 			name = Release;
 		};
+		8BA790F6877E4847973C9197 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		82B08137E09647738107E871 /* StagingDebug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = StagingDebug;
+		};
+		7BAF0E5E56BE4956A00D7035 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		51E01C35226344EC985B0CF2 /* Prototype */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6LL2R2A55F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Auris Recovery Helper";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = fm.auris.recoveryhelper;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Prototype;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -10963,7 +11117,17 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BA790F6877E4847973C9197 /* Debug */,
+				82B08137E09647738107E871 /* StagingDebug */,
+				51E01C35226344EC985B0CF2 /* Prototype */,
+				7BAF0E5E56BE4956A00D7035 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
+
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */

@@ -111,6 +111,18 @@ enum StatsQueryIntent: VoiceIntent, Equatable {
 struct CloudRouteIntent: VoiceIntent, Equatable {
     let request: String
     let tier: CloudTier
+    /// The complete wake-trimmed SOURCE utterance, when one exists (platform translate kept the
+    /// native text; backend translate exposes English only and leaves this nil). The runtime
+    /// cloud `request` carries this original — the English routing translation selects the
+    /// action but never replaces the original the model answers.
+    var sourceTranscript: String? = nil
+    /// The ASR pipeline's actual detected language (LID). Unknown stays nil and is OMITTED on
+    /// the wire — never the OS locale, never a default. Preserves yue vs zh.
+    var sourceLanguage: String? = nil
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the captured utterance's identity, so
+    /// duplicate preparation/callbacks join one wire request instead of minting another.
+    /// `nil` keeps the legacy per-call identity for constructions without an utterance.
+    var utteranceId: String? = nil
     /// Why this dispatch exists. A dispatch from a routing failure is a *fallback*
     /// rather than a command the user gave, and the two must not be treated alike
     /// by the grace window: handling a fallback continues the window but must not
@@ -129,11 +141,30 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// site that omits it silently loses the check rather than failing.
     let generation: Int?
 
-    init(request: String, tier: CloudTier, origin: CloudRouteOrigin = .modelCall, generation: Int? = nil) {
+    /// What selected this turn, captured with the input. A wake word always opens a new
+    /// conversation; only a wake-free follow-up continues one. Captured rather than read at
+    /// dispatch time for the same reason as `generation`: the answer is a property of the input,
+    /// not of whatever the window looks like after routing.
+    let selection: CloudConversationSelection?
+
+    init(
+        request: String,
+        tier: CloudTier,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
+        utteranceId: String? = nil,
+        origin: CloudRouteOrigin = .modelCall,
+        generation: Int? = nil,
+        selection: CloudConversationSelection? = nil
+    ) {
         self.request = request
         self.tier = tier
+        self.sourceTranscript = sourceTranscript
+        self.sourceLanguage = sourceLanguage
+        self.utteranceId = utteranceId
         self.origin = origin
         self.generation = generation
+        self.selection = selection
     }
 }
 
@@ -151,10 +182,14 @@ enum CloudTier: String, Equatable {
 }
 
 struct PlaybackContext: Equatable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: the contract forbids
+    /// inventing an ID, and the discovery turn — nothing playing — must represent that as
+    /// absence rather than as an id that names nothing.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to hold a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 }

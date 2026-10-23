@@ -8,14 +8,50 @@ struct IntentRoutingInput: Equatable {
     let sourceLanguage: String?
     let routerTranscript: String
     let translationKind: TranslationKind
+    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the identity of the captured utterance
+    /// this input carries. Duplicate callbacks re-emitting the SAME utterance carry the SAME id,
+    /// so the request owner can join/reuse one prepared wire request; an independent utterance
+    /// has its own id and dispatches its own request, even inside one grace window.
+    let utteranceId: String
+
+    init(
+        sourceTranscript: String?,
+        sourceLanguage: String?,
+        routerTranscript: String,
+        translationKind: TranslationKind,
+        selection: CloudConversationSelection?,
+        utteranceId: String
+    ) {
+        self.sourceTranscript = sourceTranscript
+        self.sourceLanguage = sourceLanguage
+        self.routerTranscript = routerTranscript
+        self.translationKind = translationKind
+        self.selection = selection
+        self.utteranceId = utteranceId
+    }
+
+    /// What SELECTED this utterance, carried from the gate decision that produced it.
+    ///
+    /// Read from live state instead, a wake that fires during grace and a follow-up inside the
+    /// same grace are indistinguishable — both see `isActive == true` — so the two inputs cannot
+    /// be told apart from the window they arrive in. The gate already computes the distinction
+    /// (`detected` true/false) and it is a property of the INPUT, so it travels with it.
+    let selection: CloudConversationSelection?
 
     /// Same source/router text with `.none` (native English path).
-    static func english(transcript: String, language: String? = "en") -> IntentRoutingInput {
+    static func english(
+        transcript: String,
+        language: String? = nil,
+        selection: CloudConversationSelection? = nil,
+        utteranceId: String
+    ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
             sourceLanguage: language,
             routerTranscript: transcript,
-            translationKind: .none
+            translationKind: .none,
+            selection: selection,
+            utteranceId: utteranceId
         )
     }
 }

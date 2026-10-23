@@ -55,7 +55,11 @@ final class AsrIntentBenchmarkRunner {
                 sourceTranscript: benchmarkCase.nativeText,
                 sourceLanguage: benchmarkCase.language,
                 routerTranscript: english,
-                translationKind: benchmarkCase.language == "en" ? .none : .platform
+                translationKind: benchmarkCase.language == "en" ? .none : .platform,
+                // A benchmark utterance is not a conversation turn, but it still carries an
+                // explicit identity — no silent mint on the input builders.
+                selection: nil,
+                utteranceId: UUID().uuidString
             )
         case variantE:
             // E (dual_v1): router renders from native + English transcript.
@@ -63,7 +67,11 @@ final class AsrIntentBenchmarkRunner {
                 sourceTranscript: benchmarkCase.nativeText,
                 sourceLanguage: benchmarkCase.language,
                 routerTranscript: english,
-                translationKind: benchmarkCase.language == "en" ? .none : .platform
+                translationKind: benchmarkCase.language == "en" ? .none : .platform,
+                // A benchmark utterance is not a conversation turn, but it still carries an
+                // explicit identity — no silent mint on the input builders.
+                selection: nil,
+                utteranceId: UUID().uuidString
             )
         default:
             throw BenchmarkVariantError.unknown(variant)

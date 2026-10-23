@@ -173,6 +173,37 @@ class SocketCapturingTestCase: XCTestCase {
     var capturedTask: StubWebSocketTask?
 }
 
+/// A valid prepared conversation for envelope construction in tests. Each call
+/// mints a FRESH admitted id unless a literal is supplied — mirroring the
+/// production rule that every turn carries its own admitted UUID identity.
+
+/// ONE IDENTITY (reviewer c580c42b): client tests that don't assert wire identity still must
+/// pass an EXPLICIT prepared turn — the convenience mint is gone from production.
+func testTurnEnvelope(
+    requestId: String = "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
+    conversationId: String = "1c4b9a70-6d2e-4f38-a511-9b7c2d0e54a3",
+    mode: String = "create"
+) -> CloudTurnEnvelope {
+    CloudTurnEnvelope.make(
+        capabilities: [],
+        routeHint: nil,
+        recentConversation: [],
+        conversation: CloudPreparedConversation(
+            requestId: requestId,
+            conversationId: conversationId,
+            mode: mode
+        )
+    )
+}
+
+func testPreparedConversation(
+    requestId: String = UUID().uuidString,
+    conversationId: String = UUID().uuidString,
+    mode: String = "create"
+) -> CloudPreparedConversation {
+    CloudPreparedConversation(requestId: requestId, conversationId: conversationId, mode: mode)
+}
+
 // MARK: - Per-case fixture handoff
 
 /// Lets a case keep its `event:`/`data:` fixture literal while the transport it
@@ -209,9 +240,26 @@ extension CloudRouteClient {
         baseURL: String = "https://cloud.test",
         userId: String = "user_test",
         token: String? = "test_token",
-        fixture: String
+        fixture: String,
+        /// OPT-IN binary audio. The transport delivers audio as `.data` frames
+        /// (`CloudRouteClient` maps `case .data` to `.audioFrame`), but this factory built only
+        /// text frames, so no case could put real audio in front of the player and an assertion
+        /// about audio output was vacuous. Each entry becomes one `.string`-after-`.data` pair:
+        /// the binary payload the transport treats as audio, followed by the text event that
+        /// follows it. Empty by default, so every existing text fixture behaves exactly as before.
+        audioPayloads: [Data] = [],
+        prepareTask: @Sendable (StubWebSocketTask) -> Void = { _ in }
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
-        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
+        var messages: [URLSessionWebSocketTask.Message] = []
+        let textFrames = StubWebSocketTask.frames(fromFixture: fixture)
+        // Interleave: deliver each audio payload, then the text frames that follow it. With no
+        // payloads this is exactly the previous text-only behaviour.
+        messages.append(contentsOf: audioPayloads.map { .data($0) })
+        messages.append(contentsOf: textFrames.map { .string($0) })
+        let task = StubWebSocketTask(messages)
+        // Install holds BEFORE the client exists: the producer parks at its FIRST receive, so a
+        // cancellation-insensitive park cannot be raced by stream end.
+        prepareTask(task)
         let client = CloudRouteClient(
             baseURL: baseURL,
             userId: userId,
@@ -228,28 +276,275 @@ extension CloudRouteClient {
 /// A latch rather than a semaphore: the socket asks before *every* frame, so a
 /// single permit would let the first frame through and stall the second — which
 /// is a hung turn, not a held one. `release()` opens it for the rest of the turn.
+/// Control-only handle to the REAL owning task, bound after the task exists. The gate lands
+/// cancellation here exactly as an external caller would; the sink's control seam invokes it, so
+/// there is no synthesized flag and no path where cancellation is observed but never lands.
+final class ControlCanceller: @unchecked Sendable {
+    private let lock = NSLock()
+
+    func bind<Success>(_ task: Task<Success, Never>) {
+        lock.lock()
+        cancelBox = { task.cancel() }
+        lock.unlock()
+    }
+
+    private var cancelBox: (() -> Void)?
+
+    func cancel() {
+        lock.lock(); let box = cancelBox; lock.unlock()
+        box?()
+    }
+}
+
+/// EXPLICIT-RELEASE-ONLY effect hold. Deliberately has NO task-cancellation handling of any
+/// kind (unlike `Gate`): owner cancellation can NEVER release it — only `release()` does.
+/// Controls assert `released` to probe that the waiter is still held before explicit release.
+/// A one-shot promise: resolves exactly once, from whichever task gets there first. Used so a
+/// bounded wait can be raced against an unbounded suspension WITHOUT leaving a task-group child
+/// blocked on that suspension (the group would then never drain).
+final class Promise<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value?
+    private var waiter: CheckedContinuation<Value, Never>?
+
+    func resolve(_ value: Value) {
+        lock.lock()
+        guard self.value == nil, waiter != nil || true, !resolvedFlag else { lock.unlock(); return }
+        resolvedFlag = true
+        self.value = value
+        let w = waiter
+        waiter = nil
+        lock.unlock()
+        w?.resume(returning: value)
+    }
+
+    private var resolvedFlag = false
+
+    /// Test-only: marks the promise as settled by a CLOSE rather than by its resolver, so a
+    /// blocking seam can wait for the close itself to have run. Distinct from `resolve` so a
+    /// control can both signal "close requested" and observe "close done" on one object.
+    private var closedFlag = false
+    var didClose: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closedFlag
+    }
+    func markClosed() {
+        lock.lock(); closedFlag = true; lock.unlock()
+    }
+
+    func value() async -> Value {
+        await withCheckedContinuation { (cont: CheckedContinuation<Value, Never>) in
+            lock.lock()
+            if let v = value {
+                lock.unlock()
+                cont.resume(returning: v)
+            } else {
+                waiter = cont
+                lock.unlock()
+            }
+        }
+    }
+}
+
+final class HoldLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = false
+    private var resume: (() -> Void)?
+
+    /// True once `release()` has run — the still-held probe for controls.
+    var released: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return open
+    }
+
+    /// Suspends until explicit release. Registers under the same lock as the open check so a
+    /// release landing during registration cannot be lost. No onCancel path exists.
+    func waitUntilReleased() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if open {
+                lock.unlock()
+                cont.resume()
+            } else {
+                resume = cont.resume
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Suspends until explicit release OR an external retirement predicate becomes true (the
+    /// wake-on-cancel semantics a real transport cancellation gives a parked receive). The
+    /// WAITING task's own cancellation never releases it — only `release()` or the predicate
+    /// does. Wake is delivered by `notifyRetired()` under the SAME lock that guards the
+    /// registered waiter, so there is no poll and no lost wake: a retirement that lands before
+    /// the waiter registers is observed at registration.
+    func wait(untilRetired isRetired: @escaping @Sendable () -> Bool) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            // Predicate is installed and evaluated under the same lock as the open check, so a
+            // retirement that already happened cannot be missed by a waiter that arrives late.
+            retiredCheck = isRetired
+            if open {
+                lock.unlock()
+                cont.resume()
+            } else if let f = retiredCheck, f() {
+                open = true
+                openedByRetirement = true
+                lock.unlock()
+                cont.resume()
+            } else {
+                resume = cont.resume
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Wake every parked `wait(untilRetired:)` because the retirement predicate fired (the
+    /// production onCancel path ran). Called by the control at the retirement seam.
+    func notifyRetired() {
+        lock.lock()
+        guard !open else { lock.unlock(); return }
+        open = true
+        openedByRetirement = true
+        let r = resume
+        resume = nil
+        lock.unlock()
+        r?()
+    }
+
+    private var retiredCheck: (@Sendable () -> Bool)?
+
+    /// True when the latch opened because the external retirement predicate fired (socket was
+    /// cancelled) rather than an explicit test `release()`. Only latches armed with
+    /// `wait(untilRetired:)` can report this.
+    var releasedByRetirement: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return openedByRetirement
+    }
+    private var openedByRetirement = false
+
+    func release() {
+        lock.lock()
+        open = true
+        let r = resume
+        resume = nil
+        lock.unlock()
+        r?()
+    }
+}
+
 final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
+
+    /// TICKET-STATE WAITERS. Every `wait` gets its own ticket; ALL of a ticket's mutable state is
+    /// touched only under the gate lock, which makes three previously racy transitions exact:
+    ///
+    ///   - CANCELLATION BEFORE REGISTRATION: `withTaskCancellationHandler` may run `onCancel`
+    ///     before the operation body has registered its continuation. A single stored `resume`
+    ///     would be nil there, cancellation would be missed, and the later-registered continuation
+    ///     would wait forever. A ticket flips its `cancelled` flag under the lock in that window,
+    ///     and the body observes the flag at registration time and throws instead of parking.
+    ///   - TIMED-OUT OBSERVER LEAKS: a bounded wait's loser is cancelled, and cancellation removes
+    ///     that loser's OWN ticket from the waiters table. `release()` then resumes only tickets
+    ///     still present, so no timed-out observer is retained (or double-resumed).
+    ///   - RELEASE vs CANCELLATION: whichever transition removes the ticket from the table first
+    ///     owns the single resume; the other observes the absence and does nothing.
+    private final class Ticket {
+        var cancelled = false
+        var continuation: CheckedContinuation<Void, Error>?
+    }
+    private var waiters: [ObjectIdentifier: Ticket] = [:]
 
     /// Waits for the latch to open. Throws `CancellationError` if the waiting
     /// task is cancelled — a transport that ignores cancellation cannot be
     /// superseded, and swallowing the error here would hide that (as well as
     /// spin a cancelled task forever).
     func wait() async throws {
-        while true {
+        try await wait(untilCancelled: nil)
+    }
+
+    /// Bounded wait used by controls to fail fast instead of hanging a suite.
+    func wait(timeout: TimeInterval) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await self.wait() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// Waits for release WITHOUT polling. The ticket is registered UNDER the same lock
+    /// that guards `isOpen`, so a release that lands between the state check and registration
+    /// cannot be lost. Throws `CancellationError` on task cancellation (including cancellation
+    /// that arrived BEFORE registration — the ticket flag closes that window); `untilCancelled`
+    /// lets a parked transport wake on external retirement.
+    func wait(untilCancelled isExternallyCancelled: (@Sendable () -> Bool)?) async throws {
+        let ticket = Ticket()
+        let ticketID = ObjectIdentifier(ticket)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if isOpen {
+                    lock.unlock()
+                    cont.resume()
+                    return
+                }
+                if ticket.cancelled {
+                    // Cancellation landed before this registration ran: honor it NOW instead of
+                    // parking a waiter that would never be woken.
+                    lock.unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                if let f = isExternallyCancelled, f() {
+                    lock.unlock()
+                    cont.resume(throwing: URLError(.cancelled))
+                    return
+                }
+                ticket.continuation = cont
+                waiters[ticketID] = ticket
+                lock.unlock()
+            }
+        } onCancel: {
             lock.lock()
-            let open = isOpen
-            lock.unlock()
-            if open { return }
-            try await Task.sleep(nanoseconds: 2_000_000)
+            ticket.cancelled = true
+            // Remove OUR ticket only: an observer whose own cancellation fired must not release
+            // anyone else, and a released gate has already emptied the table.
+            if let t = waiters.removeValue(forKey: ticketID) {
+                let c = t.continuation
+                t.continuation = nil
+                lock.unlock()
+                c?.resume(throwing: CancellationError())
+            } else {
+                lock.unlock()
+            }
         }
     }
 
     func release() {
         lock.lock()
         isOpen = true
+        let pending = waiters
+        waiters = [:]
+        var resumes: [CheckedContinuation<Void, Error>] = []
+        for t in pending.values {
+            if let c = t.continuation {
+                resumes.append(c)
+                t.continuation = nil
+            }
+        }
         lock.unlock()
+        for c in resumes { c.resume(returning: ()) }
+    }
+
+    var released: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isOpen
     }
 }
 
@@ -259,13 +554,38 @@ extension StubWebSocketTask {
     /// The closure happens in the client's producer task, while the consumer that
     /// drained the stream returns on another — the consumer can win that race, so
     /// a bare assertion here reads `nil` intermittently. Poll rather than race.
+    /// Continuation-based wait for socket cancellation (no polling): resumes when `cancel(with:)`
+    /// runs or the bounded timeout elapses.
+    /// Bounded, race-safe wait for socket cancellation. The waiter is registered UNDER the
+    /// snapshot lock (so a cancel landing during setup cannot be missed), and the timeout wins
+    /// via a racing sleep — no polling loop, no ignored timeout.
     func awaitCancellation(timeout: TimeInterval = 1) async -> Bool {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while Date() < deadline {
-            if cancelled != nil { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+        let gate = Gate()
+        snapshotLock.lock()
+        if cancelled != nil {
+            snapshotLock.unlock()
+            return true
         }
-        return cancelled != nil
+        let token = ObjectIdentifier(gate)
+        cancellationWaiters.append(CancellationWaiter(token: token, fire: { [gate] in gate.release() }))
+        snapshotLock.unlock()
+        // OWNERSHIP-BASED REMOVAL: however this wait ends — cancellation, timeout, or group
+        // teardown — THIS observer's closure leaves the registry. The registry can therefore
+        // never accumulate timed-out observers.
+        defer { removeCancellationWaiter(token: token) }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
+                return self.isCancelledSocket
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return self.isCancelledSocket
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first || self.isCancelledSocket
+        }
     }
 
     /// The auth frame the client sent, as a JSON object.
@@ -290,6 +610,9 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     private(set) var sent: [URLSessionWebSocketTask.Message] = []
     private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
     var receiveError: Error?
+    /// Set by the control: invoked when THIS socket retires (`cancel(with:reason:)`), so a
+    /// parked receive wakes from the same retirement instead of polling a predicate.
+    var retiredParkNotifier: (() -> Void)?
 
     init(_ incoming: [URLSessionWebSocketTask.Message]) {
         self.incoming = incoming
@@ -299,21 +622,113 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.init(textFrames.map { .string($0) })
     }
 
+    /// When set, a send RECORDS the frame and then throws — the transmit-then-fail case. The frame
+    /// demonstrably left, so a client that marked submission only on a successful return would
+    /// misclassify this as never-submitted and replay a turn that may have been admitted.
+    var transmitsThenThrows = false
+
+    /// When set, a send THROWS WITHOUT RECORDING — the frame never reached the transport, which is
+    /// the pre-entry failure that proves it was never submitted and is therefore the one case
+    /// automatic recovery may re-drive.
+    var throwsBeforeRecording = false
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         sent.append(message)
+        if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
     /// Holds delivery until `release()`, so a test can keep one turn in flight
     /// while another supersedes it. Without a way to stall a turn, a stub that
     /// answers instantly cannot express "A is still open when B starts".
-    private var gate: Gate?
+    private var holdGate: Gate?
 
     func holdUntilReleased(_ gate: Gate) {
-        self.gate = gate
+        self.holdGate = gate
     }
 
+    /// Cancellation-insensitive parking (HoldLatch): the receive stays parked until explicit
+    /// release — task cancellation cannot wake it. Used to prove prompt production retirement.
+    func holdUntilReleased(_ latch: HoldLatch) {
+        self.holdLatch = latch
+    }
+    private var holdLatch: HoldLatch?
+
+    /// ARMED AT CREATION, not at the claim boundary. An earlier design armed it from the sink's
+    /// `effectEntered` hook, but measurement showed the transport has already served its frames
+    /// by then (`pendingArmed=false` on every serve), so the park never intercepted a receive and
+    /// the "retirement woke the park" assertion could never be true. The path this seam must
+    /// cover is declared per store instead: see `armedReceivePark` below.
+    var armReceiveHoldOnEntered: HoldLatch?
+    private let armedParkGate = Gate()
+    private var pendingArmedReceiveHold = false
+    private var armedReceiveLatch: HoldLatch?
+    func armReceiveHold() {
+        guard let latch = armReceiveHoldOnEntered else { return }
+        armedReceiveLatch = latch
+        armReceiveHoldOnEntered = nil
+        pendingArmedReceiveHold = true
+    }
+
+    /// A park that WAITS OUT the turn: `receive()` holds here until `release()` or socket
+    /// retirement. Installed at task creation (before the first frame), so the parked receive
+    /// genuinely exists when cancellation lands — which is the whole point of the control. It
+    /// sits AFTER the action frame in the scripted sequence, so the claim and the effect boundary
+    /// are reached first.
+    var declaredParkAfterFrames: Int?
+    var framesServedForPark = 0
+    var armedReceivePark: HoldLatch?
+    /// True when the declared park actually parked — a skipped park must be a failure, not a
+    /// silent no-op (this is the defect the earlier arming design hid).
+    var declaredParkDidPark = false
+
+    /// True once `cancel(with:reason:)` has run — the observable retirement of the ORIGINAL
+    /// registration at the transport level.
+    var isCancelledSocket: Bool {
+        lockForSnapshot()
+        defer { unlockForSnapshot() }
+        return cancelled != nil
+    }
+    private func lockForSnapshot() { snapshotLock.lock() }
+    private func unlockForSnapshot() { snapshotLock.unlock() }
+    private let snapshotLock = NSLock()
+
+    /// When set, EVERY receive parks until explicit release — used to prove retirement wakes a
+    /// parked transport. (Installed post-`entered`, this let the producer's FIRST receive run
+    /// ungated and exit normally on stream end; that retired the transport through the drain
+    /// path and made the immediate-retirement mutant look green. Closed by the arm-on-entered
+    /// seam below.)
+    func holdAllReceivesUntilReleased(_ latch: HoldLatch) {
+        self.allReceiveHold = latch
+    }
+    private var allReceiveHold: HoldLatch?
+
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let gate { try await gate.wait() }
+        // Parked receives must WAKE on socket cancellation: a retired socket cannot keep the
+        // producer busy-waiting or holding a closed connection concept open.
+        if pendingArmedReceiveHold {
+            pendingArmedReceiveHold = false
+            if let latch = armedReceiveLatch {
+                armedParkGate.release()
+                await latch.wait(untilRetired: { self.isCancelledSocket })
+            }
+        } else if let park = armedReceivePark, framesServedForPark >= (declaredParkAfterFrames ?? 0) {
+            // Fallback park path. Note: this branch is NOT the mechanism the held-work control
+            // relies on — measurement showed the producer parks at the frame seam
+            // (`CloudRouteClient.onFrameReceived`) rather than by reaching another `receive()`.
+            declaredParkDidPark = true
+            await park.wait(untilRetired: { self.isCancelledSocket })
+        } else if let holdLatch {
+            // Cancellation-INSENSITIVE park: only explicit release wakes this receive.
+            await holdLatch.waitUntilReleased()
+        } else if let holdGate {
+            // Wake on socket retirement WITHOUT cancelling the consumer task: this is a test
+            // transport, and a thrown error here would end the AsyncStream via the producer and
+            // blur "socket retired" with "stream terminated". The waiter resumes when cancel
+            // runs; we then serve the remaining scripted events normally.
+            _ = try? await holdGate.wait(untilCancelled: { self.isCancelledSocket })
+        }
+        framesServedForPark += 1
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
@@ -323,8 +738,38 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         return incoming.removeFirst()
     }
 
+    /// Cancellation observers with OWNERSHIP. Each entry carries its token so the observer that
+    /// registered it can remove its own closure when its wait ends by TIMEOUT rather than by
+    /// cancellation — a timed-out observer that stayed registered would retain its gate and fire
+    /// on a much later cancel. `cancel(with:)` drains the registry it fires; a surviving
+    /// observer registered afterwards is unaffected.
+    fileprivate struct CancellationWaiter {
+        let token: ObjectIdentifier
+        let fire: @Sendable () -> Void
+    }
+    fileprivate var cancellationWaiters: [CancellationWaiter] = []
+
+    /// Test-side inspection of the ACTUAL registry: how many observers are still registered.
+    var cancellationWaiterCountForTesting: Int {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return cancellationWaiters.count
+    }
+
+    private func removeCancellationWaiter(token: ObjectIdentifier) {
+        snapshotLock.lock()
+        cancellationWaiters.removeAll { $0.token == token }
+        snapshotLock.unlock()
+    }
+
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        snapshotLock.lock()
         cancelled = (closeCode, reason)
+        let waiters = cancellationWaiters
+        cancellationWaiters = []
+        snapshotLock.unlock()
+        for w in waiters { w.fire() }
+        retiredParkNotifier?()
     }
 
     /// The JSON payloads the client sent, decoded for assertions.

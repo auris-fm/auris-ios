@@ -16,20 +16,32 @@ struct CloudTurnEnvelope: Equatable {
     let capabilities: [String]
     let routeHint: CloudRouteHint?
     let recentConversation: [RecentConversationTurn]
+    /// The conversation identity this turn carries. Required by the admission contract on
+    /// every turn; nothing is sent when it is absent, so a caller that forgets it produces a
+    /// frame the server must refuse rather than a silently stateless turn.
+    let conversation: CloudPreparedConversation?
 
     /// Builds an envelope for one logical turn: a fresh `request_id` (reuse the
     /// returned envelope for transport retries of the same turn) and a bounded
     /// recent-conversation context.
+    /// Builds the envelope for one logical turn. The prepared conversation is REQUIRED: the
+    /// envelope's single identity IS the admitted utterance's `requestId` — the id the ASR
+    /// pipeline minted at admission and the manager prepared. There is no fallback mint here:
+    /// a turn without an admitted identity is refused upstream (sink), never re-identifed.
+    /// Keeping ONE identity on the type means every consumer — wire frame, socket/result
+    /// registration, bind callbacks, diagnostics — binds the same value (reviewer 9ab31c6d).
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
-        recentConversation: [RecentConversationTurn]
+        recentConversation: [RecentConversationTurn],
+        conversation: CloudPreparedConversation
     ) -> CloudTurnEnvelope {
         CloudTurnEnvelope(
-            requestId: UUID().uuidString,
+            requestId: conversation.requestId,
             capabilities: capabilities,
             routeHint: routeHint,
-            recentConversation: RecentConversation.bounded(recentConversation)
+            recentConversation: RecentConversation.bounded(recentConversation),
+            conversation: conversation
         )
     }
 }
@@ -123,31 +135,69 @@ enum CloudRouteRequestBuilder {
     static func envelope(
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> [String: Any] {
-        var contextObject: [String: Any] = [
-            "episode_id": context.episodeId,
-            "client_position_ms": context.clientPositionMs,
-            "recent_reference_positions": context.recentReferencePositions,
-        ]
+        // SOURCE-FIRST RUNTIME REQUEST (core b6eafe25): the runtime `request` carries the complete
+        // wake-trimmed SOURCE utterance when one is available — the English routing translation
+        // selects the action but never REPLACES the original the model answers. When no original
+        // exists (backend translate exposes English only), the available text is used without
+        // fabricating an original.
+        let runtimeRequest = sourceTranscript?.isEmpty == false ? sourceTranscript! : request
+        // Omitted when absent, never invented. The owning contract scopes the episode and its
+        // position to "when a current episode exists" and forbids inventing either: an empty
+        // `episode_id` is an ID that names nothing, and a zero position is a measurement the
+        // client did not make. Both read as real to the server, so the discovery turn — the
+        // app's normal first interaction, with nothing playing — must send neither.
+        var contextObject: [String: Any] = [:]
+        // EVERY playback-position key is omitted when there is no episode context — not just
+        // the id and the client position. `recent_reference_positions` is a position key too:
+        // sending an empty array still asserts that the client has a position history for a
+        // turn where no current episode exists, and the contract says to omit playback positions
+        // entirely in that case. An empty array is not "absent" on the wire.
+        if let episodeId = context.episodeId {
+            contextObject["episode_id"] = episodeId
+            contextObject["recent_reference_positions"] = context.recentReferencePositions
+        }
+        if let clientPositionMs = context.clientPositionMs {
+            contextObject["client_position_ms"] = clientPositionMs
+        }
         if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
         if let referencePositionMs = context.referencePositionMs { contextObject["reference_position_ms"] = referencePositionMs }
         if let previousReferencePositionMs = context.previousReferencePositionMs { contextObject["previous_reference_position_ms"] = previousReferencePositionMs }
-        if !turn.recentConversation.isEmpty {
-            contextObject["recent_conversation"] = turn.recentConversation.map {
-                ["role": $0.role.rawValue, "text": $0.text]
-            }
-        }
+
+        // No `recent_conversation`. The owning paragraph retains conversation history
+        // SERVER-side and forbids client-supplied history in the frame, so sending ours
+        // would offer the model text the server never authenticated. Local memory stays
+        // local; the conversation identity below is what makes the server's own history
+        // reachable.
 
         var payload: [String: Any] = [
-            "request": request,
+            "request": runtimeRequest,
             "context": contextObject,
+            // The turn's ONE identity: the admitted utterance id the envelope was built with.
+            // A retry of the same logical turn must present the same `request_id`, so minting
+            // a fresh one here would make the server see a second logical turn.
             "request_id": turn.requestId,
         ]
+        // The admission contract requires both on EVERY turn, first included. Carried at
+        // the top level rather than inside `context`, and independent of episode
+        // availability: a conversation is not a property of what is playing.
+        if let conversation = turn.conversation {
+            payload["conversation_id"] = conversation.conversationId
+            payload["conversation_mode"] = conversation.mode
+        }
         // Omitted (not empty) when nothing is advertised: the server's fallback
         // path is the absence of the capability.
         if !turn.capabilities.isEmpty {
             payload["capabilities"] = turn.capabilities
+        }
+        // OPTIONAL source_language: the ASR pipeline's actual LID when it detected one. Unknown
+        // is OMITTED, never invented (not the OS locale, not a default "en"): the wire field's
+        // whole value is that it states what the pipeline measured. Preserves yue vs zh.
+        if let sourceLanguage, !sourceLanguage.isEmpty {
+            payload["source_language"] = sourceLanguage
         }
         if let routeHint = turn.routeHint {
             payload["route_hint"] = [

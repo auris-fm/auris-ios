@@ -52,6 +52,19 @@ final class CloudPlaybackContextState {
     }
 }
 
+extension PlaybackContext {
+    /// A turn with no current episode: no id, no position. The cloud fields above are what
+    /// carry the conversation identity, which is independent of episode availability.
+    static let absent = PlaybackContext(
+        episodeId: nil,
+        podcastId: nil,
+        referencePositionMs: nil,
+        clientPositionMs: nil,
+        recentReferencePositions: [],
+        previousReferencePositionMs: nil
+    )
+}
+
 struct DefaultPlaybackContextProvider: PlaybackContextProvider {
     let playbackState: PlaybackStateProviding
     let fingerprintMapper: FingerprintMappingProviding
@@ -110,6 +123,32 @@ class VoiceIntentExecutor {
     private let playbackQuerySink: VoicePlaybackQuerySink
     private let statsQuerySink: VoiceStatsQuerySink
     private let cloudRouteSink: VoiceCloudRouteSink
+
+    /// The sink this executor routes cloud playback through, so a test can reach the real
+    /// producer the app built rather than constructing its own.
+    var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
+
+    /// Retires the sink's retained dispatches on the window boundary (production wiring). The
+    /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
+    /// transition is atomic with the manager's origin clear (reviewer a2723c92).
+    @MainActor
+    func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
+        (cloudRouteSink as? CloudRouteSink)?.retireRetainedDispatchesIfWindowChanged(to: origin)
+    }
+
+    /// Forwards a delayed admitted turn's release to the sink, so the sink's nameable index drops
+    /// the entry at the ACTUAL admitted-work release rather than at some future window transition.
+    /// Main-actor like its sibling: the release fires on the main thread (the signal's release is
+    /// main-synchronized), so this is synchronous there.
+    @MainActor
+    func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {
+        (cloudRouteSink as? CloudRouteSink)?.releaseRetainedAdmittedDispatch(
+            utteranceId: utteranceId, origin: origin
+        )
+    }
+
+    /// TEST-ONLY: forwarded to the sink for the NEXT dispatch, so a case observes the identity
+    /// prepared for ITS turn rather than a sink-wide "last prepared" value.
     private let playbackContextProvider: PlaybackContextProvider
     private let gracePeriodSignal: GracePeriodSignal
     private let analytics: VoiceAnalytics?
@@ -144,8 +183,18 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
-    func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
+    func execute(
+        _ intent: any VoiceIntent,
+        /// REQUEST-SCOPED, carried on THIS dispatch alongside its request. Storing it on the shared
+        /// executor would let an overlapping dispatch replace another's expected value, so the
+        /// prepared identity could be compared against the wrong turn's.
+        preparedObserver: CloudRouteSink.PreparedObserver? = nil
+    ) async -> VoiceResponse {
         let response: VoiceResponse
+        // Set only by the cloud branch. Every other intent leaves it nil, so the generic
+        // response-shape rule below is untouched for them.
+        var cloudOutcome: CloudRouteOutcome?
+
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
         case let e as EffectsIntent: response = executeEffects(e)
@@ -157,15 +206,47 @@ class VoiceIntentExecutor {
         case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
         case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
         case let cr as CloudRouteIntent:
-            guard let context = playbackContextProvider.current() else {
-                response = .earcon(.error)
-                break
-            }
-            response = await cloudRouteSink.routeToCloud(
+            // An absent context is a representable turn, not a refusal: the app's normal first
+            // interaction has nothing playing, and the contract describes that as absent
+            // context rather than as an invented episode and position. Refusing here is what
+            // made the discovery turn unreachable on the client.
+            let context = playbackContextProvider.current() ?? PlaybackContext.absent
+            // ONE AUTHORITATIVE ADMISSION decides both wire and effect ownership (reviewer
+            // b2c09394): `beginDispatch` returns an ownership TOKEN fenced by the live origin,
+            // and that SAME token is passed to the dispatch. Only the token owner runs the wire
+            // turn and repeats its effects; a duplicate whose admission is refused can never
+            // start the owner's turn even if it reaches the sink.
+            let ownership = cloudRouteSink.beginDispatch(utteranceId: cr.utteranceId, origin: cr.generation)
+            let ownsEffects = ownership.ownsDispatch
+            let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
-                context: context
+                context: context,
+                // The captured origin and selection, not live ones: the turn belongs to the
+                // window and the selection it was issued under.
+                origin: cr.generation,
+                selection: cr.selection,
+                // REQUEST OWNERSHIP: the captured utterance's identity, so a duplicate
+                // callback joins the in-flight request instead of minting another.
+                utteranceId: cr.utteranceId,
+                preparedObserver: preparedObserver,
+                sourceTranscript: cr.sourceTranscript,
+                sourceLanguage: cr.sourceLanguage,
+                ownership: ownership
             )
+            // A duplicate (a joined or settled copy of the owner's dispatch) observes
+            // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or
+            // rendered feedback (reviewer 0c546ce5 item 4).
+            if !ownsEffects {
+                FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(cr.utteranceId ?? "?")")
+                return .silent
+            }
+            response = result.response
+            // Carried out of the switch rather than inferred from `response` below: the
+            // rendered feedback cannot say what happened (a spoken error and a silent
+            // success are both "no earcon"), and reading it as the outcome is how a
+            // failed turn was recorded as a completed cloud route.
+            cloudOutcome = result.outcome
         default: response = .earcon(.error)
         }
 
@@ -173,7 +254,42 @@ class VoiceIntentExecutor {
         analytics?.recordCommand(intent, response: response)
 
         // Start grace period after any successful (non-error) command
-        if case .earcon(.error) = response {
+        if let outcome = cloudOutcome {
+            // The cloud turn's outcome decides this, not the response it rendered.
+            switch outcome {
+            case .completed:
+                break   // falls through to the window decision below
+            case .failed, .earlyClose, .refused:
+                FileLog.shared.addMessage("[VoicePipeline] Cloud turn did not complete — no grace period")
+                return response
+            }
+            guard let route = intent as? CloudRouteIntent else { return response }
+            // Only a turn the server completed reaches the window decision. A window
+            // without a generation cannot be attributed to any session, so it changes
+            // no grace state rather than falling through to the generic reset.
+            guard let generation = route.generation else {
+                FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
+                return response
+            }
+            switch route.origin {
+            case .modelCall:
+                // Restores the allowance, but only inside its own window. One atomic
+                // operation: checking then resetting separately leaves a gap in which
+                // a privacy close could be undone.
+                if gracePeriodSignal.recognizeCommandIfCurrentWindow(generation) {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud turn completed — grace period")
+                } else {
+                    FileLog.shared.addMessage("[VoicePipeline] Cloud turn completed for an ended window — ignored")
+                }
+            case .routingFailure:
+                // The conversation continues, but only for the window that issued
+                // this dispatch, and without restoring the allowance that permitted
+                // it (shared contract with Android).
+                FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
+                gracePeriodSignal.extendWindowKeepingEscalationSpent(underGeneration: generation)
+            }
+            return response
+        } else if case .earcon(.error) = response {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
         } else if let route = intent as? CloudRouteIntent {
             // A cloud completion may only touch the window it was issued under, so

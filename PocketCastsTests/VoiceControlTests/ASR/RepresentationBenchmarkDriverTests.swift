@@ -48,7 +48,7 @@ final class RepresentationBenchmarkDriverTests: XCTestCase {
                 englishText: "pause"
             ),
             inputFormat: "test_format",
-            makeInput: { .english(transcript: $0.englishText) },
+            makeInput: { .english(transcript: $0.englishText, utteranceId: "u-200") },
             pathRouter: router
         )
 
@@ -69,7 +69,7 @@ final class RepresentationBenchmarkDriverTests: XCTestCase {
         let report = driver.measureCase(
             RepresentationBenchmarkCase(caseID: "c1", language: "en", nativeText: "pause", englishText: "pause"),
             inputFormat: "test_format",
-            makeInput: { .english(transcript: $0.englishText) },
+            makeInput: { .english(transcript: $0.englishText, utteranceId: "u-200") },
             pathRouter: { _ in
                 defer { index += 1 }
                 return self.diagnostic(totalMs: totals[index], tokenize: 1, classify: 1, generate: 1)
@@ -86,7 +86,7 @@ final class RepresentationBenchmarkDriverTests: XCTestCase {
         let caseReport = driver.measureCase(
             RepresentationBenchmarkCase(caseID: "c1", language: "zh", nativeText: "暂停", englishText: "pause"),
             inputFormat: "test_format",
-            makeInput: { .english(transcript: $0.englishText) },
+            makeInput: { .english(transcript: $0.englishText, utteranceId: "u-200") },
             pathRouter: { _ in self.diagnostic(totalMs: 42, tokenize: 1, classify: 30, generate: 11) }
         )
         let report = RepresentationBenchmarkReport(
@@ -128,7 +128,7 @@ extension RepresentationBenchmarkDriverTests {
         let report = driver.measureCase(
             RepresentationBenchmarkCase(caseID: "c1", language: "zh", nativeText: "x", englishText: "y"),
             inputFormat: "test_format",
-            makeInput: { .english(transcript: $0.englishText) },
+            makeInput: { .english(transcript: $0.englishText, utteranceId: "u-200") },
             pathRouter: { _ in d }
         )
         XCTAssertEqual(report.samples.first?.failedStage, "tokenize")

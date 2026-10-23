@@ -26,7 +26,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let ready = await router.ensureReady()
         XCTAssertTrue(ready.isSuccess)
 
-        let result = router.classify(transcript: "hello")
+        let result = router.classify(transcript: "hello", utteranceId: "u-400")
         if case .none = result {
             // expected
         } else {
@@ -43,7 +43,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let router = createRouter(inference: inference)
         _ = await router.ensureReady()
 
-        let result = router.classify(transcript: "rename my bookmark")
+        let result = router.classify(transcript: "rename my bookmark", utteranceId: "u-400")
         if case .dialogControl(let action) = result {
             if case .begin(let tool, let actionName) = action {
                 XCTAssertEqual(tool, "bookmark")
@@ -62,7 +62,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let router = createRouter(inference: inference)
         _ = await router.ensureReady()
 
-        let result = router.classify(transcript: "pause")
+        let result = router.classify(transcript: "pause", utteranceId: "u-400")
         if case .none = result {
             // expected
         } else {
@@ -78,7 +78,7 @@ final class LfmIntentRouterTests: XCTestCase {
         let router = createRouter(inference: inference)
         _ = await router.ensureReady()
 
-        let result = router.classify(transcript: "pause")
+        let result = router.classify(transcript: "pause", utteranceId: "u-400")
         if case .none = result {
             // expected
         } else {
@@ -119,7 +119,7 @@ final class LfmIntentRouterTests: XCTestCase {
         var metrics: RouterClassificationMetrics?
         router.onMetrics = { metrics = $0 }
 
-        let result = router.classify(transcript: "pause")
+        let result = router.classify(transcript: "pause", utteranceId: "u-400")
         if case .intent(let intent) = result, let playback = intent as? PlaybackIntent {
             XCTAssertEqual(playback, .pause)
         } else {
@@ -141,7 +141,7 @@ final class LfmIntentRouterTests: XCTestCase {
         )
         var metrics: RouterClassificationMetrics?
         router.onMetrics = { metrics = $0 }
-        let result = router.classify(transcript: "pause")
+        let result = router.classify(transcript: "pause", utteranceId: "u-400")
         if case .none = result {
             // expected
         } else {
@@ -161,7 +161,7 @@ final class LfmIntentRouterTests: XCTestCase {
         )
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "   ")
+        _ = router.classify(transcript: "   ", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageBlank)
         XCTAssertNil(metrics?.inputFormat)
     }
@@ -175,7 +175,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageParseRepair)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonParseOrRepairFailed)
         XCTAssertEqual(metrics?.classifierLabel, ":")
@@ -196,7 +196,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageMapperDialog)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonMapperOrDialogFailed)
         XCTAssertNotNil(metrics?.stageLatencies.mapperDialogMs)
@@ -209,7 +209,7 @@ final class LfmIntentRouterTests: XCTestCase {
         router.testExceptionAfterTokenize = LfmInferenceError.notReady
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageException)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonInferenceException)
         XCTAssertNotNil(metrics?.stageLatencies.tokenizeMs)
@@ -225,7 +225,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var events: [String] = []
         router.onMetrics = { _ in events.append("diagnostic") }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         events.append(contentsOf: inference.eventLog)
         XCTAssertEqual(events, ["diagnostic", "reset"])
         XCTAssertEqual(inference.resetCount, 1)
@@ -245,7 +245,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var stepped: RouterStageDiagnostic?
         router.onMetrics = { stepped = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
 
         XCTAssertEqual(stepped?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
         XCTAssertNotNil(stepped?.stageLatencies.tokenizeMs)
@@ -268,8 +268,9 @@ final class LfmIntentRouterTests: XCTestCase {
             sourceTranscript: "倒回去3分钟。",
             sourceLanguage: "zh",
             routerTranscript: "Go back to 3 minutes.",
-            translationKind: .platform
-        )
+            translationKind: .platform,
+            selection: nil,
+            utteranceId: "u-701")
         _ = router.classify(input: input)
 
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeNoIntent)
@@ -292,7 +293,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageTokenize)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonTokenizeFailed)
         XCTAssertEqual(inference.classifyCount, 0)
@@ -306,7 +307,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageGenerate)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonGenerateFailed)
         XCTAssertEqual(metrics?.classifierLabel, "playback:pause")
@@ -318,7 +319,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "   ")
+        _ = router.classify(transcript: "   ", utteranceId: "u-400")
         XCTAssertEqual(metrics?.failedStage, RouterStageDiagnostic.stageBlank)
         XCTAssertEqual(metrics?.reason, RouterStageDiagnostic.reasonBlankTranscript)
         XCTAssertEqual(metrics?.inputFormat, "english_v1")
@@ -343,7 +344,7 @@ final class LfmIntentRouterTests: XCTestCase {
         _ = await router.ensureReady()
         var metrics: RouterStageDiagnostic?
         router.onMetrics = { metrics = $0 }
-        _ = router.classify(transcript: "pause")
+        _ = router.classify(transcript: "pause", utteranceId: "u-400")
         XCTAssertEqual(metrics?.inputFormat, "english_v1")
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
     }
