@@ -1186,10 +1186,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// TEST-ONLY: the coalesced pending-stop-notification counter. A stranded positive value
     /// refuses every future admission, so controls assert it returns to zero.
     /// TEST-ONLY: the retained settled-displaced identities (bounded-retirement probe).
-    var runnerFlagsForTesting: (stopRequested: Bool, drainRemaining: Bool, claimInFlight: Bool, floor: Int, notifications: Int) {
-        runnerLock.lock(); defer { runnerLock.unlock() }
-        return (stopRequested, drainRemaining, drainClaimInFlight, lastConfirmedStopEpoch, pendingStopNotifications)
-    }
     var settledDisplacedIdentitiesForTesting: Set<Int> {
         bufferLock.lock(); defer { bufferLock.unlock() }
         return settledDisplacedIdentities

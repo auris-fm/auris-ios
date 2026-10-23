@@ -463,19 +463,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // No identity: legacy per-call effects, no join semantics, no retained record.
             return .owner(.init(utteranceId: "", instance: UUID(), record: nil))
         }
-        ownershipLock.lock()
-        defer { ownershipLock.unlock() }
-        // A turn admitted before the deadline keeps its eligibility through recognition and may
-        // claim AFTER the window expired, so an origin that is no longer live can still be the
-        // origin of admittedly-live work. The broad precondition is therefore "this origin is
-        // live, OR this exact turn still holds admitted work under it at this origin"; the
-        // second is checked against the TURN, so it cannot admit unrelated or retired work.
+        // LOCK-ORDER SAFETY (review 4d474d80): the liveness and admitted-work reads below hop to
+        // main synchronously when this runs off-main, while main-actor paths can take
+        // `ownershipLock` on main — holding the lock across those reads is a lock-order cycle
+        // (off-main: ownershipLock → main queue; on main: main queue → ownershipLock). Both reads
+        // are snapshotted BEFORE the lock: origin liveness from the conversation manager and the
+        // turn's own admitted-work answer (identity-keyed, stable per turn). Stale-origin refusal
+        // is preserved: a snapshot taken before the lock can only be MORE stale, never less, and
+        // the refusal decision is unchanged — an origin that was already superseded at snapshot
+        // time is refused exactly as before.
         guard let origin else { return .refused }
         let originIsLive = origin == conversationManager.liveOriginForTesting
         let turnHoldsAdmittedWork: Bool = {
             guard let authority = admittedWorkAuthority?() else { return false }
             return authority.isAdmittedWork(utteranceId, origin)
         }()
+        ownershipLock.lock()
+        defer { ownershipLock.unlock() }
         guard originIsLive || turnHoldsAdmittedWork else { return .refused }
         // ORIGIN-BOUND OWNERSHIP: a retained record is only the SAME ownership if it belongs to
         // THIS request's origin. A retained record of a different origin must not be joined or

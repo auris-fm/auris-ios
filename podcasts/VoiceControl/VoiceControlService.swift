@@ -394,6 +394,16 @@ class VoiceControlService: ObservableObject {
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) -> Bool {
+            // LOCK-ORDER SAFETY (review 4d474d80): the grace-signal reads below hop to main
+            // synchronously when called off-main, while `stop()` takes `transcriptLock` ON main.
+            // Holding `transcriptLock` across those reads is a lock-order cycle (off-main:
+            // transcriptLock → main queue; on-main stop(): main queue → transcriptLock). The
+            // grace snapshot is identity-keyed and stable, so it is captured BEFORE the lock —
+            // still at the callback, never after the queue wait — and the lock then guards only
+            // the listening check, epoch and chain.
+            let admittedOrigin = self.gracePeriodSignal.admittedOriginForTurn(utteranceId: input.utteranceId)
+            let retiredTurn = self.gracePeriodSignal.isRetiredTurn(input.utteranceId)
+            let liveGeneration = self.gracePeriodSignal.currentGeneration()
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
             guard self.isListening else {
@@ -414,16 +424,15 @@ class VoiceControlService: ObservableObject {
             // A turn whose admission was RETIRED (privacy/route) is refused outright: it must not
             // fall back to the live window, or a late completion could adopt a window that opened
             // after the retirement — the opposite of what retirement means.
-            let admittedOrigin = self.gracePeriodSignal.admittedOriginForTurn(utteranceId: input.utteranceId)
             let capturedOrigin: Int?
             if let origin {
                 capturedOrigin = origin
             } else if let admittedOrigin {
                 capturedOrigin = admittedOrigin
-            } else if self.gracePeriodSignal.isRetiredTurn(input.utteranceId) {
+            } else if retiredTurn {
                 capturedOrigin = self.gracePeriodSignal.policyRefusedOrigin
             } else {
-                capturedOrigin = self.gracePeriodSignal.currentGeneration()
+                capturedOrigin = liveGeneration
             }
             // The INPUT's own provenance, not a live read. `isActive` cannot tell a wake that
             // fired during grace from a follow-up inside the same grace — both arrive with grace
