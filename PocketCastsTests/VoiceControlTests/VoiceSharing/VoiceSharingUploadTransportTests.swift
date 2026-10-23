@@ -171,6 +171,31 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         XCTAssertLessThan(elapsed, 10, "the deadline bounds the transfer's lifetime")
     }
 
+    /// REAL OVER-CAP CONTROL (spec/reviewer open item): the response body genuinely crosses the
+    /// 64 KiB receive ceiling mid-stream — no stubbed "cap exceeded" flag — and the transport
+    /// cancels the live transfer (stopLoading observed via a bounded barrier) and reports the
+    /// record's fate as UNKNOWN (transportFailure), never a fabricated acceptance.
+    func test_responseBurstPastThe64KiBCapIsCancelledMidstream() async throws {
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        UploadRecordingURLProtocol.burstOverCapBytes = 64 * 1024 + 1
+        UploadRecordingURLProtocol.stopLoadingSemaphore = DispatchSemaphore(value: 0)
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session,
+            bodyDeadline: 30)
+        let result = await transport.send(request: makeRequest())
+        // Bounded wait for the actual cancellation callback (same barrier shape as the drip
+        // control — no assertion on unsynchronized counters).
+        let observed = DispatchQueue.global().sync {
+            UploadRecordingURLProtocol.stopLoadingSemaphore?
+                .wait(timeout: .now() + 5) == .success
+        }
+        XCTAssertEqual(result, .transportFailure,
+                       "a body crossing the cap is never a delivered record")
+        XCTAssertTrue(observed, "URLSession delivered stopLoading within the bounded wait")
+        XCTAssertGreaterThanOrEqual(UploadRecordingURLProtocol.stopLoadingCount, 1,
+                                    "the live transfer was cancelled, not drained")
+    }
+
     /// The production endpoint is the mounted worker route.
     func test_endpointIsTheMountdWorkerRoute() {
         let transport = VoiceSharingUploadTransport(
@@ -602,6 +627,9 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     /// only the WALL/cap bound can stop.
     static var drip = false
     static var dripInterval: TimeInterval = 0
+    /// REAL OVER-CAP MODE (spec/reviewer open item): the response body actually EXCEEDS the
+    /// transport's 64 KiB receive ceiling — headers first, then one burst larger than the cap.
+    static var burstOverCapBytes = 0
     private(set) static var lastRequest: URLRequest?
     private(set) static var requestCount = 0
     /// MEASURED CANCELLATION (spec/reviewer open item): how many times URLSession told the live
@@ -623,6 +651,7 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         stall = false
         drip = false
         dripInterval = 0
+        burstOverCapBytes = 0
         lastRequest = nil
         requestCount = 0
         stopLoadingCount = 0
@@ -642,6 +671,16 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         UploadRecordingURLProtocol.lock.unlock()
         // A genuine stall: the transfer exists but NEVER yields headers or bytes.
         if UploadRecordingURLProtocol.stall { return }
+        if UploadRecordingURLProtocol.burstOverCapBytes > 0 {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            // One burst strictly greater than the 64 KiB receive ceiling: the crossing happens
+            // MID-STREAM, inside the live transfer.
+            client?.urlProtocol(self, didLoad: Data(count: UploadRecordingURLProtocol.burstOverCapBytes))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         if UploadRecordingURLProtocol.drip {
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
