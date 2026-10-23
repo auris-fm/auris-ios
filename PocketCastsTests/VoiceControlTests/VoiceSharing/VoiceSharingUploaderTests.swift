@@ -159,6 +159,22 @@ final class VoiceSharingUploaderTests: XCTestCase {
                       "the entry is retained for its owning identity")
     }
 
+    /// Token double with the SAME rejected-bearer guard shape as `CloudAuthTokenProvider`.
+    private final class RefreshOnceProvider: CloudTokenProviding {
+        private let lock = NSLock()
+        private var current = "tok-1"
+        private(set) var refreshes = 0
+        func token() async -> String? { lock.lock(); defer { lock.unlock() }; return current }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {
+            lock.lock(); defer { lock.unlock() }
+            if let rejectedToken, !rejectedToken.isEmpty, current != rejectedToken { return }
+            refreshes += 1
+            current = "tok-\(refreshes + 1)"
+        }
+        func handleUnauthorized() async { await handleUnauthorized(rejectedToken: nil) }
+    }
+
     /// Mutable identity holder for the fence control.
     private final class IdentityBox {
         private let lock = NSLock()
@@ -368,6 +384,38 @@ final class VoiceSharingUploaderTests: XCTestCase {
             return XCTFail("coverage known")
         }
         XCTAssertTrue(after.contains(entry), "a 401 must not destroy a valid recording")
+    }
+
+    /// PRODUCTION REFRESH-ONCE (spec e134fa36): two 401s for the SAME rejected bearer must cost
+    /// exactly ONE refresh — the rejected-bearer guard in `CloudAuthTokenProvider.handleUnauthorized`
+    /// makes the second rejection of an already-replaced token a no-op, so a burst of N 401s (two
+    /// requests in flight carrying the same stale token, or a retry racing the refresh) cannot
+    /// rotate the chain N times. Entry retries stay bounded by the queue's attempt limit.
+    func test_repeated401sForTheSameBearerRefreshExactlyOnce() async throws {
+        let entry = try makeReadyEntry()
+        let provider = RefreshOnceProvider()
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 401, body: Data())
+        })
+
+        // Attempt 1: the request carries tok-1; the server rejects it.
+        let firstBearer = await provider.token()
+        let outcome1 = await uploader.upload(entry)
+        guard case .retry = outcome1 else {
+            return XCTFail("401 retries the same entry, got \(outcome1)")
+        }
+        // The transport reports the exact rejected bearer (as the real transport does at its 401
+        // branch) — and a SECOND concurrent rejection of the SAME bearer arrives before the
+        // refresh chain is consumed again.
+        await provider.handleUnauthorized(rejectedToken: firstBearer)
+        XCTAssertEqual(provider.refreshes, 1, "the first rejection replaces the token once")
+
+        let duplicateBearer = await provider.token()   // tok-2 now, but the WIRE rejection was tok-1
+        XCTAssertEqual(duplicateBearer, "tok-2")
+        await provider.handleUnauthorized(rejectedToken: firstBearer)   // the duplicate 401 for tok-1
+        XCTAssertEqual(provider.refreshes, 1,
+                       "a second 401 naming the ALREADY-REPLACED bearer must be a no-op — no second rotation")
+        _ = uploader
     }
 
     /// An unrecognized 4xx has NO owning disposition: unknown means RETAIN and retry, never
