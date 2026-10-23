@@ -75,6 +75,45 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
                        "revocation between prepare and finalize must discard the unready entry")
     }
 
+    /// Spec delta 736d3180 through the REAL producer→durable-record path: a collector event enters
+    /// the contribution sink with `observation_unavailable` + `state: "unknown"` on one stage, and the
+    /// resulting entry must be durably ready in the production queue (not merely encodable).
+    func test_anUnobservedStageReachesTheDurableQueueAsAReadyEntry() throws {
+        var claims = observations
+        claims["asr"] = .init(state: "unknown", reason: "observation_unavailable")
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { [self] in enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in claims })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 1,
+                       "an unobserved stage must not stop the record reaching the durable queue")
+    }
+
+    /// The pairing rule must hold on the SAME path: `observation_unavailable` paired with a known
+    /// outcome is refused before anything becomes ready, so a non-claim can never be stored as if it
+    /// described a real outcome.
+    func test_thePairingRuleIsEnforcedOnTheDurableQueuePathToo() throws {
+        var claims = observations
+        claims["asr"] = .init(state: "failed", reason: "observation_unavailable")
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { [self] in enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in claims })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 0, "the refused pair must never become a ready entry")
+        let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(leftover.count, 0, "no unready residue may survive the refusal")
+    }
+
     func test_purgeAllRemovesEveryEntryAndRootBookkeeping() throws {
         makeSink().handle(event())
         makeSink().handle(event())
