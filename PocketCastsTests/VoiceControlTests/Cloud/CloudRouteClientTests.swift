@@ -524,7 +524,9 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let task = StubWebSocketTask([])
         let events = await collect(client(task: task, token: nil).route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
-        XCTAssertEqual(events.last, .error(source: .server, code: "unauthorized", message: ""),
+        // .requestConstruction: with no credential no frame is built, let alone sent, so the
+        // failure is provably client-side pre-send (the emission site is e2dc42d1d).
+        XCTAssertEqual(events.last, .error(source: .requestConstruction, code: "unauthorized", message: ""),
                        "a turn with no credential must report the failure, not end silently")
         XCTAssertEqual(task.sent.count, 0, "nothing is sent without a credential")
     }
