@@ -632,32 +632,39 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
     /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
     /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
-    /// COHERENT ADMISSION under ORDERED CONTENTION (review 5fa6e007): admission and retirement
-    /// race through the main queue; each round must resolve coherently — admit-then-retire (the
-    /// record detaches) or refuse-after-retirement — and a stale-origin re-admission must NEVER
-    /// own after the retirement is observed. The discriminator is the observable ordering, not a
-    /// timeout. The interleaving is driven from a DETACHED task so the admission genuinely enters
-    /// via a cross-thread hop onto the main queue.
+    /// COHERENT ADMISSION with an EXPLICIT INTERLEAVING BARRIER (review 5fa6e007): the admission
+    /// is paused INSIDE the coherent block, before its liveness read; AT THAT MOMENT — mid-decision
+    /// — the window moves and the origin retires. The resumed decision must observe the retirement
+    /// and REFUSE. A pre-block snapshot implementation fails this control: its cached liveness
+    /// would still admit. The discriminator is the admission outcome, not a timeout, and the whole
+    /// retirement happens synchronously inside the barrier (no cross-queue hop, no deadlock).
     @MainActor
-    func testAdmissionAndRetirementRacingThroughTheMainQueueResolveCoherently() async throws {
+    func testAnAdmissionPausedMidDecisionObservesAMidDecisionRetirementAndRefuses() async throws {
         let manager = testConversationManager()
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
         manager.registerLiveOrigin(cloudTestOrigin)
 
-        for round in 0..<20 {
-            let admission = Task.detached { @MainActor in
-                sink.beginDispatch(utteranceId: "utterance-race-\(round)", origin: cloudTestOrigin)
-            }
-            let admitted = await admission.value
-            manager.registerLiveOrigin(cloudTestOrigin + 1 + round)
-            sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1 + round)
-            if admitted.ownsDispatch {
-                let again = sink.beginDispatch(utteranceId: "utterance-race-\(round)", origin: cloudTestOrigin)
-                XCTAssertFalse(again.ownsDispatch,
-                               "round \(round): a stale-origin re-admission must never own after retirement")
-            }
+        var retiredMidDecision = false
+        sink.admissionInterleavingBarrierForTesting = { [weak manager] in
+            guard let manager, !retiredMidDecision else { return }
+            retiredMidDecision = true
+            // Mid-decision window move: the origin the parked admission is about to test is
+            // retired right here, between block entry and the decision's own read.
+            manager.registerLiveOrigin(cloudTestOrigin + 1)
+            sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
         }
+
+        let admission = Task.detached { @MainActor in
+            sink.beginDispatch(utteranceId: "utterance-barrier-race", origin: cloudTestOrigin)
+        }
+        let disposition = await admission.value
+        sink.admissionInterleavingBarrierForTesting = nil
+        XCTAssertTrue(retiredMidDecision, "the barrier must have executed mid-decision")
+        XCTAssertTrue(disposition.isRefused,
+                      "an admission whose origin retired mid-decision must refuse — a pre-block snapshot would admit")
     }
+
+
 
     /// COHERENT ADMISSION (review 086c0172): a retirement that lands between a pre-lock snapshot
     /// and publication must not admit the stale origin. `beginDispatch` now decides and publishes

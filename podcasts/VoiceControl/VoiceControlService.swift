@@ -389,12 +389,11 @@ class VoiceControlService: ObservableObject {
     /// `origin: nil` means "capture the live window at enqueue time"; a caller that already holds
     /// the dispatch origin (the draining turn) passes it so the re-processed command belongs to the
     /// same window it was spoken in.
-    /// TEST SEAM (review 086c0172/5fa6e007): reproduces the EXACT lock/read structure of
-    /// `enqueueRoutingInput`'s capture phase — pre-lock grace reads, then the `transcriptLock`
-    /// listening check — so a control can drive the off-main side of the transcriptLock/stop
-    /// cycle deterministically without the full routing pipeline. Returns the captured origin
-    /// triple, or nil when the listening check refuses (the same `isListening` gate).
-    func routingCaptureForTesting(utteranceId: String, origin: Int?) -> (admitted: Int?, retired: Bool, generation: Int, listening: Bool)? {
+    /// THE SHARED CAPTURE OPERATION (review 5fa6e007): the grace reads + `transcriptLock`
+    /// listening check that `enqueueRoutingInput`'s capture phase performs. Production and the
+    /// test control call THIS operation, so the control cannot drift from the structure it
+    /// exercises. The grace reads happen BEFORE the lock (lock-order safety, review 4d474d80).
+    func captureRoutingOrigin(utteranceId: String) -> (admitted: Int?, retired: Bool, generation: Int, listening: Bool)? {
         let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
         let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
         let liveGeneration = gracePeriodSignal.currentGeneration()
@@ -409,16 +408,17 @@ class VoiceControlService: ObservableObject {
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) -> Bool {
-            // LOCK-ORDER SAFETY (review 4d474d80): the grace-signal reads below hop to main
+            // LOCK-ORDER SAFETY (review 4d474d80): the grace-signal reads hop to main
             // synchronously when called off-main, while `stop()` takes `transcriptLock` ON main.
             // Holding `transcriptLock` across those reads is a lock-order cycle (off-main:
             // transcriptLock → main queue; on-main stop(): main queue → transcriptLock). The
-            // grace snapshot is identity-keyed and stable, so it is captured BEFORE the lock —
-            // still at the callback, never after the queue wait — and the lock then guards only
-            // the listening check, epoch and chain.
-            let admittedOrigin = self.gracePeriodSignal.admittedOriginForTurn(utteranceId: input.utteranceId)
-            let retiredTurn = self.gracePeriodSignal.isRetiredTurn(input.utteranceId)
-            let liveGeneration = self.gracePeriodSignal.currentGeneration()
+            // shared capture operation performs the reads BEFORE the lock — still at the
+            // callback, never after the queue wait — and the lock then guards only the
+            // listening check, epoch and chain.
+            let capture = self.captureRoutingOrigin(utteranceId: input.utteranceId)
+            let admittedOrigin = capture?.admitted
+            let retiredTurn = capture?.retired ?? false
+            let liveGeneration = capture?.generation
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
             guard self.isListening else {

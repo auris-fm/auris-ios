@@ -121,6 +121,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Consulted by the dispatch fence: does this exact turn still hold admitted work under
     /// `origin`? Nil means the sink was constructed without one and fences on the live origin
     /// alone (the pre-existing behaviour).
+    /// TEST-ONLY: an interleaving barrier invoked inside the coherent admission block, before the
+    /// decision reads. Nil in production.
+    @MainActor var admissionInterleavingBarrierForTesting: (() -> Void)?
+
     private let admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)?
 
     /// The manager whose live origin must follow the grace window. Exposed so the SERVICE can own
@@ -477,6 +481,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // through the normal ownership path.
         guard let origin else { return .refused }
         let decideAndPublish: () -> CloudDispatchOwnership = {
+            // TEST HOOK (review 5fa6e007): an explicit interleaving barrier INSIDE the coherent
+            // block — production nil. A control can pause the admission mid-decision, perform a
+            // window retirement, and release, proving the decision observes the retirement because
+            // it reads state INSIDE the block (never from a pre-block snapshot).
+            self.admissionInterleavingBarrierForTesting?()
             let originIsLive = origin == self.conversationManager.liveOriginForTesting
             let turnHoldsAdmittedWork: Bool = {
                 guard let authority = self.admittedWorkAuthority?() else { return false }
