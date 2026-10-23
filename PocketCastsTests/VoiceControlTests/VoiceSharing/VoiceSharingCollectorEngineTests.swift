@@ -475,6 +475,49 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a capture whose session moved on must not become a completed record on late finalize")
     }
 
+    /// A-DEFERRED / B-OPEN (review d3c39ae5). A completed with deferred emission, then B started. A
+    /// cancellation now belongs to B — it is the capture that is still open. Consuming A instead would
+    /// discard a finished capture that was never cancelled and leave B live and filable.
+    func test_aCancellationWhileASuccessorIsOpenConsumesTheSuccessorNotTheDeferredPredecessor() async throws {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        // A: starts, closes, completion deferred.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxA = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: A open")
+        }
+        collector.segmentationEnded(ctxA)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxA,
+                                  deferEmission: true)
+        // B: starts and is still open when the cancellation arrives.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxB = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: B open")
+        }
+        XCTAssertNotEqual(ctxA.id, ctxB.id)
+
+        collector.speechCancelled()
+
+        // A must survive the cancel and publish when the engine finalizes it.
+        collector.finalizeDeferredCompletion(context: ctxA)
+        let completedIDs = Set(snapshot()
+            .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .completed }
+            .map(\.captureID))
+        XCTAssertEqual(completedIDs, Set([ctxA.id]),
+                       "the deferred predecessor was never cancelled and must still publish; "
+                           + "completed=\(completedIDs)")
+        // And B is the capture that was cancelled.
+        let cancelledIDs = Set(snapshot()
+            .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .cancelled }
+            .map(\.captureID))
+        XCTAssertEqual(cancelledIDs, Set([ctxB.id]),
+                       "the OPEN capture is the owner of the cancellation; cancelled=\(cancelledIDs)")
+    }
+
     /// CANCELLATION MUST BIND THE INTENDED CAPTURE, NEVER DICTIONARY ORDER (review 15900665). The ring is
     /// UUID-keyed, so a hash-order lookup satisfies any SINGLE arrangement by luck — proved by mutation,
     /// where the same control passed 3 runs in 5. The binding is therefore asserted from both sides in one

@@ -392,9 +392,24 @@ final class VoiceSharingCollector {
     /// which is exactly one capture by construction.
     func speechCancelled() {
         lock.lock()
-        // A DEFERRED capture (spec 2dcf8c5b) is already terminal and ring-resident, so `current` is nil and
-        // the guard below would skip it entirely — leaving a cancelled capture publishable by a late
-        // finalize (review 859dac4c). Cancel must reach it wherever it lives.
+        // THE OWNER OF THE CANCELLATION IS THE OPEN CAPTURE, and it is decided FIRST (review d3c39ae5).
+        // A deferred ring entry belongs to a segment that already closed: if a successor is open, the
+        // cancellation is about the SUCCESSOR, and consuming the predecessor instead would discard the
+        // wrong capture while leaving the intended one live.
+        if let open = current, !open.terminal, open.sawStart {
+            var c = open
+            c.terminal = true
+            current = nil
+            aggregateAudioSamples -= c.retained.count
+            markTerminal(c, discarded: true)   // a genuine cancel discards the partial FOREVER
+            let event = makeEvent(kind: .cancelled, from: c)
+            lock.unlock()
+            submit(event)
+            return
+        }
+        // No open capture: the cancellation is about the capture the pipeline is still awaiting a finalize
+        // for (spec 2dcf8c5b). Without this a deferred capture would survive and a late finalize could
+        // revive it (review 859dac4c).
         if var deferred = deferredRingEntryAwaitingCancellationLocked(preferring: nil) {
             deferred.capture = consumed(deferred.capture)
             deferred.emitted = true
@@ -403,14 +418,7 @@ final class VoiceSharingCollector {
             lock.unlock()
             return
         }
-        guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
-        c.terminal = true
-        current = nil
-        aggregateAudioSamples -= c.retained.count
-        markTerminal(c, discarded: true)   // a genuine cancel discards the partial FOREVER
-        let event = makeEvent(kind: .cancelled, from: c)
         lock.unlock()
-        submit(event)
     }
 
     /// Cancellation for a NAMED capture. The engine knows which capture it froze; when it says so, that
@@ -418,6 +426,18 @@ final class VoiceSharingCollector {
     func speechCancelled(context: CaptureContext?) {
         guard let context else { return speechCancelled() }
         lock.lock()
+        // The named capture may still be OPEN; cancel it where it lives rather than only looking in the ring.
+        if let open = current, open.id == context.id, !open.terminal, open.sawStart {
+            var c = open
+            c.terminal = true
+            current = nil
+            aggregateAudioSamples -= c.retained.count
+            markTerminal(c, discarded: true)
+            let event = makeEvent(kind: .cancelled, from: c)
+            lock.unlock()
+            submit(event)
+            return
+        }
         guard var rec = deferredRingEntryAwaitingCancellationLocked(preferring: context) else {
             lock.unlock()
             return
