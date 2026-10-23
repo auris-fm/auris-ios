@@ -418,15 +418,18 @@ enum VoiceSharingRecordBinding {
         guard state == "completed" else {
             throw BindingError.invalidField(path, "empty_result requires state completed, not \(state)")
         }
-        if let text = declared["text"], !(text is NSNull) {
+        // ABSENT means the KEY IS NOT THERE (review 2f8e5d90). An explicit JSON `null` is present: it
+        // states the field exists and is empty, which is not what this reason declares. Testing the VALUE
+        // instead of the key let `text: null` and `router_input: null` through.
+        if declared.keys.contains("text") {
             throw BindingError.invalidField(
                 "\(path)",
-                "empty_result must not accompany text; a transcription is not an empty result")
+                "empty_result must not carry a text key at all; a transcription is not an empty result")
         }
-        if let routed = declared["router_input"], !(routed is NSNull) {
+        if declared.keys.contains("router_input") {
             throw BindingError.invalidField(
                 "\(path)",
-                "empty_result must not accompany router_input; no command proceeded")
+                "empty_result must not carry a router_input key at all; no command proceeded")
         }
     }
 

@@ -1,3 +1,6 @@
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 import XCTest
 @testable import podcasts
 
@@ -780,6 +783,75 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
     }
 
+    /// THE PERSISTED ENVELOPE, WITH A RECOMPUTED DIGEST (review 2f8e5d90). Validating an observations
+    /// dictionary proves the observation rule; it does not prove a REAL record carrying the contradiction
+    /// is refused when it comes back through `bind`. Each envelope is re-sealed with the PRODUCTION
+    /// canonicalizer, so the refusal cannot be a stale-digest artifact.
+    func test_aPersistedEnvelopeCarryingANullEmptyResultFieldIsRefusedForThatReason() throws {
+        let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+            "wake": .init(state: "completed"),
+            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
+            "asr": .init(state: "completed", reason: "empty_result"),
+            "translation": .init(state: "unknown", reason: "observation_unavailable"),
+            "routing": .init(state: "unknown", reason: "observation_unavailable"),
+            "execution": .init(state: "unknown", reason: "observation_unavailable"),
+        ]
+        let samples = (0..<16_000).map { Float(sin(Double($0) * 0.01)) * 0.4 }
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed,
+            captureID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+            enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: VoiceSharingContributionEncoder.Models(
+                vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
+                asr: .init(id: "asr-1", version: "1"), translation: nil,
+                router: .init(id: "router-1", version: "1")),
+            conversionVersion: "v1")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: observations)
+        let base = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
+
+        func refuse(_ label: String, text: Any?, routerInput: Any?, mentioning fragment: String) throws {
+            var object = base
+            var block = try XCTUnwrap((object["observations"] as? [String: Any])?["asr"] as? [String: Any])
+            if let text { block["text"] = text }
+            if let routerInput { block["router_input"] = routerInput }
+            var all = try XCTUnwrap(object["observations"] as? [String: Any])
+            all["asr"] = block
+            object["observations"] = all
+            let sealed = try rescaled(object)
+            do {
+                _ = try VoiceSharingRecordBinding.bind(envelope: sealed, audio: encoded.wav)
+                XCTFail("\(label): expected refusal")
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                guard case .invalidField(let path, let message) = error else {
+                    return XCTFail("\(label): expected invalidField, got \(error)")
+                }
+                XCTAssertTrue(path.hasPrefix("observations.asr"),
+                              "\(label): refusal must be about the asr stage; got \(path)")
+                XCTAssertTrue((path + message).localizedCaseInsensitiveContains(fragment),
+                              "\(label): cause must be named (\(fragment)); got \(path): \(message)")
+            }
+        }
+        try refuse("text null", text: NSNull(), routerInput: nil, mentioning: "text")
+        try refuse("router_input null", text: nil, routerInput: NSNull(), mentioning: "router_input")
+    }
+
+    /// Re-seals with the PRODUCTION canonicalizer so the digest binds the mutated bytes.
+    private func rescaled(_ record: [String: Any]) throws -> Data {
+        var digest = ""
+        #if canImport(CryptoKit)
+        digest = SHA256.hash(data: try VoiceSharingRecordBinding.canonicalizeForTesting(record))
+            .map { String(format: "%02x", $0) }.joined()
+        #endif
+        let envelope: [String: Any] = ["record": record, "record_sha256": digest]
+        return try JSONSerialization.data(withJSONObject: envelope)
+    }
+
     /// `empty_result` DESCRIBES ONE THING ONLY (spec delta c6f3bdf7): a recognition that succeeded and
     /// produced nothing usable. Every contradictory combination is refused, because each one asserts
     /// something the capture cannot have done — a text alongside "no text", a router input from a command
@@ -807,6 +879,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let refused: [(String, [String: Any], String)] = [
             ("text present", stage(["text": "hello"]), "text"),
             ("router_input present", stage(["router_input": ["intent": "track.play"]]), "router_input"),
+            // ABSENT IS NOT NULL (review 2f8e5d90): an explicit null states the key exists and is empty,
+            // which is not what empty_result declares.
+            ("text null", stage(["text": NSNull()]), "text"),
+            ("router_input null", stage(["router_input": NSNull()]), "router_input"),
             ("state failed", stage(["state": "failed"]), "completed"),
             ("state cancelled", stage(["state": "cancelled"]), "completed"),
             ("state not_run", stage(["state": "not_run"]), "completed"),
