@@ -316,6 +316,49 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNotNil(stages["routing"], "routing must be on the record")
     }
 
+    /// REVIEW 59841fbc #2: the debounce skip must settle the capture with an ENUMERATED reason. The
+    /// first version invented `nothing_to_do`, which payload validation refuses — so the record would
+    /// have been dropped rather than recorded.
+    func test_theDebounceSkipSettlesWithAnEnumeratedReason() async {
+        collected = []
+        let router = StubClassifier()
+        router.result = .intent(PlaybackIntent.pause)
+        let executor = StubExecutor()
+        let collector = makeCollector()
+        let harness = makeService(router: router, executor: executor, collector: collector)
+        let service = harness.service
+        service.enterListeningStateForTesting()
+
+        // First turn executes and arms the debounce window.
+        guard let first = await openRealCapture(harness) else {
+            return XCTFail("a real open capture is required")
+        }
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause"),
+                                         captureContext: first)
+        finishCapture(harness, first)
+        let firstStages = publishedStages(for: first.id)
+        XCTAssertEqual(firstStages["execution"]?.state, "unknown",
+                       "premise: the first turn ran and its result is unobserved")
+        XCTAssertEqual(executor.executed.count, 1, "premise: the first turn reached the executor")
+
+        // Second identical turn inside the debounce window: suppressed, and must still PUBLISH.
+        guard let second = await openRealCapture(harness) else {
+            return XCTFail("a real open capture is required")
+        }
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause"),
+                                         captureContext: second)
+        finishCapture(harness, second)
+        XCTAssertEqual(executor.executed.count, 1, "premise: the debounce suppressed the second turn")
+
+        let stages = publishedStages(for: second.id)
+        guard let execution = stages["execution"] else {
+            return XCTFail("the suppressed turn must still publish a record, got "
+                           + "\(stages.keys.sorted())")
+        }
+        XCTAssertEqual(execution.reason, "client_refused",
+                       "the settle reason must be one the schema enumerates")
+    }
+
     /// A blank or wake-only transcript is a session start, not a failed question: routing is NOT run and
     /// the executor sees nothing. The record still publishes with both stages settled.
     func test_aSilentSessionStartIsNotRoutedAndStillPublishes() async {

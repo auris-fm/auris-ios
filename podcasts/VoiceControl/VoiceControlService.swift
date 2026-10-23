@@ -215,6 +215,10 @@ class VoiceControlService: ObservableObject {
             }
             let epoch = self.transcriptEpoch
             let previous = self.transcriptSerialTask
+            // Captured OUTSIDE the task, so the collector outlives the service. A task that finds
+            // `self` released can then still settle its capture: passing nil into the abandon path left
+            // the record owned by nobody and it never published (review 59841fbc).
+            let collectorForAbandonment = self.contributionCollector
             let task = Task { [weak self] in
                 await previous?.value
                 // This capture was handed to THIS task. If the task is abandoned while queued behind
@@ -229,13 +233,13 @@ class VoiceControlService: ObservableObject {
                     collector.finalizeDeferredCompletion(context: captureContext)
                 }
                 guard !Task.isCancelled else {
-                    abandonCapture(self?.contributionCollector)
+                    abandonCapture(self?.contributionCollector ?? collectorForAbandonment)
                     return
                 }
                 guard let self else {
-                    // The service itself was released; nothing can report any more, but a collector
-                    // captured above can still release the record.
-                    abandonCapture(nil)
+                    // The service itself was released. The collector captured above can still report and
+                    // release the record on its behalf.
+                    abandonCapture(collectorForAbandonment)
                     return
                 }
                 self.transcriptLock.lock()
@@ -508,8 +512,10 @@ class VoiceControlService: ObservableObject {
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
                 FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
-                // Debounced: the turn ran, the repeated action was suppressed.
-                settleOwnedCapture(captureContext, cancelled: false, reason: "nothing_to_do")
+                // Debounced: the turn ran, the repeated action was suppressed. No executor ran, so this
+                // is the client declining to act — an ENUMERATED reason. (`nothing_to_do` was invented
+                // and the payload validation refuses it, which would have dropped the record.)
+                settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
                 return
             }
 

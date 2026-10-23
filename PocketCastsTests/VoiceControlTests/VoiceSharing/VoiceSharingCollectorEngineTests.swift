@@ -1178,6 +1178,34 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
+    /// REVIEW 59841fbc #1: an explicit `reason: null` on a completed stage is still a carded reason. The
+    /// first f8 implementation tested the VALUE (`!(reason is NSNull)`) and let exactly the payload f8
+    /// forbids through — the same null-is-not-absence mistake made once before on asr.text.
+    func test_aCompletedStageCarryingAnExplicitNullReasonIsStillRefused() throws {
+        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
+        for stage in stages {
+            var all: [String: Any] = [:]
+            for name in stages {
+                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
+            }
+            var block: [String: Any] = ["state": "completed"]
+            block["reason"] = NSNull()
+            if stage == "asr" { block["text"] = "hello" }
+            all[stage] = block
+            do {
+                try VoiceSharingRecordBinding.validateObservationsForTesting(all)
+                XCTFail("\(stage): an explicit null reason must not pass f8")
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                guard case .invalidField(let path, let message) = error else {
+                    return XCTFail("\(stage): expected invalidField, got \(error)")
+                }
+                XCTAssertEqual(path, "observations.\(stage).reason")
+                XCTAssertTrue(message.contains("carries no reason"),
+                              "\(stage): refusal must state the rule, got \(message)")
+            }
+        }
+    }
+
     /// A TRANSLATION SKIP REASON IS A DECISION NOT TO RUN (spec 4d10275f, review b5fb69ef). Each of the
     /// three is valid ONLY on translation/not_run; on any other stage, or with failed/cancelled/unknown/
     /// completed, it would claim a skip and a non-skip at once.

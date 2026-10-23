@@ -340,9 +340,15 @@ enum VoiceSharingRecordBinding {
             // and a reason there is a narrative attached to a success. The single exception is ASR
             // completed/empty_result, where the reason IS the result.
             if state == "completed" {
-                if let reason = declared["reason"], !(reason is NSNull) {
+                // KEY PRESENCE, not value (review 2f8e5d90 taught this once and I repeated the bug):
+                // `reason: null` states the field exists and is empty, so `!(reason is NSNull)` let the
+                // exact payload f8 forbids through. A present key is a reason being carried, whatever it
+                // holds.
+                if let reason = declared["reason"] {
                     guard let text = reason as? String else {
-                        throw BindingError.invalidField("\(stagePath).reason", "string required")
+                        throw BindingError.invalidField(
+                            "\(stagePath).reason",
+                            "a completed stage carries no reason; null is still a carried reason")
                     }
                     if !(stage == "asr" && text == emptyResultReason) {
                         throw BindingError.invalidField(
