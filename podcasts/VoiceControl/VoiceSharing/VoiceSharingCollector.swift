@@ -132,6 +132,8 @@ final class VoiceSharingCollector {
                                           attributes: [], autoreleaseFrequency: .workItem)
 
     private let lock = NSLock()
+    /// Monotonic stamp for ring entry order (see `TerminalRecord.deferredOrder`).
+    private var terminalSequence: UInt64 = 0
     /// The capture currently open, with everything about it frozen at creation. Replaced (not mutated) when a
     /// new segment starts, so an old callback can never land on the successor.
     private var current: FrozenCapture?
@@ -393,7 +395,7 @@ final class VoiceSharingCollector {
         // A DEFERRED capture (spec 2dcf8c5b) is already terminal and ring-resident, so `current` is nil and
         // the guard below would skip it entirely — leaving a cancelled capture publishable by a late
         // finalize (review 859dac4c). Cancel must reach it wherever it lives.
-        if var deferred = deferredRingEntryAwaitingCancellationLocked() {
+        if var deferred = deferredRingEntryAwaitingCancellationLocked(preferring: nil) {
             deferred.capture = consumed(deferred.capture)
             deferred.emitted = true
             deferred.noContribution = true
@@ -411,14 +413,38 @@ final class VoiceSharingCollector {
         submit(event)
     }
 
-    /// The most recent deferred, unemitted completion, if one is waiting on the engine. Sufficient because a
-    /// deferred capture is by construction the one the pipeline is still working on, and a second segment
-    /// cannot complete while its predecessor is held.
-    private func deferredRingEntryAwaitingCancellationLocked() -> TerminalRecord? {
-        for (_, rec) in terminalRing where rec.capture.deferEmissionUntilFinalized && !rec.emitted {
-            return rec
+    /// Cancellation for a NAMED capture. The engine knows which capture it froze; when it says so, that
+    /// binding wins outright and no recency heuristic is consulted.
+    func speechCancelled(context: CaptureContext?) {
+        guard let context else { return speechCancelled() }
+        lock.lock()
+        guard var rec = deferredRingEntryAwaitingCancellationLocked(preferring: context) else {
+            lock.unlock()
+            return
         }
-        return nil
+        rec.capture = consumed(rec.capture)
+        rec.emitted = true
+        rec.noContribution = true
+        terminalRing[rec.capture.id] = rec
+        lock.unlock()
+    }
+
+    /// The capture a cancellation is about. DICTIONARY ORDER IS NOT A BINDING (review 15900665): the ring is
+    /// keyed by UUID, so iterating it picks an arbitrary deferred capture. Cancellation has two distinct
+    /// meanings and both must bind deterministically:
+    ///   - an OPEN capture: the cancel is about `current`, exactly as before;
+    ///   - a captured-but-already-closed one: the engine cancels the capture whose context it froze, which
+    ///     is the capture it is still awaiting a finalize for.
+    /// With several deferred captures the most recent one is the one the pipeline is working on, so recency
+    /// — never hashing — decides. A caller with a known context names it explicitly.
+    private func deferredRingEntryAwaitingCancellationLocked(preferring context: CaptureContext?) -> TerminalRecord? {
+        if let context, let named = terminalRing[context.id],
+            named.capture.deferEmissionUntilFinalized, !named.emitted {
+            return named
+        }
+        return terminalRing.values
+            .filter { $0.capture.deferEmissionUntilFinalized && !$0.emitted }
+            .max { $0.deferredOrder < $1.deferredOrder }
     }
 
     /// Strips audio ownership from a capture that can no longer contribute.
@@ -507,6 +533,9 @@ final class VoiceSharingCollector {
         /// late outcomes are CONSUMED silently: never resurrected as deliverable records, never
         /// emitted twice.
         var noContribution: Bool = false
+        /// Monotonic order of entry into the ring, so "the capture the pipeline is working on" is a fact
+        /// rather than an artifact of dictionary iteration order.
+        var deferredOrder: UInt64 = 0
     }
 
     private var terminalRing: [UUID: TerminalRecord] = [:]
@@ -517,7 +546,10 @@ final class VoiceSharingCollector {
 
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         aggregateAudioSamples += c.retained.count
-        terminalRing[c.id] = TerminalRecord(capture: c, emitted: false, noContribution: noContribution)
+        terminalSequence &+= 1
+        terminalRing[c.id] = TerminalRecord(
+            capture: c, emitted: false, noContribution: noContribution,
+            deferredOrder: terminalSequence)
         while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
             guard let oldest = terminalRing.first else { break }
             aggregateAudioSamples -= oldest.value.capture.retained.count

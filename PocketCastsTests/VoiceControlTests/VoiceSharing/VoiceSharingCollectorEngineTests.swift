@@ -475,6 +475,51 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a capture whose session moved on must not become a completed record on late finalize")
     }
 
+    /// CANCELLATION MUST BIND THE INTENDED CAPTURE, NEVER DICTIONARY ORDER (review 15900665). The ring is
+    /// UUID-keyed, so a hash-order lookup satisfies any SINGLE arrangement by luck — proved by mutation,
+    /// where the same control passed 3 runs in 5. The binding is therefore asserted from both sides in one
+    /// run: the named capture must be consumed AND every other deferred capture must remain publishable.
+    func test_aNamedCancelBindsItsOwnCaptureAndLeavesTheOthersPublishable() async throws {
+        // TRIALS: a hash-order implementation passes one arrangement by luck (observed 2 of 6 runs when the
+        // first version of this control was mutated). Repeating the scenario over several independent
+        // captures makes passing require the binding to be correct EVERY time, not once.
+        for trial in 0..<12 {
+            let policy = openGate(enrolled: true)
+            let collector = makeRecordingCollector(policy)
+            let backend = EngineStubBackend()
+            let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+            _ = engine
+
+            func deferCapture() -> VoiceSharingCollector.CaptureContext? {
+                collector.speechStarted(confirmationFrameSamples: 320)
+                guard let ctx = collector.currentCaptureContextForTesting else { return nil }
+                collector.segmentationEnded(ctx)
+                collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx,
+                                          deferEmission: true)
+                return ctx
+            }
+            guard let first = deferCapture(), let target = deferCapture(),
+                let third = deferCapture() else {
+                return XCTFail("premise: three deferred captures (trial \(trial))")
+            }
+            let all = [first, target, third]
+            XCTAssertEqual(Set(all.map(\.id)).count, 3, "trial \(trial): distinct captures")
+
+            // Cancel the middle one BY NAME: its position in the set guarantees the survivor set is not
+            // accidentally equal to "everything the implementation happened to consume".
+            collector.speechCancelled(context: target)
+            for ctx in all { collector.finalizeDeferredCompletion(context: ctx) }
+
+            let completedIDs = Set(snapshot()
+                .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .completed }
+                .map(\.captureID))
+            XCTAssertEqual(completedIDs, Set([first.id, third.id]),
+                           "trial \(trial): the named cancel must consume exactly its own capture; "
+                               + "completed=\(completedIDs)")
+            collectedLock.lock(); collectedEvents = []; collectedLock.unlock()
+        }
+    }
+
     /// A CANCELLED CAPTURE CANNOT BE REVIVED BY A LATE FINALIZE (review 859dac4c). The capture is deferred
     /// first, so it is genuinely ring-resident, and the cancel arrives while the engine still owes its
     /// finalize. The entry must be consumed, not promoted to a completed record.
