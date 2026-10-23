@@ -4812,6 +4812,86 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "late B waiter after settlement")
     }
 
+    /// REVIEWER 20ec6eaa: the retained settlement set must be BOUNDED — a repeated
+    /// coalesce→physical-stop lifecycle drives it back to the empty baseline, while a late
+    /// settled waiter still resolves BEFORE retirement gets to its entry.
+    @MainActor
+    func testRepeatedCoalesceStopCyclesKeepTheRetainedSettlementSetBounded() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        // Before any stop, the baseline is empty.
+        XCTAssertEqual(player.settledDisplacedIdentitiesForTesting, [], "baseline: nothing settled")
+
+        for cycle in 1...4 {
+            player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+            XCTAssertTrue(player.hasPendingAudio, "cycle \(cycle): a frame must be pending")
+
+            let arrived = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            player.claimReached = arrived
+            player.claimRelease = release
+            defer {
+                release.signal()
+                arrived.signal()
+                player.claimReached = nil
+                player.claimRelease = nil
+            }
+
+            let aAllocated = player.finish()
+            let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+            XCTAssertTrue(claimedInTime, "cycle \(cycle): the runner must reach the claim")
+
+            // B coalesces onto A's physical stop; C ALSO coalesces — two retained facts.
+            let bAllocated = player.finish()
+            let cAllocated = player.finish()
+            XCTAssertNotEqual(bAllocated, aAllocated)
+            XCTAssertNotEqual(cAllocated, bAllocated)
+
+            // LATE-BUT-PRE-RETIREMENT proof: register B's waiter BEFORE the release so it
+            // resolves from the retained fact even if a later physical stop retires it after.
+            async let bWaiter: Bool = player.awaitActualStop(after: bAllocated, timeout: 5)
+
+            release.signal()
+
+            let bSettled = await bWaiter
+            XCTAssertTrue(bSettled, "cycle \(cycle): the coalesced finish's late waiter resolves")
+
+            // Let the physical stop confirm and retire.
+            let physicalConfirmed = await player.awaitActualStop(after: aAllocated, timeout: 5)
+            XCTAssertTrue(physicalConfirmed, "cycle \(cycle): A's physical stop confirms")
+            try await Task.sleep(nanoseconds: 200_000_000)
+
+            // BOUNDEDNESS, per cycle: this cycle retained at most its own coalesced requests
+            // (b, c) — earlier cycles' entries were retired by this cycle's physical floor.
+            // The exact membership can lag the confirmation (async notification delivery), so
+            // assert the BOUND, not a specific set.
+            XCTAssertLessThanOrEqual(
+                player.settledDisplacedIdentitiesForTesting.count, 2,
+                "cycle \(cycle): retained settlements must stay within this cycle's coalesced requests"
+            )
+            assertNoStrandedStopNotifications(player, "cycle \(cycle)")
+        }
+
+        // FINAL RETIREMENT: one more plain physical stop confirms a floor above every retained
+        // identity from all cycles — storage must return to the EMPTY baseline.
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        let lastAllocated = player.finish()
+        let lastSettled = await player.awaitActualStop(after: lastAllocated, timeout: 5)
+        XCTAssertTrue(lastSettled, "setup: the final turn must fully stop")
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !player.settledDisplacedIdentitiesForTesting.isEmpty {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(
+            player.settledDisplacedIdentitiesForTesting, [],
+            "a physical floor above every retained identity retires them all — bounded storage"
+        )
+        assertNoStrandedStopNotifications(player, "final retirement")
+    }
+
     /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait
     /// must record `.timedOut` and the case asserting `.released` must fail. This does not depend on
     /// scheduling luck the way a shortened bound does.

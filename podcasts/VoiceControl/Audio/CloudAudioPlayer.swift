@@ -103,7 +103,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         } else {
             stopOwnerEpoch = allocated
         }
-        drainRemaining = true
+        // Re-queue work ONLY when this finish is the one that will be physically served. A
+        // coalesced finish (stop requested or a claim in flight) must not re-arm the runner:
+        // the pending/in-flight stop is the quiescent end for it too, and a re-queued drain
+        // would produce a SECOND physical stop after the coalescing that was supposed to
+        // make this request settled — exactly the second-stop bug the ownership design bans.
+        if !stopRequested && !drainClaimInFlight {
+            drainRemaining = true
+        }
         runnerRunning = true
         if !sharesNotification { pendingStopNotifications += 1 }
         runnerLock.signal()
@@ -1178,6 +1185,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// TEST-ONLY: the coalesced pending-stop-notification counter. A stranded positive value
     /// refuses every future admission, so controls assert it returns to zero.
+    /// TEST-ONLY: the retained settled-displaced identities (bounded-retirement probe).
+    var runnerFlagsForTesting: (stopRequested: Bool, drainRemaining: Bool, claimInFlight: Bool, floor: Int, notifications: Int) {
+        runnerLock.lock(); defer { runnerLock.unlock() }
+        return (stopRequested, drainRemaining, drainClaimInFlight, lastConfirmedStopEpoch, pendingStopNotifications)
+    }
+    var settledDisplacedIdentitiesForTesting: Set<Int> {
+        bufferLock.lock(); defer { bufferLock.unlock() }
+        return settledDisplacedIdentities
+    }
+
     /// TEST-ONLY: the last PHYSICALLY confirmed stop identity (excludes displaced settlements).
     var confirmedStopEpochForTesting: Int { confirmedStopEpoch() }
 
@@ -1281,6 +1298,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // must resolve from this retained set. NO floor fold into `lastConfirmedStopEpoch` —
         // that would implicitly satisfy any lower identity; the set proves exactly these.
         settledDisplacedIdentities.formUnion(displaced)
+        // Retire redundancies HERE as well (review 20ec6eaa): the physical stop that owns this
+        // settlement raised the floor synchronously via notifyDidStop's record when delivery is
+        // synchronous; when delivery is queued, this settlement path is the one that observably
+        // runs — retire anything at or below the current floor under the same lock so the set
+        // stays bounded regardless of main-queue timing.
+        settledDisplacedIdentities = settledDisplacedIdentities.filter { $0 > lastConfirmedStopEpoch }
         bufferLock.unlock()
         for continuation in resumed { continuation.resume(returning: true) }
     }
@@ -1411,6 +1434,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // physically stopped (the banned `max(epoch, drainEpoch)` folded the REQUESTED identity;
         // this max folds only identities that actually fired).
         lastConfirmedStopEpoch = max(lastConfirmedStopEpoch, epoch)
+        // BOUNDED RETIREMENT (review 20ec6eaa): a PHYSICALLY confirmed identity makes every
+        // retained settlement at or below it redundant — the floor itself proves them — so
+        // retire those entries here, under the same lock. The set therefore tracks only
+        // outstanding settlements ABOVE the confirmed floor and returns to empty in steady
+        // state; it is never an append-only request journal.
+        if !settledDisplacedIdentities.isEmpty {
+            settledDisplacedIdentities = settledDisplacedIdentities.filter { $0 > lastConfirmedStopEpoch }
+        }
         bufferLock.unlock()
         resumeStopWaiters(upTo: epoch)
     }
