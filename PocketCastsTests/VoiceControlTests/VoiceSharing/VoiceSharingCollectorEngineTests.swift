@@ -389,6 +389,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     private var root: URL!
     private var queue: VoiceSharingUploadQueue!
     private var storeState = VoiceSharingEnrollmentStore.State()
+    /// Events the collector emitted, for the association controls that inspect it directly.
+    private var collectedEvents: [VoiceSharingCollector.SegmentEvent] = []
+    private let collectedLock = NSLock()
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
@@ -400,6 +403,43 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// A collector wired to record what it emits (no sink) — for observation-association controls.
+    private func makeRecordingCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
+        let collector = VoiceSharingCollector(
+            policy: policy,
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "epoch-1" },
+            sessionIdentity: { "gen-A" },
+            sink: { [weak self] event in
+                guard let self else { return }
+                self.collectedLock.lock()
+                self.collectedEvents.append(event)
+                self.collectedLock.unlock()
+            })
+        collector.deliversSynchronouslyForTesting = true
+        return collector
+    }
+
+    private func snapshot() -> [VoiceSharingCollector.SegmentEvent] {
+        collectedLock.lock(); defer { collectedLock.unlock() }
+        return collectedEvents
+    }
+
+    private func makeEngine(
+        collector: VoiceSharingCollector, wake: WakeWordDetectorProtocol, backend: EngineStubBackend
+    ) -> VoiceAsrEngine {
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
+            backend: backend, signalFilter: SignalFilter(),
+            wakeWordDetector: wake, gracePeriodSignal: GracePeriodSignal(),
+            translationStage: nil)
+        engine.contributionCollector = collector
+        backend.engine = engine
+        engine.start()
+        return engine
     }
 
     private func openGate(enrolled: Bool) -> VoiceSharingPolicy {
@@ -550,6 +590,102 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         XCTAssertTrue(reasons.contains("no_wake_detected"),
                       "a forwarded negative segment observed no wake; got \(reasons)")
+    }
+
+    /// OBSERVATION ASSOCIATION, STALE CONTEXT (reviewer 7c6e628e): a report that belongs to capture A must
+    /// never be attached to B, even though "current" is B at the moment it arrives. The collector keys the
+    /// report by the CONTEXT it carries, and a context whose capture is already emitted is refused, so a
+    /// late report can neither adopt a successor nor amend a record that has left.
+    func test_aStaleContextReportNeverLandsOnTheSuccessorCapture() async {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        // A opens, then closes and is EMITTED. B opens afterwards.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxA = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: A open")
+        }
+        collector.segmentationEnded(ctxA)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxA)
+        let afterA = snapshot()
+        guard afterA.contains(where: { $0.captureID == ctxA.id && $0.kind == .completed }) else {
+            return XCTFail("premise: A emitted its completion; got \(afterA.map { "\($0.kind)" })")
+        }
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxB = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: B open")
+        }
+        XCTAssertNotEqual(ctxA.id, ctxB.id)
+
+        // A's detector report arrives LATE — while B is the current capture.
+        collector.engineReported(
+            stage: "wake",
+            outcome: VoiceSharingContributionEncoder.StageOutcome(
+                state: "failed", reason: "detector_error"),
+            context: ctxA)
+
+        // B must now close and emit, so anything the stale report attached to B becomes visible. Without
+        // this the assertion would inspect only B's `.started` and pass vacuously.
+        collector.segmentationEnded(ctxB)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxB)
+
+        // Nothing about A's report may appear under B.
+        let bEvents = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctxB.id
+        }
+        let stagesUnderB: [String] = bEvents.flatMap { (event: VoiceSharingCollector.SegmentEvent) -> [String] in
+            Array(event.reportedStages.keys)
+        }
+        XCTAssertTrue(stagesUnderB.isEmpty,
+                      "a stale report must not be adopted by the successor; B observed \(stagesUnderB)")
+        // And A's already-emitted record was not silently amended.
+        let aEmitted = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctxA.id && event.kind == .completed
+        }
+        XCTAssertEqual(aEmitted.count, 1, "A emitted exactly one completion")
+        XCTAssertTrue((aEmitted.first?.reportedStages ?? [:]).isEmpty,
+                      "an emitted record is immutable; A's late report must be dropped, not merged")
+    }
+
+    /// OBSERVATION ASSOCIATION, POST-SEGMENTATION RING (reviewer 7c6e628e): the engine's decision can land
+    /// AFTER the segmenter closed the capture but BEFORE the completion event is emitted. The report must
+    /// ride that event. This drives the two collector calls in that exact order, so the ring carrier — not
+    /// the open-capture carrier — is what is exercised.
+    func test_aReportLandingAfterSegmentationRidesTheEmittedEvent() async {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctx = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: open")
+        }
+        collector.segmentationEnded(ctx)
+        // Ring-resident and not yet emitted. `current` is already cleared at this point.
+        XCTAssertFalse(snapshot().contains { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctx.id && event.kind == .completed
+        }, "premise: nothing emitted yet")
+
+        collector.engineReported(
+            stage: "wake",
+            outcome: VoiceSharingContributionEncoder.StageOutcome(
+                state: "failed", reason: "detector_error"),
+            context: ctx)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx)
+
+        let completed = snapshot().first { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctx.id && event.kind == .completed
+        }
+        guard let completed else { return XCTFail("the completion was never emitted") }
+        XCTAssertEqual(completed.reportedStages["wake"]?.state, "failed",
+                       "a post-segmentation report must ride the emitted event")
+        XCTAssertEqual(completed.reportedStages["wake"]?.reason, "detector_error")
     }
 
     private func makeChain(
