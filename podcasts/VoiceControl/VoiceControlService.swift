@@ -389,6 +389,21 @@ class VoiceControlService: ObservableObject {
     /// `origin: nil` means "capture the live window at enqueue time"; a caller that already holds
     /// the dispatch origin (the draining turn) passes it so the re-processed command belongs to the
     /// same window it was spoken in.
+    /// TEST SEAM (review 086c0172/5fa6e007): reproduces the EXACT lock/read structure of
+    /// `enqueueRoutingInput`'s capture phase — pre-lock grace reads, then the `transcriptLock`
+    /// listening check — so a control can drive the off-main side of the transcriptLock/stop
+    /// cycle deterministically without the full routing pipeline. Returns the captured origin
+    /// triple, or nil when the listening check refuses (the same `isListening` gate).
+    func routingCaptureForTesting(utteranceId: String, origin: Int?) -> (admitted: Int?, retired: Bool, generation: Int, listening: Bool)? {
+        let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
+        let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
+        let liveGeneration = gracePeriodSignal.currentGeneration()
+        transcriptLock.lock()
+        defer { transcriptLock.unlock() }
+        guard isListening else { return nil }
+        return (admittedOrigin, retiredTurn, liveGeneration, true)
+    }
+
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
         origin: Int? = nil,

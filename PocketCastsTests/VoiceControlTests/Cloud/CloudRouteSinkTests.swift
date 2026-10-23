@@ -632,6 +632,33 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
     /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
     /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
+    /// COHERENT ADMISSION under ORDERED CONTENTION (review 5fa6e007): admission and retirement
+    /// race through the main queue; each round must resolve coherently — admit-then-retire (the
+    /// record detaches) or refuse-after-retirement — and a stale-origin re-admission must NEVER
+    /// own after the retirement is observed. The discriminator is the observable ordering, not a
+    /// timeout. The interleaving is driven from a DETACHED task so the admission genuinely enters
+    /// via a cross-thread hop onto the main queue.
+    @MainActor
+    func testAdmissionAndRetirementRacingThroughTheMainQueueResolveCoherently() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        manager.registerLiveOrigin(cloudTestOrigin)
+
+        for round in 0..<20 {
+            let admission = Task.detached { @MainActor in
+                sink.beginDispatch(utteranceId: "utterance-race-\(round)", origin: cloudTestOrigin)
+            }
+            let admitted = await admission.value
+            manager.registerLiveOrigin(cloudTestOrigin + 1 + round)
+            sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1 + round)
+            if admitted.ownsDispatch {
+                let again = sink.beginDispatch(utteranceId: "utterance-race-\(round)", origin: cloudTestOrigin)
+                XCTAssertFalse(again.ownsDispatch,
+                               "round \(round): a stale-origin re-admission must never own after retirement")
+            }
+        }
+    }
+
     /// COHERENT ADMISSION (review 086c0172): a retirement that lands between a pre-lock snapshot
     /// and publication must not admit the stale origin. `beginDispatch` now decides and publishes
     /// in ONE main-queue block, so a retirement preceding the block is OBSERVED by the decision:
