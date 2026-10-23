@@ -30,6 +30,7 @@ enum CloudDispatchOwnership: Equatable {
     }
 
     var ownsDispatch: Bool { if case .owner = self { return true }; return false }
+    var isRefused: Bool { if case .refused = self { return true }; return false }
 }
 
 protocol VoiceCloudRouteSink {

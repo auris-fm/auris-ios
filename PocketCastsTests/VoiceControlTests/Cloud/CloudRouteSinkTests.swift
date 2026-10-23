@@ -632,6 +632,54 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
     /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
     /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
+    /// COHERENT ADMISSION (review 086c0172): a retirement that lands between a pre-lock snapshot
+    /// and publication must not admit the stale origin. `beginDispatch` now decides and publishes
+    /// in ONE main-queue block, so a retirement preceding the block is OBSERVED by the decision:
+    /// an origin retired before admission runs is refused even though an earlier read of the live
+    /// origin (from any thread) might have seen it live.
+    @MainActor
+    func testAnOriginRetiredBeforeAdmissionRunsIsRefusedByTheCoherentDecision() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        let retiredOrigin = cloudTestOrigin
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+
+        // The window has MOVED: the old origin is no longer live and this turn holds no admitted
+        // work under it. beginDispatch must refuse — the coherent main-queue decision sees the
+        // retirement because it reads state INSIDE the decision block, never from a stale
+        // pre-lock snapshot.
+        let disposition = sink.beginDispatch(utteranceId: "utterance-retired-before-admission", origin: retiredOrigin)
+        XCTAssertTrue(disposition.isRefused, "an origin retired before the admission block runs is refused, got \(disposition)")
+    }
+
+    /// LOCK-ORDER INVERSION (review 086c0172): the production routing path calls the sink from a
+    /// nonisolated Task. The coherent admission hops ONTO main for decision+publication while
+    /// holding NO lock across the hop, and every other `ownershipLock` holder stays main-sync-free
+    /// under the lock — so a detached-task admission, a live record, and a main-side admission
+    /// interleave without deadlock.
+    @MainActor
+    func testAnOffMainTaskAdmissionAndAContendedOwnershipLockInterleaveWithoutDeadlock() async throws {
+        let manager = testConversationManager()
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+        manager.registerLiveOrigin(cloudTestOrigin)
+
+        // 1. A first admission establishes the live record.
+        let first = sink.beginDispatch(utteranceId: "utterance-interleave", origin: cloudTestOrigin)
+        XCTAssertTrue(first.ownsDispatch, "the first admission owns the dispatch")
+
+        // 2. A detached (nonisolated-context) task performs the same admission path: it must JOIN
+        //    the live record — proving the coherent main-queue block runs and releases the lock —
+        //    and this await must resume (a deadlock surfaces as a test timeout, not a hang).
+        let joiner: CloudDispatchOwnership = await Task.detached { @MainActor in
+            sink.beginDispatch(utteranceId: "utterance-interleave", origin: cloudTestOrigin)
+        }.value
+        if case .join = joiner {} else { XCTFail("the detached admission must join the live owner, got \(joiner)") }
+
+        // 3. A fresh main-side admission still completes after the interleaving.
+        let fresh = sink.beginDispatch(utteranceId: "utterance-interleave-2", origin: cloudTestOrigin)
+        XCTAssertTrue(fresh.ownsDispatch, "a fresh admission completes after the interleaving")
+    }
+
     /// ITS OWN admitted record, never the successor's — the token carries the instance precisely
     /// so a reused id cannot be mistaken for the same owner.
     @MainActor

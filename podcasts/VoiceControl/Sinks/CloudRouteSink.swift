@@ -463,41 +463,50 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // No identity: legacy per-call effects, no join semantics, no retained record.
             return .owner(.init(utteranceId: "", instance: UUID(), record: nil))
         }
-        // LOCK-ORDER SAFETY (review 4d474d80): the liveness and admitted-work reads below hop to
-        // main synchronously when this runs off-main, while main-actor paths can take
-        // `ownershipLock` on main — holding the lock across those reads is a lock-order cycle
-        // (off-main: ownershipLock → main queue; on main: main queue → ownershipLock). Both reads
-        // are snapshotted BEFORE the lock: origin liveness from the conversation manager and the
-        // turn's own admitted-work answer (identity-keyed, stable per turn). Stale-origin refusal
-        // is preserved: a snapshot taken before the lock can only be MORE stale, never less, and
-        // the refusal decision is unchanged — an origin that was already superseded at snapshot
-        // time is refused exactly as before.
+        // COHERENT ADMISSION (review 4d474d80/086c0172): the decision reads main-bound state
+        // (origin liveness, the turn's admitted-work answer), so it must run ON the main queue,
+        // and its publication (recordsByIdentity) must be atomic with that decision or a
+        // retirement between snapshot and publication could admit a stale origin. Both are
+        // achieved by performing decision AND publication in ONE main-queue block, guarded by
+        // `ownershipLock` taken ON main. Lock order stays safe in both directions: every other
+        // `ownershipLock` holder never hops to main while holding the lock (verified: the waiter
+        // continuation path, `settle`, and the test accessors are main-sync-free under the lock),
+        // so an off-main holder cannot deadlock against this main-queue admission; and this block,
+        // once running on main, performs no further cross-queue hops. Retirement that lands before
+        // the block runs is simply observed by the decision; retirement after publication settles
+        // through the normal ownership path.
         guard let origin else { return .refused }
-        let originIsLive = origin == conversationManager.liveOriginForTesting
-        let turnHoldsAdmittedWork: Bool = {
-            guard let authority = admittedWorkAuthority?() else { return false }
-            return authority.isAdmittedWork(utteranceId, origin)
-        }()
-        ownershipLock.lock()
-        defer { ownershipLock.unlock() }
-        guard originIsLive || turnHoldsAdmittedWork else { return .refused }
-        // ORIGIN-BOUND OWNERSHIP: a retained record is only the SAME ownership if it belongs to
-        // THIS request's origin. A retained record of a different origin must not be joined or
-        // observed — otherwise a new-window request that happens to reuse the id would inherit
-        // (or be settled by) the earlier window's turn. It is a different turn entirely.
-        // The authoritative lookup is (id, origin): an id may be live in two windows at once, and
-        // each owns its own record until its own token releases it. Looking up by id alone would
-        // let a successor's turn take over the earlier turn's record — making the earlier id
-        // unnameable while its token is still live, so its repeated callback would acquire a
-        // FRESH owner instead of joining the original.
-        let key = RecordKey(utteranceId: utteranceId, origin: origin)
-        if let existing = recordsByIdentity[key] {
-            if let terminal = existing.terminalResult { return .settled(terminal) }
-            return .join(.init(utteranceId: utteranceId, instance: existing.instance, record: existing))
+        let decideAndPublish: () -> CloudDispatchOwnership = {
+            let originIsLive = origin == self.conversationManager.liveOriginForTesting
+            let turnHoldsAdmittedWork: Bool = {
+                guard let authority = self.admittedWorkAuthority?() else { return false }
+                return authority.isAdmittedWork(utteranceId, origin)
+            }()
+            self.ownershipLock.lock()
+            defer { self.ownershipLock.unlock() }
+            guard originIsLive || turnHoldsAdmittedWork else { return .refused }
+            // ORIGIN-BOUND OWNERSHIP: a retained record is only the SAME ownership if it belongs to
+            // THIS request's origin. A retained record of a different origin must not be joined or
+            // observed — otherwise a new-window request that happens to reuse the id would inherit
+            // (or be settled by) the earlier window's turn. It is a different turn entirely.
+            // The authoritative lookup is (id, origin): an id may be live in two windows at once, and
+            // each owns its own record until its own token releases it. Looking up by id alone would
+            // let a successor's turn take over the earlier turn's record — making the earlier id
+            // unnameable while its token is still live, so its repeated callback would acquire a
+            // FRESH owner instead of joining the original.
+            let key = RecordKey(utteranceId: utteranceId, origin: origin)
+            if let existing = self.recordsByIdentity[key] {
+                if let terminal = existing.terminalResult { return .settled(terminal) }
+                return .join(.init(utteranceId: utteranceId, instance: existing.instance, record: existing))
+            }
+            let record = UtteranceRecord(origin: origin)
+            self.recordsByIdentity[key] = record
+            return .owner(.init(utteranceId: utteranceId, instance: record.instance, record: record))
         }
-        let record = UtteranceRecord(origin: origin)
-        recordsByIdentity[key] = record
-        return .owner(.init(utteranceId: utteranceId, instance: record.instance, record: record))
+        if Thread.isMainThread { return decideAndPublish() }
+        var disposition: CloudDispatchOwnership!
+        DispatchQueue.main.sync { disposition = decideAndPublish() }
+        return disposition
     }
 
     /// Public dispatch entry, fenced by the ownership TOKEN from `beginDispatch`. Only the token
