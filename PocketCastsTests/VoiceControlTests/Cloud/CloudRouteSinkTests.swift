@@ -4523,10 +4523,8 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
 
         var emittedIdentities: [Int] = []
         player.setCapturedStopNotificationForTesting { identity, completion in
-            print("LEDGER fired: \(identity)")
             emittedIdentities.append(identity)
-            completion()
-            print("LEDGER completion done") // the REAL notification continuation: records the physical confirmation
+            completion() // the REAL notification continuation: records the physical confirmation
         }
 
         // PREREQUISITE: nonempty audio is enqueued and pending.
