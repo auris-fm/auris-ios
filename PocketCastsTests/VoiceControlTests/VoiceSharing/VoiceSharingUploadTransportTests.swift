@@ -201,6 +201,155 @@ private final class RecordingTokenProvider: CloudTokenProviding {
 }
 
 /// URLProtocol double: records every request that actually reaches the network layer.
+// MARK: - REAL transport + REAL provider boundary (reviewer 289a38b5/b799968e)
+
+/// The REAL `CloudAuthTokenProvider` (injected auth I/O) behind the REAL
+/// `VoiceSharingUploadTransport`: the transport's 401 branch must forward the EXACT bearer the
+/// wire request carried, the provider must rotate exactly once for it, and a duplicate rejection
+/// of an already-replaced bearer must NOT rotate again. Same-account/same-epoch identity fencing
+/// rides the same path.
+extension VoiceSharingUploadTransportTests {
+    /// Stand up a real provider whose auth endpoints are served by the same URLProtocol harness,
+    /// discriminated by path from the upload endpoint.
+    private func makeRealProvider(credential: String) -> CloudAuthTokenProvider {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [UploadRecordingURLProtocol.self]
+        return CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://unit.test" },
+            credentialProvider: { credential },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.2.3" },
+            session: URLSession(configuration: config))
+    }
+
+    private var authPath: String { "/api/v1/auth/refresh" }
+
+    /// One wire request carrying tok-1 is 401'd; the transport reports tok-1; the provider rotates
+    /// to tok-2 exactly once. A SECOND 401 still naming tok-1 (burst/race) must not rotate again —
+    /// asserted against the REAL provider's refresh-call count, not a fake.
+    func test_realTransportForwardsTheWireBearerAndTheRealProviderRefreshesExactlyOnce() async throws {
+        // Auth endpoints: the token exchange mints tok-1; refresh mints tok-2, counted.
+        var refreshCount = 0
+        var uploadRequests: [URLRequest] = []
+        UploadRecordingURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path == "/api/v1/auth/token" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            if path == self.authPath {
+                refreshCount += 1
+                let next = "tok-\(refreshCount + 1)"   // tok-2, tok-3, ...
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"\#(next)","token_type":"Bearer","expires_in":900,"refresh_token":"r-\#(refreshCount)","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            // THE UPLOAD: reject whatever bearer this wire request carried — recorded below.
+            if path.contains("voice-recordings") {
+                uploadRequests.append(request)
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { UploadRecordingURLProtocol.handler = nil }
+
+        let provider = makeRealProvider(credential: "cred")
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: self.session)
+
+        // Upload request 1 leaves with tok-1 and is rejected with 401; the transport's 401 branch
+        // reports the exact bearer it sent.
+        let firstResult = await transport.send(request: self.makeRequest())
+        guard case .response(401, _) = firstResult else {
+            return XCTFail("expected the 401 verdict, got \(firstResult)")
+        }
+        let wireBearer = try XCTUnwrap(uploadRequests.last?
+            .value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(wireBearer, "Bearer tok-1", "the first wire request carries the minted token")
+        await provider.handleUnauthorized(rejectedToken: "tok-1")
+        XCTAssertEqual(refreshCount, 1, "the first rejection rotates exactly once")
+
+        // A duplicate 401 for the SAME (already-replaced) bearer must not rotate again.
+        await provider.handleUnauthorized(rejectedToken: "tok-1")
+        XCTAssertEqual(refreshCount, 1,
+                       "a second 401 naming the already-replaced bearer is a no-op — REAL provider guard")
+
+        // The next upload now carries the rotated token end-to-end.
+        let secondResult = await transport.send(request: self.makeRequest())
+        guard case .response(401, _) = secondResult else {
+            return XCTFail("expected the (still-)401 verdict, got \(secondResult)")
+        }
+        let secondBearer = try XCTUnwrap(uploadRequests.last?
+            .value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(secondBearer, "Bearer tok-2",
+                       "the wire carries the ROTATED token after the refresh")
+        // The second wire 401 rejected tok-2, so the transport's real 401 branch reported tok-2
+        // and the provider rotated again: one refresh per DISTINCT rejected bearer, no more.
+        XCTAssertEqual(refreshCount, 2,
+                       "exactly one rotation per distinct rejected bearer (tok-1, tok-2) — the duplicate tok-1 rejection never rotated")
+        let thirdBearer = await provider.token()
+        XCTAssertEqual(thirdBearer, "tok-3", "the second rejection rotated to tok-3 and it is live")
+    }
+
+    /// SAME-account/same-epoch fencing across the real path: after the entry was admitted under
+    /// (acct-A, epoch-1), a move of EITHER component stops the send at the real transport's
+    /// credential boundary.
+    func test_realTransportFencesSameAccountEpochIdentityMoves() async throws {
+        UploadRecordingURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path == "/api/v1/auth/token" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            XCTFail("no upload request may reach the wire after an identity move")
+            return (HTTPURLResponse(url: request.url!, statusCode: 500,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { UploadRecordingURLProtocol.handler = nil }
+
+        let provider = makeRealProvider(credential: "cred")
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: self.session)
+        let box = IdentityBoxHolder(VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let admitted = box.current
+
+        // The account scope moves while the attempt is pending send.
+        box.current = VoiceSharingUploadIdentity(
+            accountScope: "acct-B", enrollmentEpoch: "epoch-1")
+        let result = await transport.send(
+            request: self.makeRequest(), admittedIdentity: admitted,
+            identityFence: { box.current })
+        guard case .transportFailure = result else {
+            return XCTFail("an account move must fence the send, got \(result)")
+        }
+        // The epoch moves identically.
+        box.current = VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+        let result2 = await transport.send(
+            request: self.makeRequest(), admittedIdentity: admitted,
+            identityFence: { box.current })
+        guard case .transportFailure = result2 else {
+            return XCTFail("an epoch move must fence the send, got \(result2)")
+        }
+    }
+}
+
+/// Standalone identity holder (the uploader-suite one is file-private there).
+final class IdentityBoxHolder {
+    private let lock = NSLock()
+    private var value: VoiceSharingUploadIdentity?
+    init(_ initial: VoiceSharingUploadIdentity?) { value = initial }
+    var current: VoiceSharingUploadIdentity? {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+}
+
 private final class UploadRecordingURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
     static var stall = false
