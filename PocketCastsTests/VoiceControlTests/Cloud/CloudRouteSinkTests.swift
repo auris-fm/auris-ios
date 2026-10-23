@@ -4522,8 +4522,9 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         defer { player.setDrainHoldForTesting(false) }
 
         var emittedIdentities: [Int] = []
-        player.setCapturedStopNotificationForTesting { identity, _ in
+        player.setCapturedStopNotificationForTesting { identity, completion in
             emittedIdentities.append(identity)
+            completion() // the REAL notification continuation: records the physical confirmation
         }
 
         // PREREQUISITE: nonempty audio is enqueued and pending.
@@ -4822,6 +4823,13 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         player.delegate = delegate
         defer { player.setDrainHoldForTesting(false) }
 
+        // EXACTLY-ONCE LEDGER (reviewer 38dffe3e): every notification identity across ALL
+        // cycles — a second physical stop for a coalesced request would show up here.
+        var emittedIdentities: [Int] = []
+        player.setCapturedStopNotificationForTesting { identity, _ in
+            emittedIdentities.append(identity)
+        }
+
         // Before any stop, the baseline is empty.
         XCTAssertEqual(player.settledDisplacedIdentitiesForTesting, [], "baseline: nothing settled")
 
@@ -4874,6 +4882,18 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             )
             assertNoStrandedStopNotifications(player, "cycle \(cycle)")
         }
+
+        // EXACTLY ONCE (reviewer 38dffe3e): one physical stop per cycle — the coalesced
+        // b/c requests must never produce notifications of their own. With 4 cycles of
+        // (a,b,c) plus the final plain stop, the ledger holds exactly those 5 identities.
+        XCTAssertEqual(
+            emittedIdentities.count, 5,
+            "exactly one physical stop per cycle plus the final one: emitted=\(emittedIdentities)"
+        )
+        XCTAssertEqual(
+            emittedIdentities, Array(emittedIdentities.sorted()),
+            "notification identities ascend with their owners: emitted=\(emittedIdentities)"
+        )
 
         // FINAL RETIREMENT: one more plain physical stop confirms a floor above every retained
         // identity from all cycles — storage must return to the EMPTY baseline.
