@@ -686,32 +686,45 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(disposition.isRefused, "an origin retired before the admission block runs is refused, got \(disposition)")
     }
 
-    /// LOCK-ORDER INVERSION (review 086c0172): the production routing path calls the sink from a
-    /// nonisolated Task. The coherent admission hops ONTO main for decision+publication while
-    /// holding NO lock across the hop, and every other `ownershipLock` holder stays main-sync-free
-    /// under the lock — so a detached-task admission, a live record, and a main-side admission
-    /// interleave without deadlock.
+    /// MAIN-ACTOR ADMISSION VIA THE NONISOLATED WITNESS (review 086c0172/47328768; renamed —
+    /// the sink is main-actor isolated, so nothing here runs admission off-main). The production
+    /// routing path enters through the NONISOLATED `routeToCloud` witness from a nonisolated Task;
+    /// this control drives exactly that entry end-to-end: the witness owns a fresh dispatch
+    /// (completing against the stub consumer), and a retired-origin admission through the same
+    /// path is refused. Discriminators are the outcomes, not a timeout.
     @MainActor
-    func testAnOffMainTaskAdmissionAndAContendedOwnershipLockInterleaveWithoutDeadlock() async throws {
+    func testANonisolatedWitnessAdmissionOwnsAFreshDispatchAndARetiredWitnessOriginIsRefused() async throws {
         let manager = testConversationManager()
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
         manager.registerLiveOrigin(cloudTestOrigin)
 
-        // 1. A first admission establishes the live record.
-        let first = sink.beginDispatch(utteranceId: "utterance-interleave", origin: cloudTestOrigin)
-        XCTAssertTrue(first.ownsDispatch, "the first admission owns the dispatch")
+        // 1. A genuinely nonisolated task enters through the witness with a fresh utterance; the
+        //    dispatch must complete (the stub consumer settles it) and leave an owned record.
+        self.pendingFixture =
+            """
+            event: done
+            data: {}
 
-        // 2. A detached (nonisolated-context) task performs the same admission path: it must JOIN
-        //    the live record — proving the coherent main-queue block runs and releases the lock —
-        //    and this await must resume (a deadlock surfaces as a test timeout, not a hang).
-        let joiner: CloudDispatchOwnership = await Task.detached { @MainActor in
-            sink.beginDispatch(utteranceId: "utterance-interleave", origin: cloudTestOrigin)
+            """
+        let context = sampleContext()
+        let completed = await Task.detached { () -> Bool in
+            let result = await sink.routeToCloud(
+                request: "witness", tier: .free, context: context,
+                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-witness"
+            )
+            return result.outcome == .completed
         }.value
-        if case .join = joiner {} else { XCTFail("the detached admission must join the live owner, got \(joiner)") }
+        XCTAssertTrue(completed, "the witness-owned dispatch completes against the stub consumer")
+        let witnessInstance = sink.recordInstanceForTesting(utteranceId: "utterance-witness")
+        XCTAssertNotNil(witnessInstance, "the witness admission published its record")
 
-        // 3. A fresh main-side admission still completes after the interleaving.
-        let fresh = sink.beginDispatch(utteranceId: "utterance-interleave-2", origin: cloudTestOrigin)
-        XCTAssertTrue(fresh.ownsDispatch, "a fresh admission completes after the interleaving")
+        // 2. The window moves; a witness admission against the RETIRED origin is refused.
+        manager.registerLiveOrigin(cloudTestOrigin + 1)
+        sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
+        let refused: CloudDispatchOwnership = await Task.detached { @MainActor in
+            sink.beginDispatch(utteranceId: "utterance-witness-2", origin: cloudTestOrigin)
+        }.value
+        XCTAssertTrue(refused.isRefused, "a witness admission against a retired origin is refused, got \(refused)")
     }
 
     /// ITS OWN admitted record, never the successor's — the token carries the instance precisely

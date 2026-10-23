@@ -423,11 +423,20 @@ class VoiceControlService: ObservableObject {
             // callback, never after the queue wait — and the lock then guards only the
             // listening check, epoch and chain.
             let capture = self.captureRoutingOrigin(utteranceId: input.utteranceId)
-            let admittedOrigin = capture?.admitted
-            let retiredTurn = capture?.retired ?? false
-            let liveGeneration = capture?.generation
+            // REVIEW 47328768: a nil capture means the turn was ALREADY not listening at capture
+            // time. Refuse immediately: falling through to the lock-time `isListening` check lets
+            // a stop/restart between the two checks pass a callback whose origin reads never ran,
+            // admitting a late turn with no origin at all.
+            guard let capture else {
+                return false
+            }
+            let admittedOrigin = capture.admitted
+            let retiredTurn = capture.retired
+            let liveGeneration = capture.generation
             self.transcriptLock.lock()
-            // Drop late ASR callbacks that arrive after (or during) stop().
+            // Drop late ASR callbacks that arrive after (or during) stop(). (A stop AFTER the
+            // capture is still caught here: the capture only snapshots origin state, it does not
+            // decide admission.)
             guard self.isListening else {
                 self.transcriptLock.unlock()
                 return false
