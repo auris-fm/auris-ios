@@ -703,6 +703,95 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                           + "entries: \(entries.count))")
     }
 
+    /// THE EMITTED BYTES, not the builder (spec c6f3bdf7): an empty recognition must reach the durable
+    /// record as asr/completed/empty_result with neither text nor router_input present.
+    func test_anEmptyRecognitionReachesTheDurableRecordAsCompletedEmptyResult() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        chain.backend.stubTranscript = ""
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else { return XCTFail("a durable record is required") }
+        var sawEmptyResult = false
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            guard let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["asr"] as? [String: Any] else {
+                XCTFail("entry \(entry.name) has no asr stage; transcribeCalls=\(chain.backend.transcribeCalls)")
+                continue
+            }
+            guard asr["reason"] as? String == "empty_result" else { continue }
+            XCTAssertEqual(asr["state"] as? String, "completed")
+            XCTAssertNil(asr["text"], "an empty result carries no transcript")
+            XCTAssertFalse(asr.keys.contains("router_input"),
+                           "no router input can exist for a capture that produced no text")
+            sawEmptyResult = true
+        }
+        XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
+    }
+
+    /// `empty_result` DESCRIBES ONE THING ONLY (spec delta c6f3bdf7): a recognition that succeeded and
+    /// produced nothing usable. Every contradictory combination is refused, because each one asserts
+    /// something the capture cannot have done — a text alongside "no text", a router input from a command
+    /// that could not exist, a failure dressed as a success.
+    func test_emptyResultIsRefusedOnEveryContradictoryCombination() throws {
+        func stage(_ overrides: [String: Any], stageName: String = "asr") -> [String: Any] {
+            var base: [String: Any] = ["state": "completed", "reason": "empty_result"]
+            for (k, v) in overrides { base[k] = v }
+            // Every stage is required by the record; the others are honest `unknown` non-claims so the
+            // refusal under test can only come from the ASR arrangement.
+            var all: [String: Any] = [:]
+            for other in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
+                all[other] = ["state": "unknown", "reason": "observation_unavailable"]
+            }
+            all[stageName] = base
+            return all
+        }
+        // The valid one must actually be accepted, or the negatives prove nothing about the rule.
+        do {
+            try VoiceSharingRecordBinding.validateObservationsForTesting(stage([:]))
+        } catch {
+            return XCTFail("premise: empty_result on asr/completed must be accepted; got \(error)")
+        }
+
+        let refused: [(String, [String: Any], String)] = [
+            ("text present", stage(["text": "hello"]), "text"),
+            ("router_input present", stage(["router_input": ["intent": "track.play"]]), "router_input"),
+            ("state failed", stage(["state": "failed"]), "completed"),
+            ("state cancelled", stage(["state": "cancelled"]), "completed"),
+            ("state not_run", stage(["state": "not_run"]), "completed"),
+            ("wrong stage", stage([:], stageName: "routing"), "asr"),
+            ("wrong stage execution", stage([:], stageName: "execution"), "asr"),
+            ("wrong stage translation", stage([:], stageName: "translation"), "asr"),
+        ]
+        for (label, observations, expectedFragment) in refused {
+            assertRefused(label, observations, containing: expectedFragment)
+        }
+    }
+
+    /// Proves the REFUSAL IS ABOUT `empty_result`, not about the arrangement in general: the same payload
+    /// with the reason removed (or replaced) must be refused or accepted for a DIFFERENT stated cause, so a
+    /// control here cannot pass merely because the harness rejects this shape regardless.
+    private func assertRefused(_ label: String, _ observations: [String: Any],
+                               containing fragment: String) {
+        do {
+            _ = try VoiceSharingRecordBinding.validateObservationsForTesting(observations)
+            XCTFail("\(label): expected refusal")
+        } catch let error as VoiceSharingRecordBinding.BindingError {
+            XCTAssertTrue("\(error)".localizedCaseInsensitiveContains(fragment),
+                          "\(label): refusal must name the cause (\(fragment)); got \(error)")
+        } catch {
+            XCTFail("\(label): unexpected error \(error)")
+        }
+    }
+
     /// WAKE-ONLY IS A SUCCESSFUL RECOGNITION (spec 406c247e, review 859dac4c pt1). The recogniser returns
     /// just the wake phrase; after the wake window is removed the command text is empty. The ASR STAGE must
     /// still report the recogniser's own transcript as completed — stripping the wake phrase is the command
@@ -1014,13 +1103,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return XCTFail("no ready record carried the engine's wake observation "
                 + "(entries: \(entries.count))")
         }
-        // The stub recogniser returned NOTHING. Spec 406c247e: a genuinely empty result has no honest
-        // encoding yet, so the engine publishes nothing for ASR — the caller's unobserved claim is what
-        // stands. Publishing not_run/provider_error here would be a fabricated narrative.
+        // The stub recogniser returned NOTHING. Spec delta c6f3bdf7: that is a SUCCESSFUL recognition with
+        // nothing usable in it, so the engine's own report replaces the caller's claim — completed with
+        // `empty_result`, and no text (there was none) and no router input (no command could proceed).
         let asr = observations["asr"] as? [String: Any]
-        XCTAssertEqual(asr?["state"] as? String, "unknown",
-                       "an unencodable empty result leaves the stage unobserved, not misreported")
-        XCTAssertEqual(asr?["reason"] as? String, "observation_unavailable")
+        XCTAssertEqual(asr?["state"] as? String, "completed",
+                       "an empty recognition is a result, not an absence of observation")
+        XCTAssertEqual(asr?["reason"] as? String, "empty_result")
+        XCTAssertNil(asr?["text"], "an empty result carries no transcript")
         // PROVENANCE (review c48461e6): the caller said wake=not_run; the engine delivered frames for this
         // capture, so the stored record must say completed. If the sink ignored `reportedStages`, this
         // would read not_run and the assertion would fail.

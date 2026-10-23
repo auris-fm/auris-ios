@@ -391,12 +391,16 @@ class VoiceAsrEngine {
                 stage: "asr",
                 outcome: .init(state: "completed", reason: nil, text: rawText),
                 context: utteranceContext)
+        } else {
+            // A GENUINELY EMPTY recogniser result is a SUCCESSFUL recognition with nothing usable in it
+            // (spec delta c6f3bdf7): `completed` carrying `empty_result`, with no text and no router
+            // input. It is not `not_run` — the recogniser did run — and not `provider_error` — nothing
+            // failed. The binding enforces exactly this pairing on every path.
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "completed", reason: VoiceSharingRecordBinding.emptyResultReasonForEngine),
+                context: utteranceContext)
         }
-        // A GENUINELY EMPTY recogniser result has no honest encoding yet: `completed` requires text and
-        // every enumerated reason asserts something false about whether/how the recogniser ran. The
-        // shared schema delta for a completed/empty-result representation is being prepared (spec
-        // 406c247e); until it lands this case publishes NOTHING rather than a fabricated not_run or
-        // provider_error.
 
         if trimmedText.isEmpty {
             let reason = isWakePositive ? "wake-only" : "empty"

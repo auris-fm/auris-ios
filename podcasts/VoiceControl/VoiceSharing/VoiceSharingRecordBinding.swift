@@ -231,6 +231,17 @@ enum VoiceSharingRecordBinding {
     /// Attaching it to any other stage, or to `completed`, would assert a failure that did not happen.
     private static let detectorErrorReason = "detector_error"
 
+    /// A recognition that SUCCEEDED and produced no usable text (spec delta c6f3bdf7). This is the one
+    /// reason that describes `completed`: the recogniser ran and returned nothing, which is a real result,
+    /// not a failure and not an absence of observation. It is valid ONLY on ASR, ONLY with `completed`, and
+    /// ONLY with both `text` and `router_input` absent — a stage that produced no text cannot have produced
+    /// a router input, and carrying either would contradict the reason it is declaring.
+    private static let emptyResultReason = "empty_result"
+
+    /// The engine names this reason when a recognition succeeded and returned nothing usable. Exposed so
+    /// the producer and the validator cannot drift to two spellings of the same fact.
+    static let emptyResultReasonForEngine = "empty_result"
+
     private static let stageReasons: [String: Set<String>] = [
         "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
         "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
@@ -288,6 +299,12 @@ enum VoiceSharingRecordBinding {
         }
     }
 
+    /// Exposed so a control can assert the observation rules directly instead of assembling a whole
+    /// record and mutating a hex digest.
+    static func validateObservationsForTesting(_ observations: [String: Any]) throws {
+        try validateObservations(observations)
+    }
+
     private static func validateObservations(_ observations: [String: Any]) throws {
         try assertAllowedKeys(observations, allowed: Set(observationStages), path: "observations")
         for stage in observationStages {
@@ -321,6 +338,10 @@ enum VoiceSharingRecordBinding {
                     }
                 } else if reason == detectorErrorReason {
                     try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
+                } else if reason == emptyResultReason {
+                    throw BindingError.invalidField(
+                        "\(stagePath).reason",
+                        "empty_result requires state completed, not \(state)")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
@@ -334,7 +355,10 @@ enum VoiceSharingRecordBinding {
             if stage == "asr" {
                 let text = declared["text"]
                 let hasText = !(text is NSNull) && text != nil
-                if state == "completed", !hasText {
+                // `completed` needs its transcript — EXCEPT for a recognition that genuinely returned no
+                // usable text, which states `empty_result` and carries nothing (spec c6f3bdf7).
+                let declaresEmptyResult = (declared["reason"] as? String) == emptyResultReason
+                if state == "completed", !hasText, !declaresEmptyResult {
                     throw BindingError.missingField("\(stagePath).text")
                 }
                 if state != "completed", hasText {
@@ -365,6 +389,11 @@ enum VoiceSharingRecordBinding {
                     // Same enforcement on the completed path: a real failure cannot be attached to a
                     // stage that reports success, nor to a stage other than wake (spec 9578b16).
                     try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
+                } else if text == emptyResultReason {
+                    // `empty_result` is the ONLY reason a completed stage may carry, and only on ASR.
+                    // Asserted BEFORE the per-stage field rules below, which must then see an absent text.
+                    try assertEmptyResultPairing(stage: stage, state: state, declared: declared,
+                                                 path: "\(stagePath).reason")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(text) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
@@ -377,6 +406,30 @@ enum VoiceSharingRecordBinding {
     /// `detector_error` is a REAL observed failure, so it is a legitimate known outcome — but it names
     /// exactly one thing: the wake detector failed for this capture. Any other stage, or any state other
     /// than `failed`, would publish a failure that did not happen (spec 9578b16, reviewer 6c3fed9b).
+    /// `empty_result` describes a SUCCESSFUL recognition with nothing usable in it, so it is valid only on
+    /// ASR with `completed` and with both `text` and `router_input` absent (spec c6f3bdf7). Any other
+    /// combination asserts something the capture cannot have done.
+    private static func assertEmptyResultPairing(
+        stage: String, state: String, declared: [String: Any], path: String
+    ) throws {
+        guard stage == "asr" else {
+            throw BindingError.invalidField(path, "empty_result is valid only on the asr stage, not \(stage)")
+        }
+        guard state == "completed" else {
+            throw BindingError.invalidField(path, "empty_result requires state completed, not \(state)")
+        }
+        if let text = declared["text"], !(text is NSNull) {
+            throw BindingError.invalidField(
+                "\(path)",
+                "empty_result must not accompany text; a transcription is not an empty result")
+        }
+        if let routed = declared["router_input"], !(routed is NSNull) {
+            throw BindingError.invalidField(
+                "\(path)",
+                "empty_result must not accompany router_input; no command proceeded")
+        }
+    }
+
     private static func assertDetectorErrorPairing(stage: String, state: String, path: String) throws {
         guard stage == "wake", state == "failed" else {
             throw BindingError.invalidField(
