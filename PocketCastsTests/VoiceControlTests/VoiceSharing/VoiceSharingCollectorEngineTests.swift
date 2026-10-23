@@ -615,6 +615,53 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                           + "entries: \(entries.count))")
     }
 
+    /// WAKE-ONLY IS A SUCCESSFUL RECOGNITION (spec 406c247e, review 859dac4c pt1). The recogniser returns
+    /// just the wake phrase; after the wake window is removed the command text is empty. The ASR STAGE must
+    /// still report the recogniser's own transcript as completed — stripping the wake phrase is the command
+    /// input's job, and calling this a wake rejection or a provider error is a fabrication.
+    func test_aWakeOnlyTranscriptIsPublishedAsCompletedAsrWithItsRawText() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        // Exactly the wake phrase: removing the wake window leaves nothing for the command path.
+        chain.backend.stubTranscript = "hey auris"
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else { return XCTFail("a durable record is required") }
+        var asrBlocks: [[String: Any]] = []
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            if let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["asr"] as? [String: Any] {
+                asrBlocks.append(asr)
+            }
+        }
+        XCTAssertFalse(asrBlocks.isEmpty, "the record must state the ASR stage")
+        // Records for a segment the wake gate REJECTED never reach ASR; only the accepted capture's record
+        // can carry the transcript. Assert on that one.
+        let completed = asrBlocks.filter { $0["state"] as? String == "completed" }
+        guard !completed.isEmpty else {
+            return XCTFail("no record published the wake-only transcript; saw "
+                + "\(asrBlocks.compactMap { $0["state"] as? String }); "
+                + "transcribe calls: \(chain.backend.transcribeCalls); entries: \(entries.count); "
+                + "wake states: \(wakeStates(entries))")
+        }
+        for asr in completed {
+            XCTAssertEqual(asr["state"] as? String, "completed",
+                           "a wake-only capture is a successful recognition, not a rejection")
+            XCTAssertEqual(asr["text"] as? String, "hey auris",
+                           "the stage carries the recogniser's own transcript")
+            XCTAssertNil(asr["reason"],
+                         "a completed ASR carries no reason; a reason here would assert a failure")
+        }
+    }
+
     /// The caller claims wake was never attempted; the detector actually RAN and failed. For the SAME
     /// capture, the engine's observation must win — a claim may not narrate over a real observation.
     func test_aCallerClaimCannotHideTheDetectorsFailure() async throws {
@@ -813,6 +860,18 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return (engine: engine, sink: sink, backend: backend, grace: grace)
     }
 
+    private func wakeStates(_ entries: [VoiceSharingUploadQueue.Entry]) -> [String] {
+        entries.compactMap { entry in
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            guard let envelope = try? JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
+                let wake = ((envelope["record"] as? [String: Any])?["observations"]
+                    as? [String: Any])?["wake"] as? [String: Any] else { return nil }
+            return "\(wake["state"] as? String ?? "?")/\(wake["reason"] as? String ?? "-")"
+        }
+    }
+
     private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -867,12 +926,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return XCTFail("no ready record carried the engine's wake observation "
                 + "(entries: \(entries.count))")
         }
-        // The caller claimed the ASR stage was unobserved; the recogniser DID run for this capture and
-        // returned an empty transcript, so the engine's honest report replaces the claim.
+        // The stub recogniser returned NOTHING. Spec 406c247e: a genuinely empty result has no honest
+        // encoding yet, so the engine publishes nothing for ASR — the caller's unobserved claim is what
+        // stands. Publishing not_run/provider_error here would be a fabricated narrative.
         let asr = observations["asr"] as? [String: Any]
-        XCTAssertEqual(asr?["state"] as? String, "not_run",
-                       "the engine's own ASR outcome must replace the caller's unknown claim")
-        XCTAssertEqual(asr?["reason"] as? String, "rejected_by_wake")
+        XCTAssertEqual(asr?["state"] as? String, "unknown",
+                       "an unencodable empty result leaves the stage unobserved, not misreported")
+        XCTAssertEqual(asr?["reason"] as? String, "observation_unavailable")
         // PROVENANCE (review c48461e6): the caller said wake=not_run; the engine delivered frames for this
         // capture, so the stored record must say completed. If the sink ignored `reportedStages`, this
         // would read not_run and the assertion would fail.

@@ -381,23 +381,22 @@ class VoiceAsrEngine {
             return "trim '\(asrResult.text)' → '\(trimmedText)'"
         }()
 
-        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b, review 6fe6d773): the ASR report carries the
-        // CAPTURE'S ACTUAL TRANSCRIPT. A `completed` ASR stage is only publishable with text — the encoder
-        // emits `text` only when present and the binding requires it — so reporting `completed` with no
-        // text would make a SUCCESSFUL recognition unpublishable. An empty transcript is therefore
-        // reported honestly as not_run with the enumerated reason, not as a completed empty result.
-        if trimmedText.isEmpty {
+        // ENGINE-PRODUCED OBSERVATION (spec 406c247e): the ASR stage states the RECOGNISER'S OWN RESULT,
+        // and nothing else. A wake-only capture is a SUCCESSFUL recognition whose text happens to be just
+        // the wake phrase — removing that phrase is the COMMAND INPUT's job, downstream, not an ASR
+        // failure and not a wake rejection. So the raw transcript is published as completed.
+        let rawText = asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rawText.isEmpty {
             contributionCollector?.engineReported(
                 stage: "asr",
-                // An empty transcript with no wake hit means the recogniser produced nothing usable.
-                outcome: .init(state: "not_run", reason: isWakePositive ? "rejected_by_wake" : "provider_error"),
-                context: utteranceContext)
-        } else {
-            contributionCollector?.engineReported(
-                stage: "asr",
-                outcome: .init(state: "completed", reason: nil, text: trimmedText),
+                outcome: .init(state: "completed", reason: nil, text: rawText),
                 context: utteranceContext)
         }
+        // A GENUINELY EMPTY recogniser result has no honest encoding yet: `completed` requires text and
+        // every enumerated reason asserts something false about whether/how the recogniser ran. The
+        // shared schema delta for a completed/empty-result representation is being prepared (spec
+        // 406c247e); until it lands this case publishes NOTHING rather than a fabricated not_run or
+        // provider_error.
 
         if trimmedText.isEmpty {
             let reason = isWakePositive ? "wake-only" : "empty"
@@ -415,7 +414,8 @@ class VoiceAsrEngine {
         // detected language is not English (the SenseVoice CJK path). Trim first so we
         // only translate the command remainder (matches Android).
         let trimmedResult = AsrResult(text: trimmedText, detectedLanguage: asrResult.detectedLanguage)
-        let (finalized, translateNote) = await maybeTranslate(trimmedResult, backend: backend)
+        let (finalized, translateNote) = await maybeTranslate(
+            trimmedResult, backend: backend, context: utteranceContext)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         FileLog.shared.addMessage(
             "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
@@ -495,33 +495,50 @@ class VoiceAsrEngine {
 
     /// Translates a non-English, non-self-translating ASR result to English before
     /// intent routing. Fail / blank / no-op notes are dropped by the caller (ERROR earcon).
-    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> (AsrResult, String?) {
+    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend,
+                                context: VoiceSharingCollector.CaptureContext?) async
+        -> (AsrResult, String?) {
+        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): every branch below is a decision THIS function
+        // makes, so this is the only place entitled to report the translation stage. Reported from the
+        // branch that decided, never inferred later.
+        func report(_ outcome: VoiceSharingContributionEncoder.StageOutcome) {
+            contributionCollector?.engineReported(stage: "translation", outcome: outcome, context: context)
+        }
         guard let detected = result.detectedLanguage?.lowercased() else {
+            report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, "translate=skip(no lang)")
         }
         if detected == "en" {
+            // Nothing to translate: the source already is the target.
+            report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, nil)
         }
         if backend.capabilities.canTranslateToEnglish {
+            report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, "translate=skip(backend)")
         }
         guard let translationStage else {
             // Missing platform translation is a hard failure for non-English SenseVoice text —
             // never relabel native text as english_v1.
+            report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, "translate=skip(no stage)")
         }
 
         if case .failure = await translationStage.ensureReady(sourceLanguage: detected) {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=fail(\(detected))")
         }
         let translated = await translationStage.translate(text: result.text, sourceLanguage: detected)
         guard !translated.isEmpty else {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=blank(\(detected))")
         }
         // Reject no-op "translations" that would mislabel CJK as English.
         if translated == result.text {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=noop(\(detected))")
         }
+        report(.init(state: "completed", reason: nil))
         return (
             AsrResult(text: translated, detectedLanguage: "en"),
             "translate=\(detected)→en '\(translated)'"
