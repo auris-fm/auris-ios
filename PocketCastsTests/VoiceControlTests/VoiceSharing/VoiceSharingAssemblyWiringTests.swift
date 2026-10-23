@@ -816,6 +816,188 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertTrue(ready.isEmpty, "delivered entries leave the serving set")
     }
 
+    /// CONSTRUCTED UPLOADER → REAL LOCAL HTTP → VALIDATED RECEIPT → SETTLEMENT (spec 18:06Z ask).
+    /// Unlike the URLProtocol controls elsewhere in this file, this drives a REAL TCP connection to a
+    /// local listener. The server parses the multipart body it actually received, recomputes the record
+    /// digest from those bytes, and only then replies with a receipt — so delivery cannot be faked by a
+    /// stubbed response, and the client's settlement is accepted against a receipt the server derived
+    /// from the client's own upload.
+    func test_theConstructedUploaderDeliversOverRealLocalHTTPAndSettlesOnAValidatedReceipt() async throws {
+        var acceptedBody: Data?
+        var servedReceiptDigest: String?
+        var observedPort: UInt16 = 0
+        let serverQueue = DispatchQueue(label: "vs-local-http")
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: parameters, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { [weak listener] state in
+            if case .ready = state {
+                observedPort = listener?.port?.rawValue ?? 0
+                ready.signal()
+            }
+        }
+        let acceptedConnections = ConnectionHolder()
+        listener.newConnectionHandler = { connection in
+            acceptedConnections.store(connection)
+            connection.stateUpdateHandler = { [weak connection] state in
+                guard case .ready = state, let connection else { return }
+                // ACCUMULATE the whole request: a single receive() returns as soon as ANY bytes arrive,
+                // which truncates a multipart upload. Read until the declared Content-Length is met.
+                var accumulated = Data()
+                func drain() {
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) {
+                        content, _, isComplete, _ in
+                        if let content { accumulated.append(content) }
+                        if let expected = Self.declaredContentLength(accumulated),
+                            accumulated.count >= expected {
+                            acceptedBody = accumulated
+                            servedReceiptDigest = Self.receiptDigest(in: accumulated)
+                            let response = self.receiptFor(accumulated)
+                            connection.send(
+                                content: response,
+                                completion: .contentProcessed { _ in connection.cancel() })
+                            return
+                        }
+                        if isComplete {
+                            acceptedBody = accumulated
+                            servedReceiptDigest = Self.receiptDigest(in: accumulated)
+                            let response = self.receiptFor(accumulated)
+                            connection.send(
+                                content: response,
+                                completion: .contentProcessed { _ in connection.cancel() })
+                            return
+                        }
+                        drain()
+                    }
+                }
+                drain()
+            }
+            connection.start(queue: serverQueue)
+        }
+        listener.start(queue: serverQueue)
+        guard ready.wait(timeout: .now() + 5) == .success, observedPort != 0 else {
+            return XCTFail("the local HTTP server did not start")
+        }
+        defer {
+            listener.cancel()
+            acceptedConnections.current?.cancel()
+        }
+
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let entry = try makeReadyEntry(queue)
+        let identity = try queue.boundIdentity(of: entry)
+        let plainConfiguration = URLSessionConfiguration.ephemeral
+        let session = URLSession(configuration: plainConfiguration)
+        defer { session.invalidateAndCancel() }
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "http://127.0.0.1:\(observedPort)" },
+            tokenProvider: StaticTokenProvider(token: "tok"), session: session)
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true },
+            endpoint: { transport.endpoint },
+            transport: { [transport] request, _, _ in await transport.send(request: request) })
+        let scheduler = VoiceSharingUploadScheduler(
+            queue: queue, uploader: uploader, isAuthorized: { true })
+
+        let outcome = await scheduler.drainOnce()
+        guard case .drained(let results) = outcome, results.count == 1 else {
+            return XCTFail("expected one drained result, got \(outcome)")
+        }
+        guard case .delivered = results[0].outcome else {
+            return XCTFail("a valid receipt over real HTTP must settle as delivered, got \(results[0].outcome)")
+        }
+        // NON-VACUITY: the server derived its receipt from the UPLOADED bytes, and that derived digest
+        // is the entry's own. If this fails, a server answering with an unrelated identity would still
+        // have settled the entry here — the control would then prove transport, not validated settlement.
+        XCTAssertEqual(servedReceiptDigest, identity.recordSHA256,
+                       "the receipt must be derived from the uploaded record's own digest")
+        // The server saw a real multipart body carrying this entry's identity.
+        guard let body = acceptedBody else { return XCTFail("the server received no body") }
+        let bodyText = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(bodyText.contains(identity.recordSHA256),
+                      "the uploaded bytes must carry the entry's record digest")
+        XCTAssertTrue(bodyText.contains(identity.captureID),
+                      "the uploaded bytes must carry the entry's capture id")
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(after.isEmpty, "the settled entry no longer serves")
+    }
+
+    /// The record digest the server's receipt answered with, derived the same way receiptFor derives it.
+    static func receiptDigest(in raw: Data) -> String? {
+        let bytes = [UInt8](raw)
+        guard let headEnd = findBytes([13, 10, 13, 10], in: bytes, from: 0) else { return nil }
+        let head = String(decoding: bytes[0..<headEnd], as: UTF8.self)
+        guard let contentTypeLine = head.split(separator: "\r\n").first(where: {
+            $0.lowercased().hasPrefix("content-type:")
+        }) else { return nil }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1/")!)
+        request.httpBody = raw.subdata(in: (headEnd + 4)..<raw.count)
+        request.setValue(String(contentTypeLine), forHTTPHeaderField: "Content-Type")
+        return (try? attemptedIdentity(from: request))?.sha
+    }
+
+    /// The total byte count the request declares (head + body), from its own Content-Length header.
+    static func declaredContentLength(_ raw: Data) -> Int? {
+        let bytes = [UInt8](raw)
+        guard let headEnd = findBytes([13, 10, 13, 10], in: bytes, from: 0) else { return nil }
+        let head = String(decoding: bytes[0..<headEnd], as: UTF8.self)
+        for line in head.split(separator: "\r\n") where line.lowercased().hasPrefix("content-length:") {
+            let value = line.split(separator: ":", maxSplits: 1)[1]
+                .trimmingCharacters(in: .whitespaces)
+            guard let bodyLength = Int(value) else { return nil }
+            return headEnd + 4 + bodyLength
+        }
+        return nil
+    }
+
+    /// Builds a valid receipt for the multipart body the server actually received. It reuses the SAME
+    /// strict extractor the other controls use (no ad-hoc string search): the identity is read out of the
+    /// metadata part and the envelope digest, exactly as a real intake would.
+    private func receiptFor(_ raw: Data) -> Data {
+        func failure() -> Data {
+            let body = Data("{\"schema_version\":1,\"code\":\"malformed_record\"}".utf8)
+            var response = Data("HTTP/1.1 400 Bad Request\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+            response.append(body)
+            return response
+        }
+        // Split the request head from the body to recover the Content-Type boundary.
+        guard let headEnd = Self.findBytes([13, 10, 13, 10], in: [UInt8](raw), from: 0) else {
+            return failure()
+        }
+        let head = String(decoding: [UInt8](raw)[0..<headEnd], as: UTF8.self)
+        guard let contentTypeLine = head.split(separator: "\r\n").first(where: {
+            $0.lowercased().hasPrefix("content-type:")
+        }) else { return failure() }
+        let contentType = String(contentTypeLine)
+        let body = raw.subdata(in: (headEnd + 4)..<raw.count)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1/")!)
+        request.httpBody = body
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        guard let identity = try? Self.attemptedIdentity(from: request) else {
+            return failure()
+        }
+        let receipt: [String: Any] = [
+            "schema_version": 1,
+            "capture_id": identity.captureID,
+            "record_sha256": identity.sha,
+            "status": "accepted",
+            "receipt_id": "rcpt-local-1",
+            "accepted_at": "2026-10-22T14:00:00Z",
+            "retention_expires_at": "2026-11-22T14:00:00Z",
+        ]
+        let receiptBody = try! JSONSerialization.data(withJSONObject: receipt)
+        var response = Data("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n".utf8)
+        response.append(Data("Content-Length: \(receiptBody.count)\r\nConnection: close\r\n\r\n".utf8))
+        response.append(receiptBody)
+        return response
+    }
+
     /// REVOCATION mid-pass with a LATE SUCCESSFUL response (spec 7980bf44): the withdrawal lands
     /// while a valid 201 receipt is in flight — the late success must NOT complete the entry, the
     /// pass stops, and a successor instance cannot borrow the attempt either.
