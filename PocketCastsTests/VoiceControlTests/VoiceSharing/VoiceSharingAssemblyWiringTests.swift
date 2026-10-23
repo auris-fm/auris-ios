@@ -48,7 +48,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                 retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
             isAuthorized: policyPermits,
             endpoint: { transport.endpoint },
-            transport: { [transport] request in
+            transport: { [transport] request, _, _ in
                 await transport.send(request: request)
             })
         let scheduler = VoiceSharingUploadScheduler(
@@ -490,6 +490,93 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertFalse(unknown.isCurrent, "an absent epoch cannot authorize uploads")
         epoch = ""
         XCTAssertFalse(unknown.isCurrent, "an empty epoch cannot authorize uploads")
+    }
+
+    /// CREDENTIAL-AWAIT WINDOW (reviewer 78f23dca / ee5b4547): the identity is intact at the
+    /// uploader's launch fence, then moves WHILE the REAL transport is acquiring the credential.
+    /// The transport must re-fence at that boundary with THIS attempt's admitted snapshot and
+    /// emit no request — a post-response refusal cannot repair the disclosure.
+    func test_identityChangeDuringCredentialAwaitEmitsNoRequest() async throws {
+        let sharedRoot = root!
+        let box = IdentityBox(VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let owned = VoiceSharingUploadQueue(
+            rootDirectory: sharedRoot, currentIdentity: { box.current })
+        let entry = try makeReadyEntryOwned(owned, root: sharedRoot)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AssemblyIntercept.self]
+        let realTransport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: SuspendingTokenProvider {
+                // The move lands INSIDE the credential await, provably.
+                box.current = VoiceSharingUploadIdentity(
+                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+            },
+            session: URLSession(configuration: configuration))
+
+        AssemblyIntercept.responder = { _ in
+            XCTFail("no request may reach the wire during a credential-await identity move")
+            return (HTTPURLResponse(url: URL(string: "https://unit.test/x")!, statusCode: 500,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { AssemblyIntercept.responder = nil }
+
+        let admitted = try XCTUnwrap(try owned.admitAttempt(entry))
+        let request = URLRequest(url: URL(string: "https://unit.test/api/v1/voice-recordings")!)
+        let result = await realTransport.send(
+            request: request, admittedIdentity: admitted.identity,
+            identityFence: { box.current })
+
+        guard case .transportFailure = result else {
+            return XCTFail("a moved identity at the credential boundary must send nothing, got \(result)")
+        }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 0,
+                       "the real transport emitted no request")
+        try owned.applyAttemptResult(entry, lease: admitted.lease, outcome: .retryableFailure)
+        XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained for its owning identity")
+    }
+
+    /// Token provider that runs a hook inside `token()` — proves a move happens while the
+    /// credential await is in flight.
+    private final class SuspendingTokenProvider: CloudTokenProviding {
+        private let onAcquire: () -> Void
+        init(onAcquire: @escaping () -> Void) { self.onAcquire = onAcquire }
+        func token() async -> String? { onAcquire(); return "tok" }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
+    }
+
+    /// A ready entry on a SPECIFIC identity-bound queue.
+    private func makeReadyEntryOwned(_ queue: VoiceSharingUploadQueue, root: URL) throws
+        -> VoiceSharingUploadQueue.Entry {
+        let samples: [Float] = [0, 0.25, -0.5, 0.5]
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed, captureID: UUID(),
+            enrollmentEpoch: "epoch-1", authorizationSession: "acct-A",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+            conversionVersion: "v1")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: [:])
+        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
+        try queue.finalize(entry)
+        return entry
+    }
+
+    /// IdentityBox for fence controls.
+    private final class IdentityBox {
+        private let lock = NSLock()
+        private var value: VoiceSharingUploadIdentity?
+        init(_ initial: VoiceSharingUploadIdentity?) { value = initial }
+        var current: VoiceSharingUploadIdentity? {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
     }
 
     /// NO ELIGIBILITY: with the policy refusing, a drain pass issues NOTHING — zero network

@@ -109,27 +109,18 @@ final class VoiceSharingUploadTransport {
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
-    private let identityFence: (() -> VoiceSharingUploadIdentity?)?
-    private let admittedIdentity: VoiceSharingUploadIdentity?
+
 
     init(
         baseURLProvider: @escaping () -> String,
         tokenProvider: CloudTokenProviding,
         session: URLSession = .shared,
-        bodyDeadline: TimeInterval = 90,
-        /// Identity snapshot fence for credential acquisition (reviewer ee5b4547): the CALLER
-        /// declares the identity the request is admitted under; `send` re-reads it after the
-        /// credential resolves and refuses to put bytes on the wire if it moved. Nil disables
-        /// fencing (no identity authority in this process).
-        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil,
-        admittedIdentity: VoiceSharingUploadIdentity? = nil
+        bodyDeadline: TimeInterval = 90
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
         self.session = session
         self.bodyDeadline = bodyDeadline
-        self.identityFence = identityFence
-        self.admittedIdentity = admittedIdentity
     }
 
     /// The endpoint this transport will use, or nil when configuration is missing. Nil is NOT
@@ -145,7 +136,16 @@ final class VoiceSharingUploadTransport {
     /// The request ARRIVES complete (URL, body, boundary, idempotency key) from the uploader; this
     /// type adds the credential and executes it. That split means the bytes the controls assert on
     /// are the bytes that go on the wire.
-    func send(request built: URLRequest) async -> VoiceSharingUploader.TransportResult {
+    /// - Parameters:
+    ///   - admittedIdentity: the identity snapshot this attempt was ADMITTED under (reviewer
+    ///     78f23dca — per SEND, never transport-initialization state). Supplied together with
+    ///     `identityFence`, the live reader.
+    ///   - identityFence: re-reads the live identity at the credential boundary.
+    func send(
+        request built: URLRequest,
+        admittedIdentity: VoiceSharingUploadIdentity? = nil,
+        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil
+    ) async -> VoiceSharingUploader.TransportResult {
         // No bearer, no call — nothing is created, nothing is sent.
         guard let credential = await tokenProvider.token(), !credential.isEmpty else {
             return .transportFailure

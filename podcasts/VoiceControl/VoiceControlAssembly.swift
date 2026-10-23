@@ -130,8 +130,11 @@ class VoiceControlAssembly {
                     enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
             },
             endpoint: { uploadTransport.endpoint },
-            transport: { [uploadTransport] request in
-                await uploadTransport.send(request: request)
+            transport: { [uploadTransport] request, admitted, fence in
+                // The transport fences at its OWN credential boundary with this attempt's
+                // admitted snapshot: an identity move during token acquisition sends nothing.
+                await uploadTransport.send(request: request,
+                                           admittedIdentity: admitted, identityFence: fence)
             })
         let uploadScheduler = VoiceSharingUploadScheduler(
             queue: contributionQueue,

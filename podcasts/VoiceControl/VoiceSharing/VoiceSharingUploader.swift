@@ -70,7 +70,9 @@ final class VoiceSharingUploader {
     /// Live identity reader for attempt-lifetime fencing. Returns nil when this process has no
     /// identity authority (an unbound queue), in which case nothing is fenced.
     private let currentIdentity: () -> VoiceSharingUploadIdentity?
-    private let transport: (URLRequest) async -> TransportResult
+    /// The transport receives the admitted identity snapshot and the live reader so IT can fence
+    /// at the credential boundary (the token await is a window the uploader cannot see).
+    private let transport: (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult
     private let endpoint: () -> URL?
     private let clock: () -> Date
 
@@ -81,7 +83,7 @@ final class VoiceSharingUploader {
         currentIdentity: @escaping () -> VoiceSharingUploadIdentity? = { nil },
         endpoint: @escaping () -> URL?,
         clock: @escaping () -> Date = Date.init,
-        transport: @escaping (URLRequest) async -> TransportResult
+        transport: @escaping (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult
     ) {
         self.queue = queue
         self.retryPolicy = retryPolicy
@@ -134,7 +136,11 @@ final class VoiceSharingUploader {
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
-        let result = await transport(request)
+        // The transport re-fences at its credential boundary with THIS attempt's admitted
+        // snapshot: the token await inside is the one window the uploader-side fence cannot see.
+        // When the queue carries no identity (unbound), the fence parameters stay nil and the
+        // uploader-side checks are the only enforcement — same as before this seam existed.
+        let result = await transport(request, admitted.identity, currentIdentity)
 
         // ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the identity this attempt was ADMITTED under must
         // still be the live one. Admission-time binding alone cannot see an account/epoch move that

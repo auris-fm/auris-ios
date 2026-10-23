@@ -68,7 +68,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         retryPolicy: VoiceSharingRetryPolicy? = nil,
         authorized: @escaping () -> Bool = { true },
         endpoint: @escaping () -> URL? = { URL(string: "https://unit.test/api/v1/contributions") },
-        transport: @escaping (URLRequest) async -> VoiceSharingUploader.TransportResult,
+        transport: @escaping (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> VoiceSharingUploader.TransportResult,
         identity: @escaping () -> VoiceSharingUploadIdentity? = { nil }
     ) -> VoiceSharingUploader {
         VoiceSharingUploader(
@@ -105,7 +105,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
             isAuthorized: { true },
             currentIdentity: { box.current },
             endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
-            transport: { _ in
+            transport: { _, _, _ in
                 // The account re-enrolls while this request is in flight.
                 box.current = VoiceSharingUploadIdentity(
                     accountScope: "acct-A", enrollmentEpoch: "epoch-2")
@@ -144,7 +144,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                     accountScope: "acct-A", enrollmentEpoch: "epoch-2")
                 return URL(string: "https://unit.test/api/v1/contributions")
             },
-            transport: { _ in
+            transport: { _, _, _ in
                 transportCalls += 1
                 return .response(statusCode: 201, body: Data())
             })
@@ -179,7 +179,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let identity = try queue.boundIdentity(of: entry)
 
         var sentBody: Data?
-        let uploader = makeUploader(transport: { request in
+        let uploader = makeUploader(transport: { request, _, _ in
             sentBody = request.httpBody
             return .response(statusCode: 201, body: self.receiptBody(
                 captureID: identity.captureID, recordSHA: identity.recordSHA256))
@@ -207,7 +207,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// retry, never deleted for a response we could not trust.
     func test_malformedReceiptRetainsTheEntryAndRetries() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 201, body: Data("{\"schema_version\":1}".utf8))
         })
         let outcome = await uploader.upload(entry)
@@ -225,7 +225,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// A well-formed receipt for a DIFFERENT identity is a protocol violation: unknown, retained.
     func test_receiptForAnotherIdentityIsUnknownNotAccepted() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 201, body: self.receiptBody(
                 captureID: "not-ours", recordSHA: String(repeating: "0", count: 64)))
         })
@@ -247,7 +247,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         var authorized = true
         let uploader = makeUploader(
             authorized: { authorized },
-            transport: { request in
+            transport: { request, _, _ in
                 // Consent is withdrawn WHILE the request is on the wire.
                 authorized = false
                 return .response(statusCode: 201, body: self.receiptBody(
@@ -274,7 +274,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     func test_reclaimedLeaseMakesTheResultStale() async throws {
         let entry = try makeReadyEntry()
         let identity = try queue.boundIdentity(of: entry)
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             // While "on the wire", the lease expires and a successor takes over.
             let later = Date().addingTimeInterval(
                 VoiceSharingUploadQueue.attemptLeaseDuration + 1)
@@ -300,7 +300,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         for (index, result) in transportResults.enumerated() {
             // Re-create the entry fresh per case: attempt accounting survives restarts by design.
             let freshEntry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in result })
+            let uploader = makeUploader(transport: { _, _, _ in result })
             let outcome = await uploader.upload(freshEntry)
             guard case .retry(let serverAfter, let attempt) = outcome else {
                 return XCTFail("case \(index): expected retry, got \(outcome)")
@@ -325,7 +325,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// A 4xx with its OWNING body code is terminal: the entry is abandoned, not retried forever.
     func test_clientErrorAbandonsTheEntry() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 422, body: Data(
                 "{\"schema_version\":1,\"code\":\"integrity_mismatch\"}".utf8))
         })
@@ -346,7 +346,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         var sent = false
         let uploader = makeUploader(
             authorized: { false },
-            transport: { _ in sent = true; return .transportFailure })
+            transport: { _, _, _ in sent = true; return .transportFailure })
         let outcome = await uploader.upload(entry)
         XCTAssertEqual(outcome, .revoked)
         XCTAssertFalse(sent, "no bytes may leave without live authorization")
@@ -357,7 +357,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// 401 is AUTHENTICATION, not a verdict: the entry is retained and retried, never deleted.
     func test_unauthorizedRetainsTheEntryForRetry() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 401, body: Data())
         })
         let outcome = await uploader.upload(entry)
@@ -374,7 +374,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// delete (spec dc6a00ab: only the owning table's codes are terminal).
     func test_unrecognized4xxPreservesTheEntry() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 418, body: Data())
         })
         let outcome = await uploader.upload(entry)
@@ -396,7 +396,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         ]
         for (code, bodyCode) in terminal {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: code, body: Data(
                     "{\"schema_version\":1,\"code\":\"\(bodyCode)\"}".utf8))
             })
@@ -407,7 +407,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
         for code in [402, 404, 407, 451] {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: code, body: Data())
             })
             let outcome = await uploader.upload(entry)
@@ -444,7 +444,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// is refused immediately afterwards (enforced, not advisory).
     func test_retryDelayIsEnforcedForAnyOwnerAfterRestart() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 503, body: Data("{\"retry_after_s\":120}".utf8))
         })
         let outcome = await uploader.upload(entry)
@@ -474,7 +474,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let uploader = makeUploader(
             retryPolicy: VoiceSharingRetryPolicy(
                 retryBaseDelay: 60, retryMaximumDelay: 600, random: { 1 }),
-            transport: { _ in
+            transport: { _, _, _ in
                 .response(statusCode: 200, body: Data("{".utf8))
             })
         let outcome = await uploader.upload(entry)
@@ -528,7 +528,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         for (code, status, duplicate) in [(201, "accepted", false), (200, "duplicate", true)] {
             let entry = try makeReadyEntry()
             let identity = try queue.boundIdentity(of: entry)
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: code, body: self.receiptBody(
                     captureID: identity.captureID, recordSHA: identity.recordSHA256,
                     status: status))
@@ -596,7 +596,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         for (code, status) in [(200, "accepted"), (201, "duplicate")] {
             let entry = try makeReadyEntry()
             let identity = try queue.boundIdentity(of: entry)
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: code, body: self.receiptBody(
                     captureID: identity.captureID, recordSHA: identity.recordSHA256,
                     status: status))
@@ -616,7 +616,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// An unknown 4xx (511) is NOT in the terminal table: retained and retried, never deleted.
     func test_unknown4xxIsRetainedNotAbandoned() async throws {
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _ in
+        let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 511, body: Data())
         })
         let outcome = await uploader.upload(entry)
@@ -666,7 +666,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         // Proxy 403 without an owning code → retain.
         do {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: 403, body: errorBody("proxy_forbidden"))
             })
             let outcome = await uploader.upload(entry)
@@ -681,7 +681,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         // Malformed 409 (no code) → retain.
         do {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: 409, body: Data("{".utf8))
             })
             let outcome = await uploader.upload(entry)
@@ -692,7 +692,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         // Status/code AGREEMENT abandons: 409 + capture_conflict.
         do {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: 409, body: errorBody("capture_conflict"))
             })
             let outcome = await uploader.upload(entry)
@@ -856,7 +856,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     func test_410AcceptsBothOwningCodes() async throws {
         for code in ["record_gone", "enrollment_retired"] {
             let entry = try makeReadyEntry()
-            let uploader = makeUploader(transport: { _ in
+            let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: 410, body: Data(
                     "{\"schema_version\":1,\"code\":\"\(code)\"}".utf8))
             })
