@@ -231,6 +231,15 @@ extension VoiceSharingUploadTransportTests {
         // Auth endpoints: the token exchange mints tok-1; refresh mints tok-2, counted.
         var refreshCount = 0
         var uploadRequests: [URLRequest] = []
+        UploadRecordingURLProtocol.lock.lock()
+        UploadRecordingURLProtocol.expectedDeferredCount = 2
+        UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
+        UploadRecordingURLProtocol.lock.unlock()
+        // Cleanup on EVERY exit path: no send may hang on a held transfer.
+        defer {
+            UploadRecordingURLProtocol.handler = nil
+            UploadRecordingURLProtocol.releaseAllDeferred()
+        }
         UploadRecordingURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
             if path == "/api/v1/auth/token" {
@@ -302,6 +311,15 @@ extension VoiceSharingUploadTransportTests {
     func test_staleBearerForwardingIsDiscriminatedFromNil() async throws {
         var refreshCount = 0
         var uploadRequests: [URLRequest] = []
+        UploadRecordingURLProtocol.lock.lock()
+        UploadRecordingURLProtocol.expectedDeferredCount = 2
+        UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
+        UploadRecordingURLProtocol.lock.unlock()
+        // Cleanup on EVERY exit path: no send may hang on a held transfer.
+        defer {
+            UploadRecordingURLProtocol.handler = nil
+            UploadRecordingURLProtocol.releaseAllDeferred()
+        }
         UploadRecordingURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
             if path == "/api/v1/auth/token" {
@@ -316,14 +334,13 @@ extension VoiceSharingUploadTransportTests {
                                         httpVersion: nil, headerFields: nil)!,
                         Data(#"{"access_token":"\#(next)","token_type":"Bearer","expires_in":900,"refresh_token":"r-\#(refreshCount)","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
             }
+            UploadRecordingURLProtocol.lock.lock()
             uploadRequests.append(request)
+            UploadRecordingURLProtocol.lock.unlock()
             // DEFERRED completion: hold this protocol instance and return WITHOUT responding,
             // so the shared loader thread is never blocked (a semaphore-wait here deadlocks
             // request 2 — both sessions complete on one loader queue).
             return nil
-        }
-        defer {
-            UploadRecordingURLProtocol.handler = nil
         }
 
         let provider = makeRealProvider(credential: "cred")
@@ -346,21 +363,34 @@ extension VoiceSharingUploadTransportTests {
         // read the cached tok-1 without racing the acquisition single-flight.
         let warmed = await provider.token()
         XCTAssertEqual(warmed, "tok-1", "pre-warm mints tok-1")
+        // Distinct request identifiers so held transfers are addressable regardless of the
+        // nondeterministic arrival order of the two concurrent sends.
+        var requestA = self.makeRequest()
+        requestA.setValue("capture-A", forHTTPHeaderField: "Idempotency-Key")
+        var requestB = self.makeRequest()
+        requestB.setValue("capture-B", forHTTPHeaderField: "Idempotency-Key")
         // Both sends race; each token() reads the provider's cached tok-1, so BOTH wire
         // requests carry tok-1.
-        async let sendA = transportA.send(request: self.makeRequest())
-        async let sendB = transportB.send(request: self.makeRequest())
-        // Barrier, not a delay: wait until BOTH wire requests are recorded (held, unanswered).
-        while uploadRequests.count < 2 { await Task.yield() }
-        XCTAssertEqual(UploadRecordingURLProtocol.deferred401s.count, 2,
-                       "both transfers are held unresolved")
+        async let sendA = transportA.send(request: requestA)
+        async let sendB = transportB.send(request: requestB)
+        // Synchronized bounded barrier: the loader signals when both transfers are held.
+        let heldTimedOut: Bool = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let result = UploadRecordingURLProtocol.bothHeldSemaphore?
+                    .wait(timeout: .now() + 10)
+                continuation.resume(returning: result == .timedOut)
+            }
+        }
+        guard !heldTimedOut else {
+            return XCTFail("both transfers were not held within 10s: held=\(uploadRequests.count)")
+        }
         for request in uploadRequests {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-1",
                            "both wire requests left before any rotation")
         }
 
-        // Release A: its 401 branch reports tok-1 → one rotation.
-        UploadRecordingURLProtocol.releaseDeferred401(index: 0)
+        // Release A BY KEY: its 401 branch reports tok-1 → one rotation.
+        UploadRecordingURLProtocol.releaseDeferred401(key: "capture-A")
         guard case .response(401, _) = await sendA else {
             return XCTFail("expected the 401 verdict for A")
         }
@@ -370,8 +400,8 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(adopted, "tok-2", "the provider adopted the rotated token")
         XCTAssertEqual(refreshCount, 1, "exactly one rotation after A")
 
-        // Release B: its 401 branch holds the STALE tok-1. Correct forwarding → guard no-op.
-        UploadRecordingURLProtocol.releaseDeferred401(index: 1)
+        // Release B BY KEY: its 401 branch holds the STALE tok-1. Correct forwarding → no-op.
+        UploadRecordingURLProtocol.releaseDeferred401(key: "capture-B")
         let resultB = await sendB
         guard case .response(401, _) = resultB else {
             return XCTFail("expected the 401 verdict for B, got \(resultB)")
@@ -439,18 +469,36 @@ final class IdentityBoxHolder {
 
 private final class UploadRecordingURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data)?)?
-    /// Deferred-401 protocol instances, in arrival order — the test completes them explicitly.
-    static var deferred401s: [UploadRecordingURLProtocol] = []
-    /// Completes a held transfer with a 401 (test-side barrier release).
-    static func releaseDeferred401(index: Int) {
+    /// Deferred-401 protocol instances KEYED BY REQUEST IDENTIFIER (the Idempotency-Key header)
+    /// — arrival order is nondeterministic across concurrent sends (reviewer 7f08e173).
+    static var deferred401s: [String: UploadRecordingURLProtocol] = [:]
+    /// Signaled once the expected transfers are all held — replaces Task.yield polling with a
+    /// synchronized bounded wait.
+    static var bothHeldSemaphore: DispatchSemaphore?
+    static var expectedDeferredCount = 0
+    /// Completes the transfer identified by `key` with a 401 (test-side barrier release).
+    static func releaseDeferred401(key: String) {
         lock.lock(); defer { lock.unlock() }
-        guard index < deferred401s.count else { return }
-        let instance = deferred401s[index]
+        guard let instance = deferred401s.removeValue(forKey: key) else { return }
         let response = HTTPURLResponse(
             url: instance.request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
         instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
         instance.client?.urlProtocol(instance, didLoad: Data())
         instance.client?.urlProtocolDidFinishLoading(instance)
+    }
+    /// Releases ANY transfers still held (cleanup on failure paths) so no send hangs.
+    static func releaseAllDeferred() {
+        lock.lock()
+        let held = Array(deferred401s.values)
+        deferred401s = [:]
+        lock.unlock()
+        for instance in held {
+            let response = HTTPURLResponse(
+                url: instance.request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+            instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
+            instance.client?.urlProtocol(instance, didLoad: Data())
+            instance.client?.urlProtocolDidFinishLoading(instance)
+        }
     }
     static var stall = false
     /// Drip mode: send headers, then one byte every `dripInterval` forever — a live transfer that
@@ -468,7 +516,9 @@ private final class UploadRecordingURLProtocol: URLProtocol {
 
     static func reset() {
         handler = nil
-        deferred401s = []
+        deferred401s = [:]
+        bothHeldSemaphore = nil
+        expectedDeferredCount = 0
         stall = false
         drip = false
         dripInterval = 0
@@ -516,10 +566,17 @@ private final class UploadRecordingURLProtocol: URLProtocol {
                 client?.urlProtocol(self, didLoad: data)
                 client?.urlProtocolDidFinishLoading(self)
             } else {
-                // Deferred: hold the instance for a later test-side release.
+                // Deferred: hold the instance under its request identifier for a later
+                // test-side release, and signal the synchronized "all held" barrier.
                 UploadRecordingURLProtocol.lock.lock()
-                UploadRecordingURLProtocol.deferred401s.append(self)
+                let key = request.value(forHTTPHeaderField: "Idempotency-Key")
+                    ?? UUID().uuidString
+                UploadRecordingURLProtocol.deferred401s[key] = self
+                let held = UploadRecordingURLProtocol.deferred401s.count
+                let semaphore = UploadRecordingURLProtocol.bothHeldSemaphore
+                let expected = UploadRecordingURLProtocol.expectedDeferredCount
                 UploadRecordingURLProtocol.lock.unlock()
+                if let semaphore, held >= expected { semaphore.signal() }
             }
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
