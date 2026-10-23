@@ -145,15 +145,25 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
         UploadRecordingURLProtocol.drip = true
         UploadRecordingURLProtocol.dripInterval = 0.05
-        // A tight wall deadline so the test is fast; the ceiling is what actually stops it.
+        UploadRecordingURLProtocol.stopLoadingSemaphore = DispatchSemaphore(value: 0)
+        // A tight wall deadline so the test is fast; the deadline is what actually stops it.
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session,
             bodyDeadline: 2)
         let started = Date()
         let result = await transport.send(request: makeRequest())
+        // DETERMINISTIC BOUND: wait (at most 5s) for URLSession to actually deliver stopLoading
+        // instead of asserting the instant send resumes — the cancellation notification may
+        // land a beat later, which was the recurring flake.
+        let observed = DispatchQueue.global().sync {
+            UploadRecordingURLProtocol.stopLoadingSemaphore?
+                .wait(timeout: .now() + 5) == .success
+        }
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertEqual(result, .transportFailure,
                        "a body that never finishes is never a delivered record")
+        XCTAssertTrue(observed,
+                      "URLSession delivered stopLoading within the bounded wait")
         XCTAssertGreaterThanOrEqual(UploadRecordingURLProtocol.stopLoadingCount, 1,
                                     "the live transfer must be told to stop")
         XCTAssertTrue(UploadRecordingURLProtocol.dripWasLiveWhenStopped,
@@ -478,8 +488,15 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     static var expectedDeferredCount = 0
     /// Completes the transfer identified by `key` with a 401 (test-side barrier release).
     static func releaseDeferred401(key: String) {
-        lock.lock(); defer { lock.unlock() }
-        guard let instance = deferred401s.removeValue(forKey: key) else { return }
+        // Collect UNDER the lock; invoke client callbacks AFTER releasing it — stopLoading
+        // (triggered by cancellation paths) acquires the same lock (reviewer 2d15f73d).
+        lock.lock()
+        let instance = deferred401s.removeValue(forKey: key)
+        lock.unlock()
+        guard let instance else { return }
+        completeWith401(instance)
+    }
+    private static func completeWith401(_ instance: UploadRecordingURLProtocol) {
         let response = HTTPURLResponse(
             url: instance.request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
         instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -492,13 +509,8 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         let held = Array(deferred401s.values)
         deferred401s = [:]
         lock.unlock()
-        for instance in held {
-            let response = HTTPURLResponse(
-                url: instance.request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
-            instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
-            instance.client?.urlProtocol(instance, didLoad: Data())
-            instance.client?.urlProtocolDidFinishLoading(instance)
-        }
+        // Callbacks AFTER the lock is released (see releaseDeferred401).
+        for instance in held { completeWith401(instance) }
     }
     static var stall = false
     /// Drip mode: send headers, then one byte every `dripInterval` forever — a live transfer that
@@ -511,6 +523,10 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     /// transfer to stop, and whether a drip was still running when it did.
     private(set) static var stopLoadingCount = 0
     private(set) static var dripWasLiveWhenStopped = false
+    /// DETERMINISTIC CANCELLATION BARRIER: stopLoading signals this; the test waits on it
+    /// (bounded) instead of asserting immediately after send returns — the OS may deliver
+    /// stopLoading a beat after the await resumes, which was the flake.
+    static var stopLoadingSemaphore: DispatchSemaphore?
     private static var dripTask: Task<Void, Never>?
     static let lock = NSLock()
 
@@ -526,6 +542,7 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         requestCount = 0
         stopLoadingCount = 0
         dripWasLiveWhenStopped = false
+        stopLoadingSemaphore = nil
         dripTask?.cancel()
         dripTask = nil
     }
@@ -590,6 +607,9 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         if taskWasLive { UploadRecordingURLProtocol.dripWasLiveWhenStopped = true }
         UploadRecordingURLProtocol.dripTask?.cancel()
         UploadRecordingURLProtocol.dripTask = nil
+        let semaphore = UploadRecordingURLProtocol.stopLoadingSemaphore
         UploadRecordingURLProtocol.lock.unlock()
+        // Signaled OUTSIDE the lock: the waiter may immediately read the statics above.
+        semaphore?.signal()
     }
 }
