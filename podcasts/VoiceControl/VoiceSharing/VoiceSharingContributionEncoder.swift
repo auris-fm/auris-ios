@@ -58,20 +58,25 @@ enum VoiceSharingContributionEncoder {
         /// d09c320c). Set only by the site that ran the translation.
         let translatedText: String?
         let targetLanguage: String?
+        /// Routing's own enumerated field for what became of the routed turn.
+        let routingDisposition: String?
 
         init(state: String, reason: String? = nil, text: String? = nil, decision: String? = nil,
-             translatedText: String? = nil, targetLanguage: String? = nil) {
+             translatedText: String? = nil, targetLanguage: String? = nil,
+             routingDisposition: String? = nil) {
             self.state = state
             self.reason = reason
             self.text = text
             self.decision = decision
             self.translatedText = translatedText
             self.targetLanguage = targetLanguage
+            self.routingDisposition = routingDisposition
         }
 
         func withDecision(_ decision: String) -> StageOutcome {
             StageOutcome(state: state, reason: reason, text: text, decision: decision,
-                         translatedText: translatedText, targetLanguage: targetLanguage)
+                         translatedText: translatedText, targetLanguage: targetLanguage,
+                         routingDisposition: routingDisposition)
         }
     }
 
@@ -222,6 +227,9 @@ enum VoiceSharingContributionEncoder {
             if let decision = outcome.decision { entry["decision"] = decision }
             if let translated = outcome.translatedText { entry["translated_text"] = translated }
             if let target = outcome.targetLanguage { entry["target_language"] = target }
+            if let disposition = outcome.routingDisposition {
+                entry["execution_disposition"] = disposition
+            }
             block[stage] = entry
         }
         return block

@@ -243,7 +243,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
         var routed: [String] = []
-        engine.onRoutingInput = { routed.append($0.routerTranscript) }
+        engine.onRoutingInput = { input, _ in routed.append(input.routerTranscript) }
         XCTAssertTrue(engine.start())
 
         // Real pipeline: speech, then silence long enough for the segmenter to emit an utterance, which the
@@ -831,6 +831,92 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                            "\(testCase.label): the skip must keep its own reason")
             XCTAssertNotEqual(translation["reason"] as? String, "source_language_target_language",
                               "\(testCase.label): a skip must not assert source equals target")
+        }
+    }
+
+    /// ROUTING AND EXECUTION OBSERVATIONS BIND AND ATTRIBUTE (the two stages that were caller-supplied).
+    ///
+    /// SCOPE, STATED PLAINLY: this drives the COLLECTOR with the same StageOutcome payloads the service now
+    /// reports from its decision sites, and asserts they reach the durable record and displace a caller's
+    /// unknown claim. It does NOT prove `handleRoutingInput` reaches each branch — that path needs the LFM
+    /// router model, which this suite does not load. Do not read it as branch coverage.
+    func test_routingAndExecutionObservationsBindAndAttributeToTheirCapture() async throws {
+        let cases: [(label: String, routing: VoiceSharingContributionEncoder.StageOutcome)] = [
+            ("intent selected", .init(state: "completed", routingDisposition: "pending")),
+            ("no intent", .init(state: "completed", routingDisposition: "not_run")),
+            ("dialog question", .init(state: "completed", routingDisposition: "pending")),
+            ("not routed", .init(state: "not_run", reason: "no_candidates")),
+        ]
+        for testCase in cases {
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            let unknownClaims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+                "wake": .init(state: "completed"),
+                "bleed": .init(state: "unknown", reason: "observation_unavailable"),
+                "asr": .init(state: "completed", text: "play the latest episode"),
+                "translation": .init(state: "unknown", reason: "observation_unavailable"),
+                "routing": .init(state: "unknown", reason: "observation_unavailable"),
+                "execution": .init(state: "unknown", reason: "observation_unavailable"),
+            ]
+            // Wake POSITIVE: with a negative wake the engine strips the wake window, the remaining text is
+            // empty, and it returns before routing ever runs — so routing could not be observed at all.
+            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+                                  claims: { unknownClaims })
+            chain.engine.listeningMode = .continuous
+            // Stand where the SERVICE stands. The engine hands the frozen context to the routing
+            // consumer and does NOT finalize; the consumer reports routing, then finalizes — so the
+            // record still exists when the observation arrives. The consumer runs on the engine's own
+            // task, so the test records the context there and finalizes through the same collector.
+            var decisionContext: VoiceSharingCollector.CaptureContext?
+            chain.engine.onRoutingInput = { _, context in
+                decisionContext = context
+                chain.engine.contributionCollector?.engineReported(
+                    stage: "routing", outcome: testCase.routing, context: context)
+                chain.engine.contributionCollector?.finalizeDeferredCompletion(context: context)
+            }
+            chain.backend.stubTranscript = "play the latest episode"
+            await chain.backend.emitSpeechThenSilence(
+                level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+            // The consumer runs synchronously inside the engine's outcome task; wait for it.
+            let deadline = Date().addingTimeInterval(5)
+            while decisionContext == nil, Date() < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            guard decisionContext != nil else {
+                return XCTFail("\(testCase.label): routing must receive the frozen capture")
+            }
+            _ = waitForReadyEntries(1)
+
+            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+                !entries.isEmpty else { return XCTFail("\(testCase.label): a record is required") }
+            var sawRouting = false
+            for entry in entries {
+                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                    .appendingPathComponent("metadata.json")
+                guard let envelope = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
+                    let observations = (envelope["record"] as? [String: Any])?["observations"]
+                        as? [String: Any],
+                    let routing = observations["routing"] as? [String: Any],
+                    routing["state"] as? String != "unknown" else { continue }
+                sawRouting = true
+                XCTAssertEqual(routing["state"] as? String, testCase.routing.state,
+                               "\(testCase.label): the observed routing state must replace the claim")
+                XCTAssertEqual(routing["execution_disposition"] as? String,
+                               testCase.routing.routingDisposition,
+                               "\(testCase.label): the router's own verdict must survive")
+            }
+            if !sawRouting {
+                let dump = entries.compactMap { entry -> String? in
+                    let u = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+                    guard let e = try? JSONSerialization.jsonObject(with: Data(contentsOf: u), options: []) as? [String: Any],
+                        let o = (e["record"] as? [String: Any])?["observations"] as? [String: Any] else { return nil }
+                    return o.map { "\($0.key)=\((($0.value as? [String: Any])?["state"] as? String) ?? "?")/\((($0.value as? [String: Any])?["decision"] as? String) ?? "-")" }.sorted().joined(separator: " ")
+                }
+                XCTFail("\(testCase.label): routing must be observed; records=\(dump)")
+            }
         }
     }
 

@@ -27,6 +27,11 @@ class VoiceControlService: ObservableObject {
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
+    /// The collector that records this capture's observations. Optional so tests and any caller that
+    /// does not run voice-sharing work unchanged; routing/execution are reported through it when present.
+    private let contributionCollector: VoiceSharingCollector?
+    /// Injected for the routing/execution provenance controls; production uses `contributionCollector`.
+    var contributionCollectorForTesting: VoiceSharingCollector? { contributionCollector }
     private let analytics: VoiceAnalytics
     /// Whether the app is playing through the shared `AVAudioSession`. Used so a
     /// failed/cancelled acquisition never deactivates the session playback owns.
@@ -99,6 +104,7 @@ class VoiceControlService: ObservableObject {
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
         analytics: VoiceAnalytics,
+        contributionCollector: VoiceSharingCollector? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
     ) {
         self.conditionMonitor = conditionMonitor
@@ -113,6 +119,7 @@ class VoiceControlService: ObservableObject {
         self.gracePeriodSignal = gracePeriodSignal
         self.analytics = analytics
         self.isPlaybackActive = isPlaybackActive
+        self.contributionCollector = contributionCollector
 
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
@@ -198,7 +205,7 @@ class VoiceControlService: ObservableObject {
         }
         .store(in: &cancellables)
 
-        asrEngine.onRoutingInput = { [weak self] input in
+        asrEngine.onRoutingInput = { [weak self] input, captureContext in
             guard let self else { return }
             self.transcriptLock.lock()
             // Drop late ASR callbacks that arrive after (or during) stop().
@@ -216,7 +223,10 @@ class VoiceControlService: ObservableObject {
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
                 guard stillCurrent else { return }
-                await self.handleRoutingInput(input)
+                await self.handleRoutingInput(input, captureContext: captureContext)
+                // This task is the last decider for these stages, so it finalizes the record: routing and
+                // execution have been reported above and the capture is still ring-resident.
+                self.contributionCollector?.finalizeDeferredCompletion(context: captureContext)
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
@@ -315,7 +325,8 @@ class VoiceControlService: ObservableObject {
         await handleRoutingInput(.english(transcript: transcript))
     }
 
-    func handleRoutingInput(_ input: IntentRoutingInput) async {
+    func handleRoutingInput(_ input: IntentRoutingInput,
+                            captureContext: VoiceSharingCollector.CaptureContext? = nil) async {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return }
@@ -337,6 +348,15 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage(
                 "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
             )
+            // ENGINE-PRODUCED OBSERVATION: routing was deliberately not entered because there was no
+            // command text. `no_candidates` is the routing reason that states exactly that — there was
+            // nothing to classify. (`no_text` belongs to the translation stage, not this one.)
+            contributionCollector?.engineReported(
+                stage: "routing", outcome: .init(state: "not_run", reason: "no_candidates"),
+                context: captureContext)
+            contributionCollector?.engineReported(
+                stage: "execution", outcome: .init(state: "not_run", reason: "client_refused"),
+                context: captureContext)
             return
         case .route:
             break
@@ -375,8 +395,25 @@ class VoiceControlService: ObservableObject {
             }
 
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
-            guard isListening else { return }
+            // The router chose an intent: routing RAN and produced a decision.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "pending"),
+                context: captureContext)
+            guard isListening else {
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "cancelled", reason: "cancelled_by_user"),
+                    context: captureContext)
+                return
+            }
             let response = await executor.execute(intent)
+            // Execution returned an outcome: the action was performed.
+            contributionCollector?.engineReported(
+                stage: "execution",
+                outcome: .init(state: "completed", reason: nil),
+                context: captureContext)
             // Do not reset the window unconditionally here. A cloud route's
             // completion is the executor's to attribute — it already does so
             // against the generation the route was issued under
@@ -395,15 +432,30 @@ class VoiceControlService: ObservableObject {
 
         case .dialogControl(let action):
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
+            // The dialog manager decided: routing ran and produced a control action.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "pending"),
+                context: captureContext)
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
                 let response = await executor.execute(intent)
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "completed", reason: nil),
+                    context: captureContext)
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
                 audioRenderer.render(response)
             } else if let question = dialogResult.question {
+                // A question means NOTHING was executed: execution did not run for this turn.
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "not_run", reason: "client_refused"),
+                    context: captureContext)
                 audioRenderer.render(.spoken(question))
             }
             // If dialogResult has no intent and no question (e.g., cancel), do nothing
@@ -411,6 +463,18 @@ class VoiceControlService: ObservableObject {
         case .none:
             let stage = turnMetrics?.failedStage ?? "?"
             let reason = turnMetrics?.reason
+            // The router RAN and returned no intent. Classifying that as "no candidates" would be a
+            // guess about WHY, so the observed fact — routing completed with a negative verdict —
+            // goes in the decision field, exactly as the wake stage does.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "not_run"),
+                context: captureContext)
+            contributionCollector?.engineReported(
+                stage: "execution",
+                outcome: .init(state: "not_run", reason: "client_refused"),
+                context: captureContext)
 
             // A routing failure or a deliberate `no_match` escalates through the
             // same path a chosen `cloud_route` uses — same intent, same executor —

@@ -254,6 +254,7 @@ class VoiceControlAssembly {
             audioRenderer: audioRenderer,
             gracePeriodSignal: gracePeriodSignal,
             analytics: voiceAnalytics,
+            contributionCollector: contributionCollector,
             isPlaybackActive: isPlaybackActive
         )
     }

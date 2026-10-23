@@ -51,7 +51,7 @@ final class TranslateDropTests: XCTestCase {
 
         var routed: [String] = []
         var unroutable = 0
-        engine.onRoutingInput = { routed.append($0.routerTranscript) }
+        engine.onRoutingInput = { input, _ in routed.append(input.routerTranscript) }
         engine.onUnroutable = { unroutable += 1 }
 
         var samples = [Float](repeating: 0.05, count: 250 * 16)
@@ -103,7 +103,7 @@ final class TranslateDropTests: XCTestCase {
 
         var routed = 0
         var unroutable = 0
-        engine.onRoutingInput = { _ in routed += 1 }
+        engine.onRoutingInput = { _, _ in routed += 1 }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -133,7 +133,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var unroutable = 0
-        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
+        engine.onRoutingInput = { input, _ in transcripts.append(input.routerTranscript) }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -164,7 +164,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var unroutable = 0
-        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
+        engine.onRoutingInput = { input, _ in transcripts.append(input.routerTranscript) }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -200,7 +200,7 @@ final class TranslateDropTests: XCTestCase {
 
         var transcripts: [String] = []
         var unroutable = 0
-        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
+        engine.onRoutingInput = { input, _ in transcripts.append(input.routerTranscript) }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))

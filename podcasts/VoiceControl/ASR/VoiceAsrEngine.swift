@@ -31,7 +31,10 @@ class VoiceAsrEngine {
     var listeningMode: ListeningMode = .wakeWord
 
     /// Forwards the immutable routing envelope (source + English router text).
-    var onRoutingInput: ((IntentRoutingInput) -> Void)?
+    /// The routing envelope carries the CAPTURE it belongs to, so the sites that actually decide
+    /// routing and execution can attribute their outcome to the right record. Without it those two
+    /// stages can only ever be caller-supplied guesses.
+    var onRoutingInput: ((IntentRoutingInput, VoiceSharingCollector.CaptureContext?) -> Void)?
     /// Called on every positive detection so the service can reset grace and
     /// play the `WAKE_WORD` earcon exactly once.
     var onWakeWordDetected: (() -> Void)?
@@ -237,9 +240,14 @@ class VoiceAsrEngine {
     /// `frozenContext` is captured by the synchronous `onUtterance` closure BEFORE this Task was created.
     /// `processUtterance` itself must not read "current" state: by the time an async body runs, a successor
     /// may have started.
+    /// The context frozen for the most recent utterance — what the service's routing/execution decision
+    /// sites attribute their observations to. Test-visible so a control can report against the same capture.
+    private(set) var lastUtteranceContextForTesting: VoiceSharingCollector.CaptureContext?
+
     func processUtterance(_ utterance: [Float], frozenContext: VoiceSharingCollector.CaptureContext? = nil) async {
         stageTimer.mark() // VAD segment ready
         let utteranceContext = frozenContext
+        lastUtteranceContextForTesting = utteranceContext
 
         if effectiveExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
@@ -435,12 +443,20 @@ class VoiceAsrEngine {
             contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
-        contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
-        onRoutingInput?(Self.makeRoutingInput(
-            source: trimmedResult,
-            routerText: finalized.text,
-            translateNote: translateNote
-        ))
+        // FINALIZATION BELONGS TO WHOEVER DECIDES LAST. Routing and execution are decided downstream of
+        // this point, so finalizing here would freeze the record before either could be recorded — which
+        // is exactly why those two stages were caller-supplied. When a routing consumer is attached it
+        // takes ownership and calls `finalizeDeferredCompletion` after routing/execution; with no
+        // consumer the historical immediate finalize is preserved.
+        if let consumer = onRoutingInput {
+            consumer(Self.makeRoutingInput(
+                source: trimmedResult,
+                routerText: finalized.text,
+                translateNote: translateNote
+            ), utteranceContext)
+        } else {
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
+        }
     }
 
     /// Builds the immutable envelope. Platform success keeps trimmed native source;
