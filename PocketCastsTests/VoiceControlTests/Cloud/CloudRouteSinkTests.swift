@@ -4573,6 +4573,113 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
     }
 
 
+    /// REVIEWER-SPECIFIED CONTROL (dc70303d): parked-A → mid-drain CANCEL. The cancel arrives
+    /// while A's drain holds the claim window. The physical stop IS the cancel's stop, so the
+    /// cancel's own identity must be emitted exactly once, A's claimant identity must NOT be
+    /// relabelled onto it, and A's unperformed identity must never be promoted by a later stop.
+    @MainActor
+    func testAMidDrainCancelEmitsTheCancelIdentityExactlyOnceAndNeverRelabelsA() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        var emittedIdentities: [Int] = []
+        player.setCapturedStopNotificationForTesting { identity, _ in
+            emittedIdentities.append(identity)
+        }
+
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio, "a frame must be pending for the drain to be scheduled")
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        // A schedules its drain and reaches the claim.
+        let aAllocated = player.finish()
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime, "the runner must reach A's claim within the bound")
+
+        // CANCEL INSIDE THE WINDOW: the cancel's identity supersedes A's queued drain.
+        let cRequested = player.cancel()
+        XCTAssertNotEqual(cRequested, aAllocated, "the cancel must allocate its own identity")
+
+        release.signal()
+
+        try await waitUntilCondition(timeout: 5) { !emittedIdentities.isEmpty }
+
+        XCTAssertEqual(
+            player.claimReleaseOutcome, .released,
+            "the runner's bounded wait must end RELEASED, not timed out"
+        )
+        // EXACTLY the cancel's identity, exactly once — not A's, not both.
+        XCTAssertEqual(
+            emittedIdentities, [cRequested],
+            "emitted=\(emittedIdentities) aAllocated=\(aAllocated) cRequested=\(cRequested): the physical stop belongs to the cancel"
+        )
+    }
+
+    /// REVIEWER-SPECIFIED CONTROL (dc70303d): combined B.finish + cancel. A successor's
+    /// independently queued finish must NOT be recorded as stopped merely because the
+    /// cancel's stop is newer: its own notification identity stays distinct and no
+    /// second stop fires for it.
+    @MainActor
+    func testCombinedSuccessorFinishAndCancelKeepDistinctIdentitiesWithoutASecondStop() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        var emittedIdentities: [Int] = []
+        player.setCapturedStopNotificationForTesting { identity, _ in
+            emittedIdentities.append(identity)
+        }
+
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio, "a frame must be pending for the drain to be scheduled")
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        let aAllocated = player.finish()
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime, "the runner must reach A's claim within the bound")
+
+        // BOTH, inside the window: B queues a finish, then a cancel supersedes the queue.
+        let bAllocated = player.finish()
+        let cRequested = player.cancel()
+        XCTAssertNotEqual(bAllocated, aAllocated)
+        XCTAssertNotEqual(cRequested, bAllocated)
+
+        release.signal()
+
+        try await waitUntilCondition(timeout: 5) { !emittedIdentities.isEmpty }
+
+        XCTAssertEqual(player.claimReleaseOutcome, .released)
+        // ONE physical stop: the cancel's identity. B's queued finish was SUPERSEDED — it must
+        // neither steal the emitted identity nor fire a second notification of its own.
+        XCTAssertEqual(
+            emittedIdentities, [cRequested],
+            "emitted=\(emittedIdentities) a=\(aAllocated) b=\(bAllocated) c=\(cRequested): exactly one stop, the cancel's"
+        )
+    }
+
     /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait
     /// must record `.timedOut` and the case asserting `.released` must fail. This does not depend on
     /// scheduling luck the way a shortened bound does.

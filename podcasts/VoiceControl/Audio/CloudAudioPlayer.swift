@@ -89,6 +89,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
         let sharesNotification = stopRequested || drainRemaining
         drainEpoch += 1
         let allocated = drainEpoch
+        // OWNERSHIP: a finish queued while a stop is already requested can never perform its
+        // own physical stop — the pending stop (whose owner is earlier) supersedes it at the
+        // queue level, so it is recorded as superseded rather than left ambiguous.
+        if stopRequested {
+            supersededStopRequests.insert(allocated)
+        } else if drainRemaining || drainClaimInFlight {
+            // A drain is already pending/claimed: this finish COALESCES onto that drain's
+            // single physical stop (the owner keeps its identity — review dc70303d: a newer
+            // queued finish is not "stopped" for being newer). It settles as superseded when
+            // that stop lands, satisfying its waiter without a second stop.
+            supersededStopRequests.insert(allocated)
+        } else {
+            stopOwnerEpoch = allocated
+        }
         drainRemaining = true
         runnerRunning = true
         if !sharesNotification { pendingStopNotifications += 1 }
@@ -135,6 +149,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
         let sharesNotification = stopRequested || drainRemaining
         drainEpoch += 1
         let requestedEpoch = drainEpoch
+        // OWNERSHIP: this cancel's stop SUPERSEDES whatever drain/finish was queued — the
+        // queued request never performs its own physical stop (review dc70303d: settle only
+        // cancellation requests actually satisfied by this physical stop; a superseded
+        // finish is not marked stopped for being sequence-newer — it is settled as superseded).
+        if stopRequested || drainRemaining {
+            let displaced = stopOwnerEpoch
+            if displaced != 0 { supersededStopRequests.insert(displaced) }
+        }
+        stopOwnerEpoch = requestedEpoch
         drainRemaining = false
         stopRequested = true
         runnerRunning = true
@@ -366,6 +389,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
+
+    /// OWNED-STOP RECORD (spec a9e27935 / review dc70303d): which REQUESTED identity physically
+    /// owns the next stop the runner performs, and which requested identities that single
+    /// physical stop SUPERSEDES. `cancel()`/`finish()` publish ownership under `runnerLock` at
+    /// request time; the runner consumes it AT the physical stop and confirms exactly the
+    /// owner's identity once. A superseded request settles through its own terminal path —
+    /// it is never relabelled onto another operation's stop, and never promoted by a later
+    /// stop it did not perform.
+    private var stopOwnerEpoch: Int = 0
+    /// Requested identities superseded by the CURRENT stop owner (guard: runnerLock).
+    private var supersededStopRequests: Set<Int> = []
+    /// A claimed drain is IN FLIGHT (claim made, physical stop not yet performed). The claim
+    /// consumed `drainRemaining`, so request sites can no longer see it — this flag keeps the
+    /// ownership record honest until the stop consumes it (guard: runnerLock).
+    private var drainClaimInFlight = false
     /// TEST-ONLY RESCUE: resumes EVERY registered waiter false and clears the registry. A
     /// control uses this to reap a (mutant-)stranded waiter after its bounded completion probe
     /// failed, so the test process never hangs on a leaked continuation.
@@ -507,15 +545,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 // this stop's confirmation would be shed by that second stop. The cancel's stop
                 // IS the quiescent end of everything queued before it.
                 drainRemaining = false
-                // Snapshot the identity WHILE HOLDING runnerLock: reading it after the unlock
-                // raced the writers in finish()/cancel().
-                let scheduledEpoch = drainEpoch
+                // OWNED-STOP: consume the published owner + superseded set under runnerLock.
+                let scheduledEpoch = stopOwnerEpoch
+                let displaced = supersededStopRequests
+                supersededStopRequests = []
+                stopOwnerEpoch = 0
                 runnerLock.unlock()
                 physicalStopGateWait()
                 stopEngine()
                 isPlaying = false
                 paused = false
                 notifyDidStop(epoch: scheduledEpoch)
+                settleSupersededRequests(displaced)
                 runnerLock.lock()
                 runnerExited = false
                 runnerLock.signal()
@@ -533,6 +574,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 // `runnerLock` across `claimRelease.wait()` would block the test's own `finish()`,
                 // which needs the same lock — a lock must never span a barrier.
                 let claimedEpoch = drainEpoch
+                drainClaimInFlight = true
                 runnerLock.unlock()
                 claimReached?.signal()
                 // BOUNDED: a setup error must fail promptly, not consume the runner forever.
@@ -1167,13 +1209,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
             guard let frame = dequeueFrame() else { break }
             playFrame(frame)
         }
-        // The stop's IDENTITY is what the runner owns AT THE STOP, not the drain claim: a cancel
-        // that landed while this drain was parked/playing bumped the identity and shed the
-        // frames — the physical stop below IS that cancel's stop, so confirming the stale claim
-        // would either strand the cancel's awaiter or (worse) promote a delayed A stop onto B's
-        // unperformed identity. Read under runnerLock (the writers' domain).
+        // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
+        // request time — the drain claim when nothing displaced it, the cancel that landed
+        // mid-window otherwise. Never a fresh re-read of `drainEpoch` (that let a successor's
+        // unscheduled request steal the stop's identity) and never the stale claim once a
+        // cancel superseded it. The displaced requests settle as superseded.
         runnerLock.lock()
-        let stoppedEpoch = drainEpoch
+        let stoppedEpoch = stopOwnerEpoch
+        let displaced = supersededStopRequests
+        supersededStopRequests = []
+        stopOwnerEpoch = 0
+        drainClaimInFlight = false
         // CANONICAL QUIESCENCE AT THE DRAIN END (review 0585959a): a cancel that landed while
         // this drain was claimed/playing bumped the identity and queued `stopRequested`. The
         // physical stop below IS that cancel's stop — the epoch snapshot proves it — so the
@@ -1186,6 +1232,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         isPlaying = false
         paused = false
         notifyDidStop(epoch: stoppedEpoch)
+        settleSupersededRequests(displaced)
+    }
+
+    /// Terminal settlement for requests this physical stop SUPERSEDED: their waiters resolve
+    /// through their OWN record, never by relabelling them onto the owner's stop identity
+    /// (review dc70303d: exactly-once, only-after-actual-stop settlement).
+    private func settleSupersededRequests(_ displaced: Set<Int>) {
+        guard !displaced.isEmpty else { return }
+        bufferLock.lock()
+        lastConfirmedStopEpoch = max(lastConfirmedStopEpoch, displaced.max() ?? 0)
+        bufferLock.unlock()
+        for epoch in displaced.sorted() { resumeStopWaiters(upTo: epoch) }
     }
 
     /// Snapshots what a control cannot read from the test thread while the runner is parked:
