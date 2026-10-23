@@ -520,6 +520,40 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(carried, "no durable record carried the detector's failure")
     }
 
+    /// NORMAL ASR → DURABLE RECORD (review 6fe6d773). A SUCCESSFUL recognition must be publishable: the
+    /// stored record must carry the transcript the recogniser actually returned. Reporting `completed`
+    /// with no text made the sink overwrite the caller's text and the binding refuse it, so a successful
+    /// capture produced no record at all.
+    func test_aSuccessfulRecognitionPublishesItsTranscriptIntoTheDurableRecord() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        chain.backend.stubTranscript = "play the latest episode"
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else {
+            return XCTFail("a successful recognition must produce a durable record")
+        }
+        var transcripts: [String] = []
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["asr"] as? [String: Any]
+            guard asr?["state"] as? String == "completed" else { continue }
+            if let text = asr?["text"] as? String { transcripts.append(text) }
+        }
+        XCTAssertTrue(transcripts.contains("play the latest episode"),
+                      "the record must carry the recogniser's own transcript; got \(transcripts) "
+                          + "(transcribe calls: \(chain.backend.transcribeCalls), "
+                          + "entries: \(entries.count))")
+    }
+
     /// The caller claims wake was never attempted; the detector actually RAN and failed. For the SAME
     /// capture, the engine's observation must win — a claim may not narrate over a real observation.
     func test_aCallerClaimCannotHideTheDetectorsFailure() async throws {
@@ -772,10 +806,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return XCTFail("no ready record carried the engine's wake observation "
                 + "(entries: \(entries.count))")
         }
+        // The caller claimed the ASR stage was unobserved; the recogniser DID run for this capture and
+        // returned an empty transcript, so the engine's honest report replaces the claim.
         let asr = observations["asr"] as? [String: Any]
-        XCTAssertEqual(asr?["state"] as? String, "unknown",
-                       "the caller-supplied unknown ASR claim survives where the engine reports nothing")
-        XCTAssertEqual(asr?["reason"] as? String, "observation_unavailable")
+        XCTAssertEqual(asr?["state"] as? String, "not_run",
+                       "the engine's own ASR outcome must replace the caller's unknown claim")
+        XCTAssertEqual(asr?["reason"] as? String, "rejected_by_wake")
         // PROVENANCE (review c48461e6): the caller said wake=not_run; the engine delivered frames for this
         // capture, so the stored record must say completed. If the sink ignored `reportedStages`, this
         // would read not_run and the assertion would fail.
@@ -791,7 +827,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let policy = openGate(enrolled: true)
         let chain = makeChain(policy: policy, claims: { [self] in
             var broken = self.claims
-            broken["asr"] = .init(state: "failed", reason: "observation_unavailable")
+            // Break a stage the ENGINE DOES NOT report, so the caller's claim is what reaches the sink and
+            // the pairing rule is genuinely the thing refusing it (the engine now reports asr itself).
+            broken["translation"] = .init(state: "failed", reason: "observation_unavailable")
             return broken
         })
         chain.engine.listeningMode = .continuous
@@ -820,9 +858,11 @@ final class EngineStubBackend: AsrBackend {
         AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
+    /// The transcript this stub returns; a real recogniser returns text.
+    var stubTranscript = ""
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
         transcribeCalls += 1
-        return AsrResult(text: "", detectedLanguage: nil)
+        return AsrResult(text: stubTranscript, detectedLanguage: nil)
     }
     func release() {}
 

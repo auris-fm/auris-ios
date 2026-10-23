@@ -115,6 +115,10 @@ final class VoiceSharingCollector {
         var droppedFrom: Int? = nil
         var original: Int? = nil
         var terminal = false
+        /// Held until the engine finalizes the capture (downstream ASR/translation/routing complete).
+        /// Without this, the record is emitted at segmentation time and can never carry a downstream stage.
+        /// OPT-IN: a consumer that emits directly (and never finalizes) keeps the immediate behaviour.
+        var deferEmissionUntilFinalized = false
     }
 
     private let policy: VoiceSharingPolicy
@@ -304,8 +308,22 @@ final class VoiceSharingCollector {
 
     /// Completion matched against the CONTEXT THE ENGINE CAPTURED, not current state. A nil/unknown context
     /// (no capture was open when the utterance Task launched) refuses outright.
-    func speechCompleted(_ samples: [Float], context: CaptureContext?) {
+    func speechCompleted(_ samples: [Float], context: CaptureContext?, deferEmission: Bool = false) {
+        if let context, deferEmission {
+            lock.lock()
+            if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
+                rec.capture.deferEmissionUntilFinalized = true
+                terminalRing[context.id] = rec
+            }
+            if var c = current, c.id == context.id, !c.terminal {
+                c.deferEmissionUntilFinalized = true
+                current = c
+            }
+            lock.unlock()
+        }
         if emitLateOutcomeIfTerminal(kind: .completed, context: context) { return }
+        // A late outcome that CANNOT be emitted yet (downstream stages still to come) leaves the capture
+        // ring-resident; the engine finalizes it. Nothing else may be refused by falling through.
         lock.lock()
         guard var c = resolve(context) else { lock.unlock(); return }
         guard !c.terminal, c.sawStart else { lock.unlock(); return }
@@ -325,7 +343,28 @@ final class VoiceSharingCollector {
                                             // event share it via COW from this point
         aggregateAudioSamples -= c.retained.count
         markTerminal(c)                     // ring re-registers the (immutable, completed) capture
+        if c.deferEmissionUntilFinalized {
+            // DOWNSTREAM STAGES STILL RUN (spec 2dcf8c5b, review 6fe6d773): ASR/translation/routing
+            // decisions happen AFTER the segment closes, so emitting here would publish a record that can
+            // never carry them. The capture stays ring-resident until the engine finalizes it.
+            lock.unlock()
+            return
+        }
         let event = makeEvent(kind: .completed, from: c)
+        lock.unlock()
+        submit(event)
+    }
+
+    /// The engine's downstream work for this capture is finished. Emit the completion now, carrying every
+    /// observation the engine reported in the meantime. A capture that is not ring-resident (already
+    /// emitted, or never completed) is a no-op, so a double finalize cannot publish twice.
+    func finalizeDeferredCompletion(context: CaptureContext?) {
+        guard let context else { return }
+        lock.lock()
+        guard var rec = terminalRing[context.id], !rec.emitted else { lock.unlock(); return }
+        rec.emitted = true
+        terminalRing[context.id] = rec
+        let event = makeEvent(kind: .completed, from: rec.capture)
         lock.unlock()
         submit(event)
     }
@@ -495,6 +534,14 @@ final class VoiceSharingCollector {
             && policy.permitsCollection
             && membership().effectiveEnrolled
         guard sameConsent else { lock.unlock(); return false }
+        // DEFER (spec 2dcf8c5b, review 6fe6d773): the capture's downstream stages (ASR, translation,
+        // routing) have not run yet. Emitting now would publish an immutable record that can never carry
+        // them — the engine finalizes instead. Reported as "handled" so callers do not fall through into
+        // a second emission path.
+        if kind == .completed, rec.capture.deferEmissionUntilFinalized {
+            lock.unlock()
+            return true
+        }
         rec.emitted = true
         terminalRing[context.id] = rec
         let event = makeEvent(kind: kind, from: rec.capture)

@@ -329,9 +329,13 @@ class VoiceAsrEngine {
         // Segment accepted by wake gating: hand the completed capture AND its immutable context to the
         // collector before any ASR work. The context — not whatever is current inside the collector — decides
         // whether this completion belongs.
-        contributionCollector?.speechCompleted(utterance, context: utteranceContext)
+        contributionCollector?.speechCompleted(
+            utterance, context: utteranceContext, deferEmission: true)
 
-        guard !utterance.isEmpty else { return }
+        guard !utterance.isEmpty else {
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
+            return
+        }
         let ready: Result<Void, Error>
         backendReadyLock.lock()
         let cachedReadyTask = backendReadyBox.task
@@ -354,6 +358,7 @@ class VoiceAsrEngine {
                 stage: "asr",
                 outcome: .init(state: "failed", reason: "provider_error"),
                 context: utteranceContext)
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
         stageTimer.mark() // ASR start
@@ -362,13 +367,6 @@ class VoiceAsrEngine {
         let asrMs = Int(Date().timeIntervalSince(asrStartedAt) * 1000)
         stageTimer.mark() // ASR result
         emitStageTiming(detectedConfidence: detectedConfidence)
-
-        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the recogniser RAN for this capture and returned a
-        // result. Whether the resulting text is usable is a downstream judgement, not the ASR outcome.
-        contributionCollector?.engineReported(
-            stage: "asr",
-            outcome: .init(state: "completed", reason: nil),
-            context: utteranceContext)
 
         let isWakePositive = detectedConfidence != nil
         let trimmedText = WakeTranscriptTrimmer.commandText(
@@ -383,6 +381,24 @@ class VoiceAsrEngine {
             return "trim '\(asrResult.text)' → '\(trimmedText)'"
         }()
 
+        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b, review 6fe6d773): the ASR report carries the
+        // CAPTURE'S ACTUAL TRANSCRIPT. A `completed` ASR stage is only publishable with text — the encoder
+        // emits `text` only when present and the binding requires it — so reporting `completed` with no
+        // text would make a SUCCESSFUL recognition unpublishable. An empty transcript is therefore
+        // reported honestly as not_run with the enumerated reason, not as a completed empty result.
+        if trimmedText.isEmpty {
+            contributionCollector?.engineReported(
+                stage: "asr",
+                // An empty transcript with no wake hit means the recogniser produced nothing usable.
+                outcome: .init(state: "not_run", reason: isWakePositive ? "rejected_by_wake" : "provider_error"),
+                context: utteranceContext)
+        } else {
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "completed", reason: nil, text: trimmedText),
+                context: utteranceContext)
+        }
+
         if trimmedText.isEmpty {
             let reason = isWakePositive ? "wake-only" : "empty"
             FileLog.shared.addMessage(
@@ -391,6 +407,7 @@ class VoiceAsrEngine {
             if isWakePositive {
                 onWakeOnly?()
             }
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
 
@@ -407,8 +424,10 @@ class VoiceAsrEngine {
             // Don't feed untranslated CJK into the English-only intent model.
             FileLog.shared.addMessage("[VoicePipeline] → drop (\(translateNote ?? "translate"))")
             onUnroutable?()
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
+        contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
         onRoutingInput?(Self.makeRoutingInput(
             source: trimmedResult,
             routerText: finalized.text,
