@@ -4570,6 +4570,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             emittedIdentities, [aAllocated],
             "emitted=\(emittedIdentities) aAllocated=\(aAllocated) bAllocated=\(bAllocated)"
         )
+        assertNoStrandedStopNotifications(player, "parked A + successor B finish")
     }
 
 
@@ -4625,6 +4626,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             emittedIdentities, [cRequested],
             "emitted=\(emittedIdentities) aAllocated=\(aAllocated) cRequested=\(cRequested): the physical stop belongs to the cancel"
         )
+        assertNoStrandedStopNotifications(player, "mid-drain cancel")
     }
 
     /// REVIEWER-SPECIFIED CONTROL (dc70303d): combined B.finish + cancel. A successor's
@@ -4678,6 +4680,84 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             emittedIdentities, [cRequested],
             "emitted=\(emittedIdentities) a=\(aAllocated) b=\(bAllocated) c=\(cRequested): exactly one stop, the cancel's"
         )
+        assertNoStrandedStopNotifications(player, "combined B finish + cancel")
+    }
+
+    /// REVIEWER 47f67d4d: coalesced accounting must include in-flight claim work — the
+    /// pending-stop-notification counter must return to ZERO after every parked scenario,
+    /// or a stranded increment refuses every future admission.
+    private func assertNoStrandedStopNotifications(_ player: CloudAudioPlayer, _ label: String) {
+        XCTAssertEqual(
+            player.pendingStopNotificationsForTesting, 0,
+            "\(label): pending stop notifications must settle to zero"
+        )
+    }
+
+    /// REVIEWER 47f67d4d: a cancelled drain's displaced owner must appear in the EXPLICIT
+    /// settlement record — and an identity NOT in that record must not be implicitly settled
+    /// by it. A waiter on a lower, never-performed identity stays stranded (returning false
+    /// on its bound), proving the exact-set settlement does not promote bystanders.
+    @MainActor
+    func testMidDrainCancelSettlesTheDisplacedOwnerExplicitlyAndNeverABystanderLowerIdentity() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio)
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        // THE BYSTANDER: an identity ABOVE the cancel's (it will allocate cancel+1 implicitly? no —
+        // identities allocate only on request), so use the identity the cancel WILL take: register
+        // the bystander waiter on `aAllocated + 1` AFTER the cancel (so the value is known), while
+        // the runner is still parked mid-stop? The stop fires on release. Simpler: take the bystander
+        // as an identity allocated but never satisfied — cancel() BEFORE the bystander registration
+        // is released? We register the bystander waiter AFTER the cancel request and BEFORE the
+        // release: the bystander's epoch = cancelEpoch (performed ⇒ settles true, useless) — so use
+        // bystander = aAllocated - 1 relative to a RAISED floor: perform one full turn first.
+        let firstAllocated = player.finish()
+        let settledFirst = await player.awaitActualStop(after: firstAllocated, timeout: 5)
+        XCTAssertTrue(settledFirst, "setup: the first turn must fully stop to raise the floor to \(firstAllocated)")
+        // Now floor == firstAllocated. The bystander must be ABOVE the floor (else it answers
+        // immediately) and NEVER requested. Identities allocate sequentially on request, so the
+        // next request takes firstAllocated+1. The bystander takes the identity AFTER the cancel's:
+        // request A (takes +1), cancel (+2, performed), bystander (+3, never performed, above floor 2).
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio, "setup: a frame must be pending for A's drain")
+        let aAllocated = player.finish()
+        XCTAssertNotEqual(aAllocated, firstAllocated)
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime)
+
+        let cancelEpoch = player.cancel() // supersedes A's in-flight claim
+        let bystanderEpoch = cancelEpoch + 1 // never requested; floor is firstAllocated < it
+        XCTAssertGreaterThan(bystanderEpoch, firstAllocated, "bystander must sit above the confirmed floor")
+        var bystanderSettled = false
+        async let bystander: Bool = player.awaitActualStop(after: bystanderEpoch, timeout: 1)
+        try await Task.sleep(nanoseconds: 100_000_000) // let it register
+        release.signal()
+
+        // A's waiter settles EXPLICITLY via the displaced record.
+        let aSettled = await player.awaitActualStop(after: aAllocated, timeout: 5)
+        XCTAssertTrue(aSettled, "the displaced owner's waiter settles via the explicit record")
+
+        bystanderSettled = await bystander
+        XCTAssertFalse(
+            bystanderSettled,
+            "a lower identity outside the displaced record must NOT be implicitly promoted"
+        )
+        assertNoStrandedStopNotifications(player, "mid-drain cancel")
     }
 
     /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait

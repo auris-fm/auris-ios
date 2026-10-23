@@ -86,15 +86,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
         runnerLock.lock()
         // Same atomic coalescing as cancel(): the check and the publication share one
         // critical section, so the runner cannot complete a decrement before the increment.
-        let sharesNotification = stopRequested || drainRemaining
+        let sharesNotification = stopRequested || drainRemaining || drainClaimInFlight
         drainEpoch += 1
         let allocated = drainEpoch
         // OWNERSHIP: a finish queued while a stop is already requested can never perform its
         // own physical stop — the pending stop (whose owner is earlier) supersedes it at the
         // queue level, so it is recorded as superseded rather than left ambiguous.
-        if stopRequested {
+        if stopRequested || drainClaimInFlight {
             supersededStopRequests.insert(allocated)
-        } else if drainRemaining || drainClaimInFlight {
+        } else if drainRemaining {
             // A drain is already pending/claimed: this finish COALESCES onto that drain's
             // single physical stop (the owner keeps its identity — review dc70303d: a newer
             // queued finish is not "stopped" for being newer). It settles as superseded when
@@ -146,16 +146,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // section that signals the runner: the runner can never observe the signal and complete
         // its decrement before the increment is published (that race stranded the counter
         // positive forever).
-        let sharesNotification = stopRequested || drainRemaining
+        let sharesNotification = stopRequested || drainRemaining || drainClaimInFlight
         drainEpoch += 1
         let requestedEpoch = drainEpoch
         // OWNERSHIP: this cancel's stop SUPERSEDES whatever drain/finish was queued — the
         // queued request never performs its own physical stop (review dc70303d: settle only
         // cancellation requests actually satisfied by this physical stop; a superseded
         // finish is not marked stopped for being sequence-newer — it is settled as superseded).
-        if stopRequested || drainRemaining {
-            let displaced = stopOwnerEpoch
-            if displaced != 0 { supersededStopRequests.insert(displaced) }
+        if stopRequested || drainRemaining || drainClaimInFlight {
+            // The in-flight claim counts too: its owner's identity must be EXPLICITLY
+            // recorded as displaced, never left to be satisfied incidentally by a sweep.
+            let displacedOwner = stopOwnerEpoch
+            if displacedOwner != 0 { supersededStopRequests.insert(displacedOwner) }
         }
         stopOwnerEpoch = requestedEpoch
         drainRemaining = false
@@ -1160,6 +1162,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
     var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
 
+    /// TEST-ONLY: the coalesced pending-stop-notification counter. A stranded positive value
+    /// refuses every future admission, so controls assert it returns to zero.
+    var pendingStopNotificationsForTesting: Int {
+        runnerLock.lock(); defer { runnerLock.unlock() }
+        return pendingStopNotifications
+    }
+
     /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
     /// the same drain loop continues.
     func setDrainHoldForTesting(_ hold: Bool) {
@@ -1240,10 +1249,23 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// (review dc70303d: exactly-once, only-after-actual-stop settlement).
     private func settleSupersededRequests(_ displaced: Set<Int>) {
         guard !displaced.isEmpty else { return }
+        // EXACT-SET settlement (review 47f67d4d): resume ONLY waiters whose epoch is in the
+        // displaced record — never a lower identity that this stop did not satisfy. The
+        // `upTo` sweep is for CONFIRMED identities (a physical stop of E satisfies every
+        // request ≤ E); a displaced record is a SETTLEMENT of specific requests, and folding
+        // them into the monotonic record would let a lower identity ride along unproven.
         bufferLock.lock()
-        lastConfirmedStopEpoch = max(lastConfirmedStopEpoch, displaced.max() ?? 0)
+        var resumed: [CheckedContinuation<Bool, Never>] = []
+        for (id, ticket) in stopWaiters where displaced.contains(ticket.epoch) {
+            stopWaiters.removeValue(forKey: id)
+            if let continuation = ticket.takeContinuation() { resumed.append(continuation) }
+        }
+        // NO floor fold: folding displaced maxima into `lastConfirmedStopEpoch` would let
+        // `confirmStopForBoundWaiter`/the `upTo` sweep implicitly satisfy ANY lower identity —
+        // exactly the unproven promotion the reviewer banned. A displaced waiter settles ONLY
+        // through its entry in this record, resolved above.
         bufferLock.unlock()
-        for epoch in displaced.sorted() { resumeStopWaiters(upTo: epoch) }
+        for continuation in resumed { continuation.resume(returning: true) }
     }
 
     /// Snapshots what a control cannot read from the test thread while the runner is parked:
