@@ -72,8 +72,16 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                     }
                     XCTAssertEqual(path, "observations.\(stage).reason",
                                    "the refusal must name the offending stage for \(stage)/\(state)")
-                    XCTAssertTrue(message.contains("detector_error requires wake+failed"),
-                                  "refusal for \(stage)/\(state) must state the pairing rule, got: \(message)")
+                    // f8 says a COMPLETED stage carries no reason at all, and that rule is checked first,
+                    // so for these pairs the refusal correctly names that stronger rule. Both are real
+                    // refusals of the same payload; asserting the specific cause keeps this honest about
+                    // WHICH rule fired instead of accepting any message.
+                    let expected = state == "completed"
+                        ? "a completed stage carries no reason"
+                        : "detector_error requires wake+failed"
+                    XCTAssertTrue(message.contains(expected),
+                                  "refusal for \(stage)/\(state) must state its rule (\(expected)), "
+                                      + "got: \(message)")
                 }
             }
         }
@@ -113,7 +121,9 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                 return XCTFail("expected invalidField, got \(error)")
             }
             XCTAssertEqual(path, "observations.wake.reason")
-            XCTAssertTrue(message.contains("detector_error requires wake+failed"), "got: \(message)")
+            // The completed path is now refused by f8's no-reason rule, which is the stronger and
+            // earlier check for a completed stage; that rule is what must be named.
+            XCTAssertTrue(message.contains("a completed stage carries no reason"), "got: \(message)")
         }
     }
 
@@ -303,8 +313,14 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                     // validator that merely lacks the reason would also throw here for the wrong
                     // reason and leave this control green (found by mutation: removing the pairing
                     // check left this test passing).
-                    XCTAssertTrue(message.contains("requires state unknown"),
-                                  "\(stage)/\(state): expected the pairing refusal, got '\(message)'")
+                    // f8 refuses ANY reason on a completed stage before the pairing rule is reached, so
+                    // for completed pairs the stronger rule is the one that correctly fires. Asserting
+                    // the rule that applies keeps this from silently accepting an unrelated refusal.
+                    let expected = state == "completed"
+                        ? "a completed stage carries no reason"
+                        : "requires state unknown"
+                    XCTAssertTrue(message.contains(expected),
+                                  "\(stage)/\(state): expected '\(expected)', got '\(message)'")
                 }
             }
         }

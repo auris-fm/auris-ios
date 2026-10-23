@@ -1009,22 +1009,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             "routing": .init(state: "unknown", reason: "observation_unavailable"),
             "execution": .init(state: "unknown", reason: "observation_unavailable"),
         ]
-        let samples = (0..<16_000).map { Float(sin(Double($0) * 0.01)) * 0.4 }
-        let event = VoiceSharingCollector.SegmentEvent(
-            kind: .completed,
-            captureID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
-            enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
-            retainedSamples: samples.count, truncated: false, droppedSpans: [],
-            originalSampleCount: nil, audio: samples, isGateControl: false)
-        let provenance = VoiceSharingContributionEncoder.Provenance(
-            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
-            models: VoiceSharingContributionEncoder.Models(
-                vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
-                asr: .init(id: "asr-1", version: "1"), translation: nil,
-                router: .init(id: "router-1", version: "1")),
-            conversionVersion: "v1")
-        let encoded = try VoiceSharingContributionEncoder.encode(
-            event: event, provenance: provenance, observations: observations)
+        let encoded = try encodeEmptyResultRecord()
         let base = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
 
@@ -1054,6 +1039,41 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         try refuse("router_input null", text: nil, routerInput: NSNull(), mentioning: "router_input")
     }
 
+    /// A real encoder fixture whose ASR stage is completed/empty_result — the one legal completed reason.
+    private func encodeEmptyResultRecord() throws -> VoiceSharingContributionEncoder.Encoded {
+        let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+            "wake": .init(state: "completed"),
+            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
+            "asr": .init(state: "completed", reason: "empty_result"),
+            "translation": .init(state: "unknown", reason: "observation_unavailable"),
+            "routing": .init(state: "unknown", reason: "observation_unavailable"),
+            "execution": .init(state: "unknown", reason: "observation_unavailable"),
+        ]
+        let samples = (0..<16_000).map { Float(sin(Double($0) * 0.01)) * 0.4 }
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed,
+            captureID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+            enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: VoiceSharingContributionEncoder.Models(
+                vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
+                asr: .init(id: "asr-1", version: "1"), translation: nil,
+                router: .init(id: "router-1", version: "1")),
+            conversionVersion: "v1")
+        return try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: observations)
+    }
+
+    /// The RECORD object of that fixture, for mutation.
+    private func encodedRecordWithEmptyResult() throws -> [String: Any] {
+        let encoded = try encodeEmptyResultRecord()
+        return try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
+    }
+
     /// Re-seals with the PRODUCTION canonicalizer so the digest binds the mutated bytes.
     private func rescaled(_ record: [String: Any]) throws -> Data {
         var digest = ""
@@ -1063,6 +1083,141 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         #endif
         let envelope: [String: Any] = ["record": record, "record_sha256": digest]
         return try JSONSerialization.data(withJSONObject: envelope)
+    }
+
+    /// A TRANSLATION SKIP REASON IS A DECISION NOT TO RUN (spec 4d10275f, review b5fb69ef). Each of the
+    /// three is valid ONLY on translation/not_run; on any other stage, or with failed/cancelled/unknown/
+    /// completed, it would claim a skip and a non-skip at once.
+    func test_translationSkipReasonsAreValidOnlyWithTranslationNotRun() throws {
+        let skipReasons = ["source_language_unavailable", "backend_handles_translation",
+                           "translator_unavailable"]
+        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
+        func payload(stage: String, state: String, reason: String) -> [String: Any] {
+            var all: [String: Any] = [:]
+            for name in stages {
+                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
+            }
+            var block: [String: Any] = ["state": state, "reason": reason]
+            if stage == "asr" && state == "completed" { block["text"] = "hello" }
+            all[stage] = block
+            return all
+        }
+        // ACCEPTED FIRST: the one legal combination must bind, or the refusals below prove nothing.
+        for reason in skipReasons {
+            XCTAssertNoThrow(
+                try VoiceSharingRecordBinding.validateObservationsForTesting(
+                    payload(stage: "translation", state: "not_run", reason: reason)),
+                "translation/not_run/\(reason) is the legal pairing")
+        }
+        // REFUSED: right reason, wrong stage — and right stage, wrong state.
+        for stage in stages where stage != "translation" {
+            for reason in skipReasons {
+                do {
+                    try VoiceSharingRecordBinding.validateObservationsForTesting(
+                        payload(stage: stage, state: "not_run", reason: reason))
+                    XCTFail("\(stage)/not_run/\(reason): skip reasons are translation-only")
+                } catch let error as VoiceSharingRecordBinding.BindingError {
+                    guard case .invalidField(let path, let message) = error else {
+                        return XCTFail("\(stage): expected invalidField, got \(error)")
+                    }
+                    XCTAssertEqual(path, "observations.\(stage).reason")
+                    XCTAssertTrue(message.contains("valid only on the translation stage"),
+                                  "\(stage): refusal must state the stage rule, got \(message)")
+                }
+            }
+        }
+        for state in ["failed", "cancelled", "unknown"] {
+            for reason in skipReasons {
+                do {
+                    try VoiceSharingRecordBinding.validateObservationsForTesting(
+                        payload(stage: "translation", state: state, reason: reason))
+                    XCTFail("translation/\(state)/\(reason): a skip requires not_run")
+                } catch let error as VoiceSharingRecordBinding.BindingError {
+                    guard case .invalidField(_, let message) = error else {
+                        return XCTFail("translation/\(state): expected invalidField, got \(error)")
+                    }
+                    XCTAssertTrue(message.contains("requires state not_run"),
+                                  "translation/\(state): refusal must state the state rule, got \(message)")
+                }
+            }
+        }
+        // RE-SEALED PERSISTED ENVELOPE: translation/failed carrying a skip reason.
+        let record = try encodedRecordWithEmptyResult()
+        var mutated = record
+        var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
+        all["translation"] = ["state": "failed", "reason": "translator_unavailable"]
+        mutated["observations"] = all
+        do {
+            _ = try VoiceSharingRecordBinding.bind(envelope: try rescaled(mutated), audio: Data())
+            XCTFail("a persisted translation/failed carrying a skip reason must be refused")
+        } catch let error as VoiceSharingRecordBinding.BindingError {
+            guard case .invalidField(let path, let message) = error else {
+                return XCTFail("expected invalidField from the persisted envelope, got \(error)")
+            }
+            XCTAssertEqual(path, "observations.translation.reason")
+            XCTAssertTrue(message.contains("requires state not_run"), "got \(message)")
+        }
+    }
+
+    /// SPEC DELTA f8 ON EVERY STAGE (review b5fb69ef): a completed stage carries NO reason. Only exact
+    /// asr/completed/empty_result may, where the reason IS the result. Asserted on the raw observations
+    /// AND on a re-sealed persisted envelope, so the rule is proven where records actually come back.
+    func test_aCompletedStageCarriesNoReasonOnEveryStage() throws {
+        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
+        // Each stage's own first enumerated reason, used as the "carries a reason" payload.
+        let reasons: [String: String] = [
+            "wake": "below_threshold",
+            "bleed": "no_playback_reference",
+            "asr": "local_only_action",
+            "translation": "no_text",
+            "routing": "no_candidates",
+            "execution": "client_refused",
+        ]
+        func observations(completedStage: String, reason: String, text: String? = nil) -> [String: Any] {
+            var all: [String: Any] = [:]
+            for stage in stages {
+                all[stage] = ["state": "unknown", "reason": "observation_unavailable"]
+            }
+            var block: [String: Any] = ["state": "completed", "reason": reason]
+            if let text { block["text"] = text }
+            all[completedStage] = block
+            return all
+        }
+        for stage in stages {
+            let payload = observations(completedStage: stage, reason: reasons[stage]!,
+                                       text: stage == "asr" ? "hello" : nil)
+            do {
+                try VoiceSharingRecordBinding.validateObservationsForTesting(payload)
+                XCTFail("\(stage): a completed stage must not carry a reason")
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                guard case .invalidField(let path, let message) = error else {
+                    return XCTFail("\(stage): expected invalidField, got \(error)")
+                }
+                XCTAssertEqual(path, "observations.\(stage).reason",
+                               "the refusal must name the offending stage")
+                XCTAssertTrue(message.contains("a completed stage carries no reason"),
+                              "\(stage): refusal must state the rule, got \(message)")
+            }
+        }
+        // RE-SEALED PERSISTED ENVELOPE: the same contradiction coming back through `bind`.
+        let record = try encodedRecordWithEmptyResult()
+        var mutated = record
+        var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
+        var wake = try XCTUnwrap(all["wake"] as? [String: Any])
+        wake["state"] = "completed"
+        wake["reason"] = "below_threshold"
+        all["wake"] = wake
+        mutated["observations"] = all
+        let sealed = try rescaled(mutated)
+        do {
+            _ = try VoiceSharingRecordBinding.bind(envelope: sealed, audio: Data())
+            XCTFail("a persisted record with a completed stage carrying a reason must be refused")
+        } catch let error as VoiceSharingRecordBinding.BindingError {
+            guard case .invalidField(let path, _) = error else {
+                return XCTFail("expected invalidField from the persisted envelope, got \(error)")
+            }
+            XCTAssertEqual(path, "observations.wake.reason")
+        }
     }
 
     /// `empty_result` DESCRIBES ONE THING ONLY (spec delta c6f3bdf7): a recognition that succeeded and

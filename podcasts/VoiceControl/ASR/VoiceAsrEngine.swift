@@ -530,10 +530,9 @@ class VoiceAsrEngine {
         }
         // `source_language_target_language` means exactly what it says: the source IS the target, so
         // translation was correctly skipped. Only the `detected == "en"` branch below can assert that
-        // (review bb404153). The other three skips are a MISSING SOURCE LANGUAGE, a backend that cannot
-        // translate, and an absent platform stage — none of which proves source equals target, so none of
-        // them may borrow that reason. Those three are reported as `unknown`/`observation_unavailable`:
-        // honest, and not a claim about what translation did.
+        // (review bb404153). The other three skips are DISTINCT KNOWN FACTS (spec 4d10275f) and each
+        // reports its own reason: no source language, a backend that handles translation itself, or no
+        // platform translator attached. None of them proves source equals target, so none may borrow it.
         guard let detected = result.detectedLanguage?.lowercased() else {
             report(.init(state: "not_run", reason: "source_language_unavailable"))
             return (result, "translate=skip(no lang)")

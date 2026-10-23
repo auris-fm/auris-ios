@@ -236,6 +236,13 @@ enum VoiceSharingRecordBinding {
     /// not a failure and not an absence of observation. It is valid ONLY on ASR, ONLY with `completed`, and
     /// ONLY with both `text` and `router_input` absent — a stage that produced no text cannot have produced
     /// a router input, and carrying either would contradict the reason it is declaring.
+    /// The three reasons that describe translation being CORRECTLY SKIPPED (spec delta 4d10275f). They
+    /// say why the stage did not run, so they are valid only with `state: not_run` — attaching one to a
+    /// failure or a cancellation would describe a decision that was never made (review b5fb69ef).
+    private static let translationSkipReasons: Set<String> = [
+        "source_language_unavailable", "backend_handles_translation", "translator_unavailable",
+    ]
+
     private static let emptyResultReason = "empty_result"
 
     /// The engine names this reason when a recognition succeeded and returned nothing usable. Exposed so
@@ -329,6 +336,21 @@ enum VoiceSharingRecordBinding {
             guard let state = declared["state"] as? String, observationStates.contains(state) else {
                 throw BindingError.invalidField("\(stagePath).state", "enumerated state required")
             }
+            // SPEC DELTA f8: a COMPLETED stage carries no reason at all — success needs no explanation,
+            // and a reason there is a narrative attached to a success. The single exception is ASR
+            // completed/empty_result, where the reason IS the result.
+            if state == "completed" {
+                if let reason = declared["reason"], !(reason is NSNull) {
+                    guard let text = reason as? String else {
+                        throw BindingError.invalidField("\(stagePath).reason", "string required")
+                    }
+                    if !(stage == "asr" && text == emptyResultReason) {
+                        throw BindingError.invalidField(
+                            "\(stagePath).reason",
+                            "a completed stage carries no reason; only asr/empty_result may")
+                    }
+                }
+            }
             // Only a completed stage may omit a reason; anything else must say why, from the list.
             if state != "completed" {
                 guard let reason = declared["reason"] as? String, !reason.isEmpty else {
@@ -349,6 +371,8 @@ enum VoiceSharingRecordBinding {
                     throw BindingError.invalidField(
                         "\(stagePath).reason",
                         "empty_result requires state completed, not \(state)")
+                } else if translationSkipReasons.contains(reason) {
+                    try assertTranslationSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
@@ -396,6 +420,8 @@ enum VoiceSharingRecordBinding {
                     // Same enforcement on the completed path: a real failure cannot be attached to a
                     // stage that reports success, nor to a stage other than wake (spec 9578b16).
                     try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
+                } else if translationSkipReasons.contains(text) {
+                    try assertTranslationSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else if text == emptyResultReason {
                     // `empty_result` is the ONLY reason a completed stage may carry, and only on ASR.
                     // Asserted BEFORE the per-stage field rules below, which must then see an absent text.
@@ -416,6 +442,20 @@ enum VoiceSharingRecordBinding {
     /// `empty_result` describes a SUCCESSFUL recognition with nothing usable in it, so it is valid only on
     /// ASR with `completed` and with both `text` and `router_input` absent (spec c6f3bdf7). Any other
     /// combination asserts something the capture cannot have done.
+    /// A translation skip reason states a DECISION NOT TO RUN the stage, so it is valid only on the
+    /// translation stage with `state: not_run` (spec 4d10275f, review b5fb69ef). A `failed` or
+    /// `cancelled` translation carrying one would claim a skip and a non-skip at once.
+    private static func assertTranslationSkipPairing(stage: String, state: String, path: String) throws {
+        guard stage == "translation" else {
+            throw BindingError.invalidField(
+                path, "translation skip reasons are valid only on the translation stage, not \(stage)")
+        }
+        guard state == "not_run" else {
+            throw BindingError.invalidField(
+                path, "translation skip reason requires state not_run, not \(state)")
+        }
+    }
+
     private static func assertEmptyResultPairing(
         stage: String, state: String, declared: [String: Any], path: String
     ) throws {
