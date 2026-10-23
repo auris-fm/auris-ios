@@ -203,6 +203,11 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
     /// didFinishLoading fires right after the burst).
     func test_localhostServerObservesTheClientStopAfterTheCapCrossing() async throws {
         let stopFlag = StopFlag()
+        var acceptedConnection: NWConnection?
+        // A PLAIN session: self.session intercepts every request through the URLProtocol
+        // harness, which would never let real TCP reach the local listener.
+        let plainConfiguration = URLSessionConfiguration.ephemeral
+        let plainSession = URLSession(configuration: plainConfiguration)
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         let listener = try NWListener(using: parameters, on: .any)
@@ -215,7 +220,10 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                 ready.signal()
             }
         }
+        let accepted = ConnectionHolder()
         listener.newConnectionHandler = { connection in
+            acceptedConnection = connection  // for defer cleanup
+            accepted.store(connection)
             // STILL-PRODUCING PEER (reviewer e1c86d32): headers with NO content-length, then
             // chunks forever. The cap crossing happens while the provider is still streaming;
             // only a client-side cancellation can end this. Sending starts ONLY on .ready —
@@ -225,6 +233,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                 switch state {
                 case .failed, .cancelled:
                     stopFlag.stop()
+                    accepted.clear()   // no further pump scheduling after the connection ends
                 case .ready:
                     guard !stopFlag.started else { break }
                     stopFlag.markStarted()
@@ -233,13 +242,16 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                     // Chunked encoding: each write is one <hex-length>\r\n<data>\r\n chunk.
                     var sequence = 0
                     func pump() {
-                        guard sequence < 100 else { return }   // bounded: 100 × 16 KiB = 1.6 MB max
+                        // Stop scheduling once the connection has ended or a send failed —
+                        // no work outstanding beyond the observed stop (reviewer 8619e6e2).
+                        guard sequence < 100, !stopFlag.stoppedFlag, accepted.current != nil else { return }
                         sequence += 1
                         let chunk = Data(count: 16 * 1024)
                         var frame = Data(String(format: "%x\r\n", chunk.count).utf8)
                         frame.append(chunk)
                         frame.append(Data("\r\n".utf8))
-                        connection.send(content: frame, completion: .contentProcessed { _ in
+                        connection.send(content: frame, completion: .contentProcessed { error in
+                            if error != nil { accepted.clear(); return }
                             serverQueue.asyncAfter(deadline: .now() + 0.05) { pump() }
                         })
                     }
@@ -254,13 +266,13 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         guard ready.wait(timeout: .now() + 5) == .success, port != 0 else {
             return XCTFail("the local cap server did not start")
         }
-        defer { listener.cancel() }
+        defer {
+            listener.cancel()
+            acceptedConnection?.cancel()
+            plainSession.invalidateAndCancel()
+        }
 
         let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
-        // A PLAIN session: self.session intercepts every request through the URLProtocol
-        // harness, which would never let real TCP reach the local listener.
-        let plainConfiguration = URLSessionConfiguration.ephemeral
-        let plainSession = URLSession(configuration: plainConfiguration)
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "http://127.0.0.1:\(port)" },
             tokenProvider: provider, session: plainSession,
@@ -670,6 +682,15 @@ final class IdentityBoxHolder {
     }
 }
 
+/// Thread-safe holder for the accepted connection so pump() and cleanup can observe it.
+final class ConnectionHolder {
+    private let lock = NSLock()
+    private var connection: NWConnection?
+    func store(_ c: NWConnection) { lock.lock(); connection = c; lock.unlock() }
+    func clear() { lock.lock(); connection = nil; lock.unlock() }
+    var current: NWConnection? { lock.lock(); defer { lock.unlock() }; return connection }
+}
+
 /// Thread-safe stop flag for server-side connection-end observation.
 final class StopFlag {
     private let semaphore = DispatchSemaphore(value: 0)
@@ -681,6 +702,9 @@ final class StopFlag {
     }
     var started: Bool {
         lock.lock(); defer { lock.unlock() }; return startedSend
+    }
+    var stoppedFlag: Bool {
+        lock.lock(); defer { lock.unlock() }; return stopped
     }
     func stop() {
         lock.lock()
