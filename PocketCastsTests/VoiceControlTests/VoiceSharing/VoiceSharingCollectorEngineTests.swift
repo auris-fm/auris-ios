@@ -442,6 +442,67 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return engine
     }
 
+    /// A LATE FINALIZE MAY NOT RESURRECT A DISQUALIFIED CAPTURE (review 859dac4c). Finalize promotes a
+    /// terminal capture into a completed record, so it must refuse everything the normal late-outcome path
+    /// refuses: a capture whose epoch/session no longer match, and one that can never contribute.
+    func test_aLateFinalizeCannotPublishADisqualifiedOrForeignCapture() async throws {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctxA = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: A open")
+        }
+        collector.segmentationEnded(ctxA)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxA,
+                                  deferEmission: true)
+        XCTAssertFalse(snapshot().contains { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctxA.id && event.kind == .completed
+        }, "premise: A's completion is deferred, not emitted")
+
+        // The gate CLOSES before the engine finalizes (the real withdrawal lever): a capture that was
+        // eligible when it was captured must not be published by a finalize that arrives afterwards.
+        storeState.localOptIn = false
+        collector.finalizeDeferredCompletion(context: ctxA)
+
+        let emitted = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctxA.id && event.kind == .completed
+        }
+        XCTAssertTrue(emitted.isEmpty,
+                      "a capture whose session moved on must not become a completed record on late finalize")
+    }
+
+    /// A CANCELLED CAPTURE CANNOT BE REVIVED BY A LATE FINALIZE (review 859dac4c). The capture is deferred
+    /// first, so it is genuinely ring-resident, and the cancel arrives while the engine still owes its
+    /// finalize. The entry must be consumed, not promoted to a completed record.
+    func test_aCancelledDeferredCaptureCannotBeRevivedByFinalize() async throws {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctx = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: open")
+        }
+        collector.segmentationEnded(ctx)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx,
+                                  deferEmission: true)
+        // The withdrawal/cancel path consumes the deferred capture as a non-contribution.
+        collector.speechCancelled()
+        collector.finalizeDeferredCompletion(context: ctx)
+
+        let completed = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
+            event.captureID == ctx.id && event.kind == .completed
+        }
+        XCTAssertTrue(completed.isEmpty,
+                      "a consumed (cancelled) deferred capture must never become a completed record")
+    }
+
     private func openGate(enrolled: Bool) -> VoiceSharingPolicy {
         let policy = VoiceSharingPolicy(
             clock: StubMonotonicClock(time: 1_000),

@@ -362,6 +362,23 @@ final class VoiceSharingCollector {
         guard let context else { return }
         lock.lock()
         guard var rec = terminalRing[context.id], !rec.emitted else { lock.unlock(); return }
+        // MIRRORS emitLateOutcomeIfTerminal (review 859dac4c): this is the SAME promotion of a terminal
+        // capture into a completed record, so it must honour every safeguard that path applies. Without
+        // these checks a late finalize could resurrect a capture that was genuinely cancelled or withdrawn,
+        // after a gate/identity move it no longer belongs to, or one that was never a deferred completion.
+        guard rec.capture.deferEmissionUntilFinalized else { lock.unlock(); return }
+        if rec.noContribution {
+            // A capture that can never contribute is CONSUMED, never resurrected.
+            rec.emitted = true
+            terminalRing[context.id] = rec
+            lock.unlock()
+            return
+        }
+        let sameConsent = (rec.capture.epoch == epochProvider())
+            && (rec.capture.session == sessionIdentity())
+            && policy.permitsCollection
+            && membership().effectiveEnrolled
+        guard sameConsent else { lock.unlock(); return }
         rec.emitted = true
         terminalRing[context.id] = rec
         let event = makeEvent(kind: .completed, from: rec.capture)
@@ -373,6 +390,17 @@ final class VoiceSharingCollector {
     /// which is exactly one capture by construction.
     func speechCancelled() {
         lock.lock()
+        // A DEFERRED capture (spec 2dcf8c5b) is already terminal and ring-resident, so `current` is nil and
+        // the guard below would skip it entirely — leaving a cancelled capture publishable by a late
+        // finalize (review 859dac4c). Cancel must reach it wherever it lives.
+        if var deferred = deferredRingEntryAwaitingCancellationLocked() {
+            deferred.capture = consumed(deferred.capture)
+            deferred.emitted = true
+            deferred.noContribution = true
+            terminalRing[deferred.capture.id] = deferred
+            lock.unlock()
+            return
+        }
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         c.terminal = true
         current = nil
@@ -381,6 +409,24 @@ final class VoiceSharingCollector {
         let event = makeEvent(kind: .cancelled, from: c)
         lock.unlock()
         submit(event)
+    }
+
+    /// The most recent deferred, unemitted completion, if one is waiting on the engine. Sufficient because a
+    /// deferred capture is by construction the one the pipeline is still working on, and a second segment
+    /// cannot complete while its predecessor is held.
+    private func deferredRingEntryAwaitingCancellationLocked() -> TerminalRecord? {
+        for (_, rec) in terminalRing where rec.capture.deferEmissionUntilFinalized && !rec.emitted {
+            return rec
+        }
+        return nil
+    }
+
+    /// Strips audio ownership from a capture that can no longer contribute.
+    private func consumed(_ c: FrozenCapture) -> FrozenCapture {
+        var identityOnly = c
+        aggregateAudioSamples -= identityOnly.retained.count
+        identityOnly.retained = []
+        return identityOnly
     }
 
     /// Rejection resolved by CONTEXT. The engine's Task captured identity at utterance launch; this call
