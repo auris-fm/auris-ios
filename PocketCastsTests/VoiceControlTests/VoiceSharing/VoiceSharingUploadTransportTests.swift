@@ -293,6 +293,93 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(thirdBearer, "tok-3", "the second rejection rotated to tok-3 and it is live")
     }
 
+    /// NIL-DISCRIMINATING FORWARDED-BEARER CONTROL (reviewer 5e57e531): TWO CONCURRENT sends,
+    /// BOTH wire requests carrying tok-1 (the provider has not rotated yet), each 401 held by a
+    /// barrier. Release response A first — transport A's 401 branch reports tok-1, the provider
+    /// rotates to tok-2 (count 1) — and WAIT for the adoption. Then release response B: transport
+    /// B's 401 branch still holds the STALE tok-1 it sent. Correct forwarding names tok-1; the
+    /// guard no-ops; the count stays 1. A transport passing `nil` refreshes unconditionally → 2.
+    func test_staleBearerForwardingIsDiscriminatedFromNil() async throws {
+        var refreshCount = 0
+        var uploadRequests: [URLRequest] = []
+        UploadRecordingURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path == "/api/v1/auth/token" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            if path == self.authPath {
+                refreshCount += 1
+                let next = "tok-\(refreshCount + 1)"
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"\#(next)","token_type":"Bearer","expires_in":900,"refresh_token":"r-\#(refreshCount)","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            uploadRequests.append(request)
+            // DEFERRED completion: hold this protocol instance and return WITHOUT responding,
+            // so the shared loader thread is never blocked (a semaphore-wait here deadlocks
+            // request 2 — both sessions complete on one loader queue).
+            return nil
+        }
+        defer {
+            UploadRecordingURLProtocol.handler = nil
+        }
+
+        let provider = makeRealProvider(credential: "cred")
+        // SEPARATE sessions for A and B: one URLSession can pipeline both POSTs on a single
+        // connection, so request 2 would never startLoading until request 1 completed — and the
+        // barrier would deadlock. Distinct configurations force distinct connections.
+        func freshSession() -> URLSession {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [UploadRecordingURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+        let transportA = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: freshSession())
+        let transportB = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: freshSession())
+
+        // PRE-WARM the provider: the token exchange completes BEFORE any send, so both sends
+        // read the cached tok-1 without racing the acquisition single-flight.
+        let warmed = await provider.token()
+        XCTAssertEqual(warmed, "tok-1", "pre-warm mints tok-1")
+        // Both sends race; each token() reads the provider's cached tok-1, so BOTH wire
+        // requests carry tok-1.
+        async let sendA = transportA.send(request: self.makeRequest())
+        async let sendB = transportB.send(request: self.makeRequest())
+        // Barrier, not a delay: wait until BOTH wire requests are recorded (held, unanswered).
+        while uploadRequests.count < 2 { await Task.yield() }
+        XCTAssertEqual(UploadRecordingURLProtocol.deferred401s.count, 2,
+                       "both transfers are held unresolved")
+        for request in uploadRequests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok-1",
+                           "both wire requests left before any rotation")
+        }
+
+        // Release A: its 401 branch reports tok-1 → one rotation.
+        UploadRecordingURLProtocol.releaseDeferred401(index: 0)
+        guard case .response(401, _) = await sendA else {
+            return XCTFail("expected the 401 verdict for A")
+        }
+        // WAIT for the provider to ADOPT tok-2 (barrier, not a delay): token() returns tok-2
+        // only after the refresh inside send A completed.
+        let adopted = await provider.token()
+        XCTAssertEqual(adopted, "tok-2", "the provider adopted the rotated token")
+        XCTAssertEqual(refreshCount, 1, "exactly one rotation after A")
+
+        // Release B: its 401 branch holds the STALE tok-1. Correct forwarding → guard no-op.
+        UploadRecordingURLProtocol.releaseDeferred401(index: 1)
+        let resultB = await sendB
+        guard case .response(401, _) = resultB else {
+            return XCTFail("expected the 401 verdict for B, got \(resultB)")
+        }
+        XCTAssertEqual(refreshCount, 1,
+                       "the stale tok-1 rejection from transport B must NOT rotate again — this is what a nil-forwarding transport fails")
+    }
+
     /// SAME-account/same-epoch fencing across the real path: after the entry was admitted under
     /// (acct-A, epoch-1), a move of EITHER component stops the send at the real transport's
     /// credential boundary.
@@ -351,7 +438,20 @@ final class IdentityBoxHolder {
 }
 
 private final class UploadRecordingURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data)?)?
+    /// Deferred-401 protocol instances, in arrival order — the test completes them explicitly.
+    static var deferred401s: [UploadRecordingURLProtocol] = []
+    /// Completes a held transfer with a 401 (test-side barrier release).
+    static func releaseDeferred401(index: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard index < deferred401s.count else { return }
+        let instance = deferred401s[index]
+        let response = HTTPURLResponse(
+            url: instance.request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
+        instance.client?.urlProtocol(instance, didLoad: Data())
+        instance.client?.urlProtocolDidFinishLoading(instance)
+    }
     static var stall = false
     /// Drip mode: send headers, then one byte every `dripInterval` forever — a live transfer that
     /// only the WALL/cap bound can stop.
@@ -368,6 +468,7 @@ private final class UploadRecordingURLProtocol: URLProtocol {
 
     static func reset() {
         handler = nil
+        deferred401s = []
         stall = false
         drip = false
         dripInterval = 0
@@ -410,10 +511,16 @@ private final class UploadRecordingURLProtocol: URLProtocol {
             return
         }
         do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
+            if let (response, data) = try handler(request) {
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            } else {
+                // Deferred: hold the instance for a later test-side release.
+                UploadRecordingURLProtocol.lock.lock()
+                UploadRecordingURLProtocol.deferred401s.append(self)
+                UploadRecordingURLProtocol.lock.unlock()
+            }
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
