@@ -439,7 +439,6 @@ extension VoiceSharingUploadTransportTests {
         UploadRecordingURLProtocol.expectedDeferredCount = 3   // one will never come
         UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
         UploadRecordingURLProtocol.lock.unlock()
-        let cleanupStarted = Date()
         defer {
             UploadRecordingURLProtocol.handler = nil
             UploadRecordingURLProtocol.releaseAllDeferred()
@@ -450,6 +449,15 @@ extension VoiceSharingUploadTransportTests {
                 return (HTTPURLResponse(url: request.url!, statusCode: 200,
                                         httpVersion: nil, headerFields: nil)!,
                         Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            if path == self.authPath {
+                // Answer refresh IMMEDIATELY (rejected → provider drops the chain): otherwise
+                // the release-triggered refreshes would hang until the auth deadline and the
+                // prompt-cleanup assertion would be measuring the wrong thing
+                // (reviewer 0a748432).
+                return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"code":"refresh_reused"}"#.utf8))
             }
             // Upload path: hold, never complete.
             return nil
@@ -480,17 +488,21 @@ extension VoiceSharingUploadTransportTests {
             }
         }
         XCTAssertTrue(timedOut, "with one transfer missing, the barrier must time out")
-        // FAILURE PATH: release BEFORE awaiting the children.
+        // FAILURE PATH: release BEFORE awaiting the children. Measure release → completions.
+        let releaseStarted = Date()
         UploadRecordingURLProtocol.releaseAllDeferred()
         let resultA = await sendA
         let resultB = await sendB
+        let releaseToDone = Date().timeIntervalSince(releaseStarted)
         guard case .response(401, _) = resultA, case .response(401, _) = resultB else {
             return XCTFail("released transfers complete as 401s, got \(resultA) / \(resultB)")
         }
-        // PROMPT: the whole flow stays far under the transport's 90s deadline.
-        let elapsed = Date().timeIntervalSince(cleanupStarted)
-        XCTAssertLessThan(elapsed, 30,
-                          "the failure path ends promptly — no transport deadline reached")
+        // PROMPT: release → both children completed stays far under any transport/auth deadline.
+        XCTAssertLessThan(releaseToDone, 10,
+                          "the children complete promptly after release — no deadline reached")
+        // The deferred registry is EMPTY afterward: nothing left held.
+        XCTAssertTrue(UploadRecordingURLProtocol.deferred401s.isEmpty,
+                      "no transfer remains held after cleanup")
     }
 
     /// SAME-account/same-epoch fencing across the real path: after the entry was admitted under
