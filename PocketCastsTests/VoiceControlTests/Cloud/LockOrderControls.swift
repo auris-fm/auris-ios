@@ -72,59 +72,6 @@ final class LockOrderControls: XCTestCase {
         service.captureBeforeAcquisitionBarrierForTesting = nil
     }
 
-    /// PRE-FIX DEADLOCK PROOF (review 92de14ea/7443c3ea): drives the PRODUCTION `captureRoutingOrigin` with the
-    /// pre-fix ordering enabled through the test seam (reads inside the lock). With the reads
-    /// inside the lock, a capture that parks at the barrier HOLDS `transcriptLock`, so the
-    /// main-actor `stop()` blocks — the control bounds stop() with an explicit deadline and FAILS
-    /// (diagnosing the deadlock) if the lock window regresses. The committed suite keeps the GREEN
-    /// half; this RED half runs only when `redRunsEnabled` is set (CI cost: one bounded 10 s
-    /// deadlock). The GREEN half is `testCaptureParkedAfterItsReadsCompletesAfterMainStopsWithoutDeadlock`:
-    /// same park, same main stop(), completes in ~0.1 s on the fixed ordering.
-    @MainActor
-    func testThePreFixOrderingReplayedThroughTheProductionCaptureBlocksMainStop() async throws {
-        let session = FakeAudioSessionControlling()
-        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "bt-out")]
-        session.inputs = []
-        session.available = []
-        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "bt-mic")]
-        session.selectionTakesEffect = true
-
-        let gracePeriodSignal = GracePeriodSignal()
-        let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: gracePeriodSignal)
-        let service = VoiceControlAssembly()
-            .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor, capture: SucceedingCapture())!
-        service.startIfAllowed()
-        await waitUntilListening(timeout: 5) { service.isListening }
-        XCTAssertTrue(service.isListening, "the control requires a listening service")
-        service.captureReadsInsideLockForTesting = true
-
-        let parked = DispatchSemaphore(value: 0)
-        let release = DispatchSemaphore(value: 0)
-        service.captureBeforeAcquisitionBarrierForTesting = {
-            parked.signal()
-            _ = release.wait(timeout: .now() + 10)
-        }
-        let captureThread = Thread {
-            _ = service.captureRoutingOrigin(utteranceId: "utterance-red")
-        }
-        captureThread.start()
-        _ = await Task.detached { parked.wait(timeout: .now() + 5) == .success }.value
-
-        // RED discriminator: under reads-inside-the-lock the parked capture HOLDS the lock, so
-        // the main-actor stop() can only complete after the barrier's own 10 s bound expires —
-        // the bounded stop duration IS the deadlock measurement.
-        let stopStarted = Date()
-        service.stop()
-        let stopDuration = Date().timeIntervalSince(stopStarted)
-        release.signal()
-        service.captureReadsInsideLockForTesting = false
-        service.captureBeforeAcquisitionBarrierForTesting = nil
-        XCTAssertGreaterThan(stopDuration, 8,
-                            "RED: reads inside the lock make main stop() block on the parked capture "
-                                + "(measured \(stopDuration)s) — this is the deadlock the pre-lock reads remove")
-        XCTAssertTrue(captureThread.isFinished || Date() < stopStarted.addingTimeInterval(15))
-    }
-
     /// STOPPED-CAPTURE CHARACTERIZATION (review e89e00ec/7443c3ea): documents that a capture taken
     /// while stopped returns nil. This is a characterization of the capture operation, NOT proof of
     /// the enqueue refusal — the refusal itself is the `guard let capture else { return false }`

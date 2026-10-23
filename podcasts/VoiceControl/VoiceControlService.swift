@@ -394,28 +394,13 @@ class VoiceControlService: ObservableObject {
     /// test control call THIS operation, so the control cannot drift from the structure it
     /// exercises. The grace reads happen BEFORE the lock (lock-order safety, review 4d474d80).
     func captureRoutingOrigin(utteranceId: String) -> (admitted: Int?, retired: Bool, generation: Int, listening: Bool)? {
-        // TEST HOOK (review 92de14ea/47328768): fires AFTER the grace reads and BEFORE lock
-        // acquisition — the exact window the fix owns. The hook may BLOCK: a control parks the
-        // capture here while main runs stop(), then releases. Nil in production.
-        if !captureReadsInsideLockForTesting {
-            captureBeforeAcquisitionBarrierForTesting?()
-        }
-        if captureReadsInsideLockForTesting {
-            // RED SEAM (review 92de14ea): replays the PRE-FIX ordering through THIS production
-            // operation — the grace reads run INSIDE the lock, so a parked holder blocks main's
-            // stop(). Nil in production.
-            transcriptLock.lock()
-            defer { transcriptLock.unlock() }
-            let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
-            let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
-            let liveGeneration = gracePeriodSignal.currentGeneration()
-            captureBeforeAcquisitionBarrierForTesting?()
-            guard isListening else { return nil }
-            return (admittedOrigin, retiredTurn, liveGeneration, true)
-        }
         let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
         let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
         let liveGeneration = gracePeriodSignal.currentGeneration()
+        // TEST HOOK (review 92de14ea/47328768): fires AFTER the grace reads and BEFORE lock
+        // acquisition — the exact window the fix owns. The hook may BLOCK: a control parks the
+        // capture here while main runs stop(), then releases. Nil in production.
+        captureBeforeAcquisitionBarrierForTesting?()
         transcriptLock.lock()
         defer { transcriptLock.unlock() }
         guard isListening else { return nil }
@@ -424,9 +409,6 @@ class VoiceControlService: ObservableObject {
 
     /// TEST-ONLY: barrier between the grace reads and lock acquisition. Nil in production.
     var captureBeforeAcquisitionBarrierForTesting: (() -> Void)?
-    /// TEST-ONLY: when true, `captureRoutingOrigin` replays the pre-fix ordering (reads inside the
-    /// lock). The RED control sets this on its own service instance; production never does.
-    var captureReadsInsideLockForTesting = false
 
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
