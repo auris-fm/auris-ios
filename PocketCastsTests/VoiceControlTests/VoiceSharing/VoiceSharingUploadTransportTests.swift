@@ -196,6 +196,89 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                                     "the live transfer was cancelled, not drained")
     }
 
+    /// LOCALHOST HTTP (reviewer e1c86d32): a REAL local HTTP server holds the response OPEN
+    /// after crossing the 64 KiB cap — the provider stream is never finished — and the test
+    /// OBSERVES the server-side connection ending when the client's ceiling cancellation tears
+    /// the transfer down. URLProtocol's burst control cannot give this evidence (its
+    /// didFinishLoading fires right after the burst).
+    func test_localhostServerObservesTheClientStopAfterTheCapCrossing() async throws {
+        let stopFlag = StopFlag()
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: parameters, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        let serverQueue = DispatchQueue(label: "cap-server")
+        var port: UInt16 = 0
+        listener.stateUpdateHandler = { [weak listener] state in
+            if case .ready = state {
+                port = listener?.port?.rawValue ?? 0
+                ready.signal()
+            }
+        }
+        listener.newConnectionHandler = { connection in
+            // STILL-PRODUCING PEER (reviewer e1c86d32): headers with NO content-length, then
+            // chunks forever. The cap crossing happens while the provider is still streaming;
+            // only a client-side cancellation can end this. Sending starts ONLY on .ready —
+            // a send issued before the connection is prepared is silently dropped, which was
+            // the reason an earlier attempt deadlocked into the client's deadline.
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .failed, .cancelled:
+                    stopFlag.stop()
+                case .ready:
+                    guard !stopFlag.started else { break }
+                    stopFlag.markStarted()
+                    connection.send(content: Data("HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n".utf8),
+                                    completion: .contentProcessed { _ in })
+                    // Chunked encoding: each write is one <hex-length>\r\n<data>\r\n chunk.
+                    var sequence = 0
+                    func pump() {
+                        guard sequence < 100 else { return }   // bounded: 100 × 16 KiB = 1.6 MB max
+                        sequence += 1
+                        let chunk = Data(count: 16 * 1024)
+                        var frame = Data(String(format: "%x\r\n", chunk.count).utf8)
+                        frame.append(chunk)
+                        frame.append(Data("\r\n".utf8))
+                        connection.send(content: frame, completion: .contentProcessed { _ in
+                            serverQueue.asyncAfter(deadline: .now() + 0.05) { pump() }
+                        })
+                    }
+                    pump()
+                default:
+                    break
+                }
+            }
+            connection.start(queue: serverQueue)
+        }
+        listener.start(queue: serverQueue)
+        guard ready.wait(timeout: .now() + 5) == .success, port != 0 else {
+            return XCTFail("the local cap server did not start")
+        }
+        defer { listener.cancel() }
+
+        let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
+        // A PLAIN session: self.session intercepts every request through the URLProtocol
+        // harness, which would never let real TCP reach the local listener.
+        let plainConfiguration = URLSessionConfiguration.ephemeral
+        let plainSession = URLSession(configuration: plainConfiguration)
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "http://127.0.0.1:\(port)" },
+            tokenProvider: provider, session: plainSession,
+            bodyDeadline: 30)
+        var request = self.makeRequest()
+        request.url = URL(string: "http://127.0.0.1:\(port)/api/v1/voice-recordings")
+        let started = Date()
+        let result = await transport.send(request: request)
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(result, .transportFailure,
+                       "a stream that crosses the cap and never finishes is never a delivered record")
+        XCTAssertLessThan(elapsed, 15,
+                          "the ceiling stops the transfer long before the 30s deadline")
+        // SERVER-SIDE OBSERVATION: the client's cancellation reached the real connection.
+        XCTAssertTrue(stopFlag.wait(timeout: 5),
+                      "the server observed its connection end after the client's cap cancellation")
+    }
+
     /// The production endpoint is the mounted worker route.
     func test_endpointIsTheMountdWorkerRoute() {
         let transport = VoiceSharingUploadTransport(
@@ -584,6 +667,30 @@ final class IdentityBoxHolder {
     var current: VoiceSharingUploadIdentity? {
         get { lock.lock(); defer { lock.unlock() }; return value }
         set { lock.lock(); value = newValue; lock.unlock() }
+    }
+}
+
+/// Thread-safe stop flag for server-side connection-end observation.
+final class StopFlag {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var stopped = false
+    private var startedSend = false
+    func markStarted() {
+        lock.lock(); startedSend = true; lock.unlock()
+    }
+    var started: Bool {
+        lock.lock(); defer { lock.unlock() }; return startedSend
+    }
+    func stop() {
+        lock.lock()
+        let first = !stopped
+        stopped = true
+        lock.unlock()
+        if first { semaphore.signal() }
+    }
+    func wait(timeout: TimeInterval) -> Bool {
+        semaphore.wait(timeout: .now() + timeout) == .success
     }
 }
 
