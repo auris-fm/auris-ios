@@ -186,7 +186,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// genuinely parked waiters. The caller's actor is never polled: the confirmation resumes
     /// the waiter directly.
     func awaitActualStop(after epoch: Int, timeout: TimeInterval = 2) async -> Bool {
-        if confirmedStopEpoch() >= epoch { return true }
+        bufferLock.lock()
+        let preSettled = settledDisplacedIdentities.contains(epoch)
+        bufferLock.unlock()
+        if preSettled || confirmedStopEpoch() >= epoch { return true }
         // PRECREATE the ticket before the handler: cancel-before-register flips this flag, and
         // registration observes it instead of parking.
         let ticket = StopWaiterTicket(epoch: epoch)
@@ -273,7 +276,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
         let registered: Bool = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) -> Void in
             bufferLock.lock()
             // Confirmed while we were registering? Resume immediately.
-            if lastConfirmedStopEpoch >= ticket.epoch {
+            if lastConfirmedStopEpoch >= ticket.epoch
+                || settledDisplacedIdentities.contains(ticket.epoch) {
                 bufferLock.unlock()
                 continuation.resume(returning: true)
                 return
@@ -327,11 +331,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     private func confirmStopForBoundWaiter(_ ticket: StopWaiterTicket) async -> Bool {
-        confirmedStopEpoch() >= ticket.epoch
+        bufferLock.lock()
+        let settled = settledDisplacedIdentities.contains(ticket.epoch)
+        bufferLock.unlock()
+        return settled || confirmedStopEpoch() >= ticket.epoch
     }
 
     private func confirmStopForBoundWaiter(_ epoch: Int) async -> Bool {
-        confirmedStopEpoch() >= epoch
+        bufferLock.lock()
+        let settled = settledDisplacedIdentities.contains(epoch)
+        bufferLock.unlock()
+        return settled || confirmedStopEpoch() >= epoch
     }
 
     // MARK: - Internal
@@ -406,6 +416,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// consumed `drainRemaining`, so request sites can no longer see it — this flag keeps the
     /// ownership record honest until the stop consumes it (guard: runnerLock).
     private var drainClaimInFlight = false
+    /// Explicitly settled displaced identities (guard: bufferLock). Retained so a waiter that
+    /// registers AFTER its settlement can still resolve from the retained fact — settlement is
+    /// terminal for exactly these identities, and no max/upTo shortcut is restored.
+    private var settledDisplacedIdentities: Set<Int> = []
     /// TEST-ONLY RESCUE: resumes EVERY registered waiter false and clears the registry. A
     /// control uses this to reap a (mutant-)stranded waiter after its bounded completion probe
     /// failed, so the test process never hangs on a leaked continuation.
@@ -1164,6 +1178,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// TEST-ONLY: the coalesced pending-stop-notification counter. A stranded positive value
     /// refuses every future admission, so controls assert it returns to zero.
+    /// TEST-ONLY: the last PHYSICALLY confirmed stop identity (excludes displaced settlements).
+    var confirmedStopEpochForTesting: Int { confirmedStopEpoch() }
+
     var pendingStopNotificationsForTesting: Int {
         runnerLock.lock(); defer { runnerLock.unlock() }
         return pendingStopNotifications
@@ -1260,10 +1277,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
             stopWaiters.removeValue(forKey: id)
             if let continuation = ticket.takeContinuation() { resumed.append(continuation) }
         }
-        // NO floor fold: folding displaced maxima into `lastConfirmedStopEpoch` would let
-        // `confirmStopForBoundWaiter`/the `upTo` sweep implicitly satisfy ANY lower identity —
-        // exactly the unproven promotion the reviewer banned. A displaced waiter settles ONLY
-        // through its entry in this record, resolved above.
+        // RETAIN the settlement fact (review 82714c29): a waiter registering after settlement
+        // must resolve from this retained set. NO floor fold into `lastConfirmedStopEpoch` —
+        // that would implicitly satisfy any lower identity; the set proves exactly these.
+        settledDisplacedIdentities.formUnion(displaced)
         bufferLock.unlock()
         for continuation in resumed { continuation.resume(returning: true) }
     }

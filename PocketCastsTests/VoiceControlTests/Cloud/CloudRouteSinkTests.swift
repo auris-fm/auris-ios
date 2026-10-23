@@ -4760,6 +4760,58 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "mid-drain cancel")
     }
 
+    /// REVIEWER 82714c29, deterministic: a coalesced B.finish settles under A's physical stop;
+    /// a waiter on B that registers ONLY AFTER the settlement must still resolve from B's
+    /// retained explicit settlement fact — not strand because the confirmed floor is A's.
+    @MainActor
+    func testLatelyRegisteredWaiterOnACoalescedFinishResolvesFromItsRetainedSettlement() async throws {
+        let player = CloudAudioPlayer()
+        let delegate = RecordingAudioPlayerDelegate()
+        player.delegate = delegate
+        defer { player.setDrainHoldForTesting(false) }
+
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
+        XCTAssertTrue(player.hasPendingAudio)
+
+        let arrived = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = arrived
+        player.claimRelease = release
+        defer {
+            release.signal()
+            arrived.signal()
+            player.claimReached = nil
+            player.claimRelease = nil
+        }
+
+        let aAllocated = player.finish()
+        let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(claimedInTime)
+
+        // B coalesces onto A's physical stop.
+        let bAllocated = player.finish()
+        XCTAssertNotEqual(bAllocated, aAllocated)
+
+        release.signal()
+
+        // A's notification terminal, observed FIRST.
+        var aEmitted = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !aEmitted {
+            aEmitted = player.confirmedStopEpochForTesting >= aAllocated
+            if !aEmitted { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        XCTAssertTrue(aEmitted, "A's physical stop must be confirmed before B's waiter registers")
+
+        // NOW register B's waiter — after settlement. It must resolve from the retained fact.
+        let bSettled = await player.awaitActualStop(after: bAllocated, timeout: 5)
+        XCTAssertTrue(
+            bSettled,
+            "a late waiter on a coalesced finish resolves from its explicit settlement, never strands"
+        )
+        assertNoStrandedStopNotifications(player, "late B waiter after settlement")
+    }
+
     /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait
     /// must record `.timedOut` and the case asserting `.released` must fail. This does not depend on
     /// scheduling luck the way a shortened bound does.
