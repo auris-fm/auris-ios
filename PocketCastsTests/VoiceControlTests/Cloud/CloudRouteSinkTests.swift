@@ -686,19 +686,22 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(disposition.isRefused, "an origin retired before the admission block runs is refused, got \(disposition)")
     }
 
-    /// MAIN-ACTOR ADMISSION VIA THE NONISOLATED WITNESS (review 086c0172/47328768; renamed —
-    /// the sink is main-actor isolated, so nothing here runs admission off-main). The production
-    /// routing path enters through the NONISOLATED `routeToCloud` witness from a nonisolated Task;
-    /// this control drives exactly that entry end-to-end: the witness owns a fresh dispatch
-    /// (completing against the stub consumer), and a retired-origin admission through the same
-    /// path is refused. Discriminators are the outcomes, not a timeout.
+    /// ADMISSION ENTERED FROM A DETACHED TASK (review 086c0172/47328768/7443c3ea). The sink class
+    /// is `@MainActor`-annotated, so its `routeToCloud` witness is MAIN-ISOLATED: a detached caller
+    /// suspends and the body runs on main. There is no off-main admission branch to exercise, and
+    /// this control does not claim one. What it verifies is what a remote caller sees: entering from
+    /// a detached task still owns a fresh dispatch that completes against the stub consumer and
+    /// publishes a record, and a retired-origin admission made the same way is refused. Review
+    /// 7443c3ea: the second step calls `beginDispatch` directly (main-isolated) — this is the
+    /// coherent-decision control, labelled as such.
     @MainActor
-    func testANonisolatedWitnessAdmissionOwnsAFreshDispatchAndARetiredWitnessOriginIsRefused() async throws {
+    func testADetachedCallerOwnsAFreshDispatchAndARetiredOriginAdmissionIsRefused() async throws {
         let manager = testConversationManager()
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
         manager.registerLiveOrigin(cloudTestOrigin)
 
-        // 1. A genuinely nonisolated task enters through the witness with a fresh utterance; the
+        // 1. A genuinely nonisolated task enters through the NONISOLATED witness (the concrete
+        //    type's witness — not the @MainActor-concrete convenience) with a fresh utterance; the
         //    dispatch must complete (the stub consumer settles it) and leave an owned record.
         self.pendingFixture =
             """
@@ -718,7 +721,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let witnessInstance = sink.recordInstanceForTesting(utteranceId: "utterance-witness")
         XCTAssertNotNil(witnessInstance, "the witness admission published its record")
 
-        // 2. The window moves; a witness admission against the RETIRED origin is refused.
+        // 2. The window moves; an admission against the RETIRED origin is refused by the coherent
+        //    decision (called on main, where that decision lives).
         manager.registerLiveOrigin(cloudTestOrigin + 1)
         sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
         let refused: CloudDispatchOwnership = await Task.detached { @MainActor in
