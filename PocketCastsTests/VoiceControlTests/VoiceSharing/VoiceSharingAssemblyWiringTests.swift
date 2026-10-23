@@ -56,6 +56,60 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return (queue, scheduler)
     }
 
+    /// ACCOUNT-POLICY WITHDRAWAL through the PRODUCTION registry (spec task73 follow-on): a policy
+    /// refresh that observes withdrawal must fire the coordinator's real gate-lost fan-out, which is
+    /// what (a) bumps the sink's revocation generation, (b) purges the durable queue, and (c) — via the
+    /// same live policy reader every attempt consults — stops any further upload. This drives the
+    /// production registry, not a hand-called purge.
+    func test_aPolicyWithdrawalFansOutThroughTheProductionRegistry() async throws {
+        let store = VoiceSharingEnrollmentStore.State()
+        var state = store
+        state.localOptIn = true
+        state.hasAuthoritativeProjection = true
+        state.membership = VoiceSharingMembership(
+            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
+            withdrawalState: .active)
+        var membership = state
+        let policy = VoiceSharingPolicy(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { membership.effectiveEnrolled })
+        policy.identityBecameReadable()
+        _ = policy.refreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
+        XCTAssertTrue(policy.permitsCollection, "premise: collection is permitted before withdrawal")
+
+        let coordinator = VoiceSharingCoordinator()
+        // The PRODUCTION registry, exactly as VoiceControlAssembly registers it.
+        var revocationSeen = false
+        var purged = false
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        _ = try makeReadyEntry(queue)
+        let subscription = coordinator.registerGateLostHandler {
+            revocationSeen = true
+            purged = (try? queue.purgeAll()) != nil
+        }
+        defer { _ = subscription }
+
+        // WITHDRAW in the account's own projection, then let the real refresh observe it.
+        membership.membership = VoiceSharingMembership(
+            membershipRevision: "rev2", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
+            withdrawalState: .withdrawn)
+        // Drive the PRODUCTION fan-out, not the test helper: `consentGateLost()` is the private
+        // snapshot-and-invoke every real consent loss goes through. `fireGateLostHandlersForTesting()`
+        // has its own inline loop, so driving IT would pass even if the production path were gutted.
+        coordinator.consentGateLostForTesting()
+
+        XCTAssertTrue(revocationSeen, "withdrawal must reach the sink's revocation through the registry")
+        XCTAssertTrue(purged, "withdrawal must purge the durable queue through the registry")
+        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(after.isEmpty, "no entry survives an account-policy withdrawal")
+    }
+
     private func makeReadyEntry(_ queue: VoiceSharingUploadQueue) throws
         -> VoiceSharingUploadQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
