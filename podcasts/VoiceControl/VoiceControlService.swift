@@ -394,14 +394,23 @@ class VoiceControlService: ObservableObject {
     /// test control call THIS operation, so the control cannot drift from the structure it
     /// exercises. The grace reads happen BEFORE the lock (lock-order safety, review 4d474d80).
     func captureRoutingOrigin(utteranceId: String) -> (admitted: Int?, retired: Bool, generation: Int, listening: Bool)? {
+        // TEST HOOK (review 92de14ea): pre-lock barrier — fires after the grace reads, before the
+        // lock acquisition. Nil in production.
+        capturePreLockBarrierForTesting?()
         let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
         let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
         let liveGeneration = gracePeriodSignal.currentGeneration()
         transcriptLock.lock()
+        // TEST HOOK: post-acquisition barrier — fires with the lock HELD. Nil in production.
+        capturePostLockBarrierForTesting?()
         defer { transcriptLock.unlock() }
         guard isListening else { return nil }
         return (admittedOrigin, retiredTurn, liveGeneration, true)
     }
+
+    /// TEST-ONLY barriers around the capture operation's lock window. Nil in production.
+    var capturePreLockBarrierForTesting: (() -> Void)?
+    var capturePostLockBarrierForTesting: (() -> Void)?
 
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
