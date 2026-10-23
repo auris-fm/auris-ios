@@ -69,6 +69,45 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                        SHA256.hash(data: encoded.wav).map { String(format: "%02x", $0) }.joined())
     }
 
+    /// The pinned cross-client WIRE fixture for spec delta 736d3180: a capture whose ASR stage is
+    /// explicitly unobserved (`state: "unknown"` + `observation_unavailable`). Deterministic capture
+    /// id, enrollment epoch, samples and provenance, so the emitted record bytes are reproducible and
+    /// hashable by another client's intake. Skips unless AURIS_UNAVAILABLE_FIXTURE_DIR is set.
+    func test_exportUnavailableObservationFixtureForCrossClientWireParity() throws {
+        // Host environment variables do not reach the simulator test process, so the fixture is
+        // always written to a fixed, readable location inside the runner's temporary directory and
+        // copied out with `simctl get_app_container` afterwards. It is a no-op for normal runs
+        // beyond one small write.
+        let dir = NSTemporaryDirectory() + "/auris-wire-fixture"
+        var claims = observations
+        claims["asr"] = .init(state: "unknown", reason: "observation_unavailable")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event(), provenance: provenance, observations: claims)
+        let base = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try encoded.metadataEnvelope.write(to: base.appendingPathComponent("metadata.json"))
+        try encoded.wav.write(to: base.appendingPathComponent("audio.wav"))
+        // Read the record digest back from the bound envelope rather than recomputing it here, so
+        // the manifest can never disagree with the bytes beside it.
+        let bound = try VoiceSharingRecordBinding.bind(
+            envelope: encoded.metadataEnvelope, audio: encoded.wav)
+        XCTAssertFalse(bound.recordSHA256.isEmpty, "the exported envelope carries its record digest")
+        let manifest: [String: String] = [
+            "record_sha256": bound.recordSHA256,
+            "metadata_sha256": SHA256.hash(data: encoded.metadataEnvelope)
+                .map { String(format: "%02x", $0) }.joined(),
+            "audio_sha256": SHA256.hash(data: encoded.wav)
+                .map { String(format: "%02x", $0) }.joined(),
+            "capture_id": event().captureID.uuidString,
+            "unobserved_stage": "asr",
+            "unobserved_reason": "observation_unavailable",
+            "unobserved_state": "unknown",
+        ]
+        let manifestData = try JSONSerialization.data(
+            withJSONObject: manifest, options: [.sortedKeys, .prettyPrinted])
+        try manifestData.write(to: base.appendingPathComponent("manifest.json"))
+    }
+
     func test_wavRepresentationIsCanonicalPcmS16leMono16k() throws {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(), provenance: provenance, observations: observations)
