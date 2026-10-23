@@ -445,10 +445,119 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         ]
     }
 
+    /// ENGINE DETECTOR ERROR → DURABLE RECORD (spec 9578b16, reviewer 6c3fed9b). The detector reports a
+    /// real failure; that outcome must reach a READY durable record as the exact wake+failed/detector_error
+    /// pairing. Before the pairing rule existed the binding refused this and the record never existed —
+    /// a real engine failure was silently unpublishable.
+    func test_theRealEnginePipelinePublishesADetectorErrorAsWakeFailed() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: ErroringWake(), claims: { claims })
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let ready = waitForReadyEntries(1)
+        XCTAssertGreaterThanOrEqual(ready.count, 1,
+                                    "a detector failure must still produce a durable record")
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        var carried = false
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            let wake = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["wake"] as? [String: Any]
+            if wake?["state"] as? String == "failed" {
+                XCTAssertEqual(wake?["reason"] as? String, "detector_error",
+                               "a real detector failure is preserved as itself, not as unknown")
+                carried = true
+                break
+            }
+        }
+        XCTAssertTrue(carried, "no durable record carried the detector's failure")
+    }
+
+    /// The caller claims wake was never attempted; the detector actually RAN and failed. For the SAME
+    /// capture, the engine's observation must win — a claim may not narrate over a real observation.
+    func test_aCallerClaimCannotHideTheDetectorsFailure() async throws {
+        var claims = claims
+        claims["wake"] = .init(state: "not_run", reason: "detector_disabled")
+        let chain = makeChain(policy: openGate(enrolled: true), wake: ErroringWake(), claims: { claims })
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        // Group by capture: the question is what a SINGLE capture's record says, not what some unrelated
+        // record in the same run says. The harness can close more than one segment.
+        var byCapture: [String: [String: Any]] = [:]
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            let record = envelope?["record"] as? [String: Any]
+            guard let capture = record?["capture_id"] as? String else { continue }
+            byCapture[capture] = (record?["observations"] as? [String: Any])?["wake"] as? [String: Any]
+        }
+        let failedCaptures = byCapture.filter { $0.value["state"] as? String == "failed" }
+        XCTAssertFalse(failedCaptures.isEmpty,
+                       "the detector's real failure must reach a record; got \(byCapture)")
+        for (capture, wake) in failedCaptures {
+            XCTAssertEqual(wake["reason"] as? String, "detector_error",
+                           "capture \(capture) reported the failure as something else")
+        }
+        // The claim may not stand in for the observation: no capture may publish the caller's
+        // `not_run` for a stage the engine reported, because the merge makes the engine's word final.
+        let claimedAsNotRun = byCapture.filter {
+            $0.value["state"] as? String == "not_run"
+                && $0.value["reason"] as? String == "detector_disabled"
+        }
+        XCTAssertTrue(claimedAsNotRun.isEmpty,
+                      "the caller's not_run claim survived into a record despite a real observation: "
+                          + "\(claimedAsNotRun)")
+    }
+
+    /// NO-WAKE FORWARDING (reviewer 7c6e628e): in grace/continuous the gate FORWARDS a negative segment
+    /// instead of dropping it. The detector still ran and still reported no wake, so the record must carry
+    /// `no_wake_detected` — the two gate decisions must not disagree about the same observation.
+    func test_aForwardedNegativeSegmentStillReportsNoWakeDetected() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        chain.engine.listeningMode = .continuous
+        // Open the grace window through the PRODUCTION entry point, not a test seam.
+        chain.grace.onWakeWordDetected()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        var reasons: [String?] = []
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            let wake = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["wake"] as? [String: Any]
+            if wake?["state"] as? String == "completed" { reasons.append(wake?["reason"] as? String) }
+        }
+        XCTAssertTrue(reasons.contains("no_wake_detected"),
+                      "a forwarded negative segment observed no wake; got \(reasons)")
+    }
+
     private func makeChain(
         policy: VoiceSharingPolicy,
+        wake: WakeWordDetectorProtocol = DetectedWake(),
         claims: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome]
-    ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink, backend: EngineStubBackend) {
+    ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
+          backend: EngineStubBackend, grace: GracePeriodSignal) {
         let sink = VoiceSharingContributionSink(
             queue: queue, isEnabled: { policy.permitsCollection },
             encoderProvenance: { [self] in provenance }, observations: claims)
@@ -460,16 +569,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             sink: { event in sink.handle(event) })
         collector.deliversSynchronouslyForTesting = true
         let backend = EngineStubBackend()
+        let grace = GracePeriodSignal()
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
             backend: backend, signalFilter: SignalFilter(),
-            wakeWordDetector: DetectedWake(), gracePeriodSignal: GracePeriodSignal(),
+            wakeWordDetector: wake, gracePeriodSignal: grace,
             translationStage: nil)
         engine.contributionCollector = collector
         backend.engine = engine
         engine.start()
-        return (engine, sink, backend)
+        return (engine: engine, sink: sink, backend: backend, grace: grace)
     }
 
     private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
@@ -623,6 +733,12 @@ private final class DetectedWake: WakeWordDetectorProtocol {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
         .detected(confidence: 0.95, completionSample: 1600)
     }
+    func release() {}
+}
+
+/// The detector reports a real FAILURE (`error(code:)`) — the outcome the wake binding must accept.
+private final class ErroringWake: WakeWordDetectorProtocol {
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult { .error(code: "model_load_failed") }
     func release() {}
 }
 

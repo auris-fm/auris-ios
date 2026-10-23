@@ -43,6 +43,12 @@ enum VoiceSharingRecordBinding {
 
     /// Validates `envelope` (UTF-8 JSON of `{record, record_sha256}`) against `audio`, returning the
     /// identity the queue will rely on, or throwing the first reason it does not bind.
+    /// Test-only entry point to the SAME canonicalizer the digest uses, so a test that mutates a record
+    /// can re-seal it and be rejected for the rule under test rather than for a stale digest.
+    static func canonicalizeForTesting(_ record: [String: Any]) throws -> Data {
+        Data(try canonicalize(record).utf8)
+    }
+
     static func bind(envelope: Data, audio: Data) throws -> BoundEntry {
         let value = try parseRefusingDuplicates(envelope)
         guard let object = value as? [String: Any] else {
@@ -219,6 +225,12 @@ enum VoiceSharingRecordBinding {
     /// claim. The pairing rule is enforced below, not by mere membership here.
     private static let anyStateReasons: Set<String> = ["observation_unavailable"]
 
+    /// A reason that names a REAL observed failure rather than an absence of observation (spec 9578b16,
+    /// reviewer 6c3fed9b). `detector_error` is what the wake detector actually reported when it failed, so
+    /// it must survive into the durable record — but only as the exact wake+failed pairing it describes.
+    /// Attaching it to any other stage, or to `completed`, would assert a failure that did not happen.
+    private static let detectorErrorReason = "detector_error"
+
     private static let stageReasons: [String: Set<String>] = [
         "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
         "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
@@ -307,6 +319,8 @@ enum VoiceSharingRecordBinding {
                             "\(stagePath).reason",
                             "observation_unavailable requires state unknown, not \(state)")
                     }
+                } else if reason == detectorErrorReason {
+                    try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
@@ -347,12 +361,26 @@ enum VoiceSharingRecordBinding {
                             "\(stagePath).reason",
                             "observation_unavailable requires state unknown, not \(state)")
                     }
+                } else if text == detectorErrorReason {
+                    // Same enforcement on the completed path: a real failure cannot be attached to a
+                    // stage that reports success, nor to a stage other than wake (spec 9578b16).
+                    try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(text) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
                     }
                 }
             }
+        }
+    }
+
+    /// `detector_error` is a REAL observed failure, so it is a legitimate known outcome — but it names
+    /// exactly one thing: the wake detector failed for this capture. Any other stage, or any state other
+    /// than `failed`, would publish a failure that did not happen (spec 9578b16, reviewer 6c3fed9b).
+    private static func assertDetectorErrorPairing(stage: String, state: String, path: String) throws {
+        guard stage == "wake", state == "failed" else {
+            throw BindingError.invalidField(
+                path, "detector_error requires wake+failed, not \(stage)+\(state)")
         }
     }
 

@@ -243,10 +243,26 @@ class VoiceAsrEngine {
 
         if effectiveExposedSpeakerRoute, signalFilter.isPlaybackBleed(mic: utterance, playback: playbackBuffer) {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
+            // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the bleed filter RAN for this capture and its
+            // verdict was "bleed" — reported from the site that made the decision, never inferred.
+            contributionCollector?.engineReported(
+                stage: "bleed",
+                outcome: .init(state: "completed", reason: nil),
+                context: utteranceContext, decision: "bleed_rejected")
             // Observed bleed decision, not a discard: the spec requires collecting bleed-rejected segments
             // and retaining the decision rather than treating all rejects as playback-only ground truth.
             contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
             return
+        }
+
+        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): reaching here means the bleed filter produced a
+        // verdict for this capture. When the reference is not exposed the filter is not consulted at all,
+        // which is NOT a verdict — that case stays `unknown`/`no_playback_reference` from the caller.
+        if effectiveExposedSpeakerRoute {
+            contributionCollector?.engineReported(
+                stage: "bleed",
+                outcome: .init(state: "completed", reason: nil),
+                context: utteranceContext, decision: "no_bleed")
         }
 
         // The detector observes every segment in both listening modes.
@@ -288,9 +304,15 @@ class VoiceAsrEngine {
         case .forward(let detected):
             // ENGINE-PRODUCED OBSERVATION (review bc692f91): the wake decision below is made HERE, by
             // the detector, so this is the only place entitled to report the wake stage.
+            // The detector RAN and returned a verdict either way. A forwarded NEGATIVE segment in
+            // grace/continuous mode observed `no_wake_detected` exactly as a dropped one did, so the
+            // same outcome must be reported here — dropping it would lose a real observation
+            // (reviewer 7c6e628e).
             contributionCollector?.engineReported(
                 stage: "wake",
-                outcome: .init(state: "completed", reason: nil),
+                outcome: detected
+                    ? .init(state: "completed", reason: nil)
+                    : .init(state: "completed", reason: "no_wake_detected"),
                 context: utteranceContext)
             if detected {
                 onWakeWordDetected?()
@@ -326,6 +348,12 @@ class VoiceAsrEngine {
         }
         if case .failure(let error) = ready {
             FileLog.shared.addMessage("[VoicePipeline] → drop (backend not ready: \(error))")
+            // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the recogniser could not be started, so this
+            // capture's ASR genuinely failed — a real observed failure, not an unobserved stage.
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "failed", reason: "provider_error"),
+                context: utteranceContext)
             return
         }
         stageTimer.mark() // ASR start
@@ -334,6 +362,13 @@ class VoiceAsrEngine {
         let asrMs = Int(Date().timeIntervalSince(asrStartedAt) * 1000)
         stageTimer.mark() // ASR result
         emitStageTiming(detectedConfidence: detectedConfidence)
+
+        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the recogniser RAN for this capture and returned a
+        // result. Whether the resulting text is usable is a downstream judgement, not the ASR outcome.
+        contributionCollector?.engineReported(
+            stage: "asr",
+            outcome: .init(state: "completed", reason: nil),
+            context: utteranceContext)
 
         let isWakePositive = detectedConfidence != nil
         let trimmedText = WakeTranscriptTrimmer.commandText(

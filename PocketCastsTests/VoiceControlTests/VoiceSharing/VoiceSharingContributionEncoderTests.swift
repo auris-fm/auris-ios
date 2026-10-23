@@ -27,6 +27,96 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
 
     /// A stage-claim set the caller (pipeline) supplies — every non-completed stage states an
     /// enumerated reason; nothing is fabricated by the encoder.
+    // MARK: - detector_error is a REAL observed failure (spec 9578b16, reviewer 6c3fed9b)
+
+    /// The exact pairing the detector produces must ENCODE and reach a durable-ready record. Before this
+    /// rule existed the known failure was refused by the binding, so a real engine detector error could
+    /// never publish at all — the record silently never existed.
+    func test_theDetectorErrorPairingEncodesIntoAnImmutableRecord() throws {
+        var claims = observations
+        claims["wake"] = .init(state: "failed", reason: "detector_error")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event(), provenance: provenance, observations: claims)
+        let object = try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any]
+        let wake = (object?["observations"] as? [String: Any])?["wake"] as? [String: Any]
+        XCTAssertEqual(wake?["state"] as? String, "failed")
+        XCTAssertEqual(wake?["reason"] as? String, "detector_error")
+        // And it BINDS through the production validator (envelope + audio), not just encodes.
+        XCTAssertNoThrow(try VoiceSharingRecordBinding.bind(
+            envelope: encoded.metadataEnvelope, audio: encoded.wav))
+    }
+
+    /// REJECTION MATRIX: `detector_error` names the wake detector's failure and nothing else. Every other
+    /// stage/state pairing is refused — including `wake` + `completed`, which would publish a failure that
+    /// did not happen, and `wake` + `unknown`, which would turn an observed failure into non-observation.
+    func test_detectorErrorIsRefusedForEveryPairingOtherThanWakeFailed() throws {
+        let otherStates = ["completed", "not_run", "cancelled", "unknown"]
+        for stage in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
+            let states = stage == "wake" ? otherStates : otherStates + ["failed"]
+            for state in states {
+                var claims = observations
+                // ASR's completed state independently requires text; supply it so the ONLY rule that can
+                // reject this pair is the detector_error pairing (proven by the asserted message).
+                claims[stage] = .init(state: state, reason: "detector_error",
+                                      text: stage == "asr" && state == "completed" ? "hello" : nil)
+                do {
+                    let encoded = try VoiceSharingContributionEncoder.encode(
+                        event: event(), provenance: provenance, observations: claims)
+                    XCTFail("detector_error must be refused for \(stage)/\(state); it encoded")
+                    _ = encoded
+                } catch let error as VoiceSharingRecordBinding.BindingError {
+                    // Assert WHY, not just that something threw (a generic path can throw the same type).
+                    guard case .invalidField(let path, let message) = error else {
+                        XCTFail("expected invalidField for \(stage)/\(state), got \(error)")
+                        continue
+                    }
+                    XCTAssertEqual(path, "observations.\(stage).reason",
+                                   "the refusal must name the offending stage for \(stage)/\(state)")
+                    XCTAssertTrue(message.contains("detector_error requires wake+failed"),
+                                  "refusal for \(stage)/\(state) must state the pairing rule, got: \(message)")
+                }
+            }
+        }
+    }
+
+    /// The completed-stage path enforces the SAME rule (the binding validates reasons twice); a rule added
+    /// to only one path leaves the other open.
+    func test_theDetectorErrorPairingIsEnforcedOnTheCompletedPathToo() throws {
+        var claims = observations
+        claims["wake"] = .init(state: "failed", reason: "detector_error")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event(), provenance: provenance, observations: claims)
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
+        var stageBlock = try XCTUnwrap((object["observations"] as? [String: Any])?["wake"] as? [String: Any])
+        stageBlock["state"] = "completed"
+        var observationsBlock = try XCTUnwrap(object["observations"] as? [String: Any])
+        observationsBlock["wake"] = stageBlock
+        object["observations"] = observationsBlock
+        // Re-seal the mutated record with a digest computed by the PRODUCTION canonicalizer, so the digest
+        // is not what rejects it — the pairing rule must be.
+        var digest = ""
+        #if canImport(CryptoKit)
+        digest = SHA256.hash(data: try VoiceSharingRecordBinding.canonicalizeForTesting(object))
+            .map { String(format: "%02x", $0) }.joined()
+        #endif
+        let resealed: [String: Any] = [
+            "record": object,
+            "record_sha256": digest,
+        ]
+        let envelope = try JSONSerialization.data(withJSONObject: resealed)
+        do {
+            _ = try VoiceSharingRecordBinding.bind(envelope: envelope, audio: encoded.wav)
+            XCTFail("a completed wake stage must not carry the detector's failure reason")
+        } catch let error as VoiceSharingRecordBinding.BindingError {
+            guard case .invalidField(let path, let message) = error else {
+                return XCTFail("expected invalidField, got \(error)")
+            }
+            XCTAssertEqual(path, "observations.wake.reason")
+            XCTAssertTrue(message.contains("detector_error requires wake+failed"), "got: \(message)")
+        }
+    }
+
     private let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
         "wake": .init(state: "completed"),
         "bleed": .init(state: "not_run", reason: "no_playback_reference"),

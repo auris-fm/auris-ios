@@ -279,8 +279,10 @@ final class VoiceSharingCollector {
     /// the report is dropped rather than attached to a successor.
     func engineReported(
         stage: String, outcome: VoiceSharingContributionEncoder.StageOutcome,
-        context: CaptureContext?
+        context: CaptureContext?, decision: String? = nil
     ) {
+        var outcome = outcome
+        if let decision { outcome = outcome.withDecision(decision) }
         lock.lock()
         defer { lock.unlock() }
         guard let context else { return }
