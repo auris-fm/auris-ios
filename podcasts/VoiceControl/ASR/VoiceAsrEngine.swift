@@ -295,9 +295,13 @@ class VoiceAsrEngine {
             // next statement returns, and nothing downstream runs for this segment either way.
             // ENGINE-PRODUCED OBSERVATION (review bc692f91): the detector RAN and reported no wake for
             // this segment — reported from the decision site, never inferred from receiving frames.
+            // An OBSERVED NEGATIVE is still `completed`: the detector ran and gave a verdict. The
+            // verdict lives in the DECISION field, because a completed stage carries no reason
+            // (spec 94073918) — emitting the reason here would be refused by the binding and the
+            // capture would vanish instead of being recorded as a real no-wake observation.
             contributionCollector?.engineReported(
                 stage: "wake",
-                outcome: .init(state: "completed", reason: "no_wake_detected"),
+                outcome: .init(state: "completed", reason: nil, decision: "no_wake_detected"),
                 context: utteranceContext)
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
@@ -310,9 +314,9 @@ class VoiceAsrEngine {
             // (reviewer 7c6e628e).
             contributionCollector?.engineReported(
                 stage: "wake",
-                outcome: detected
-                    ? .init(state: "completed", reason: nil)
-                    : .init(state: "completed", reason: "no_wake_detected"),
+                outcome: .init(
+                    state: "completed", reason: nil,
+                    decision: detected ? nil : "no_wake_detected"),
                 context: utteranceContext)
             if detected {
                 onWakeWordDetected?()

@@ -783,6 +783,82 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
     }
 
+    /// COLLECTOR-LEVEL PROBE: an engine report made while the capture is open must ride the event that
+    /// the DEFERRED finalize emits. This isolates the merge from the engine and the sink.
+    func test_anEngineReportMadeWhileOpenRidesTheDeferredCompletionEvent() async {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        collector.speechStarted(confirmationFrameSamples: 320)
+        guard let ctx = collector.currentCaptureContextForTesting else {
+            return XCTFail("premise: open capture")
+        }
+        collector.engineReported(
+            stage: "wake",
+            outcome: .init(state: "completed", reason: nil, decision: "no_wake_detected"),
+            context: ctx)
+        collector.segmentationEnded(ctx)
+        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx,
+                                  deferEmission: true)
+        collector.finalizeDeferredCompletion(context: ctx)
+        let events = snapshot()
+        guard let completed = events.first(where: { $0.kind == .completed }) else {
+            return XCTFail("premise: a completed event; got \(events.map(\.kind))")
+        }
+        let wake = completed.reportedStages["wake"]
+        XCTAssertEqual(wake?.state, "completed", "the open-capture report must ride the event")
+        XCTAssertEqual(wake?.decision, "no_wake_detected")
+        XCTAssertNil(wake?.reason, "a completed stage carries no reason")
+    }
+
+    /// AN OBSERVED NEGATIVE WAKE MUST NOT BE LOST (spec 94073918). Sink merge must not let a caller's
+    /// unknown claim displace the engine's real `completed` wake, and validation must not relabel the
+    /// observed no-wake decision — the negative stays in the decision field while the reason is omitted.
+    func test_anObservedNegativeWakeReachesTheDurableRecordAsCompletedWithItsDecision() async throws {
+        // The caller claims NOTHING is known about wake; the detector really ran and found no wake.
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+            "wake": .init(state: "unknown", reason: "observation_unavailable"),
+            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
+            "asr": .init(state: "unknown", reason: "observation_unavailable"),
+            "translation": .init(state: "unknown", reason: "observation_unavailable"),
+            "routing": .init(state: "unknown", reason: "observation_unavailable"),
+            "execution": .init(state: "unknown", reason: "observation_unavailable"),
+        ]
+        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        chain.backend.stubTranscript = "play the latest episode"
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else { return XCTFail("an observed negative wake must still publish a record") }
+        // A capture produces TWO records by design: a `started` event at segment start, before any engine
+        // observation exists, and the completion carrying what the engine actually decided. The COMPLETION
+        // is what must state the observed negative; asserting the started record would demand that a
+        // pre-observation publish know the future.
+        var completionBlocks: [[String: Any]] = []
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            guard let record = envelope?["record"] as? [String: Any],
+                let wake = (record["observations"] as? [String: Any])?["wake"] as? [String: Any]
+            else { continue }
+            // Only the completed capture states an observed wake; the started record still says unknown.
+            if wake["state"] as? String == "completed" { completionBlocks.append(wake) }
+        }
+        guard let wake = completionBlocks.first else {
+            return XCTFail("no completion stated the observed wake; " + diagnostic(entries, chain))
+        }
+        XCTAssertEqual(wake["state"] as? String, "completed",
+                       "the engine's observed wake outcome must replace the caller's unknown claim")
+        XCTAssertEqual(wake["decision"] as? String, "no_wake_detected",
+                       "the OBSERVED negative decision must survive validation, not be relabelled")
+        XCTAssertNil(wake["reason"],
+                     "a completed stage carries no reason; the negative lives in decision")
+    }
+
     /// THE PERSISTED ENVELOPE, WITH A RECOMPUTED DIGEST (review 2f8e5d90). Validating an observations
     /// dictionary proves the observation rule; it does not prove a REAL record carrying the contradiction
     /// is refused when it comes back through `bind`. Each envelope is re-sealed with the PRODUCTION
@@ -1016,7 +1092,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
-        var reasons: [String?] = []
+        // The negative verdict lives in `decision`, not `reason` (spec 94073918): a completed stage
+        // carries no reason, so a reason-shaped assertion here would be asserting a refused payload.
+        var decisions: [String?] = []
         for entry in entries {
             let metadataURL = entry.root.appendingPathComponent(entry.name)
                 .appendingPathComponent("metadata.json")
@@ -1024,10 +1102,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
             let wake = ((envelope?["record"] as? [String: Any])?["observations"]
                 as? [String: Any])?["wake"] as? [String: Any]
-            if wake?["state"] as? String == "completed" { reasons.append(wake?["reason"] as? String) }
+            if wake?["state"] as? String == "completed" {
+                decisions.append(wake?["decision"] as? String)
+                XCTAssertNil(wake?["reason"], "a completed wake stage must not carry a reason")
+            }
         }
-        XCTAssertTrue(reasons.contains("no_wake_detected"),
-                      "a forwarded negative segment observed no wake; got \(reasons)")
+        XCTAssertTrue(decisions.contains("no_wake_detected"),
+                      "a forwarded negative segment observed no wake; got \(decisions)")
     }
 
     /// OBSERVATION ASSOCIATION, STALE CONTEXT (reviewer 7c6e628e): a report that belongs to capture A must
@@ -1154,6 +1235,26 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         backend.engine = engine
         engine.start()
         return (engine: engine, sink: sink, backend: backend, grace: grace)
+    }
+
+    private func diagnostic(
+        _ entries: [VoiceSharingUploadQueue.Entry],
+        _ chain: (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
+                  backend: EngineStubBackend, grace: GracePeriodSignal)
+    ) -> String {
+        let states: [String] = entries.map { entry in
+            let u = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+            guard let e = try? JSONSerialization.jsonObject(with: Data(contentsOf: u), options: []) as? [String: Any],
+                let o = ((e["record"] as? [String: Any])?["observations"] as? [String: Any]) else {
+                return "no-record"
+            }
+            let cid = ((e["record"] as? [String: Any])?["capture_id"] as? String) ?? "?"
+            let wakeDecision = (o["wake"] as? [String: Any])?["decision"] as? String ?? "-"
+            return "\(cid.prefix(8)) wake=\(wakeDecision) "
+                + o.map { "\($0.key):\((($0.value as? [String: Any])?["state"] as? String) ?? "?")" }
+                .sorted().joined(separator: ",")
+        }
+        return "entries=\(entries.count) transcribe=\(chain.backend.transcribeCalls) states=\(states)"
     }
 
     private func wakeStates(_ entries: [VoiceSharingUploadQueue.Entry]) -> [String] {
