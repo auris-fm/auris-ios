@@ -217,16 +217,37 @@ class VoiceControlService: ObservableObject {
             let previous = self.transcriptSerialTask
             let task = Task { [weak self] in
                 await previous?.value
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
+                // This capture was handed to THIS task. If the task is abandoned while queued behind
+                // its predecessor, it still owns the record and must release it, or the capture never
+                // publishes (review a7dfe013 #3). Reported as cancelled, because that is what happened.
+                func abandonCapture(_ collector: VoiceSharingCollector?) {
+                    guard let captureContext, let collector else { return }
+                    collector.engineReported(
+                        stage: "execution",
+                        outcome: .init(state: "cancelled", reason: "cancelled_by_user"),
+                        context: captureContext)
+                    collector.finalizeDeferredCompletion(context: captureContext)
+                }
+                guard !Task.isCancelled else {
+                    abandonCapture(self?.contributionCollector)
+                    return
+                }
+                guard let self else {
+                    // The service itself was released; nothing can report any more, but a collector
+                    // captured above can still release the record.
+                    abandonCapture(nil)
+                    return
+                }
                 self.transcriptLock.lock()
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
-                guard stillCurrent else { return }
+                guard stillCurrent else {
+                    abandonCapture(self.contributionCollector)
+                    return
+                }
+                // `handleRoutingInput` releases the record itself, on every exit path (its own
+                // `defer`). Finalizing here as well would release it twice.
                 await self.handleRoutingInput(input, captureContext: captureContext)
-                // This task is the last decider for these stages, so it finalizes the record: routing and
-                // execution have been reported above and the capture is still ring-resident.
-                self.contributionCollector?.finalizeDeferredCompletion(context: captureContext)
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
@@ -325,11 +346,94 @@ class VoiceControlService: ObservableObject {
         await handleRoutingInput(.english(transcript: transcript))
     }
 
+    /// What the executor's returned response actually establishes (review a7dfe013 #2). A return value
+    /// does NOT mean the action happened: `.earcon(.error)` and `.silent` are failed/refused outcomes.
+    private static func executionOutcome(
+        for response: VoiceResponse
+    ) -> VoiceSharingContributionEncoder.StageOutcome {
+        switch response {
+        case .earcon(.error):
+            return .init(state: "failed", reason: "action_failed")
+        case .earcon(.confirmRequired):
+            return .init(state: "not_run", reason: "precondition_failed")
+        case .silent:
+            return .init(state: "not_run", reason: "client_refused")
+        case .earcon, .spoken, .combined:
+            return .init(state: "completed", reason: nil)
+        }
+    }
+
+    /// The routing verdict once execution has finished: the disposition is no longer pending.
+    private static func settledDisposition(
+        for outcome: VoiceSharingContributionEncoder.StageOutcome
+    ) -> String {
+        switch outcome.state {
+        case "completed": return "executed"
+        case "failed": return "failed"
+        default: return "refused"
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: the PRODUCTION interpreter, so a control cannot restate the mapping and pass alone.
+    static func executionOutcomeForTesting(_ response: VoiceResponse)
+        -> VoiceSharingContributionEncoder.StageOutcome {
+        executionOutcome(for: response)
+    }
+
+    static func settledDispositionForTesting(
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome) -> String {
+        settledDisposition(for: outcome)
+    }
+    #endif
+
+    /// Reports BOTH stages for a turn that reached the executor. Routing's disposition is corrected
+    /// from `pending` to its terminal value, which is why it is reported a second time.
+    private func reportExecution(
+        _ response: VoiceResponse,
+        captureContext: VoiceSharingCollector.CaptureContext?
+    ) {
+        let outcome = Self.executionOutcome(for: response)
+        contributionCollector?.engineReported(
+            stage: "routing",
+            outcome: .init(state: "completed", reason: nil,
+                           routingDisposition: Self.settledDisposition(for: outcome)),
+            context: captureContext)
+        contributionCollector?.engineReported(
+            stage: "execution", outcome: outcome, context: captureContext)
+    }
+
+    /// FINDING a7dfe013 #3: this method took ownership of the deferred record and could return
+    /// without reporting. A capture left owned-but-unreported never publishes, so every early exit
+    /// must SETTLE it — cancelled if the turn was abandoned, else with whatever is true of that exit.
+    private func settleOwnedCapture(
+        _ context: VoiceSharingCollector.CaptureContext?,
+        cancelled: Bool,
+        reason: String?
+    ) {
+        guard let context else { return }
+        contributionCollector?.engineReported(
+            stage: "execution",
+            outcome: .init(state: cancelled ? "cancelled" : "not_run", reason: reason),
+            context: context)
+    }
+
     func handleRoutingInput(_ input: IntentRoutingInput,
                             captureContext: VoiceSharingCollector.CaptureContext? = nil) async {
+        // The engine handed this method ownership of the deferred record, so the RELEASE is
+        // structural: `defer` covers every return below, including ones added later. Reporting
+        // still has to happen per path above; releasing cannot be forgotten.
+        defer {
+            if captureContext != nil {
+                contributionCollector?.finalizeDeferredCompletion(context: captureContext)
+            }
+        }
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
-        guard isListening else { return }
+        guard isListening else {
+            settleOwnedCapture(captureContext, cancelled: true, reason: "cancelled_by_user")
+            return
+        }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
 
@@ -391,6 +495,8 @@ class VoiceControlService: ObservableObject {
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
                 FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
+                // Debounced: the turn ran, the repeated action was suppressed.
+                settleOwnedCapture(captureContext, cancelled: false, reason: "nothing_to_do")
                 return
             }
 
@@ -402,18 +508,13 @@ class VoiceControlService: ObservableObject {
                                routingDisposition: "pending"),
                 context: captureContext)
             guard isListening else {
-                contributionCollector?.engineReported(
-                    stage: "execution",
-                    outcome: .init(state: "cancelled", reason: "cancelled_by_user"),
-                    context: captureContext)
+                settleOwnedCapture(captureContext, cancelled: true, reason: "cancelled_by_user")
                 return
             }
             let response = await executor.execute(intent)
-            // Execution returned an outcome: the action was performed.
-            contributionCollector?.engineReported(
-                stage: "execution",
-                outcome: .init(state: "completed", reason: nil),
-                context: captureContext)
+            // A RETURNED response is not a performed action: `.earcon(.error)` is a failure and
+            // `.silent`/`.confirmRequired` are refusals. The report carries what the executor said.
+            reportExecution(response, captureContext: captureContext)
             // Do not reset the window unconditionally here. A cloud route's
             // completion is the executor's to attribute — it already does so
             // against the generation the route was issued under
@@ -442,10 +543,7 @@ class VoiceControlService: ObservableObject {
 
             if let intent = dialogResult.intent {
                 let response = await executor.execute(intent)
-                contributionCollector?.engineReported(
-                    stage: "execution",
-                    outcome: .init(state: "completed", reason: nil),
-                    context: captureContext)
+                reportExecution(response, captureContext: captureContext)
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
@@ -458,7 +556,11 @@ class VoiceControlService: ObservableObject {
                     context: captureContext)
                 audioRenderer.render(.spoken(question))
             }
-            // If dialogResult has no intent and no question (e.g., cancel), do nothing
+            // If dialogResult has no intent and no question (e.g., cancel), nothing was executed —
+            // but the record still needs releasing.
+            if dialogResult.intent == nil && dialogResult.question == nil {
+                settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
+            }
 
         case .none:
             let stage = turnMetrics?.failedStage ?? "?"
@@ -514,6 +616,8 @@ class VoiceControlService: ObservableObject {
                 if gracePeriodSignal.claimRefusalTone() {
                     audioRenderer.playEarcon(.error)
                 }
+                // Escalation was refused by policy: execution did not run.
+                settleOwnedCapture(captureContext, cancelled: false, reason: "precondition_failed")
                 return
             }
             if let dispatchGeneration {
@@ -531,6 +635,10 @@ class VoiceControlService: ObservableObject {
                         generation: dispatchGeneration
                     )
                 )
+                // FINDING a7dfe013 #1: this branch really does dispatch a CloudRouteIntent, so the
+                // earlier "no execution" report was wrong. Routing's disposition and execution are
+                // corrected to what the dispatch actually produced.
+                reportExecution(response, captureContext: captureContext)
                 audioRenderer.render(response)
                 return
             }
@@ -546,6 +654,8 @@ class VoiceControlService: ObservableObject {
             // the router could not do its job — and each speaks: the user asked
             // a real question and got nothing.
             audioRenderer.playEarcon(.error)
+            // Nothing was executed and no dispatch happened; release the record.
+            settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
         }
     }
 

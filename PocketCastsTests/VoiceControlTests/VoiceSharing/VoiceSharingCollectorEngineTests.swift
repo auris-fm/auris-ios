@@ -358,6 +358,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// The COMPLETION events (the ones carrying what the engine observed), not the `started` event.
+    private func collectedCompletions() -> [VoiceSharingCollector.SegmentEvent] {
+        snapshot().filter { $0.kind == .completed }
+    }
+
     private func snapshot() -> [VoiceSharingCollector.SegmentEvent] {
         recordLock.lock(); defer { recordLock.unlock() }
         return events
@@ -423,6 +428,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             })
         collector.deliversSynchronouslyForTesting = true
         return collector
+    }
+
+    /// The COMPLETION events (the ones carrying what the engine observed), not the `started` event.
+    private func collectedCompletions() -> [VoiceSharingCollector.SegmentEvent] {
+        snapshot().filter { $0.kind == .completed }
     }
 
     private func snapshot() -> [VoiceSharingCollector.SegmentEvent] {
@@ -1083,6 +1093,87 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         #endif
         let envelope: [String: Any] = ["record": record, "record_sha256": digest]
         return try JSONSerialization.data(withJSONObject: envelope)
+    }
+
+    /// FINDING a7dfe013 #3: the capture handed to the routing consumer must always be RELEASED, or it
+    /// stays ring-resident forever and never publishes. Drives the REAL engine: the consumer reports
+    /// (or a stopped turn cancels) and releases. Asserts a COMPLETION record exists in both cases.
+    func test_aDeferredCaptureIsReleasedByTheConsumerEvenWhenTheTurnIsAbandoned() async throws {
+        for abandoned in [true, false] {
+            let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+                                  claims: { claims })
+            chain.backend.stubTranscript = "play the latest episode"
+            chain.engine.listeningMode = .continuous
+            var released = false
+            chain.engine.onRoutingInput = { _, context in
+                chain.engine.contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: VoiceSharingContributionEncoder.StageOutcome(
+                        state: abandoned ? "cancelled" : "completed",
+                        reason: abandoned ? "cancelled_by_user" : nil),
+                    context: context)
+                chain.engine.contributionCollector?.finalizeDeferredCompletion(context: context)
+                released = true
+            }
+            await chain.backend.emitSpeechThenSilence(
+                level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+            let deadline = Date().addingTimeInterval(5)
+            while !released, Date() < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertTrue(released, "\(abandoned): the consumer must be handed the capture")
+
+            // A RELEASE is what makes a completion publish; a capture left owned never reaches here.
+            _ = waitForReadyEntries(1)
+            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+                !entries.isEmpty else {
+                return XCTFail("\(abandoned): a released capture must publish a record")
+            }
+            var states: [String] = []
+            for entry in entries {
+                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                    .appendingPathComponent("metadata.json")
+                let envelope = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+                if let execution = ((envelope?["record"] as? [String: Any])?["observations"]
+                    as? [String: Any])?["execution"] as? [String: Any],
+                   let state = execution["state"] as? String {
+                    states.append(state)
+                }
+            }
+            XCTAssertTrue(states.contains(abandoned ? "cancelled" : "completed"),
+                          "\(abandoned): the published record must carry the consumer's outcome, "
+                              + "got \(states)")
+        }
+    }
+
+    /// FINDING a7dfe013 #2: a returned `VoiceResponse` does not establish success. `.earcon(.error)` is
+    /// a FAILED action and `.silent`/`.confirmRequired` refuse to act. Drives the PRODUCTION classifier
+    /// helper the service uses, so an optimistic "completed on return" cannot pass this.
+    func test_anExecutorResultIsInterpretedByWhatItSaysNotByReturning() {
+        typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
+        let cases: [(String, VoiceResponse, String, String?)] = [
+            ("error tone", .earcon(.error), "failed", "action_failed"),
+            ("confirmation needed", .earcon(.confirmRequired), "not_run", "precondition_failed"),
+            ("silent", .silent, "not_run", "client_refused"),
+            ("spoken answer", .spoken("playing"), "completed", nil),
+            ("success tone", .earcon(.success), "completed", nil),
+            ("combined", .combined(earcon: .success, spokenText: "done"), "completed", nil),
+        ]
+        for (label, response, state, reason) in cases {
+            let outcome: Outcome = VoiceControlService.executionOutcomeForTesting(response)
+            XCTAssertEqual(outcome.state, state, "\(label): wrong state")
+            XCTAssertEqual(outcome.reason, reason, "\(label): wrong reason")
+            // The routing disposition must AGREE with the execution outcome; a pending disposition
+            // left behind would say the turn was still undecided after it finished.
+            let disposition = VoiceControlService.settledDispositionForTesting(outcome)
+            let expectedDisposition = state == "completed" ? "executed"
+                : (state == "failed" ? "failed" : "refused")
+            XCTAssertEqual(disposition, expectedDisposition,
+                           "\(label): disposition must follow the outcome")
+            XCTAssertNotEqual(disposition, "pending", "\(label): a finished turn is not pending")
+        }
     }
 
     /// A TRANSLATION SKIP REASON IS A DECISION NOT TO RUN (spec 4d10275f, review b5fb69ef). Each of the
