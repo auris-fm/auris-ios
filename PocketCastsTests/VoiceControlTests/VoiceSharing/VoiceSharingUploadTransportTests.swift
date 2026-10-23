@@ -392,6 +392,11 @@ extension VoiceSharingUploadTransportTests {
             }
         }
         guard !heldTimedOut else {
+            // Release BEFORE returning: the async-let children below are still held, and
+            // structured cleanup would wait for them (up to a transport deadline). Explicit
+            // release first keeps the return prompt (reviewer 2d15f73d/0505f163).
+            UploadRecordingURLProtocol.releaseAllDeferred()
+            _ = await sendA; _ = await sendB
             return XCTFail("both transfers were not held within 10s: held=\(uploadRequests.count)")
         }
         for request in uploadRequests {
@@ -402,6 +407,9 @@ extension VoiceSharingUploadTransportTests {
         // Release A BY KEY: its 401 branch reports tok-1 → one rotation.
         UploadRecordingURLProtocol.releaseDeferred401(key: "capture-A")
         guard case .response(401, _) = await sendA else {
+            // Same rule: unblock the still-held transfer BEFORE returning.
+            UploadRecordingURLProtocol.releaseAllDeferred()
+            _ = await sendB
             return XCTFail("expected the 401 verdict for A")
         }
         // WAIT for the provider to ADOPT tok-2 (barrier, not a delay): token() returns tok-2
@@ -416,8 +424,73 @@ extension VoiceSharingUploadTransportTests {
         guard case .response(401, _) = resultB else {
             return XCTFail("expected the 401 verdict for B, got \(resultB)")
         }
+        XCTAssertTrue(UploadRecordingURLProtocol.deferred401s.isEmpty,
+                      "no transfer is left held after the flow completes")
         XCTAssertEqual(refreshCount, 1,
                        "the stale tok-1 rejection from transport B must NOT rotate again — this is what a nil-forwarding transport fails")
+    }
+
+    /// FORCED MISSING-TRANSFER CLEANUP (reviewer 2d15f73d/0505f163): the barrier expects three
+    /// held transfers but only two ever arrive. The bounded barrier times out at 10s, the failure
+    /// path releases what IS held BEFORE awaiting the children, and the test ends promptly —
+    /// no 90-second transport deadline is reached.
+    func test_barrierFailureReleasesHeldTransfersPromptly() async throws {
+        UploadRecordingURLProtocol.lock.lock()
+        UploadRecordingURLProtocol.expectedDeferredCount = 3   // one will never come
+        UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
+        UploadRecordingURLProtocol.lock.unlock()
+        let cleanupStarted = Date()
+        defer {
+            UploadRecordingURLProtocol.handler = nil
+            UploadRecordingURLProtocol.releaseAllDeferred()
+        }
+        UploadRecordingURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path == "/api/v1/auth/token" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                        httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
+            }
+            // Upload path: hold, never complete.
+            return nil
+        }
+        let provider = makeRealProvider(credential: "cred")
+        func freshSession() -> URLSession {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [UploadRecordingURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+        let transportA = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: freshSession())
+        let transportB = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: freshSession())
+        var requestA = self.makeRequest()
+        requestA.setValue("capture-A", forHTTPHeaderField: "Idempotency-Key")
+        var requestB = self.makeRequest()
+        requestB.setValue("capture-B", forHTTPHeaderField: "Idempotency-Key")
+        async let sendA = transportA.send(request: requestA)
+        async let sendB = transportB.send(request: requestB)
+        let timedOut: Bool = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let result = UploadRecordingURLProtocol.bothHeldSemaphore?
+                    .wait(timeout: .now() + 10)
+                continuation.resume(returning: result == .timedOut)
+            }
+        }
+        XCTAssertTrue(timedOut, "with one transfer missing, the barrier must time out")
+        // FAILURE PATH: release BEFORE awaiting the children.
+        UploadRecordingURLProtocol.releaseAllDeferred()
+        let resultA = await sendA
+        let resultB = await sendB
+        guard case .response(401, _) = resultA, case .response(401, _) = resultB else {
+            return XCTFail("released transfers complete as 401s, got \(resultA) / \(resultB)")
+        }
+        // PROMPT: the whole flow stays far under the transport's 90s deadline.
+        let elapsed = Date().timeIntervalSince(cleanupStarted)
+        XCTAssertLessThan(elapsed, 30,
+                          "the failure path ends promptly — no transport deadline reached")
     }
 
     /// SAME-account/same-epoch fencing across the real path: after the entry was admitted under
