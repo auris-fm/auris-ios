@@ -783,6 +783,57 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
     }
 
+    /// THE THREE TRANSLATION SKIPS ARE DISTINCT FACTS (spec delta 4d10275f). Collapsing them into
+    /// `observation_unavailable` threw away what the engine actually knew. Each must reach the durable
+    /// record under its own reason, and none may borrow `source_language_target_language`.
+    func test_eachTranslationSkipReachesTheDurableRecordUnderItsOwnReason() async throws {
+        let cases: [(label: String, language: String?, expected: String)] = [
+            ("no detected language", nil, "source_language_unavailable"),
+            ("backend handles translation", "fr", "backend_handles_translation"),
+            ("no translator stage", "de", "translator_unavailable"),
+        ]
+        for testCase in cases {
+            // Fresh storage per case so each sees only its own record.
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+            chain.backend.stubTranscript = "bonjour"
+            chain.backend.stubLanguage = testCase.language
+            // The backend only claims it translates for the middle case.
+            chain.backend.stubCanTranslate = testCase.label == "backend handles translation"
+            chain.engine.listeningMode = .continuous
+            await chain.backend.emitSpeechThenSilence(
+                level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+            _ = waitForReadyEntries(1)
+
+            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+                !entries.isEmpty else { return XCTFail("\(testCase.label): a record is required") }
+            var found: [String: Any]?
+            for entry in entries {
+                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                    .appendingPathComponent("metadata.json")
+                let envelope = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+                if let translation = ((envelope?["record"] as? [String: Any])?["observations"]
+                    as? [String: Any])?["translation"] as? [String: Any] {
+                    found = translation
+                }
+            }
+            guard let translation = found else {
+                return XCTFail("\(testCase.label): the record must state the translation stage")
+            }
+            XCTAssertEqual(translation["state"] as? String, "not_run",
+                           "\(testCase.label): a skip is not_run")
+            XCTAssertEqual(translation["reason"] as? String, testCase.expected,
+                           "\(testCase.label): the skip must keep its own reason")
+            XCTAssertNotEqual(translation["reason"] as? String, "source_language_target_language",
+                              "\(testCase.label): a skip must not assert source equals target")
+        }
+    }
+
     /// COLLECTOR-LEVEL PROBE: an engine report made while the capture is open must ride the event that
     /// the DEFERRED finalize emits. This isolates the merge from the engine and the sink.
     func test_anEngineReportMadeWhileOpenRidesTheDeferredCompletionEvent() async {
@@ -1373,15 +1424,20 @@ final class EngineStubBackend: AsrBackend {
     private(set) var transcribeCalls = 0
 
     var requiredModel: ModelSpec { ModelSpec(id: "stub", files: [], targetDir: "stub") }
+    /// The detected language the stub reports; nil models a recogniser that cannot say.
+    var stubLanguage: String?
+    /// Whether the stub backend claims it translates natively.
+    var stubCanTranslate = false
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(languages: ["en"], canTranslateToEnglish: stubCanTranslate,
+                        requiresHardwareAccel: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
     /// The transcript this stub returns; a real recogniser returns text.
     var stubTranscript = ""
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
         transcribeCalls += 1
-        return AsrResult(text: stubTranscript, detectedLanguage: nil)
+        return AsrResult(text: stubTranscript, detectedLanguage: stubLanguage)
     }
     func release() {}
 

@@ -54,16 +54,24 @@ enum VoiceSharingContributionEncoder {
         /// The stage's own decision verdict (the `decision` member the schema defines for bleed). Only a
         /// site that actually decided may set it; `nil` leaves the member absent.
         let decision: String?
+        /// What a successful translation actually produced (schema fields that already exist, spec
+        /// d09c320c). Set only by the site that ran the translation.
+        let translatedText: String?
+        let targetLanguage: String?
 
-        init(state: String, reason: String? = nil, text: String? = nil, decision: String? = nil) {
+        init(state: String, reason: String? = nil, text: String? = nil, decision: String? = nil,
+             translatedText: String? = nil, targetLanguage: String? = nil) {
             self.state = state
             self.reason = reason
             self.text = text
             self.decision = decision
+            self.translatedText = translatedText
+            self.targetLanguage = targetLanguage
         }
 
         func withDecision(_ decision: String) -> StageOutcome {
-            StageOutcome(state: state, reason: reason, text: text, decision: decision)
+            StageOutcome(state: state, reason: reason, text: text, decision: decision,
+                         translatedText: translatedText, targetLanguage: targetLanguage)
         }
     }
 
@@ -212,6 +220,8 @@ enum VoiceSharingContributionEncoder {
             if let reason = outcome.reason { entry["reason"] = reason }
             if let text = outcome.text { entry["text"] = text }
             if let decision = outcome.decision { entry["decision"] = decision }
+            if let translated = outcome.translatedText { entry["translated_text"] = translated }
+            if let target = outcome.targetLanguage { entry["target_language"] = target }
             block[stage] = entry
         }
         return block

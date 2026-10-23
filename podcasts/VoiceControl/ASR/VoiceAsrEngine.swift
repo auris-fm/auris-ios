@@ -519,7 +519,7 @@ class VoiceAsrEngine {
         // them may borrow that reason. Those three are reported as `unknown`/`observation_unavailable`:
         // honest, and not a claim about what translation did.
         guard let detected = result.detectedLanguage?.lowercased() else {
-            report(.init(state: "unknown", reason: "observation_unavailable"))
+            report(.init(state: "not_run", reason: "source_language_unavailable"))
             return (result, "translate=skip(no lang)")
         }
         if detected == "en" {
@@ -529,13 +529,13 @@ class VoiceAsrEngine {
         }
         if backend.capabilities.canTranslateToEnglish {
             // The backend translates natively, so our stage never ran. That is not "source == target".
-            report(.init(state: "unknown", reason: "observation_unavailable"))
+            report(.init(state: "not_run", reason: "backend_handles_translation"))
             return (result, "translate=skip(backend)")
         }
         guard let translationStage else {
             // Missing platform translation is a hard failure for non-English SenseVoice text —
             // never relabel native text as english_v1.
-            report(.init(state: "unknown", reason: "observation_unavailable"))
+            report(.init(state: "not_run", reason: "translator_unavailable"))
             return (result, "translate=skip(no stage)")
         }
 
@@ -553,10 +553,10 @@ class VoiceAsrEngine {
             report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=noop(\(detected))")
         }
-        // NOTE (review bb404153): the observation payload carries no translated text or target
-        // language yet, so `completed` asserts only that translation ran and produced output. The
-        // translated text is visible in the transcript the caller supplies, not in this stage block.
-        report(.init(state: "completed", reason: nil))
+        // The owning schema already carries `translated_text` and `target_language`, so a successful
+        // translation now states what it actually produced instead of only that it ran (spec d09c320c).
+        report(.init(state: "completed", reason: nil,
+                     translatedText: translated, targetLanguage: "en"))
         return (
             AsrResult(text: translated, detectedLanguage: "en"),
             "translate=\(detected)→en '\(translated)'"

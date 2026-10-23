@@ -246,7 +246,14 @@ enum VoiceSharingRecordBinding {
         "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
         "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
         "asr": ["local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user"],
-        "translation": ["source_language_target_language", "no_text", "provider_error", "outcome_wait_expired"],
+        // Spec delta 4d10275f: the three ways translation can be correctly SKIPPED get their own
+        // reasons. Reporting them as `observation_unavailable` discarded facts the engine actually knew.
+        // `backend_handles_translation` records why THIS stage was skipped — it does not claim the
+        // backend actually produced a translation, which is a separate observation.
+        "translation": [
+            "source_language_target_language", "no_text", "provider_error", "outcome_wait_expired",
+            "source_language_unavailable", "backend_handles_translation", "translator_unavailable",
+        ],
         "routing": ["no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired"],
         "execution": ["client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired"],
     ]
