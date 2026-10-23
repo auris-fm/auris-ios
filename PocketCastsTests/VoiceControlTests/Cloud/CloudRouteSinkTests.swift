@@ -3430,12 +3430,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             bPreparedTask.sentAuthFrame?["request_id"] as? String,
             "B's prepared frame must carry a client-assigned request_id"
         )
-        XCTAssertNotNil(UUID(uuidString: bRequestId), "B's request_id must be a UUID")
+        XCTAssertEqual(bRequestId, "u-82", "B's wire request_id IS B's admitted utterance id (delta f47e972)")
         // A and B are genuinely distinct turns, shown by their own prepared frames.
         let aRequestId = try XCTUnwrap(
             heldA.task.sentAuthFrame?["request_id"] as? String,
             "A's prepared frame must carry a client-assigned request_id"
         )
+        XCTAssertEqual(aRequestId, "u-81", "A's wire request_id IS A's admitted utterance id (delta f47e972)")
         XCTAssertNotEqual(aRequestId, bRequestId, "A and B must be distinguishable by their frames")
 
         gate.release()
@@ -3687,7 +3688,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let task = try XCTUnwrap(capturedTask, "the turn must have built its own transport task")
         let frame = try XCTUnwrap(task.sentAuthFrame, "the turn's own prepared frame must be readable")
         let requestId = try XCTUnwrap(frame["request_id"] as? String, "the frame carries a request_id")
-        XCTAssertNotNil(UUID(uuidString: requestId), "the request_id is client-assigned")
+        XCTAssertEqual(requestId, "u-88", "the wire request_id IS the turn's admitted utterance id (delta f47e972)")
         XCTAssertEqual(result.outcome, .completed, "this turn completes at `done`")
 
         let pending = await MainActor.run { owningPlayer.hasPendingAudio }
@@ -3775,7 +3776,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // B's distinct identity, from ITS OWN prepared frame.
         let bFrame = try XCTUnwrap(heldB.task.sentAuthFrame, "B's prepared frame must be readable")
         let bRequestId = try XCTUnwrap(bFrame["request_id"] as? String, "B carries a request_id")
-        XCTAssertNotNil(UUID(uuidString: bRequestId), "B's request_id is client-assigned")
+        XCTAssertEqual(bRequestId, "u-90", "B's wire request_id IS B's admitted utterance id (delta f47e972)")
 
         let resumesBeforeNotification = playback.calls.filter { $0 == .resume }.count
         XCTAssertFalse(playback.isPlaying, "the inherited hold is in effect while B is in flight")
