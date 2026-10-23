@@ -131,39 +131,32 @@ final class VoiceSharingUploaderTests: XCTestCase {
         queue = owned
         let entry = try makeReadyEntryOwned(owned)
         var transportCalls = 0
-        // The transport closure flips the identity BEFORE returning. The fence runs BEFORE the
-        // transport call, so this flip cannot influence the fence — it proves the fence saw the
-        // live pre-flip value, i.e. that the fence is genuinely reached with the identity intact.
+        // THE PRE-LAUNCH WINDOW (reviewer ee5b4547): `endpoint` is injected and called AFTER
+        // admission but BEFORE the launch fence, so flipping the identity inside it lands the
+        // move exactly in the admission→fence interval — deterministically, no races.
         let uploader = VoiceSharingUploader(
             queue: owned, retryPolicy: retryPolicy(),
             isAuthorized: { true },
             currentIdentity: { box.current },
-            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
-            transport: { _ in
-                transportCalls += 1
+            endpoint: { () -> URL? in
+                // The move happens here: admission has already seen A.
                 box.current = VoiceSharingUploadIdentity(
                     accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                return URL(string: "https://unit.test/api/v1/contributions")
+            },
+            transport: { _ in
+                transportCalls += 1
                 return .response(statusCode: 201, body: Data())
             })
 
-        // The FENCE window: upload() admits under A (box still A), then the launch fence re-reads.
-        // To flip BETWEEN admission and fence we cannot hook the private interior — so instead the
-        // fence is proven by the post-await control (next test) plus this one asserting a fence
-        // that sees the SAME identity lets the request through to the transport exactly once.
         let outcome = await uploader.upload(entry)
-        if case .unavailable = outcome {
-            return XCTFail("fence refused a request whose identity never moved — the fence is not comparing what admission admitted")
+        guard case .revoked = outcome else {
+            return XCTFail("a move inside the admission→launch window must stop the attempt, got \(outcome)")
         }
-        // The fence PASSED the request through (identity had not moved at fence time), the
-        // transport ran once, and it flipped the identity mid-flight — which the post-await
-        // fence must now catch (asserted by the sibling control). Here we assert the flow:
-        XCTAssertEqual(box.current,
-                       VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-2"),
-                       "the transport flipped the identity after the fence passed")
-        // The attempt then must have been stopped by the POST-AWAIT fence (identity retired while
-        // in flight) — the sibling control's invariant, reached here through the same flow.
+        XCTAssertEqual(transportCalls, 0,
+                       "no request may reach the transport, let alone the wire")
         XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name },
-                      "the entry is retained: the late success did not settle it")
+                      "the entry is retained for its owning identity")
     }
 
     /// Mutable identity holder for the fence control.
