@@ -1,6 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {prepare, requested, eligible, trusted, completed, completion, skippedNotice} from './claude-review.mjs';
+import {prepare, requested, eligible, trusted, completed, completion, skippedNotice, api} from './claude-review.mjs';
+import {mkdtemp, writeFile, chmod, rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 const pr = {number: 9, state: 'open', draft: false, user: {login: 'author'},
   head: {sha: 'a'.repeat(40), repo: {full_name: 'owner/repo'}}, base: {sha: 'b'.repeat(40)}};
 test('only ready conversion or exact new PR command requests review', () => {
@@ -32,7 +35,10 @@ test('current permission is checked before PR access; ready pins head; workflow 
     path.includes('/statuses') ? statuses : path.includes('/files') ? files : pr});
   assert.equal((await run({action: 'ready_for_review', pull_request: {...pr, head: {...pr.head, sha: 'old'}}})).run, false);
   const ready = {action: 'ready_for_review', pull_request: pr};
-  assert.equal((await run(ready, [{filename: '.github/scripts/claude-review.mjs'}])).run, false);
+  // prepare() consumes FILENAMES (a --jq projection), not the files payload:
+  // the paginated payload carries every file's full patch and overflowed
+  // execFileSync's buffer (spawnSync gh ENOBUFS) on a large-diff PR.
+  assert.equal((await run(ready, ['.github/scripts/claude-review.mjs'])).run, false);
   assert.equal((await run(ready, [], [{context: 'Claude review', state: 'success'}])).run, false);
   assert.deepEqual(await run(ready), {run: true, number: 9, head: pr.head.sha, base: pr.base.sha});
 });
@@ -257,4 +263,24 @@ test('a comment line containing the invocation is not a writer', async () => {
   ).replace('      statuses: write\n      # Unused', '      # Unused');
   assert.throws(() => check(commented), /detector did not match/,
     'a commented line was treated as a live writer');
+});
+
+test('files projection parses gh --jq PLAIN-LINE output (transport shape)', async () => {
+  // gh --paginate --jq emits newline-separated strings, NOT JSON. The real
+  // ENOBUFS command returned exactly this shape; JSON.parse on it is the
+  // failure class this guard must not have.
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'gh-stub-'));
+  const stub = path.join(dir, 'gh');
+  await writeFile(stub, '#!/bin/sh\nprintf "Podcasts/VoiceControl/Audio/CloudAudioPlayer.swift\\n.guarded.yml\\n"\n');
+  await chmod(stub, 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = dir + path.delimiter + prevPath;
+  let out;
+  try {
+    out = api('repos/owner/repo/pulls/9/files?per_page=100', true, null, '.[].filename');
+  } finally {
+    process.env.PATH = prevPath;
+  }
+  assert.deepEqual(out, ['Podcasts/VoiceControl/Audio/CloudAudioPlayer.swift', '.guarded.yml']);
+  await rm(dir, {recursive: true, force: true});
 });
