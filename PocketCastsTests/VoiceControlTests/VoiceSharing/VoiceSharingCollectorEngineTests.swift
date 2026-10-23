@@ -1154,12 +1154,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     func test_anExecutorResultIsInterpretedByWhatItSaysNotByReturning() {
         typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
         let cases: [(String, VoiceResponse, String, String?)] = [
+            // Only the executor's own failure verdict concludes anything (spec 012b19dd). Every other
+            // response is a PRESENTATION choice and leaves execution unobserved.
             ("error tone", .earcon(.error), "failed", "action_failed"),
-            ("confirmation needed", .earcon(.confirmRequired), "not_run", "precondition_failed"),
-            ("silent", .silent, "not_run", "client_refused"),
-            ("spoken answer", .spoken("playing"), "completed", nil),
-            ("success tone", .earcon(.success), "completed", nil),
-            ("combined", .combined(earcon: .success, spokenText: "done"), "completed", nil),
+            ("confirmation needed", .earcon(.confirmRequired), "unknown", "observation_unavailable"),
+            ("silent", .silent, "unknown", "observation_unavailable"),
+            ("spoken answer", .spoken("playing"), "unknown", "observation_unavailable"),
+            ("success tone", .earcon(.success), "unknown", "observation_unavailable"),
+            ("combined", .combined(earcon: .success, spokenText: "done"), "unknown",
+             "observation_unavailable"),
         ]
         for (label, response, state, reason) in cases {
             let outcome: Outcome = VoiceControlService.executionOutcomeForTesting(response)
@@ -1168,11 +1171,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             // The routing disposition must AGREE with the execution outcome; a pending disposition
             // left behind would say the turn was still undecided after it finished.
             let disposition = VoiceControlService.settledDispositionForTesting(outcome)
-            let expectedDisposition = state == "completed" ? "executed"
-                : (state == "failed" ? "failed" : "refused")
+            let expectedDisposition = state == "failed" ? "failed"
+                : (state == "unknown" ? "pending" : "refused")
             XCTAssertEqual(disposition, expectedDisposition,
-                           "\(label): disposition must follow the outcome")
-            XCTAssertNotEqual(disposition, "pending", "\(label): a finished turn is not pending")
+                           "\(label): disposition must follow what was actually observed")
         }
     }
 

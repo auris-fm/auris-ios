@@ -346,20 +346,23 @@ class VoiceControlService: ObservableObject {
         await handleRoutingInput(.english(transcript: transcript))
     }
 
-    /// What the executor's returned response actually establishes (review a7dfe013 #2). A return value
-    /// does NOT mean the action happened: `.earcon(.error)` and `.silent` are failed/refused outcomes.
+    /// What the executor's returned response actually establishes (review a7dfe013 #2, narrowed by spec
+    /// 012b19dd). `VoiceResponse` says what to PRESENT, which is not the same as what execution did, so
+    /// only the ONE value the executor itself treats as failure is allowed to conclude anything.
+    ///
+    /// `.earcon(.error)` is that value: the executor logs "Command failed" and withholds the grace period
+    /// on exactly this case, so reporting it as failed/`action_failed` repeats the executor's own verdict.
+    /// Everything else — including `.silent` and `.confirmRequired` — is a presentation choice that does
+    /// not record whether the action ran, so it is reported as `observation_unavailable` with `unknown`
+    /// state rather than inventing a refusal or an action failure.
     private static func executionOutcome(
         for response: VoiceResponse
     ) -> VoiceSharingContributionEncoder.StageOutcome {
         switch response {
         case .earcon(.error):
             return .init(state: "failed", reason: "action_failed")
-        case .earcon(.confirmRequired):
-            return .init(state: "not_run", reason: "precondition_failed")
-        case .silent:
-            return .init(state: "not_run", reason: "client_refused")
-        case .earcon, .spoken, .combined:
-            return .init(state: "completed", reason: nil)
+        default:
+            return .init(state: "unknown", reason: "observation_unavailable")
         }
     }
 
@@ -368,8 +371,10 @@ class VoiceControlService: ObservableObject {
         for outcome: VoiceSharingContributionEncoder.StageOutcome
     ) -> String {
         switch outcome.state {
-        case "completed": return "executed"
         case "failed": return "failed"
+        // `unknown` cannot claim a disposition either: the turn finished, but what became of it was not
+        // observed, so the routing verdict stays honest about that rather than guessing.
+        case "unknown": return "pending"
         default: return "refused"
         }
     }

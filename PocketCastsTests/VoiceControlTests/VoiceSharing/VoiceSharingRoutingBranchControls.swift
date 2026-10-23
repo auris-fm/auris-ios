@@ -223,14 +223,22 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             let executionReason: String?
         }
         let cases: [Case] = [
-            // A model-chosen intent that the executor completed.
-            Case(label: "intent executed", result: .intent(PlaybackIntent.pause),
-                 response: .spoken("ok"), routingDisposition: "executed",
-                 executionState: "completed", executionReason: nil),
-            // The SAME branch with a failed action: returning a response must not read as success.
+            // SPEC 012b19dd: a response says what to PRESENT, so only the executor's own error verdict
+            // concludes anything. A normal success tone leaves execution UNOBSERVED — reporting it as
+            // `completed` would be inventing a success the response does not state.
+            Case(label: "intent succeeded, result unobserved", result: .intent(PlaybackIntent.pause),
+                 response: .earcon(.success), routingDisposition: "pending",
+                 executionState: "unknown", executionReason: "observation_unavailable"),
+            // The executor's OWN failure verdict: it logs "Command failed" and withholds the grace
+            // period on exactly this value, so this one conclusion comes from the executor.
             Case(label: "intent action failed", result: .intent(PlaybackIntent.pause),
                  response: .earcon(.error), routingDisposition: "failed",
                  executionState: "failed", executionReason: "action_failed"),
+            // `.silent` is a PRESENTATION choice (resume succeeds silently), so it must not be read as
+            // a refusal either — the earlier version of this control got that wrong.
+            Case(label: "silent response, result unobserved", result: .intent(PlaybackIntent.pause),
+                 response: .silent, routingDisposition: "pending",
+                 executionState: "unknown", executionReason: "observation_unavailable"),
             // The router declined: nothing to execute.
             // The router declined, and this window has no escalation budget, so the dispatch the service
             // would otherwise make is refused by policy: nothing executed, and the reason says which
@@ -270,8 +278,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             }
             XCTAssertEqual(routing.routingDisposition, testCase.routingDisposition,
                            "\(testCase.label): wrong routing disposition")
-            XCTAssertNotEqual(routing.routingDisposition, "pending",
-                              "\(testCase.label): a finished turn must not stay pending")
+            if testCase.executionState != "unknown" {
+                XCTAssertNotEqual(routing.routingDisposition, "pending",
+                                  "\(testCase.label): an OBSERVED turn must not stay pending")
+            }
             XCTAssertEqual(execution.state, testCase.executionState,
                            "\(testCase.label): wrong execution state")
             XCTAssertEqual(execution.reason, testCase.executionReason,
