@@ -1,25 +1,27 @@
 import XCTest
 @testable import podcasts
 
-/// LOCK-ORDER CONTROLS (review 086c0172/5fa6e007/92de14ea): deterministic, bounded proofs for the
-/// service `transcriptLock`/`stop()` main-queue inversion.
+/// LOCK-ORDER CONTROL (review 086c0172/5fa6e007/92de14ea/47328768): one real-path control on the
+/// shared production capture operation `captureRoutingOrigin`, plus a mutation run proving it fails
+/// under the pre-fix ordering (grace reads inside the lock — RED receipt preserved at handoff).
 ///
-/// The shared production operation `captureRoutingOrigin` exposes two barriers: pre-lock (after the
-/// grace reads, before acquisition) and post-lock (with the lock held). The GREEN control walks an
-/// explicit handoff — off-main capture thread reaches the pre-lock barrier, main runs `stop()`
-/// (acquiring the lock on main), the capture thread then acquires — which completes only when the
-/// grace reads are OUTSIDE the lock. The RED control replays the PRE-FIX ordering (reads INSIDE the
-/// lock, i.e. after acquisition) on a pair of daemon threads and asserts, with a bounded wait, that
-/// it deadlocks: neither side can proceed because the off-main holder waits for the main queue while
-/// main waits for `transcriptLock`. A deadlocked probe thread is abandoned (daemon), so the runner
-/// never hangs; the discriminator is the bounded outcome, not a timeout kill.
+/// The control parks the off-main capture INSIDE the operation, after its grace reads and before its
+/// lock acquisition (via the production-adjacent test barrier), runs the REAL `stop()` on main —
+/// which acquires `transcriptLock` there — then releases the park and requires BOTH sides to finish
+/// within bounded waits. Under the pre-fix ordering this cannot complete: the parked capture would
+/// already hold the lock while making main-bound reads, so main's `stop()` blocks and the release
+/// never serves the reads — the bounded completion asserts fail.
 final class LockOrderControls: XCTestCase {
     @MainActor
-    func testAnOffMainCapturePausesBeforeTheLockWhileMainStopsThenCompletes() async throws {
+    func testCaptureParkedAfterItsReadsCompletesAfterMainStopsWithoutDeadlock() async throws {
         let session = FakeAudioSessionControlling()
-        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "speaker")]
-        session.inputs = [AudioPort(portType: .builtInMic, uid: "built-in")]
-        session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "built-in")]
+        // Bluetooth pattern (mirrors the passing RouteChange acquisition tests): the gate refuses
+        // a built-in-mic-only acquisition ("builtInOnly"), so the control needs an external
+        // candidate that confirms on configure.
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "bt-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "bt-mic")]
         session.selectionTakesEffect = true
 
         let gracePeriodSignal = GracePeriodSignal()
@@ -28,82 +30,46 @@ final class LockOrderControls: XCTestCase {
             .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor, capture: SucceedingCapture())!
         service.startIfAllowed()
         await waitUntilListening(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening,
+                      "the control requires a LISTENING service; without it stop() guard-returns and "
+                          + "the control is vacuous")
 
-        // Explicit handoff:
-        //   1. off-main capture enters the PRE-LOCK barrier (grace reads done, lock NOT held);
-        //   2. main runs stop() — takes transcriptLock ON main — and signals;
-        //   3. the capture thread acquires the lock. Post-fix this cannot deadlock: the grace
-        //      reads are already complete, so the off-main side never waits on the main queue
-        //      while holding the lock.
-        let reachedPreLock = DispatchSemaphore(value: 0)
-        let mainStopDone = DispatchSemaphore(value: 0)
-        let captureAcquired = DispatchSemaphore(value: 0)
-        service.capturePreLockBarrierForTesting = { reachedPreLock.signal() }
-        service.capturePostLockBarrierForTesting = { captureAcquired.signal() }
+        // Park the capture AFTER its reads, BEFORE its acquisition. The barrier itself blocks the
+        // capture thread on a semaphore; the test releases it — an explicit park/release handoff.
+        let parked = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        service.captureBeforeAcquisitionBarrierForTesting = {
+            parked.signal()
+            _ = release.wait(timeout: .now() + 10)
+        }
 
         let captureThread = Thread {
-            _ = service.captureRoutingOrigin(utteranceId: "utterance-handoff")
+            _ = service.captureRoutingOrigin(utteranceId: "utterance-parked-handoff")
         }
         captureThread.start()
-        // Await the barriers WITHOUT blocking the main thread (the capture's grace reads
-        // main.sync onto it — blocking main here would manufacture the very deadlock the
-        // control forbids). Each wait runs on a detached task with a bounded timeout.
-        let reached = await Task.detached { reachedPreLock.wait(timeout: .now() + 5) == .success }.value
-        XCTAssertTrue(reached, "the capture must reach the pre-lock barrier (grace reads done, lock not held)")
-        service.capturePreLockBarrierForTesting = nil
 
-        // Main-side stop: takes transcriptLock on main. Because the off-main side holds NO lock
-        // right now, this completes immediately — the inversion point the pre-fix code sat on.
+        // Bounded wait for the park, WITHOUT blocking the main thread (the capture's reads
+        // main.sync onto main only BEFORE the barrier; while parked it makes no main requests,
+        // but we stay non-blocking on principle and to keep the pump live).
+        let isParked = await Task.detached { parked.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(isParked, "the capture must park between its grace reads and its lock acquisition")
+
+        // MAIN-SIDE stop(), on the main actor, while the capture is parked: acquires the lock,
+        // bumps the epoch, releases. Post-fix the parked capture holds NO lock, so this cannot
+        // block; the await below is bounded and would time out under the pre-fix ordering.
+        let stopStarted = Date()
         service.stop()
-        mainStopDone.signal()
+        let stopDuration = Date().timeIntervalSince(stopStarted)
+        XCTAssertLessThan(stopDuration, 3,
+                          "main stop() must complete while the capture is parked before acquisition — "
+                              + "blocking here is the pre-fix deadlock")
 
-        service.startIfAllowed()
-        // Release the capture thread to acquire the (now free) lock; the main-queue pump stays
-        // live (we await, never block) so the capture's main.sync grace reads are served.
-        let acquired = await Task.detached { captureAcquired.wait(timeout: .now() + 5) == .success }.value
-        XCTAssertTrue(acquired,
-                      "the capture must acquire the lock after main's stop() released it — no inversion")
-        _ = mainStopDone
-        service.capturePostLockBarrierForTesting = nil
-    }
-
-    /// RED CONTROL (pre-fix ordering, replayed explicitly): the grace reads are performed INSIDE
-    /// the lock — i.e., after acquisition — on an off-main thread, while main attempts `stop()`
-    /// which needs the same lock. This is the exact pre-fix structure. Both sides block forever:
-    /// the holder waits on the main queue (reads), main waits for the lock. The control bounds
-    /// the observation to 3 s and FAILS with the deadlock diagnosis; the probe threads are daemon
-    /// threads, abandoned on return, so the runner never hangs. Committed RED receipt:
-    /// task58-lockorder-red-run.log.
-    func testRedReplayGraceReadsInsideTheLockDeadlocksAgainstMainStop() {
-        let gracePeriodSignal = GracePeriodSignal()
-        let lock = NSLock()
-
-        let enteredLock = DispatchSemaphore(value: 0)
-        // Off-main probe (daemon): acquire the lock, THEN perform the main-bound grace reads —
-        // the pre-fix ordering.
-        let probe = Thread {
-            lock.lock()
-            enteredLock.signal()
-            // Pre-fix: reads hop to main while the lock is held. Main is blocked on the lock
-            // below → self-deadlock.
-            gracePeriodSignal.currentGeneration()
-            lock.unlock()
-        }
-        probe.threadPriority = 0.5
-        probe.start()
-        XCTAssertEqual(enteredLock.wait(timeout: .now() + 5), .success, "probe must acquire the lock")
-
-        // Main-bound stop() equivalent: acquire the same lock on THIS thread — pre-fix main would
-        // block forever because the holder never releases (it waits for main to serve its reads).
-        let result = lock.lock(before: Date().addingTimeInterval(3))
-        XCTAssertFalse(result,
-                       "RED (pre-fix ordering): main cannot acquire transcriptLock while the off-main "
-                           + "holder performs main-bound reads — the deadlock the pre-lock reads remove")
-        if !result {
-            // The probe is deadlocked by construction; abandon it (daemon thread).
-            return
-        }
-        lock.unlock()
+        // Release the park; the capture acquires (post-stop the lock is free), hits the listening
+        // gate, and returns. Join the thread with a bounded pump so a hang surfaces as a failure.
+        release.signal()
+        let joined = await Task.detached { captureThread.waitUntilExit(withTimeout: 5) }.value
+        XCTAssertTrue(joined, "the capture thread must finish after release — a hang here is the deadlock")
+        service.captureBeforeAcquisitionBarrierForTesting = nil
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {
@@ -111,5 +77,17 @@ final class LockOrderControls: XCTestCase {
         while !condition() && Date() < deadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+}
+
+extension Thread {
+    /// Bounded join: polls isFinished from a non-main context (never call from the thread itself).
+    func waitUntilExit(withTimeout seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if isFinished { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return false
     }
 }
