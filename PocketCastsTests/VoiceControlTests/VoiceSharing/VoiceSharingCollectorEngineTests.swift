@@ -374,10 +374,17 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
 /// Backend stand-in that also gives the test a handle on the engine's capture callback and the bleed verdict,
 /// neither of which is otherwise reachable without a real audio session or playback tap.
-/// The FULL production chain: real `VoiceAsrEngine` → real segmenter → real collector → the REAL
-/// `VoiceSharingContributionSink` → the REAL durable queue. `VoiceSharingCollectorEngineTests` stops at
-/// the collector's event callback; `VoiceSharingContributionSinkTests` starts at a hand-built event. This
-/// closes the seam between them, with bounded fixtures instead of microphone capture.
+/// The FULL production chain, at the boundary it actually covers (review 9cf20d7a): real
+/// `VoiceAsrEngine` → real segmenter → real collector → the REAL `VoiceSharingContributionSink` → the
+/// REAL durable queue. `VoiceSharingCollectorEngineTests` stops at the collector's event callback;
+/// `VoiceSharingContributionSinkTests` starts at a hand-built event. This joins them with bounded
+/// fixtures instead of microphone capture.
+///
+/// WHAT THIS DOES NOT PROVE: the stage observation (wake/bleed/asr/…) is supplied by the sink's
+/// `observations` closure, i.e. by the TEST — the engine does not produce these claims, so these
+/// controls say nothing about observation PROVENANCE from live recognition. They prove the transport
+/// from a real engine-produced capture event to a durable record, and that a record the validator
+/// refuses never becomes ready. Live observation provenance remains an open gap.
 final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     private var root: URL!
     private var queue: VoiceSharingUploadQueue!
@@ -521,10 +528,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return broken
         })
         chain.engine.listeningMode = .continuous
+        // ANTI-VACUITY (review 9cf20d7a): a marker the SINK itself sets when its worker actually runs
+        // on the event. Waiting a fixed interval would pass even if nothing was ever processed.
+        let processed = XCTestExpectation(description: "the sink worker processed the event")
+        chain.sink.testingWorkerGate = { processed.fulfill() }
         chain.backend.emitSpeech(level: 0.3, totalSamples: 16_000)
-
-        // Give the pipeline at least as long as the positive control takes, then assert emptiness.
-        _ = waitForReadyEntries(1, timeout: 2)
+        wait(for: [processed], timeout: 5)
+        chain.sink.waitForIdleForTesting()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
