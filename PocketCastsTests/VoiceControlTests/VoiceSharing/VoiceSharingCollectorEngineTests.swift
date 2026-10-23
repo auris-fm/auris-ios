@@ -464,17 +464,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             capture: NativeAudioCapture(),
             segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
             backend: backend, signalFilter: SignalFilter(),
-            wakeWordDetector: NotDetectedWake(), gracePeriodSignal: GracePeriodSignal(),
+            wakeWordDetector: DetectedWake(), gracePeriodSignal: GracePeriodSignal(),
             translationStage: nil)
         engine.contributionCollector = collector
         backend.engine = engine
         engine.start()
         return (engine, sink, backend)
-    }
-
-    private func records_seenForTesting() -> Int {
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else { return 0 }
-        return entries.count
     }
 
     private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
@@ -490,37 +485,63 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
     /// THE control: speech driven through the real engine's capture callback becomes a durable ready
     /// entry, and the record inside it carries the unknown/observation_unavailable pair.
-    func test_theRealEnginePipelineReachesTheDurableQueueWithTheUnobservedPair() throws {
+    func test_theRealEnginePipelineReachesTheDurableQueueWithTheUnobservedPair() async throws {
         let policy = openGate(enrolled: true)
-        let chain = makeChain(policy: policy, claims: { [self] in claims })
-        // A wake-triggered continuous capture, then one bounded burst of speech frames.
+        // The caller claims wake was NOT run. The engine, however, delivers real speech frames for this
+        // capture and reports so — the record must carry the ENGINE's observation, not the caller's claim.
+        // This is the provenance control: a claim cannot overwrite a real observation.
+        let chain = makeChain(policy: policy, claims: { [self] in
+            var callerClaims = claims
+            callerClaims["wake"] = .init(state: "not_run", reason: "no_wake_detected")
+            return callerClaims
+        })
+        // A wake-triggered continuous capture: speech, then the silence that closes the utterance (the
+        // segmenter ends a segment on silence — without it nothing is ever emitted).
         chain.engine.listeningMode = .continuous
-        chain.backend.emitSpeech(level: 0.3, totalSamples: 16_000)
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
         let ready = waitForReadyEntries(1)
-        XCTAssertEqual(ready.count, 1,
+        XCTAssertGreaterThanOrEqual(ready.count, 1,
                        "the real engine's observer must produce a durable ready entry, not just a callback")
         // ANTI-VACUITY: the entry must be produced by a real capture, and its record must actually carry
         // the unknown/observation_unavailable pair — not merely "some entry exists".
         guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            let entry = entries.first else { return XCTFail("a ready entry is required") }
-        let metadataURL = entry.root.appendingPathComponent(entry.name)
-            .appendingPathComponent("metadata.json")
-        let envelope = try JSONSerialization.jsonObject(
-            with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-        let record = envelope?["record"] as? [String: Any]
-        let observations = record?["observations"] as? [String: Any]
-        let asr = observations?["asr"] as? [String: Any]
+            !entries.isEmpty else { return XCTFail("a ready entry is required") }
+        // The pipeline can emit more than one record (a segment the wake rejected, then a completed one).
+        // Inspect the one that carried the engine's wake report.
+        var examined: [String: Any]?
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            let candidate = (envelope?["record"] as? [String: Any])?["observations"] as? [String: Any]
+            if (candidate?["wake"] as? [String: Any])?["state"] as? String == "completed" {
+                examined = candidate
+                break
+            }
+        }
+        guard let observations = examined else {
+            return XCTFail("no ready record carried the engine's wake observation "
+                + "(entries: \(entries.count))")
+        }
+        let asr = observations["asr"] as? [String: Any]
         XCTAssertEqual(asr?["state"] as? String, "unknown",
-                       "the durable entry must carry the engine-produced unknown state")
+                       "the caller-supplied unknown ASR claim survives where the engine reports nothing")
         XCTAssertEqual(asr?["reason"] as? String, "observation_unavailable")
-        XCTAssertEqual(records_seenForTesting(), 1, "exactly one capture reached the queue")
+        // PROVENANCE (review c48461e6): the caller said wake=not_run; the engine delivered frames for this
+        // capture, so the stored record must say completed. If the sink ignored `reportedStages`, this
+        // would read not_run and the assertion would fail.
+        let wake = observations["wake"] as? [String: Any]
+        XCTAssertEqual(wake?["state"] as? String, "completed",
+                       "an engine-reported observation must override a caller's claim")
     }
 
     /// The refusal half on the SAME chain: with the pairing broken, the pipeline reaches the sink and the
     /// sink drops it — nothing becomes ready. This is what makes the positive control above meaningful:
     /// an entry appearing is not automatic.
-    func test_theRealEnginePipelineDropsTheRecordWhenThePairingIsBroken() throws {
+    func test_theRealEnginePipelineDropsTheRecordWhenThePairingIsBroken() async throws {
         let policy = openGate(enrolled: true)
         let chain = makeChain(policy: policy, claims: { [self] in
             var broken = self.claims
@@ -532,7 +553,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         // on the event. Waiting a fixed interval would pass even if nothing was ever processed.
         let processed = XCTestExpectation(description: "the sink worker processed the event")
         chain.sink.testingWorkerGate = { processed.fulfill() }
-        chain.backend.emitSpeech(level: 0.3, totalSamples: 16_000)
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         wait(for: [processed], timeout: 5)
         chain.sink.waitForIdleForTesting()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
@@ -593,6 +615,15 @@ final class EngineStubBackend: AsrBackend {
             if fed % 320 == 0 { Thread.sleep(forTimeInterval: 0.02) }
         }
     }
+}
+
+/// Detects every utterance, so the engine forwards the segment and a COMPLETED record is emitted — the
+/// path on which an engine-reported wake observation can be compared against a caller's claim.
+private final class DetectedWake: WakeWordDetectorProtocol {
+    func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        .detected(confidence: 0.95, completionSample: 1600)
+    }
+    func release() {}
 }
 
 private final class NotDetectedWake: WakeWordDetectorProtocol {

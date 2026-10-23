@@ -138,8 +138,16 @@ final class VoiceSharingContributionSink {
             provenance.captureSessionID = session
         }
         do {
+            // ENGINE-PRODUCED OBSERVATIONS WIN (review c48461e6): the event carries the stages the
+            // recogniser actually reported for this capture; a claim supplied by the caller covers only
+            // stages the engine did not report. A caller can therefore never overwrite a real
+            // observation with its own narrative, and the recorded claim traces to the engine.
+            var claims = observations()
+            for (stage, observed) in pending.event.reportedStages {
+                claims[stage] = observed
+            }
             let encoded = try VoiceSharingContributionEncoder.encode(
-                event: pending.event, provenance: provenance, observations: observations())
+                event: pending.event, provenance: provenance, observations: claims)
             // Gate check 2: the encoded bytes must not become a queue entry under a closed gate.
             guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)

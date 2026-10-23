@@ -265,15 +265,33 @@ class VoiceAsrEngine {
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the DETECTOR failed for this capture — a real
+            // observed error, reported from the site that made the decision.
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(state: "failed", reason: "detector_error"),
+                context: utteranceContext)
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .dropUtterance:
             FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
             // Wake-negative: collectable audio. Notifying here adds NO ASR/router/action work — the very
             // next statement returns, and nothing downstream runs for this segment either way.
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the detector RAN and reported no wake for
+            // this segment — reported from the decision site, never inferred from receiving frames.
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(state: "completed", reason: "no_wake_detected"),
+                context: utteranceContext)
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the wake decision below is made HERE, by
+            // the detector, so this is the only place entitled to report the wake stage.
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(state: "completed", reason: nil),
+                context: utteranceContext)
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)

@@ -47,7 +47,7 @@ enum VoiceSharingContributionEncoder {
     /// Caller-supplied stage claim. `state` is one of the record schema's enumerated states;
     /// `reason` is REQUIRED for any non-completed state and must be stage-enumerated (enforced by
     /// the round-trip bind). `text` only for a completed ASR stage.
-    struct StageOutcome {
+    struct StageOutcome: Equatable {
         let state: String
         let reason: String?
         let text: String?

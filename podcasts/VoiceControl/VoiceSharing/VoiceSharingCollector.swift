@@ -98,10 +98,16 @@ final class VoiceSharingCollector {
         /// live dequeue check: their whole purpose is to report that consent ended, so gating them on the
         /// (now-closed) gate would drop the evidence of the drop.
         let isGateControl: Bool
+        /// What the ENGINE actually reported while this capture was open (review c48461e6): the stage
+        /// observations carried on the event, so downstream claims describe observations that really
+        /// happened rather than claims a caller supplied. Empty for legacy/gate-control events.
+        var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
     }
 
     private struct FrozenCapture {
         let id: UUID
+        /// Stage observations the engine reported for THIS capture, accumulated as its signals arrive.
+        var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
         let epoch: String
         let session: String?
         var retained: [Float] = []
@@ -265,6 +271,33 @@ final class VoiceSharingCollector {
         aggregateAudioSamples += take
         current = c
         lock.unlock()
+    }
+
+    /// The ENGINE's own report about a stage it actually evaluated for this capture (review bc692f91).
+    /// Only the caller that made the decision may report it: receiving frames does NOT establish a wake
+    /// detection, so `appendSamples` must never infer one. A nil `context` means no capture was open and
+    /// the report is dropped rather than attached to a successor.
+    func engineReported(
+        stage: String, outcome: VoiceSharingContributionEncoder.StageOutcome,
+        context: CaptureContext?
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let context else { return }
+        // The engine's decision can land AFTER segmentation ended but BEFORE the completion event is
+        // emitted (a late outcome re-emits from the ring). Record it wherever the capture currently
+        // lives — open, or ring-resident and not yet emitted — so the record that eventually leaves
+        // carries it. A capture already emitted cannot be amended: its record is immutable, which is
+        // the point of the digest.
+        if var c = current, c.id == context.id, !c.terminal, c.sawStart {
+            c.reportedStages[stage] = outcome
+            current = c
+            return
+        }
+        if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
+            rec.capture.reportedStages[stage] = outcome
+            terminalRing[context.id] = rec
+        }
     }
 
     /// Completion matched against the CONTEXT THE ENGINE CAPTURED, not current state. A nil/unknown context
@@ -521,7 +554,8 @@ final class VoiceSharingCollector {
                             authorizationSession: c.session, retainedSamples: c.retained.count,
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
                             originalSampleCount: c.original, audio: audio,
-                            isGateControl: kind == .cancelled)
+                            isGateControl: kind == .cancelled,
+                            reportedStages: c.reportedStages)
     }
 
     // MARK: - Bounded non-blocking handoff
