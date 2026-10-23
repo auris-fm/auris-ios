@@ -475,6 +475,49 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a capture whose session moved on must not become a completed record on late finalize")
     }
 
+    /// A NAMED CANCELLATION FOR A STALE CAPTURE MUST CONSUME NOTHING (review bb404153). Capture A is
+    /// cancelled and its deferred entry consumed; capture B is deferred and live. A second cancellation
+    /// still naming A describes a capture that no longer exists — falling back to "most recent" would
+    /// consume B, which nobody cancelled.
+    func test_aStaleNamedCancellationConsumesNothingEvenWithALiveDeferredSuccessor() async throws {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        let backend = EngineStubBackend()
+        let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
+        _ = engine
+
+        func deferCapture() -> VoiceSharingCollector.CaptureContext? {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            guard let ctx = collector.currentCaptureContextForTesting else { return nil }
+            collector.segmentationEnded(ctx)
+            collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx,
+                                      deferEmission: true)
+            return ctx
+        }
+        guard let ctxA = deferCapture() else { return XCTFail("premise: A") }
+        collector.speechCancelled(context: ctxA)          // A consumed
+        guard let ctxB = deferCapture() else { return XCTFail("premise: B") }
+
+        collector.speechCancelled(context: ctxA)          // stale: A is gone, B is untouched
+        // An UNKNOWN capture id, carrying the live epoch/session so only the identity is wrong.
+        collector.speechCancelled(
+            context: VoiceSharingCollector.CaptureContext(
+                id: UUID(), epoch: ctxB.epoch, session: ctxB.session))
+
+        collector.finalizeDeferredCompletion(context: ctxB)
+        let completedIDs = Set(snapshot()
+            .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .completed }
+            .map(\.captureID))
+        XCTAssertEqual(completedIDs, Set([ctxB.id]),
+                       "a stale named cancellation must not consume a live capture; "
+                           + "completed=\(completedIDs)")
+        let cancelledIDs = snapshot()
+            .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .cancelled }
+            .map(\.captureID)
+        XCTAssertFalse(cancelledIDs.contains(ctxB.id),
+                       "B was never cancelled; cancelled=\(cancelledIDs)")
+    }
+
     /// A-DEFERRED / B-OPEN (review d3c39ae5). A completed with deferred emission, then B started. A
     /// cancellation now belongs to B — it is the capture that is still open. Consuming A instead would
     /// discard a finished capture that was never cancelled and leave B live and filable.

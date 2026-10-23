@@ -458,10 +458,17 @@ final class VoiceSharingCollector {
     /// With several deferred captures the most recent one is the one the pipeline is working on, so recency
     /// — never hashing — decides. A caller with a known context names it explicitly.
     private func deferredRingEntryAwaitingCancellationLocked(preferring context: CaptureContext?) -> TerminalRecord? {
-        if let context, let named = terminalRing[context.id],
-            named.capture.deferEmissionUntilFinalized, !named.emitted {
+        // A NAMED context is a BINDING, not a hint (review bb404153). Falling through to "most recent
+        // unrelated capture" when the named one is stale, already emitted, or ineligible means a
+        // cancellation for a capture that no longer exists silently consumes a DIFFERENT one that was
+        // never cancelled. Named lookup therefore returns its own entry or nothing at all.
+        if let context {
+            guard let named = terminalRing[context.id],
+                named.capture.deferEmissionUntilFinalized, !named.emitted else { return nil }
             return named
         }
+        // Unnamed: the caller did not say which capture, so the most recent one is the best available
+        // evidence. Recency is an explicit stamp, never dictionary iteration order.
         return terminalRing.values
             .filter { $0.capture.deferEmissionUntilFinalized && !$0.emitted }
             .max { $0.deferredOrder < $1.deferredOrder }

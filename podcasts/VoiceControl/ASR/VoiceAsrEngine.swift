@@ -508,23 +508,30 @@ class VoiceAsrEngine {
         func report(_ outcome: VoiceSharingContributionEncoder.StageOutcome) {
             contributionCollector?.engineReported(stage: "translation", outcome: outcome, context: context)
         }
+        // `source_language_target_language` means exactly what it says: the source IS the target, so
+        // translation was correctly skipped. Only the `detected == "en"` branch below can assert that
+        // (review bb404153). The other three skips are a MISSING SOURCE LANGUAGE, a backend that cannot
+        // translate, and an absent platform stage — none of which proves source equals target, so none of
+        // them may borrow that reason. Those three are reported as `unknown`/`observation_unavailable`:
+        // honest, and not a claim about what translation did.
         guard let detected = result.detectedLanguage?.lowercased() else {
-            report(.init(state: "not_run", reason: "source_language_target_language"))
+            report(.init(state: "unknown", reason: "observation_unavailable"))
             return (result, "translate=skip(no lang)")
         }
         if detected == "en" {
-            // Nothing to translate: the source already is the target.
+            // Nothing to translate: the source already is the target. This is the only true skip.
             report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, nil)
         }
         if backend.capabilities.canTranslateToEnglish {
-            report(.init(state: "not_run", reason: "source_language_target_language"))
+            // The backend translates natively, so our stage never ran. That is not "source == target".
+            report(.init(state: "unknown", reason: "observation_unavailable"))
             return (result, "translate=skip(backend)")
         }
         guard let translationStage else {
             // Missing platform translation is a hard failure for non-English SenseVoice text —
             // never relabel native text as english_v1.
-            report(.init(state: "not_run", reason: "source_language_target_language"))
+            report(.init(state: "unknown", reason: "observation_unavailable"))
             return (result, "translate=skip(no stage)")
         }
 
@@ -542,6 +549,9 @@ class VoiceAsrEngine {
             report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=noop(\(detected))")
         }
+        // NOTE (review bb404153): the observation payload carries no translated text or target
+        // language yet, so `completed` asserts only that translation ran and produced output. The
+        // translated text is visible in the transcript the caller supplies, not in this stage block.
         report(.init(state: "completed", reason: nil))
         return (
             AsrResult(text: translated, detectedLanguage: "en"),
