@@ -129,6 +129,85 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         }
     }
 
+    // MARK: observation_unavailable parity (spec delta 736d3180)
+
+    /// An unobserved stage is stated as `state: "unknown"` + `observation_unavailable`: the client
+    /// does not claim the stage ran, failed, was cancelled or timed out. The record must round-trip
+    /// through the same binding the queue applies, on EVERY stage.
+    func test_observationUnavailableWithUnknownStateIsAcceptedOnEveryStage() throws {
+        for stage in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
+            var claim = observations
+            claim[stage] = .init(state: "unknown", reason: "observation_unavailable")
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: event(), provenance: provenance, observations: claim)
+            let bound = try VoiceSharingRecordBinding.bind(
+                envelope: encoded.metadataEnvelope, audio: encoded.wav)
+            XCTAssertEqual(bound.captureID, event().captureID.uuidString,
+                           "\(stage): an unobserved stage must not break the record")
+        }
+    }
+
+    /// The pairing rule in the OTHER direction: the reason describes a stage whose outcome cannot be
+    /// established, so attaching it to any known outcome is refused — including completed, which
+    /// always keeps its specific reason (or none at all).
+    func test_observationUnavailableIsRefusedWithAnyKnownState() throws {
+        for state in ["completed", "not_run", "failed", "cancelled"] {
+            for stage in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
+                var claim = observations
+                // A completed ASR stage must carry its text, which the validator checks before the
+                // reason pairing — supply it so the REASON rule is the one under test.
+                claim[stage] = state == "completed" && stage == "asr"
+                    ? .init(state: state, reason: "observation_unavailable", text: "hello")
+                    : .init(state: state, reason: "observation_unavailable")
+                XCTAssertThrowsError(
+                    try VoiceSharingContributionEncoder.encode(
+                        event: event(), provenance: provenance, observations: claim),
+                    "\(stage)/\(state): observation_unavailable must be refused"
+                ) { error in
+                    guard let binding = error as? VoiceSharingRecordBinding.BindingError,
+                        case .invalidField(let path, let message) = binding
+                    else {
+                        return XCTFail("\(stage)/\(state): expected a binding refusal, got \(error)")
+                    }
+                    XCTAssertEqual(path, "observations.\(stage).reason")
+                    // The refusal must be the PAIRING rule, not the generic "not enumerated" — a
+                    // validator that merely lacks the reason would also throw here for the wrong
+                    // reason and leave this control green (found by mutation: removing the pairing
+                    // check left this test passing).
+                    XCTAssertTrue(message.contains("requires state unknown"),
+                                  "\(stage)/\(state): expected the pairing refusal, got '\(message)'")
+                }
+            }
+        }
+    }
+
+    /// Parity with the Worker's strict intake (Cloud `c569b319`): the same reason on the same stage
+    /// is accepted on one state and refused on the others — the accept-any-state mutant must fail.
+    func test_theAcceptAnyStateMutantFailsThePairingRule() throws {
+        var accepted = observations
+        accepted["asr"] = .init(state: "unknown", reason: "observation_unavailable")
+        XCTAssertNoThrow(
+            try VoiceSharingRecordBinding.bind(
+                envelope: VoiceSharingContributionEncoder.encode(
+                    event: event(), provenance: provenance, observations: accepted
+                ).metadataEnvelope,
+                audio: VoiceSharingContributionEncoder.encode(
+                    event: event(), provenance: provenance, observations: accepted
+                ).wav),
+            "the accepted pair must bind")
+        var refused = accepted
+        refused["asr"] = .init(state: "failed", reason: "observation_unavailable")
+        XCTAssertThrowsError(
+            try VoiceSharingRecordBinding.bind(
+                envelope: VoiceSharingContributionEncoder.encode(
+                    event: event(), provenance: provenance, observations: refused
+                ).metadataEnvelope,
+                audio: VoiceSharingContributionEncoder.encode(
+                    event: event(), provenance: provenance, observations: refused
+                ).wav),
+            "the same reason with a known outcome must be refused")
+    }
+
     private func eventReplaced(audio: [Float]) -> VoiceSharingCollector.SegmentEvent {
         let e = event()
         return VoiceSharingCollector.SegmentEvent(

@@ -212,6 +212,13 @@ enum VoiceSharingRecordBinding {
 
     /// Reasons are ENUMERATED per stage. An arbitrary sentence is where stack traces and file paths
     /// enter the dataset, so a free-form reason is refused rather than stored.
+    /// Reasons valid at ANY non-completed state on every stage (spec delta 736d3180):
+    /// `observation_unavailable` states that normal execution supplied no trustworthy observation
+    /// by finalization. It is allowed ONLY with `state: "unknown"` — it asserts nothing about
+    /// whether the stage ran, so pairing it with a known outcome would attach a non-claim to a
+    /// claim. The pairing rule is enforced below, not by mere membership here.
+    private static let anyStateReasons: Set<String> = ["observation_unavailable"]
+
     private static let stageReasons: [String: Set<String>] = [
         "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
         "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
@@ -291,8 +298,19 @@ enum VoiceSharingRecordBinding {
                 guard let reason = declared["reason"] as? String, !reason.isEmpty else {
                     throw BindingError.missingField("\(stagePath).reason")
                 }
-                guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
-                    throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                // `observation_unavailable` is a non-claim: it is allowed ONLY with `state:
+                // "unknown"` (spec delta 736d3180). With any known outcome the stage keeps its
+                // specific reason, so the pair is refused rather than reinterpreted.
+                if anyStateReasons.contains(reason) {
+                    guard state == "unknown" else {
+                        throw BindingError.invalidField(
+                            "\(stagePath).reason",
+                            "observation_unavailable requires state unknown, not \(state)")
+                    }
+                } else {
+                    guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
+                        throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                    }
                 }
             }
 
@@ -318,8 +336,21 @@ enum VoiceSharingRecordBinding {
             }
 
             if let reason = declared["reason"], !(reason is NSNull) {
-                guard let text = reason as? String, let enumerated = stageReasons[stage], enumerated.contains(text) else {
-                    throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                guard let text = reason as? String, !text.isEmpty else {
+                    throw BindingError.invalidField("\(stagePath).reason", "non-empty string required")
+                }
+                if anyStateReasons.contains(text) {
+                    // Same pairing rule for the completed case: a non-claim cannot describe a known
+                    // outcome, so a completed stage carrying it is refused.
+                    guard state == "unknown" else {
+                        throw BindingError.invalidField(
+                            "\(stagePath).reason",
+                            "observation_unavailable requires state unknown, not \(state)")
+                    }
+                } else {
+                    guard let enumerated = stageReasons[stage], enumerated.contains(text) else {
+                        throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
+                    }
                 }
             }
         }
