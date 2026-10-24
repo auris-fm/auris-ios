@@ -416,10 +416,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(fact?.reason, "precondition_failed")
     }
 
-    /// Void-result actions (the seek sinks return presentation only) are NOT
-    /// claims: a turn whose only actions were Void seeks states no fact at
-    /// done — unobserved, not completed (spec 1a0661ba).
-    func testVoidResultActionsStateNoClaim() async {
+    /// Void-result actions (the seek sinks return presentation only) are
+    /// UNKNOWN entries, never claims: a turn whose only actions were Void
+    /// seeks aggregates to unknown, not completed (spec 1a0661ba/15662487).
+    func testVoidResultActionsAreUnknownEntries() async {
         self.pendingFixture =
             """
             event: action
@@ -431,7 +431,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let (_, fact) = await makeSink().routeToCloud(
             request: "x", tier: .free, context: sampleContext())
-        XCTAssertNil(fact, "a Void seek call is not an observed action result")
+        XCTAssertEqual(fact?.state, "unknown", "a Void seek is an unobserved result, not a completion")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
     }
 
     /// Transport termination without `done` (the client's own request timeout
@@ -490,9 +491,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(fact?.reason, "precondition_failed")
     }
 
-    /// RED: MIXED outcomes — one declined, one performed — resolve to the
-    /// declined fact, never to aggregate success.
-    func testMixedOutcomesResolveToTheDecline_notSuccess() async {
+    /// MIXED outcomes (completed decline-pair here: one declined, one Void) —
+    /// no truthful single state exists, so the aggregate is UNKNOWN, never a
+    /// forced not_run (reviewer f96813da, spec 15662487).
+    func testMixedOutcomesStayUnknown_noFalseAggregate() async {
         self.pendingFixture =
             """
             event: action
@@ -507,8 +509,43 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let (_, fact) = await makeSink().routeToCloud(
             request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+    }
+
+    /// Uniform declines still map truthfully to not_run.
+    func testUniformDeclinesMapToNotRun() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
         XCTAssertEqual(fact?.state, "not_run")
         XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// An UNKNOWN action is recorded, not omitted: a turn whose only action is
+    /// a forward-compat no-op aggregates to unknown.
+    func testUnknownActionIsRecordedAsAnUnknownEntry() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"do_a_barrel_roll","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
     }
 
     /// A turn that executed NO actions states no aggregate fact at done: there
@@ -687,6 +724,59 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         CloudRouteTestURLProtocol.reset()
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
+    }
+
+    /// OVERLAPPING TURNS on ONE sink: each turn's action log is
+    /// invocation-local — the losing turn's already-run action (an UNKNOWN
+    /// entry: Void seek) reaches ITS caller, and the winning turn (no actions)
+    /// states no fact. Deterministic: A's action is awaited on the playback
+    /// recording before B supersedes (no sleeps).
+    func testOverlappingTurnsKeepTheirActionLogsSeparate() async throws {
+        // Turn A: a play_quote (records a seek on the playback sink), then the
+        // stream idles open.
+        self.nextTurnFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let sink = makeSink()
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+        // Deterministic: wait until A has actually processed its action (the
+        // seek lands on the playback recording) before B starts.
+        let sawSeek = await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            self.playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        }
+        XCTAssertTrue(sawSeek, "turn A processed its action")
+
+        // Turn B runs after A's action is on record (superseding whatever of A
+        // is still in flight) and completes with no actions.
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, winnerFact) = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        let (_, loserFact) = await slow.value
+        XCTAssertNil(winnerFact, "the winner ran no actions and must not see A's log")
+        XCTAssertEqual(loserFact?.state, "unknown", "A's ran-but-unobserved action reaches A's caller")
+        XCTAssertEqual(loserFact?.reason, "observation_unavailable")
+    }
+
+    private static func waitUntil(timeoutNanoseconds: UInt64,
+                                  _ condition: @escaping () -> Bool) async -> Bool {
+        let step: UInt64 = 10_000_000
+        var waited: UInt64 = 0
+        while waited < timeoutNanoseconds {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: step)
+            waited += step
+        }
+        return condition()
     }
 
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
