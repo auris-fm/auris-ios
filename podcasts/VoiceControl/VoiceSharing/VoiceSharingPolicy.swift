@@ -93,6 +93,11 @@ final class VoiceSharingPolicy {
 
     private let lock = NSLock()
     private var installed: VoiceSharingSnapshot?
+    /// Bumped on EVERY successful install. Expiry revocation is generation-bound: the schedule
+    /// captures the generation at arm time and the revoke validates it under the SAME lock —
+    /// otherwise a renewal that lands between "the lease looks lapsed" and "purge" lets a stale
+    /// expiry revoke a FRESH lease (review 5ae8f430).
+    private var leaseGeneration = 0
     private var pendingIdentityFence: Int = 0
 
     init(
@@ -181,14 +186,39 @@ final class VoiceSharingPolicy {
                 accountEnrolled: isAccountEnrolled()
             )
             installed = snapshot
+            leaseGeneration += 1
             lock.unlock()
             // EVERY installed lease announces itself, so expiry-driven revocation cannot depend on the
             // caller remembering to schedule it. The coordinator arms the expiry trigger here rather
             // than only at the tail of its refresh (audit finding 2026-10-23: a lease installed by any
             // other route had no time-driven purge).
+            latestInstalledLeaseGeneration = leaseGeneration
+            // Delivered with the lock released (the handler reads the policy back) and AFTER the
+            // generation is published: the arming hook reads it, so publishing after the call would
+            // arm the expiry against the PREVIOUS lease's generation.
             onLeaseInstalled?(snapshot)
             return snapshot
         }
+    }
+
+    /// The generation of the MOST RECENT successful install. The coordinator's schedule captures this
+    /// at arm time and hands it back to `revokeIfLeaseGenerationMatches`, which validates it atomically.
+    private(set) var latestInstalledLeaseGeneration = 0
+
+    /// ATOMIC expiry transition (review 5ae8f430): invalidate the lease ONLY if it is still the one
+    /// the caller armed. Returns false without touching anything when a renewal (or an identity
+    /// move) has superseded the armed generation — the stale expiry then does nothing, and cannot
+    /// revoke a lease it no longer owns. True means the caller owns the revocation fan-out.
+    func revokeIfLeaseGenerationMatches(_ generation: Int) -> Bool {
+        lock.lock()
+        guard leaseGeneration == generation, installed != nil else {
+            lock.unlock()
+            return false
+        }
+        installed = nil
+        leaseGeneration += 1
+        lock.unlock()
+        return true
     }
 
     /// Synchronous invalidation on withdrawal / account switch. Required because a frozen

@@ -87,12 +87,6 @@ final class VoiceSharingCoordinator {
     /// Each refresh REPLACES the pending schedule (newest token wins), so a renewed lease never
     /// fires the previous deadline's purge.
     var expiryScheduler: ((_ delay: TimeInterval, _ body: @escaping () -> Void) -> Void)?
-    /// Guards `expiryScheduleToken` (review 15a18d5d). Installs now arrive on WHICHEVER thread the
-    /// refresh ran on, and the scheduled body validates the token later on the scheduler's queue — a
-    /// renewal racing a stale fire is exactly the pair that must not interleave.
-    private let expiryScheduleLock = NSLock()
-    private var expiryScheduleToken = UUID()
-
     static let defaultExpiryScheduler: (_ delay: TimeInterval, @escaping () -> Void) -> Void = { delay, body in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
     }
@@ -104,20 +98,18 @@ final class VoiceSharingCoordinator {
     private func scheduleLeaseExpiryTrigger() {
         guard let deadline = policy.installedLeaseExpiry else { return }
         let delay = max(0, deadline - monotonicClock.now())
-        let token = UUID()
-        expiryScheduleLock.lock()
-        expiryScheduleToken = token
-        expiryScheduleLock.unlock()
+        // Generation-bound, not token-bound (review 5ae8f430): a locked token snapshot still left
+        // check-then-purge interleavable — a renewal could land between the lapsed-lease check and
+        // the purge, letting a stale expiry revoke a FRESH lease. The revoke itself is now the
+        // atomic step at the policy authority: it validates the armed generation under the same
+        // lock that invalidates, so a superseded schedule can only ever do nothing.
+        let armedGeneration = policy.latestInstalledLeaseGeneration
         let schedule = expiryScheduler ?? Self.defaultExpiryScheduler
         schedule(delay) { [weak self] in
-            // Token validation INSIDE the same lock the replacement uses: a renewal and a stale fire
-            // cannot both hold it, so a stale schedule can never act on a lease it no longer owns.
             guard let self else { return }
-            self.expiryScheduleLock.lock()
-            let current = self.expiryScheduleToken
-            self.expiryScheduleLock.unlock()
-            guard current == token else { return }
-            if !self.policy.permitsCollection { self.consentGateLost() }
+            if self.policy.revokeIfLeaseGenerationMatches(armedGeneration) {
+                self.consentGateLost()
+            }
         }
     }
 
@@ -201,8 +193,8 @@ final class VoiceSharingCoordinator {
         // If the refresh observed the gate closed (switch off, account not enrolled, install
         // refused), any audio the collector still holds is consentless — purge now.
         if !policy.permitsCollection { consentGateLost() }
-        // And schedule the purge at the NEW lease's deadline, so expiry is triggered by time itself.
-        scheduleLeaseExpiryTrigger()
+        // The NEW lease's expiry schedule is armed at the INSTALL SITE itself; arming again here
+        // would double-schedule every refresh.
     }
 
     /// Freshness plumbing reads the SDK's own bookkeeping rather than trusting `.success`, which

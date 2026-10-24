@@ -888,6 +888,78 @@ final class VoiceSharingPolicyTests: XCTestCase {
         }
     }
 
+    /// REVIEW 5ae8f430: a renewal that lands before a STALE fire must be immune — the stale expiry
+    /// may revoke nothing. The lease is renewed AFTER its original deadline lapsed, then the stale
+    /// schedule runs: the generation-bound revoke must refuse, and both the fresh permission and the
+    /// sink's authorization generation must survive untouched. Drives the production decision
+    /// function at the policy boundary, where the atomicity actually lives.
+    func test_aRenewalBeforeAStaleExpiryFireIsImmuneToIt() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        var firedBodies: [() -> Void] = []
+        coordinator.expiryScheduler = { _, body in firedBodies.append(body) }
+        var purges = 0
+        let subscription = coordinator.registerGateLostHandler { purges += 1 }
+
+        let token1 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
+        let armedGeneration = coordinator.policy.latestInstalledLeaseGeneration
+        XCTAssertEqual(firedBodies.count, 1, "premise: the install armed one schedule")
+        let staleFire = firedBodies[0]
+
+        // The original deadline lapses with no refresh — then the RENEWAL installs a fresh lease.
+        clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+        let token2 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token2)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: the fresh lease is live")
+
+        // The STALE fire runs against the superseded generation: it must do NOTHING.
+        withExtendedLifetime(subscription) {
+            staleFire()
+            XCTAssertFalse(coordinator.policy.revokeIfLeaseGenerationMatches(armedGeneration),
+                           "the armed generation was superseded; the policy must refuse")
+            XCTAssertEqual(purges, 0, "a stale expiry must not fire the revocation fan-out")
+            XCTAssertTrue(coordinator.policy.permitsCollection,
+                          "the fresh lease survives the stale fire")
+        }
+    }
+
+    /// The OTHER half of the atomic transition: the CURRENT generation still revokes in one step.
+    /// Without this half, refusing every revoke would pass the immunity control above.
+    func test_theCurrentGenerationStillRevokesAtomically() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        var purges = 0
+        let subscription = coordinator.registerGateLostHandler { purges += 1 }
+        var bodies: [() -> Void] = []
+        coordinator.expiryScheduler = { _, body in bodies.append(body) }
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertEqual(bodies.count, 1, "premise: exactly one schedule per install")
+        withExtendedLifetime(subscription) {
+            bodies[0]()
+            XCTAssertEqual(purges, 1, "a live-lease expiry revokes and fires the fan-out once")
+            XCTAssertFalse(coordinator.policy.permitsCollection, "the lease is gone")
+            // Re-running a consumed fire must be inert: the generation moved, nothing re-fires.
+            bodies[0]()
+            XCTAssertEqual(purges, 1, "a consumed generation must not fire twice")
+        }
+    }
+
     /// REVIEW 15a18d5d: lifting the identity fence must INITIATE the normal refresh. A fence without
     /// a fetch never installs, and production's only fetch calls lived at launch and in the developer
     /// menu — so a re-login in a long-running process stayed closed until relaunch. This drives the
