@@ -297,6 +297,9 @@ final class VoiceSharingUploadQueue {
     /// answer to "the disqualification might not be durable": refuse everything rather than
     /// report success or miscount an unmarked survivor as disqualified.
     private var revocationHoldLocked = false
+    /// True when the revocation hold exists because its evidence could not be READ. Reported as
+    /// `unknownCoverage`, not `revocationHeld` (reviewer 8ae2b980).
+    private var revocationOriginUnknownLocked = false
 
     private var revocationIntentPath: URL {
         serialQueueSafeRoot.appendingPathComponent(Self.revocationIntentName)
@@ -2069,6 +2072,12 @@ final class VoiceSharingUploadQueue {
     /// scanned: callers that cannot handle `.unknownCoverage` must not serve.
     enum ReadyDiscovery {
         case known([Entry])
+        /// The owner is HELD by an unproven revocation: purge barriers did not reconcile, and the
+        /// durable intent is on disk. Only a purge that proves every barrier may release it.
+        case revocationHeld
+        /// Coverage could not be DETERMINED (listing/stat/read/durability failure, or an intent
+        /// whose presence could not even be ESTABLISHED). Serving is held all the same, but this is
+        /// NOT evidence that a revocation failed (reviewer 8ae2b980).
         case unknownCoverage
     }
 
@@ -2103,7 +2112,9 @@ final class VoiceSharingUploadQueue {
             // OWNER-WIDE HOLD: an unreconciled purge means the on-disk set is not provable, so
             // NOTHING may serve. Reported as unknown coverage (the same all-or-nothing channel
             // every caller already handles), never as an empty known set.
-            guard !revocationHoldLocked else { return .unknownCoverage }
+            if revocationHoldLocked {
+                return revocationOriginUnknownLocked ? .unknownCoverage : .revocationHeld
+            }
             // Reviewer c4d5ecb4: coverage is ALL-OR-NOTHING for the owner. Any required check
             // whose outcome is UNKNOWN (listing failure, required-stat failure, required-file
             // read failure, unconfirmable durability) holds serving for the WHOLE root — one
@@ -2534,10 +2545,14 @@ final class VoiceSharingUploadQueue {
         // EXPLICIT REQUIRED-STAT, not fileExists (reviewer 2d7cb2c9): `fileExists` collapses
         // "cannot determine" into "absent", which would RESUME serving after an unreadable root.
         // Unknown discovery must hold the whole owner, exactly like every other unknown state.
+        // A failed discovery is a hold whose ORIGIN is unknown — it must not be reported as
+        // "a revocation failed", which would offer the user a remedy that may not apply.
         switch intentDiscovery(revocationIntentPath) {
         case .present: revocationHoldLocked = true
         case .absent: revocationHoldLocked = false
-        case .failure: revocationHoldLocked = true // unknown ⇒ hold
+        case .failure:
+            revocationHoldLocked = true
+            revocationOriginUnknownLocked = true
         }
         // The retry hold re-derives the same way: an `attempt.pause.intent` left by a failed
         // not-before barrier keeps admission held across restart until reconciliation.

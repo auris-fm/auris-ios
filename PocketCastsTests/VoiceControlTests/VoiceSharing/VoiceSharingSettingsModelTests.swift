@@ -25,7 +25,9 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     private func model(permitted: Bool = false,
                        queue: VoiceSharingUploadQueue? = nil) -> VoiceSharingSettingsModel {
         VoiceSharingSettingsModel(queue: queue ?? self.queue,
-                                  isCollectionPermitted: { permitted })
+                                  isCollectionPermitted: { permitted },
+                                  isAccountEnrolled: { nil },
+                                  isLocallyOptedIn: { nil })
     }
 
     /// The surface must be COMPILED OFF. Flipping this activates a feature — an owner decision.
@@ -50,16 +52,21 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
-    /// Reviewer f92ff117: unknown coverage must render as UNKNOWN, never as a zero count.
+    /// Reviewer f92ff117 + 8ae2b980: neither unknown case may render as a zero count, and they are
+    /// NOT the same state — an unretired revocation intent is a HELD owner, an unlistable root is
+    /// merely unknown.
     func test_unknownCoverageRendersUnknownNotEmpty() throws {
-        // A durable revocation intent the queue could not retire → owner held.
+        // A durable revocation intent the queue could not retire → owner HELD.
         try Data([0x01]).write(to: root.appendingPathComponent("revocation.intent"))
         let heldQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(model(queue: heldQueue).status().storage, .unknown)
+        XCTAssertEqual(model(queue: heldQueue).status().storage, .revocationInDoubt)
 
-        // Independently: an unlistable root is also unknown, not zero.
+        // Independently: an unlistable root is unknown, not zero — and not a revocation claim.
+        // Its own directory: the case above left a revocation intent in `root`, which correctly
+        // holds ANY queue pointed at that root (that is the point of the durable marker).
+        let otherRoot = root.appendingPathComponent("unlistable-owner")
         let unlistable = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
+            rootDirectory: otherRoot, clock: Date.init,
             listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
         XCTAssertEqual(model(queue: unlistable).status().storage, .unknown)
     }
@@ -160,11 +167,15 @@ enum VoiceSharingSettingsFixture {
         return true
     }
 }
-// MARK: - Stopped / recovery projection (spec 62d39f8f)
+// MARK: - Stopped / recovery projection (spec 62d39f8f, reviewer 8ae2b980)
 
-/// Every branch of the stopped/recovery projection, driven from injected live queries — the
-/// surface must name WHY sharing is off and WHAT makes it work again, and must never attribute a
-/// policy/enrollment stop to a user action they did not take.
+/// Every branch of the stopped/recovery projection over EXPLICIT live state:
+///
+///  * an undetermined read (`nil`) is `unknown`, never an invented opt-out;
+///  * a known-unenrolled account is NOT reported as the user turning sharing off;
+///  * an unreadable store is NOT reported as a failed revocation, and offers no remedy;
+///  * a held owner (revocation in doubt) names the one VERIFIED remedy — local deletion — and
+///    only that.
 final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     private var root: URL!
     private var queue: VoiceSharingUploadQueue!
@@ -180,55 +191,102 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func guidance(permits: Bool, enrolled: Bool, optedIn: Bool,
-                          queue: VoiceSharingUploadQueue? = nil)
+    private func model() -> VoiceSharingSettingsModel {
+        VoiceSharingSettingsModel(queue: queue,
+                                  isCollectionPermitted: { nil },
+                                  isAccountEnrolled: { nil },
+                                  isLocallyOptedIn: { nil })
+    }
+
+    private func guidance(permits: Bool? = true, enrolled: Bool? = true, optedIn: Bool? = true,
+                          fault: VoiceSharingSettingsModel.StoppedReason.StorageFault = .none)
         -> VoiceSharingSettingsModel.RecoveryGuidance {
-        VoiceSharingSettingsModel(queue: queue ?? self.queue,
-                                  isCollectionPermitted: { permits })
-            .stoppedGuidance(policyPermits: permits, enrolled: enrolled, localOptIn: optedIn)
+        model().recoveryGuidance(
+            for: .init(policyPermits: permits, enrolled: enrolled, localOptIn: optedIn,
+                       storageFault: fault))
     }
 
     func test_permittedEnrolledAndOptedInReportsNotStoppedWithNoAction() {
-        let result = guidance(permits: true, enrolled: true, optedIn: true)
+        let result = guidance()
         XCTAssertEqual(result.reason, .notStopped)
         XCTAssertNil(result.action, "nothing to do when sharing works")
     }
 
-    /// A stop caused by the user's own gesture names itself as such.
     func test_optedOutLocallyReportsTurnedOffLocally() {
-        let result = guidance(permits: false, enrolled: true, optedIn: false)
-        XCTAssertEqual(result.reason, .turnedOffLocally)
-        XCTAssertNotNil(result.action)
+        XCTAssertEqual(guidance(permits: false, optedIn: false).reason, .turnedOffLocally)
+        XCTAssertNotNil(guidance(permits: false, optedIn: false).action)
     }
 
-    /// Server-side non-enrollment must NOT be rendered as the user turning it off.
+    /// Server-side non-enrollment must NOT read as a local action.
     func test_notEnrolledIsNotReportedAsALocalAction() {
         let result = guidance(permits: false, enrolled: false, optedIn: true)
         XCTAssertEqual(result.reason, .notEnrolled)
         XCTAssertNotEqual(result.reason, .turnedOffLocally)
     }
 
-    /// An expired/absent lease is a PAUSE with a recovery action, not a user-facing "off".
     func test_missingLeaseReportsAPauseNotAUserAction() {
         let result = guidance(permits: false, enrolled: true, optedIn: true)
         XCTAssertEqual(result.reason, .noActiveLease)
         XCTAssertNotNil(result.action)
     }
 
-    /// When the owner's revocation is in doubt (coverage unknown ⇒ held), recovery must point at the
-    /// local deletion path — the actual remedy — and take precedence over the other reasons.
-    func test_heldOwnerReportsStorageHeldAndPointsAtDeletion() {
+    /// The reachable unknown: an undetermined read is reported as unknown, and nothing is claimed
+    /// about the user. This is the branch the old `false` defaults made unreachable.
+    func test_anUndeterminedReadReportsUnknownAndBlamesNobody() {
+        XCTAssertEqual(guidance(permits: nil).reason, .unknown)
+        XCTAssertEqual(guidance(enrolled: nil).reason, .unknown)
+        XCTAssertEqual(guidance(optedIn: nil).reason, .unknown)
+        XCTAssertNil(guidance(optedIn: nil).action, "no remedy can be named for an unknown")
+    }
+
+    /// An UNREADABLE store is not a failed revocation: different reason, and no remedy offered.
+    func test_unreadableStorageIsNotReportedAsAFailedRevocation() {
+        let result = guidance(fault: .unreadable)
+        XCTAssertEqual(result.reason, .storageUnreadable)
+        XCTAssertNotEqual(result.reason, .storageHeld)
+        XCTAssertNil(result.action, "nothing the user does clears an unreadable store")
+    }
+
+    /// A held owner names the verified remedy: local deletion completes the revocation.
+    func test_heldOwnerNamesLocalDeletionAsTheRemedy() {
+        let result = guidance(fault: .revocationInDoubt)
+        XCTAssertEqual(result.reason, .storageHeld)
+        XCTAssertEqual(result.action, L10n.voiceSharingRecoveryHeld)
+    }
+
+    /// The model's OWN live state classifies storage from the queue: a refused purge leaves the
+    /// owner held, so the live projection reports the held reason (not unknown, not unreadable).
+    func test_liveStateClassifiesARevocationHoldFromTheQueue() throws {
+        try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+        let refusing = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        guard case .refused = refusing.purgeAll() else {
+            return XCTFail("setup: expected a refused purge")
+        }
+        // Fresh instance = the state a newly launched app reads.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let live = VoiceSharingSettingsModel(queue: fresh,
+                                            isCollectionPermitted: { true },
+                                            isAccountEnrolled: { true },
+                                            isLocallyOptedIn: { true }).liveState()
+        XCTAssertEqual(live.storageFault, .revocationInDoubt)
+        XCTAssertEqual(VoiceSharingSettingsModel(queue: fresh,
+                                                 isCollectionPermitted: { true },
+                                                 isAccountEnrolled: { true },
+                                                 isLocallyOptedIn: { true })
+                        .recoveryGuidance(for: live).reason, .storageHeld)
+    }
+
+    /// An unreadable root reports `.unknown` coverage — classified as unreadable, not held.
+    func test_liveStateClassifiesAnUnreadableRootAsUnreadable() {
         let unreadable = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
-        let result = guidance(permits: true, enrolled: true, optedIn: true, queue: unreadable)
-        XCTAssertEqual(result.reason, .storageHeld)
-        XCTAssertTrue(result.action?.lowercased().contains("delete") == true,
-                      "recovery must name the remedy that actually resolves a held owner")
-    }
-
-    /// The surface renders nothing when everything is fine: no empty shell.
-    func test_notStoppedCarriesNoActionText() {
-        XCTAssertNil(guidance(permits: true, enrolled: true, optedIn: true).action)
+        let live = VoiceSharingSettingsModel(queue: unreadable,
+                                            isCollectionPermitted: { true },
+                                            isAccountEnrolled: { true },
+                                            isLocallyOptedIn: { true }).liveState()
+        XCTAssertEqual(live.storageFault, .unreadable)
     }
 }

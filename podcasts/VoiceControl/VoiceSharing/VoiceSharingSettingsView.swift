@@ -29,12 +29,14 @@ struct VoiceSharingSettingsView: View {
         }
     }
 
+    /// Titles are keyed around what the app actually knows; `.unknown` deliberately says nothing
+    /// about why.
     private func title(for reason: VoiceSharingSettingsModel.StoppedReason) -> String {
         switch reason {
         case .notStopped: return "Voice Sharing is on"
-        case .noActiveLease: return "Voice Sharing is paused"
+        case .noActiveLease, .unknown: return "Voice Sharing is paused"
         case .notEnrolled, .turnedOffLocally: return "Voice Sharing is off"
-        case .storageHeld, .unknown: return "Voice Sharing stopped"
+        case .storageHeld, .storageUnreadable: return "Voice Sharing stopped"
         }
     }
 
@@ -42,11 +44,11 @@ struct VoiceSharingSettingsView: View {
         List {
             // WHY sharing is stopped and what the user can do about it, from the model's live
             // projection (spec 62d39f8f). Present only when something is actually blocking.
-            let live = status ?? model.status()
-            let stopped = model.stoppedGuidance(
-                policyPermits: live.collectionPermitted,
-                enrolled: model.isAccountEnrolled(),
-                localOptIn: model.isLocallyOptedIn())
+            // ONE snapshot for the whole render: the status read and the guidance both come from
+            // this single LiveState, so the surface never mixes a cached permit with fresh reads
+            // (reviewer 8ae2b980).
+            let live = model.liveState()
+            let stopped = model.recoveryGuidance(for: live)
             if stopped.reason != .notStopped {
                 Section {
                     Text(title(for: stopped.reason))
@@ -76,6 +78,10 @@ struct VoiceSharingSettingsView: View {
                              + "attempt them all and tell you exactly what could not be resolved.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                    case .revocationInDoubt:
+                        // Count is deliberately not shown: the set is unprovable until a purge
+                        // reconciles. The reason row above already offers the verified remedy.
+                        row("Recordings waiting to upload", value: "Not confirmed", tint: .orange)
                     }
                 }
             }

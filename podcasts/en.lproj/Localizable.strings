@@ -6690,3 +6690,15 @@
 
 /* Message shown when a network the user tapped fails to load */
 "network_fail_to_load" = "This network couldn't be loaded";
+
+/* Voice Sharing recovery: shown when a revocation could not be proven complete; the verified remedy is deleting stored recordings on this device. */
+"voice_sharing_recovery_held" = "Some stored recordings could not be removed. Deleting recordings on this device finishes it.";
+
+/* Voice Sharing recovery: shown when the app cannot determine whether collection is permitted. */
+"voice_sharing_recovery_paused" = "Voice Sharing is paused until the app can check its settings. Open the app with a connection to resume.";
+
+/* Voice Sharing recovery: shown when the account is not enrolled in Voice Sharing on the server. */
+"voice_sharing_recovery_not_enrolled" = "Voice Sharing is not enabled for this account.";
+
+/* Voice Sharing recovery: shown when the user has turned Voice Sharing off on this device. */
+"voice_sharing_recovery_turned_off" = "Turn on Voice Sharing to resume.";

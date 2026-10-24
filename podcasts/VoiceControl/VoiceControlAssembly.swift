@@ -7,6 +7,9 @@ class VoiceControlAssembly {
     /// Strong reference to the upload lifecycle trigger so its notification observer survives;
     /// creation happens inside `buildVoiceControlService` when the upload chain is built.
     private var voiceSharingUploadTrigger: VoiceSharingUploadTrigger?
+    /// Production settings model, wired with live reads. Retained so the surface can be handed a
+    /// real dependency rather than a stub; the surface itself stays compiled OFF.
+    private(set) var voiceSharingSettingsModel: VoiceSharingSettingsModel?
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -151,6 +154,15 @@ class VoiceControlAssembly {
             isAuthorized: uploadAuthorized)
         // A retained reference keeps the notification observer alive for the app's lifetime.
         self.voiceSharingUploadTrigger = uploadTrigger
+        // The settings MODEL is wired here, in production, with the real live reads (reviewer
+        // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
+        // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
+        // renders as `unknown` rather than inventing an opt-out.
+        self.voiceSharingSettingsModel = VoiceSharingSettingsModel(
+            queue: contributionQueue,
+            isCollectionPermitted: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEffectiveEnrolled },
+            isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn })
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },

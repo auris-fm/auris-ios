@@ -1315,6 +1315,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         switch q.readyEntriesReportingUnknownCoverage() {
         case .unknownCoverage:
             break
+        case .revocationHeld:
+            XCTFail("an unreadable owner is UNKNOWN coverage, not a claimed failed revocation")
         case .known(let entries):
             XCTFail("unreadable ownership is unknown coverage for the whole owner, got \(entries.count) entries")
         }
@@ -3004,5 +3006,124 @@ private final class LockedBox<T> {
     func mutate(_ body: (inout T) -> Void) {
         lock.lock(); defer { lock.unlock() }
         body(&storage)
+    }
+}
+
+// MARK: - Revocation-intent restart hold (spec 62d39f8f: durable purge coverage)
+
+/// A purge that could not prove every barrier must survive a RESTART: the intent marker left on
+/// disk keeps the owner held so an unmarked survivor can never be served by a fresh process. The
+/// memory hold alone would be lost on relaunch — that is the whole point of the marker.
+final class VoiceSharingRevocationRestartTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsrevocation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Minimal WAV (44-byte header + PCM16 mono 16 kHz), duplicated here because the queue suite's
+    /// helpers are instance-private to that class.
+    private static func testWAV(frames: Int) -> Data {
+        var data = Data()
+        let dataBytes = frames * 2
+        func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        data.append(contentsOf: Array("RIFF".utf8)); append32(UInt32(36 + dataBytes))
+        data.append(contentsOf: Array("WAVE".utf8))
+        data.append(contentsOf: Array("fmt ".utf8)); append32(16)
+        append16(1); append16(1); append32(16_000); append32(16_000 * 2); append16(2); append16(16)
+        data.append(contentsOf: Array("data".utf8)); append32(UInt32(dataBytes))
+        data.append(Data(repeating: 0, count: dataBytes))
+        return data
+    }
+
+    private static func testRecord(captureID: String, audio: Data) throws -> Data {
+        let digest = SHA256.hash(data: audio).map { String(format: "%02x", $0) }.joined()
+        let record: [String: Any] = [
+            "schema_version": 1,
+            "capture_id": captureID,
+            "enrollment_epoch": "epoch-1",
+            "platform": "ios",
+            "app_version": "8.0",
+            "build": "1",
+            "capture_session_id": "session-1",
+            "audio": [
+                "sha256": digest,
+                "byte_count": audio.count,
+                "encoding": "pcm_s16le",
+                "sample_rate_hz": 16_000,
+                "channels": 1,
+                "retained_samples": (audio.count - 44) / 2,
+                "original_format": "pcm_s16le",
+                "conversion_version": "1",
+                "truncated": false,
+                "dropped_spans": [Any](),
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: record)
+    }
+
+    private func seedEntry() throws {
+        let audio = Self.testWAV(frames: 1_600)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let prep = try queue.prepare(metadata: Self.testRecord(captureID: UUID().uuidString, audio: audio),
+                                     audio: audio)
+        try queue.finalize(prep)
+    }
+
+    /// A held purge leaves the intent marker; a FRESH queue must re-derive the hold from storage and
+    /// refuse to serve anything — no entry, no "unknown only because listing failed", an explicit
+    /// owner-wide hold.
+    func test_aFailedPurgeHoldsAcrossRestart() throws {
+        try seedEntry()
+        // Force the purge to refuse: its first durable write cannot be synced.
+        let refusing = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        let outcome = refusing.purgeAll()
+        guard case .refused = outcome else {
+            return XCTFail("expected a refused purge, got \(outcome)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("revocation.intent").path),
+            "a refused purge must leave durable intent behind")
+
+        // RESTART: a brand-new instance with a working file system must still be held.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        if case .known(let entries) = fresh.readyEntriesReportingUnknownCoverage() {
+            XCTFail("a fresh process must not serve after an unproven revocation (saw \(entries.count))")
+        }
+    }
+
+    /// The hold is cleared only by a SUCCESSFUL purge, not by restarting.
+    func test_theRestartHoldIsClearedOnlyByASuccessfulPurge() throws {
+        try seedEntry()
+        let refusing = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        guard case .refused = refusing.purgeAll() else {
+            return XCTFail("setup: expected a refused purge")
+        }
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("setup: a fresh owner must re-derive the REVOCATION hold from disk")
+        }
+        // A purge that can complete its writes releases it.
+        _ = fresh.purgeAll()
+        let afterReconcile = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        switch afterReconcile.readyEntriesReportingUnknownCoverage() {
+        case .known(let entries):
+            XCTAssertEqual(entries.count, 0, "a reconciled owner serves nothing and is not held")
+        case .revocationHeld:
+            XCTFail("a completed purge must release the restart hold")
+        case .unknownCoverage:
+            XCTFail("a completed purge leaves READABLE storage, not unknown coverage")
+        }
     }
 }

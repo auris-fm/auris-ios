@@ -51,8 +51,8 @@ final class VoiceSharingUploadScheduler {
         }
         defer { passLock.withLock { passInFlight = false } }
         guard isAuthorized() else { return .idle }
-        // Unknown coverage must never feed the scheduler: `.unknownCoverage` yields nothing here
-        // (the same fail-closed rule serving uses).
+        // Neither unknown coverage nor a revocation hold may feed the scheduler: both yield
+        // nothing here (the same fail-closed rule serving uses).
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(), !ready.isEmpty
         else { return .idle }
 

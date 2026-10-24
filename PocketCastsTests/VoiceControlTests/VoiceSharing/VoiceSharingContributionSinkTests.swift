@@ -354,7 +354,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             contents.filter { ["audio.wav", "metadata.json", "created.at", "ready.marker"].contains($0) }.count,
             4, "an unconfirmable disqualification must not damage the entry")
         // The owner-wide hold blocks serving AND admission.
-        guard case .unknownCoverage = failingFileSyncQueue.readyEntriesReportingUnknownCoverage() else {
+        guard case .revocationHeld = failingFileSyncQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("the owner-wide hold must block serving after an unconfirmed purge")
         }
         XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance(forBytes: 1_000))
@@ -387,7 +387,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             4)
         // A FRESH queue (production restart) must honor the durable intent in EVERY authority.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
+        guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a fresh queue must not serve after an unconfirmed revocation")
         }
         XCTAssertEqual(fresh.readyEntries().count, 0, "legacy serving path must honor the hold too")
@@ -417,14 +417,14 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         }
         // The I/O failure now clears — the hold must NOT clear with it.
         failListing = false
-        guard case .unknownCoverage = refusingListQueue.readyEntriesReportingUnknownCoverage() else {
+        guard case .revocationHeld = refusingListQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a refused listing must leave the owner held")
         }
         XCTAssertFalse(refusingListQueue.hasAdmissionAllowance(forBytes: 1_000))
         XCTAssertEqual(refusingListQueue.readyEntries().count, 0)
         // A FRESH queue sees the durable intent and stays held.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
+        guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("the refused-listing intent must survive restart")
         }
         // Only a RECONCILED purge clears it.
@@ -493,6 +493,8 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let fresh = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             intentDiscovery: { _ in .failure })
+        // The hold is real, but its ORIGIN is "cannot determine", not "a revocation failed":
+        // the retry-hold discovery is unknown, so coverage is unknown (reviewer 8ae2b980).
         guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("unknown intent discovery must HOLD the owner, never resume serving")
         }
