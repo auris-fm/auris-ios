@@ -809,6 +809,46 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
     }
 
+    /// PRODUCER BINDING (spec 78480a17): asr `source_language` and `router_input` are stated by the
+    /// RECOGNISER at its own report site — the language it detected, and the exact text handed onward
+    /// as the command input. Asserted on the DURABLE record through the real engine path.
+    func test_theRecogniserStatesItsLanguageAndRouterInputOnTheDurableRecord() async throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let localClaims = claims
+        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { localClaims })
+        chain.backend.stubTranscript = "play the latest episode"
+        chain.backend.stubLanguage = "en"
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else { return XCTFail("a record is required") }
+        var asr: [String: Any]?
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let envelope = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
+            if let stage = ((envelope?["record"] as? [String: Any])?["observations"]
+                as? [String: Any])?["asr"] as? [String: Any] {
+                asr = stage
+            }
+        }
+        guard let asr else { return XCTFail("the record must state the asr stage") }
+        XCTAssertEqual(asr["state"] as? String, "completed")
+        XCTAssertEqual(asr["source_language"] as? String, "en",
+                       "the recogniser's own language fact must reach the record")
+        let routerInput = try XCTUnwrap(asr["router_input"] as? String,
+                                        "router_input must be present, not absent")
+        XCTAssertEqual(routerInput, "play the latest episode",
+                       "router_input is the exact text handed onward as the command input")
+    }
+
     /// THE THREE TRANSLATION SKIPS ARE DISTINCT FACTS (spec delta 4d10275f). Collapsing them into
     /// `observation_unavailable` threw away what the engine actually knew. Each must reach the durable
     /// record under its own reason, and none may borrow `source_language_target_language`.

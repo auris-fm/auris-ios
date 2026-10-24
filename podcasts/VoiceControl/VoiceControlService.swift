@@ -411,13 +411,23 @@ class VoiceControlService: ObservableObject {
         captureContext: VoiceSharingCollector.CaptureContext?
     ) {
         let outcome = Self.executionOutcome(for: response)
+        let verdict = Self.settledDisposition(for: outcome)
         contributionCollector?.engineReported(
             stage: "routing",
             outcome: .init(state: "completed", reason: nil,
-                           routingDisposition: Self.settledDisposition(for: outcome)),
+                           routingDisposition: verdict),
             context: captureContext)
+        // The executor's own verdict, from the same decision the disposition derives from — the
+        // `outcome` member states what execution concluded, not what was presented.
         contributionCollector?.engineReported(
-            stage: "execution", outcome: outcome, context: captureContext)
+            stage: "execution",
+            outcome: .init(state: outcome.state, reason: outcome.reason,
+                           text: outcome.text, decision: outcome.decision,
+                           translatedText: outcome.translatedText,
+                           targetLanguage: outcome.targetLanguage,
+                           routingDisposition: outcome.routingDisposition,
+                           outcome: verdict),
+            context: captureContext)
     }
 
     /// FINDING a7dfe013 #3: this method took ownership of the deferred record and could return
@@ -520,11 +530,15 @@ class VoiceControlService: ObservableObject {
             }
 
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
-            // The router chose an intent: routing RAN and produced a decision.
+            // The router chose an intent: routing RAN and produced a decision. predicted_intent and
+            // predicted_tool are the SAME canonical names analytics records, so the record and the
+            // analytics event cannot disagree about what was classified.
             contributionCollector?.engineReported(
                 stage: "routing",
                 outcome: .init(state: "completed", reason: nil,
-                               routingDisposition: "pending"),
+                               routingDisposition: "pending",
+                               predictedIntent: "\(VoiceAnalytics.toolName(from: intent)).\(VoiceAnalytics.actionName(from: intent))",
+                               predictedTool: VoiceAnalytics.toolName(from: intent)),
                 context: captureContext)
             guard isListening else {
                 settleOwnedCapture(captureContext, cancelled: true, reason: "cancelled_by_user")

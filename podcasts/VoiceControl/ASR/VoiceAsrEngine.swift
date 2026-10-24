@@ -399,9 +399,14 @@ class VoiceAsrEngine {
         // failure and not a wake rejection. So the raw transcript is published as completed.
         let rawText = asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rawText.isEmpty {
+            // The language is the RECOGNISER'S OWN observation and router_input is the exact text
+            // handed onward as the command input (spec 78480a17: existing schema fields, stated by
+            // the site that produced them). `empty_result` never carries either member.
             contributionCollector?.engineReported(
                 stage: "asr",
-                outcome: .init(state: "completed", reason: nil, text: rawText),
+                outcome: .init(state: "completed", reason: nil, text: rawText,
+                               sourceLanguage: asrResult.detectedLanguage,
+                               routerInput: trimmedText.isEmpty ? rawText : trimmedText),
                 context: utteranceContext)
         } else {
             // A GENUINELY EMPTY recogniser result is a SUCCESSFUL recognition with nothing usable in it

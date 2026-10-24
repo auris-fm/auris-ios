@@ -297,13 +297,34 @@ final class VoiceSharingCollector {
         // lives — open, or ring-resident and not yet emitted — so the record that eventually leaves
         // carries it. A capture already emitted cannot be amended: its record is immutable, which is
         // the point of the digest.
+        // A stage can be reported MORE THAN ONCE (e.g. routing at classification time, then again at
+        // settlement with its terminal disposition). Replacement would erase the first report's
+        // facts, so members the new outcome does not state are carried forward from the prior one;
+        // the new report wins wherever it states a member.
+        func merged(_ previous: VoiceSharingContributionEncoder.StageOutcome?
+        ) -> VoiceSharingContributionEncoder.StageOutcome {
+            guard let previous else { return outcome }
+            return .init(
+                state: outcome.state,
+                reason: outcome.reason ?? previous.reason,
+                text: outcome.text ?? previous.text,
+                decision: outcome.decision ?? previous.decision,
+                translatedText: outcome.translatedText ?? previous.translatedText,
+                targetLanguage: outcome.targetLanguage ?? previous.targetLanguage,
+                routingDisposition: outcome.routingDisposition ?? previous.routingDisposition,
+                sourceLanguage: outcome.sourceLanguage ?? previous.sourceLanguage,
+                routerInput: outcome.routerInput ?? previous.routerInput,
+                predictedIntent: outcome.predictedIntent ?? previous.predictedIntent,
+                predictedTool: outcome.predictedTool ?? previous.predictedTool,
+                outcome: outcome.outcome ?? previous.outcome)
+        }
         if var c = current, c.id == context.id, !c.terminal, c.sawStart {
-            c.reportedStages[stage] = outcome
+            c.reportedStages[stage] = merged(c.reportedStages[stage])
             current = c
             return
         }
         if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
-            rec.capture.reportedStages[stage] = outcome
+            rec.capture.reportedStages[stage] = merged(rec.capture.reportedStages[stage])
             terminalRing[context.id] = rec
         }
     }

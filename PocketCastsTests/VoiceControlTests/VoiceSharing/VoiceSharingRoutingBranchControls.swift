@@ -286,6 +286,22 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                            "\(testCase.label): wrong execution state")
             XCTAssertEqual(execution.reason, testCase.executionReason,
                            "\(testCase.label): wrong execution reason")
+            // PRODUCER BINDINGS (spec 78480a17): the classification names come from the SAME
+            // canonical mapping analytics records, and the execution verdict states what execution
+            // concluded. The router-declined case classified nothing, so it must name nothing.
+            if testCase.routingDisposition != "not_run" {
+                XCTAssertFalse(routing.predictedIntent?.isEmpty ?? true,
+                               "\(testCase.label): the classified turn must name its intent")
+                XCTAssertFalse(routing.predictedTool?.isEmpty ?? true,
+                               "\(testCase.label): the classified turn must name its tool")
+            } else {
+                XCTAssertNil(routing.predictedIntent,
+                             "\(testCase.label): an unclassified turn must not invent an intent")
+            }
+            if testCase.executionState != "not_run" {
+                XCTAssertFalse(execution.outcome?.isEmpty ?? true,
+                               "\(testCase.label): an executed turn must state its verdict")
+            }
         }
     }
 

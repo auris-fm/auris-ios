@@ -60,10 +60,22 @@ enum VoiceSharingContributionEncoder {
         let targetLanguage: String?
         /// Routing's own enumerated field for what became of the routed turn.
         let routingDisposition: String?
+        /// ASR's language fact (spec 78480a17: the field exists in the owning schema; a site that
+        /// observed the language states it). Nil leaves the member absent.
+        let sourceLanguage: String?
+        /// The exact text handed onward as the command input. Nil leaves the member absent.
+        let routerInput: String?
+        /// Routing's classification, from the site that classified (analytics' own tool/action names).
+        let predictedIntent: String?
+        let predictedTool: String?
+        /// The executor's own verdict for the turn, from `executionOutcome`'s decision site.
+        let outcome: String?
 
         init(state: String, reason: String? = nil, text: String? = nil, decision: String? = nil,
              translatedText: String? = nil, targetLanguage: String? = nil,
-             routingDisposition: String? = nil) {
+             routingDisposition: String? = nil, sourceLanguage: String? = nil,
+             routerInput: String? = nil, predictedIntent: String? = nil,
+             predictedTool: String? = nil, outcome: String? = nil) {
             self.state = state
             self.reason = reason
             self.text = text
@@ -71,6 +83,11 @@ enum VoiceSharingContributionEncoder {
             self.translatedText = translatedText
             self.targetLanguage = targetLanguage
             self.routingDisposition = routingDisposition
+            self.sourceLanguage = sourceLanguage
+            self.routerInput = routerInput
+            self.predictedIntent = predictedIntent
+            self.predictedTool = predictedTool
+            self.outcome = outcome
         }
 
         func withDecision(_ decision: String) -> StageOutcome {
@@ -229,6 +246,21 @@ enum VoiceSharingContributionEncoder {
             if let target = outcome.targetLanguage { entry["target_language"] = target }
             if let disposition = outcome.routingDisposition {
                 entry["execution_disposition"] = disposition
+            }
+            if let sourceLanguage = outcome.sourceLanguage {
+                entry["source_language"] = sourceLanguage
+            }
+            if let routerInput = outcome.routerInput {
+                entry["router_input"] = routerInput
+            }
+            if let predictedIntent = outcome.predictedIntent {
+                entry["predicted_intent"] = predictedIntent
+            }
+            if let predictedTool = outcome.predictedTool {
+                entry["predicted_tool"] = predictedTool
+            }
+            if let outcomeValue = outcome.outcome {
+                entry["outcome"] = outcomeValue
             }
             block[stage] = entry
         }
