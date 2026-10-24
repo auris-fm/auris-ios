@@ -152,14 +152,14 @@ final class PlaybackEchoReference {
             let candidate = Int(anchor.renderedPipelineSamples) - windowStart
             if candidate >= 0, candidate <= samples.count { offset = candidate }
         }
-        // COPY, not alias: Swift arrays share storage until one side mutates, so returning
-        // `samples` directly would let the NEXT append mutate the observation in place — the
-        // "consistent" window would grow under the filter and the offset would describe samples
-        // that are no longer there. Driving the real `processUtterance` (r4366062986 control)
-        // exposed exactly this: the filter received 80300 samples from an 80000-sample
-        // observation because the post-observation append mutated the shared buffer.
+        // CORRECTION (reviewer, independent Swift check): an earlier comment here attributed a
+        // test observation of "80300 samples from an 80000-sample observation" to CoW aliasing.
+        // That was wrong — Swift value semantics already isolate the returned array from later
+        // appends. The 80300 was READ TIMING: the engine observes at filter time, which was
+        // after the test's append. The single lock acquisition is the actual guarantee this
+        // method makes: samples, offset and anchor describe ONE instant.
         return ConsistentObservation(
-            samples: Array(samples), audibleEndOffset: offset, renderAnchor: renderAnchor)
+            samples: samples, audibleEndOffset: offset, renderAnchor: renderAnchor)
     }
 
 

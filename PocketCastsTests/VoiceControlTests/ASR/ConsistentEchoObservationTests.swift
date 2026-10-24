@@ -130,24 +130,17 @@ final class ConsistentEchoObservationTests: XCTestCase {
                            + "re-read after an append is displaced and misaligns the correlation")
     }
 
-    /// r4366062986: the control above drives the arithmetic seam, not the production wiring —
-    /// reverting `processUtterance` to a fresh snapshot+offset pair would leave it green. THIS
-    /// control drives the REAL `processUtterance` through a recording SignalFilter. Two phases:
-    ///
-    /// WIRING (no concurrency): with the producer quiesced, the filter must receive exactly the
-    /// window the reference holds — content-equal to a consistentObservation taken at the same
-    /// instant — and an offset that indexes it.
-    ///
-    /// CONSISTENCY (concurrent producer): an UNGATED producer (append + anchor advance every
-    /// ~1µs — the only density at which a nanosecond-scale inter-read gap is detectable, per
-    /// MM3) runs while processUtterance drives the filter repeatedly. Every filter call must
-    /// satisfy offset ≤ reference.count: under a SPLIT fresh-snapshot+offset regression an
-    /// anchor advance between the two reads yields an offset past the snapshot it is paired
-    /// with, and the assertion fails.
-    func test_processUtteranceFeedsTheFilterAConsistentObservation() async {
+    /// r4366062986 disposition, DETERMINISTIC (reviewer 4a332d8d): the engine fires a test-only
+    /// hook at the production-adjacent observation boundary — after the observation is taken,
+    /// before the filter call. The control forces an append AND an anchor advance INSIDE that
+    /// boundary. The filter must then receive the PRE-boundary observation: exactly 80000
+    /// samples with offset exactly 80000. A split-read regression reads across the forced
+    /// boundary — a fresh snapshot yields 80300 samples, a fresh offset 80300 — and fails on
+    /// either member, with no timing involved. (CoW keeps the pre-boundary array intact; the
+    /// earlier aliasing explanation was wrong — see the corrected production comment.)
+    func test_processUtteranceFeedsTheFilterTheObservationItTook() async {
         let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 10.0)
         let capacity = 16_000 * 10
-        let stride = 8
         let engine = VoiceAsrEngine(
             capture: ParkedCapture(),
             segmenter: NativeVadSegmenter(threshold: 0.020),
@@ -155,74 +148,38 @@ final class ConsistentEchoObservationTests: XCTestCase {
             signalFilter: RecordingFilter(),
             wakeWordDetector: QuietWake(),
             gracePeriodSignal: GracePeriodSignal())
-        // Route FIRST: a route transition retires the reference down to its acoustic tail, so
-        // the data appended below must land AFTER the route is settled.
+        // Route FIRST: a route transition retires the reference to its acoustic tail, so the
+        // data appended below must land AFTER the route is settled.
         engine.setEchoFilterRoute(.builtInSpeaker)
         engine.setEchoReference(reference)
         reference.append([Float](repeating: 0.1, count: capacity / 2))
         reference.recordRenderPosition(PlaybackRenderAnchor(
             renderedFrames: Double(capacity / 2), sourceSampleRate: 16_000, hostTime: 0))
 
-        // WIRING PHASE (no producer): the filter sees the whole retained window, content-equal
-        // to the reference's own consistent view, with an offset at its end.
-        let quiesced = reference.consistentObservation()
+        let expectedCount = capacity / 2
+        engine.echoObservationTakenForTesting = {
+            // The forced boundary change: an append and its anchor advance, landing AFTER the
+            // engine's observation and BEFORE the filter call.
+            reference.append([Float](repeating: 0.2, count: 300))
+            reference.recordRenderPosition(PlaybackRenderAnchor(
+                renderedFrames: Double(expectedCount + 300), sourceSampleRate: 16_000,
+                hostTime: 0))
+        }
+
         let utterance = [Float](repeating: 0.05, count: 160)
         await engine.processUtterance(utterance, capturedAt: 0)
+
         let filter = engine.signalFilterForTesting as! RecordingFilter
         XCTAssertEqual(filter.recordedObservations.count, 1, "premise: the filter ran once")
-        let wired = filter.recordedObservations[0]
-        XCTAssertEqual(wired.reference, quiesced.samples,
-                       "the filter must receive the reference's current window, content-equal")
-        XCTAssertEqual(wired.segmentEndOffset, quiesced.audibleEndOffset,
-                       "the filter's offset must come from the same view as its samples")
-        filter.clearObservations()
-
-        // CONSISTENCY PHASE: ungated producer vs repeated production reads.
-        let appended = Counter()
-        appended.bump(by: capacity / 2)
-        let producerStop = AtomicFlag()
-        let producer = Thread { [appended] in
-            var tick: Float = 0.1
-            while !producerStop.load() {
-                if appended.load() + stride > capacity * 9 / 10 { break }
-                tick += 0.001
-                reference.append([Float](repeating: tick, count: stride))
-                let total = appended.bump(by: stride)
-                reference.recordRenderPosition(PlaybackRenderAnchor(
-                    renderedFrames: Double(total), sourceSampleRate: 16_000, hostTime: 0))
-            }
-        }
-        producer.start()
-        for _ in 0..<1_500 {
-            await engine.processUtterance(utterance, capturedAt: 0)
-            if let seen = filter.recordedObservations.last {
-                XCTAssertTrue(seen.segmentEndOffset >= 0 && seen.segmentEndOffset <= seen.reference.count,
-                              "the offset (\(seen.segmentEndOffset)) must index the window it was "
-                                  + "paired with (\(seen.reference.count) samples) — a violation "
-                                  + "means processUtterance paired a fresh offset with a stale "
-                                  + "snapshot (the split-read regression)")
-                // Window never trims, capturedAt=0 so no latency subtraction: a consistent
-                // read's offset IS the window end. The only legitimate slack is the producer's
-                // own sequencing window — the anchor is advanced AFTER its append lands, so an
-                // atomic read between the two sees count = anchor + stride. Slack beyond one
-                // stride means the offset and the window came from different reads. HONEST
-                // LIMIT (disclosed to reviewer/spec): a split regression with a nanosecond
-                // inter-read gap mismatches by at most a stride or two as well, so this phase
-                // is wiring+bounds coverage, NOT a deterministic split discriminator — the
-                // deterministic killers are the seam control (MM2) and the unit-level MM3.
-                let slack = seen.reference.count - seen.segmentEndOffset
-                XCTAssertTrue(slack >= 0 && slack <= 3 * stride,
-                              "offset \(seen.segmentEndOffset) vs window \(seen.reference.count): "
-                                  + "legitimate producer lag is at most one stride (\(stride))")
-            }
-        }
-        producerStop.store(true)
-        let joinDeadline = Date().addingTimeInterval(5)
-        while producer.isFinished == false && Date() < joinDeadline {
-            Thread.sleep(forTimeInterval: 0.002)
-        }
-        XCTAssertGreaterThan(filter.recordedObservations.count, 100,
-                             "premise: the concurrent phase must have exercised the filter")
+        let seen = filter.recordedObservations[0]
+        XCTAssertEqual(seen.reference.count, expectedCount,
+                       "the filter must receive the PRE-boundary observation (\(expectedCount) "
+                           + "samples); a fresh post-boundary snapshot has \(expectedCount + 300)")
+        XCTAssertEqual(seen.segmentEndOffset, expectedCount,
+                       "the filter's offset must be the PRE-boundary observation's; a fresh "
+                           + "post-boundary read is \(expectedCount + 300)")
+        XCTAssertEqual(seen.reference, [Float](repeating: 0.1, count: expectedCount),
+                       "the filter's window must be the observation's content")
     }
 
     /// THE HOOK CLOSURE RACE (r4357901105): `finishTurn()` must run the close hook EXACTLY ONCE

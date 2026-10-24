@@ -113,6 +113,9 @@ class VoiceAsrEngine {
             observation: echoReference?.consistentObservation())
     }
 
+    /// TEST-ONLY: fires between the filter-path observation and the filter call. See call site.
+    var echoObservationTakenForTesting: (() -> Void)?
+
     /// TEST SEAM (r4357901593): the offset arithmetic applied to a CALLER-SUPPLIED observation,
     /// so a control can prove the filter uses the observation it took rather than a fresh
     /// (post-append, displaced) read.
@@ -329,6 +332,11 @@ class VoiceAsrEngine {
             // samples the mic segment is correlated against — an append landing between two
             // separate reads can no longer shift the window out from under the offset.
             let observation = echoReference?.consistentObservation()
+            // TEST-ONLY boundary hook (r4366062986 disposition): fires AFTER the observation is
+            // taken and BEFORE the filter call, so a control can force an append/anchor advance
+            // into the exact window a split-read regression would read across — deterministically,
+            // no timing. Nil in production.
+            echoObservationTakenForTesting?()
             let segmentEndOffset = playbackEndOffsetForSegment(
                 capturedAt: capturedAt,
                 segmentSamples: utterance.count,
