@@ -73,25 +73,44 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = Outcome.self
     }
 
-    /// THE DISCRIMINATING CONTROL (spec 6a033773: "add discriminating
-    /// same-presentation/different-action-outcome controls where the action API supports them").
-    /// The sleep sink presents the SAME spoken confirmation whether or not its timer was actually
-    /// armed (the mock models both worlds). The verdict must NOT follow the presentation: both
-    /// worlds stay unknown until a sink-side structured fact channel exists — and the mock's
-    /// fact is recorded here as exactly what such a channel must carry. When the sink-fact slice
-    /// lands, the armed world becomes completed and this control becomes the pair that proves
-    /// the verdict followed the FACT, not the presentation.
-    func test_samePresentationDifferentActionOutcome_staysUnknownUntilSinkFactsExist() async {
+    /// THE DISCRIMINATING CONTROL (spec 6a033773), now with a REAL fact channel: pause presents
+    /// the SAME `.earcon(.success)` whether or not anything was playing — the presentation cannot
+    /// discriminate. The SINK'S FACT does: pausing from playing is a completed action; pausing
+    /// while already paused is a no-op with its precondition absent (not_run/precondition_failed).
+    /// RED until the fact channel lands; the sleep half (below) pins the world where NO fact
+    /// channel exists — unknown in both worlds.
+    func test_samePresentationDifferentActionOutcome_verdictFollowsTheSinkFactNotThePresentation() async {
+        // Same presentation, real action: the sink fact says the pause acted.
+        mockPlaybackSink.wasPlayingFact = true
+        let (_, acted) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(acted.state, "completed",
+                       "the sink fact (an actual playing→paused transition) must conclude the "
+                           + "turn, not the identical success earcon")
+        XCTAssertNil(acted.reason)
+        XCTAssertEqual(acted.outcome, "executed")
+
+        // Same presentation again, no-op: the fact says the precondition was absent.
+        mockPlaybackSink.wasPlayingFact = false
+        let (_, noOp) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(noOp.state, "not_run",
+                       "pausing while paused did nothing; the identical earcon must not read "
+                           + "as a completed action")
+        XCTAssertEqual(noOp.reason, "precondition_failed")
+        XCTAssertEqual(noOp.outcome, "refused")
+    }
+
+    /// The NO-CHANNEL half: the sleep sink has no fact channel yet, so its identical
+    /// presentations in both worlds stay unknown — the verdict must not follow presentation
+    /// where no structured fact exists.
+    func test_withoutAFactChannel_identicalPresentationsStayUnknown() async {
         mockSleepSink.armedFact = true
         let (_, armed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
         XCTAssertEqual(armed.state, "unknown",
-                       "an armed timer behind a spoken confirmation is still not PROVEN by the "
-                           + "presentation; unknown until sink facts exist")
+                       "no sink fact channel exists for this sink; unknown, not completed")
         mockSleepSink.armedFact = false
         let (_, notArmed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
         XCTAssertEqual(notArmed.state, "unknown",
-                       "identical presentation, different action outcome — the verdict must not "
-                           + "have followed the presentation")
+                       "identical presentation, no fact channel — unknown, not refused")
     }
 
     /// The origin branch is what decides whether a dispatch re-arms the allowance
@@ -359,7 +378,17 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
+    /// The sink's structured fact, as the real channel will carry it: whether an actual
+    /// playing→paused transition happened.
+    var wasPlayingFact = true
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        pauseCalled = true
+        let response: VoiceResponse = .earcon(.success)
+        return wasPlayingFact
+            ? (response, SinkActionFact(state: "completed", reason: nil))
+            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+    }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
         lastSeekRelativeDelta = deltaSeconds

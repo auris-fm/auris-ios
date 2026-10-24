@@ -7,6 +7,15 @@ enum SeekDirection: Int {
     case backward = 1
 }
 
+/// A sink's own structured fact about what its action actually did — the verdict channel
+/// (spec: execution verdicts must be decision-site facts, not response classifications).
+/// `state` uses the record's enumerated vocabulary; `reason` is an enumerated execution
+/// reason, nil exactly when state is completed.
+struct SinkActionFact {
+    let state: String
+    let reason: String?
+}
+
 protocol VoicePlaybackSink {
     /// Whether the host is playing right now. Read before taking the turn's
     /// hold: a pause of ours may only be released if it stopped playback that
@@ -26,4 +35,18 @@ protocol VoicePlaybackSink {
     /// clamp.
     func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse
     func nextEpisode() -> VoiceResponse
+    /// THE FACT CHANNEL: pause with the sink's own structured fact. Protocol REQUIREMENT (with
+    /// the default below) so overrides dispatch dynamically through the existential — a protocol
+    /// extension alone would silently route every call to the default.
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?)
+}
+
+/// THE FACT CHANNEL, introduced one method at a time. The default reports NO fact — the
+/// executor's bridge then keeps the verdict unknown, because a presentation cannot prove an
+/// outcome. A sink that knows what its action did overrides the method and states the fact.
+extension VoicePlaybackSink {
+    /// Pause with the sink's own structured fact. Default: presentation only, no fact.
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        (pause(), nil)
+    }
 }

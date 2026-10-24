@@ -245,30 +245,57 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         return response
     }
 
-    /// CORRECTED (spec 6a033773): this executor boundary adds NOTHING over the default bridge —
-    /// the local sinks return only presentations, and a presentation cannot prove an outcome.
-    /// Local sinks still ride the default bridge; honest completed verdicts require sink-side
-    /// structured facts (the sink knows whether its operation acted), which is the remaining
-    /// slice together with the CloudRouteSink verdict. Kept explicit only to document that.
+    /// The verdict rides the ONE shared execution path: `execute` performs the turn exactly once
+    /// (analytics + grace effects, reviewer 8bc80b2b), the fact channel is captured inside that
+    /// dispatch, and the verdict is the sink's own fact where the channel is live — else the
+    /// TEMPORARY presentation bridge (labeled at its definition).
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
-        await executeWithVerdictViaBridge(intent)
+        lastSinkFact = nil
+        let response = await execute(intent)
+        let fact = lastSinkFact
+        lastSinkFact = nil
+        guard let fact else {
+            return (response, Self.presentationBridgeVerdict(response))
+        }
+        return (response, ExecutionVerdict(
+            state: fact.state, reason: fact.reason,
+            outcome: fact.state == "completed" ? "executed"
+                : fact.state == "failed" ? "failed" : "refused"))
     }
 
     private func executeWithVerdictViaBridge(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
         let response = await execute(intent)
+        return (response, Self.presentationBridgeVerdict(response))
+    }
+
+    /// TEMPORARY BRIDGE (reviewer 03593972/7b09ce42, spec cac5e28b): the error earcon and
+    /// confirm-required earcon are PRESENTATION classifications, kept only because they are the
+    /// conclusions the executor itself currently acts on (it logs "Command failed" and withholds
+    /// grace on exactly this value). They are NOT decision-site facts; the sink-side fact channel
+    /// (SinkActionFact) replaces them as it reaches each sink. Everything else stays unknown.
+    static func presentationBridgeVerdict(_ response: VoiceResponse) -> ExecutionVerdict {
         switch response {
         case .earcon(.error):
-            return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+            return ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed")
         case .earcon(.confirmRequired):
-            return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+            return ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused")
         default:
-            return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+            return ExecutionVerdict(state: "unknown", reason: "observation_unavailable")
         }
     }
 
+    /// The fact the sink stated during the CURRENT dispatch, captured inside the shared path so
+    /// the action (and its analytics/grace effects) happen exactly once. Cleared after each
+    /// verdict read. Executors are used serially per turn; the field is not shared state across
+    /// turns. (Concurrency disclosure: same single-threaded assumption as the rest of this class.)
+    private var lastSinkFact: SinkActionFact?
+
     private func executePlayback(_ intent: PlaybackIntent) -> VoiceResponse {
         switch intent {
-        case .pause: return playbackSink.pause()
+        case .pause:
+            let (response, fact) = playbackSink.pauseWithFact()
+            lastSinkFact = fact
+            return response
         case .resume: return playbackSink.resume()
         case .seekRelative(let delta, let direction):
             return playbackSink.seekRelative(deltaSeconds: delta, direction: direction)

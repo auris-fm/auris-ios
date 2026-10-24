@@ -38,6 +38,19 @@ class PlaybackManagerSink: VoicePlaybackSink {
         return .earcon(.success)
     }
 
+    /// THE DECISION-SITE FACT (the first live fact channel): the presentation is the identical
+    /// success earcon whether or not anything was playing; the FACT states which world happened.
+    /// Pausing from playing is a completed action; pausing while paused is a no-op whose
+    /// precondition was absent — stated as not_run/precondition_failed rather than reading the
+    /// earcon as a completion. (Semantic choice disclosed to spec/reviewer for ruling.)
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        let wasPlaying = playbackManager.isPlaying
+        let response = pause()
+        return wasPlaying
+            ? (response, SinkActionFact(state: "completed", reason: nil))
+            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+    }
+
     func resume() -> VoiceResponse {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.play()
