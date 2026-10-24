@@ -2,15 +2,16 @@ import XCTest
 @testable import podcasts
 
 /// LOCK-ORDER CONTROL (review 086c0172/5fa6e007/92de14ea/47328768): one real-path control on the
-/// shared production capture operation `captureRoutingOrigin`, plus a mutation run proving it fails
-/// under the pre-fix ordering (grace reads inside the lock — RED receipt preserved at handoff).
+/// shared production capture operation `captureRoutingOrigin`.
 ///
 /// The control parks the off-main capture INSIDE the operation, after its grace reads and before its
 /// lock acquisition (via the production-adjacent test barrier), runs the REAL `stop()` on main —
 /// which acquires `transcriptLock` there — then releases the park and requires BOTH sides to finish
-/// within bounded waits. Under the pre-fix ordering this cannot complete: the parked capture would
-/// already hold the lock while making main-bound reads, so main's `stop()` blocks and the release
-/// never serves the reads — the bounded completion asserts fail.
+/// within bounded waits. Under the PRE-FIX ordering (grace reads made while holding
+/// `transcriptLock`) no barrier sits between reads and lock, so the park is never reached and the
+/// `isParked` assertion fails. That mutation was run OUT-OF-TREE when the ordering fix landed; the
+/// RED receipt is preserved at handoff and is not re-runnable through this file's committed
+/// controls, which exercise only the fixed ordering.
 final class LockOrderControls: XCTestCase {
     @MainActor
     func testCaptureParkedAfterItsReadsCompletesAfterMainStopsWithoutDeadlock() async throws {
@@ -118,7 +119,6 @@ final class LockOrderControls: XCTestCase {
         // The nil capture is the discriminating fact: the guard refuses regardless of what the
         // later lock-time isListening reads.
         XCTAssertTrue(nilCapture == nil, "the stopped-time capture is nil")
-        // _ = parked; _ = release // unused in this direct form
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {

@@ -110,12 +110,26 @@ class VoiceAsrEngine {
     /// is captured and not when capture buffering delays it, which is why the capture-side
     /// timestamp is required before alignment acceptance can close.
     func playbackEndOffsetForTesting(capturedAt: MonotonicTime?, segmentSamples: Int) -> Int {
-        playbackEndOffsetForSegment(capturedAt: capturedAt, segmentSamples: segmentSamples)
+        playbackEndOffsetForSegment(
+            capturedAt: capturedAt, segmentSamples: segmentSamples,
+            observation: echoReference?.consistentObservation())
     }
 
-    private func playbackEndOffsetForSegment(capturedAt: MonotonicTime?, segmentSamples: Int) -> Int {
-        guard let reference = echoReference,
-              let anchor = reference.currentRenderAnchor else { return -1 }
+    /// TEST SEAM (r4357901593): the offset arithmetic applied to a CALLER-SUPPLIED observation,
+    /// so a control can prove the filter uses the observation it took rather than a fresh
+    /// (post-append, displaced) read.
+    func engineOffsetFromObservationForTesting(
+        observation: PlaybackEchoReference.ConsistentObservation
+    ) -> Int {
+        playbackEndOffsetForSegment(
+            capturedAt: 0, segmentSamples: 0, observation: observation)
+    }
+
+    private func playbackEndOffsetForSegment(
+        capturedAt: MonotonicTime?, segmentSamples: Int,
+        observation: PlaybackEchoReference.ConsistentObservation?
+    ) -> Int {
+        guard let observation, let anchor = observation.renderAnchor else { return -1 }
         // Without the segment's own instant the position is unknown, so no alignment
         // claim is made. The callback's arrival time is not a substitute: the tap runs on
         // a processing queue, so arrival lags capture by an indeterminate amount and would
@@ -138,7 +152,9 @@ class VoiceAsrEngine {
         // while the segment is captured, so the audible position then is earlier than now.
         let latency = max(0, anchor.hostTime - segmentEndInstant)
         let latencySamples = Int(latency * PlaybackEchoReference.pipelineSampleRate)
-        let nowOffset = reference.audibleEndOffsetInRetainedWindow() ?? -1
+        // The offset is the one computed WITH these samples under the same lock — not a fresh
+        // read, which could describe a window an append has already shifted.
+        let nowOffset = observation.audibleEndOffset ?? -1
         guard nowOffset >= 0 else { return -1 }
         return max(0, nowOffset - latencySamples)
     }
@@ -309,17 +325,23 @@ class VoiceAsrEngine {
         let utteranceId = utteranceIdGeneratorForTesting?() ?? UUID().uuidString
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
 
-        if echoFilterRoute.appliesCorrelationWindow,
-           signalFilter.isPlaybackBleed(
-               mic: utterance,
-               reference: playbackBuffer,
-               segmentEndOffset: playbackEndOffsetForSegment(
-                   capturedAt: capturedAt,
-                   segmentSamples: utterance.count
-               )
-           ) {
-            FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
-            return
+        if echoFilterRoute.appliesCorrelationWindow {
+            // ONE CONSISTENT OBSERVATION (PR50 review r4357901593): samples, offset and anchor
+            // come from a single lock acquisition, so the offset always describes exactly the
+            // samples the mic segment is correlated against — an append landing between two
+            // separate reads can no longer shift the window out from under the offset.
+            let observation = echoReference?.consistentObservation()
+            let segmentEndOffset = playbackEndOffsetForSegment(
+                capturedAt: capturedAt,
+                segmentSamples: utterance.count,
+                observation: observation)
+            if signalFilter.isPlaybackBleed(
+                mic: utterance,
+                reference: observation?.samples ?? [],
+                segmentEndOffset: segmentEndOffset) {
+                FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
+                return
+            }
         }
 
         // The detector observes every segment in both listening modes.

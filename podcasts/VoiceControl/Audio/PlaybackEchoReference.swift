@@ -128,6 +128,34 @@ final class PlaybackEchoReference {
         return samples
     }
 
+    /// ONE CONSISTENT OBSERVATION (PR50 review r4357901593): the retained audio, its audible-end
+    /// offset, and the render anchor, all read under a SINGLE lock acquisition. The filter path
+    /// needs all three to agree: `snapshot()` and `audibleEndOffsetInRetainedWindow()` were
+    /// separate acquisitions, so an `append()` landing between them shifted the window the offset
+    /// describes away from the samples it indexes — the filter then aligned the mic segment
+    /// against a reference that no longer matched its own offset, and the assistant's own voice
+    /// could pass the bleed filter while talking over a streaming answer.
+    struct ConsistentObservation {
+        let samples: [Float]
+        let audibleEndOffset: Int?
+        let renderAnchor: PlaybackRenderAnchor?
+    }
+
+    func consistentObservation() -> ConsistentObservation {
+        lock.lock()
+        defer { lock.unlock() }
+        // The offset body is the single-lock-acquisition version of
+        // `audibleEndOffsetInRetainedWindow()`; see that method for the reasoning.
+        var offset: Int?
+        if let anchor = renderAnchor, !samples.isEmpty {
+            let windowStart = totalAppended - samples.count
+            let candidate = Int(anchor.renderedPipelineSamples) - windowStart
+            if candidate >= 0, candidate <= samples.count { offset = candidate }
+        }
+        return ConsistentObservation(
+            samples: samples, audibleEndOffset: offset, renderAnchor: renderAnchor)
+    }
+
 
     /// Where the audible end of the emitted stream sits within the retained window.
     ///

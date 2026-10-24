@@ -84,32 +84,65 @@ final class AppOperationResultSocket: @unchecked Sendable {
 }
 
 extension AppOperationResultSocket {
-    /// Called by the sink when it starts consuming the turn: takes ownership of the socket's
-    /// lifetime, cancelling any bounded cleanup timer.
-    func claimConsumerOwnership() {
-        _claimHook?()
-    }
-
     /// Set by `routeWithResultSocket`; invoked by the sink when the turn's event loop has ended.
     /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
     /// never on producer completion, which `AsyncStream` signals via `onTermination` on
     /// `finish()` while the consumer may still be mid-turn.
-    /// True once the turn's close hook has run — i.e. the ORIGINAL registration was retired
-    /// (close is idempotent at the lifetime, so re-checking after the first close is safe).
-    var isTurnFinished: Bool { _closeHook == nil }
+    /// True once the turn's close hook has been TAKEN for running — i.e. the ORIGINAL
+    /// registration was retired (close is idempotent at the lifetime, so re-checking after the
+    /// first close is safe).
+    var isTurnFinished: Bool {
+        bindingLock.lock(); defer { bindingLock.unlock() }
+        return _closeHook == nil
+    }
 
+    /// HOOK CLOSURE RACE (PR50 review): `finishTurn` previously ran the hook and THEN nilled it
+    /// with no synchronization on `_closeHook` — two concurrent turn-end paths could both observe
+    /// non-nil and close the lifetime twice, and the unsynchronized read/write of a cross-thread
+    /// optional was a data race. The hook is now TAKEN under `bindingLock` (exactly one taker wins
+    /// the non-nil swap) and RUN outside the lock, so the hook body can never run under the
+    /// binding lock it may itself re-enter.
     func finishTurn() {
-        closeHook?()
-        closeHook = nil
+        let hook = takeCloseHook()
+        hook?()
+    }
+
+    private func takeCloseHook() -> (() -> Void)? {
+        bindingLock.lock(); defer { bindingLock.unlock() }
+        let hook = _closeHook
+        _closeHook = nil
+        return hook
     }
 
     var closeHook: (() -> Void)? {
-        get { _closeHook }
-        set { _closeHook = newValue }
+        get {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _closeHook
+        }
+        set {
+            bindingLock.lock(); _closeHook = newValue; bindingLock.unlock()
+        }
+    }
+
+    /// Same take-once discipline for the claim hook: `claimConsumerOwnership` must fire the
+    /// cleanup-cancellation exactly once no matter how many consumers start.
+    func claimConsumerOwnership() {
+        let hook: (() -> Void)? = {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            let hook = _claimHook
+            _claimHook = nil
+            return hook
+        }()
+        hook?()
     }
 
     var claimHook: (() -> Void)? {
-        get { _claimHook }
-        set { _claimHook = newValue }
+        get {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _claimHook
+        }
+        set {
+            bindingLock.lock(); _claimHook = newValue; bindingLock.unlock()
+        }
     }
 }
