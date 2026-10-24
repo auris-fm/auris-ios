@@ -908,7 +908,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         // Watchdog (2s) is SHORTER than the client's 5s requestTimeoutSeconds,
         // so the fallback can never masquerade as delivery (reviewer 9e39323c).
-        let startedAt = Date()
         let deadline = Int(2_000_000_000 / 10_000_000)
         for _ in 0..<deadline where !(winnerBox.done && loserBox.done) {
             try? await Task.sleep(nanoseconds: 10_000_000)
@@ -920,8 +919,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // sensitive); the 2s watchdog above already bounds it.
         guard winnerBox.done, loserBox.done else {
             // Failure path: cancel and walk away — no await of a stuck turn.
+            // `slow` is unstructured and awaits routeToCloud directly, so
+            // cancelling only its wrapper would leave it running.
             winnerWork.cancel()
             loserWork.cancel()
+            slow.cancel()
             return
         }
         let winnerFact = winnerBox.value
