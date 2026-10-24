@@ -513,6 +513,48 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(fact?.reason, "observation_unavailable")
     }
 
+    /// GENUINELY completed + declined (reviewer 2fcedf35): a pause that stated
+    /// its observed completion AND a stop_quote that declined — no truthful
+    /// single state, so unknown.
+    func testGenuinelyCompletedPlusDeclinedStaysUnknown() async {
+        playback.pauseReturnsCompletedFact = true
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+        playback.pauseReturnsCompletedFact = false
+    }
+
+    /// A MISSING required parameter is an event with unobserved effect — it is
+    /// still logged (unknown), never omitted (reviewer 2fcedf35).
+    func testMalformedActionIsLoggedAsUnknown() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+    }
+
     /// Uniform declines still map truthfully to not_run.
     func testUniformDeclinesMapToNotRun() async {
         self.pendingFixture =
@@ -640,6 +682,16 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
     /// player that is running. `pause()`/`resume()` maintain it thereafter.
     func setPlaying(_ playing: Bool) { isPlaying = playing }
 
+    /// Opt-in REAL fact channel: when set, pause states an observed completion
+    /// (used by the genuinely-completed+declined mixed control).
+    var pauseReturnsCompletedFact = false
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        pause()
+        return pauseReturnsCompletedFact
+            ? (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
+            : (.earcon(.success), nil)
+    }
+
     var calls: [Call] = []
     var positionMs: Int64 = 0
 
@@ -726,14 +778,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         super.tearDown()
     }
 
-    /// OVERLAPPING TURNS on ONE sink: each turn's action log is
-    /// invocation-local — the losing turn's already-run action (an UNKNOWN
-    /// entry: Void seek) reaches ITS caller, and the winning turn (no actions)
-    /// states no fact. Deterministic: A's action is awaited on the playback
-    /// recording before B supersedes (no sleeps).
+    /// OVERLAPPING TURNS on ONE sink (reviewer 2fcedf35): A is held OPEN after
+    /// its logged action (mid-stream gate) and PROVABLY in flight when B
+    /// supersedes it. Each turn's action log is invocation-local: A's logged
+    /// action reaches A's caller through the supersession exit; B's empty log
+    /// states no fact. A shared-log mutant fails on the winner's assertion.
     func testOverlappingTurnsKeepTheirActionLogsSeparate() async throws {
-        // Turn A: a play_quote (records a seek on the playback sink), then the
-        // stream idles open.
+        // Turn A: a play_quote (records a seek), then the stream is held before
+        // its last frame — A stays in flight with its action already logged.
         self.nextTurnFixture =
             """
             event: action
@@ -743,17 +795,20 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"text":"slow"}
 
             """
-        let sink = makeSink()
+        let midStreamGate = Gate()
+        let sink = makeSink(configureTask: { task in
+            task.holdWhenRemaining = (count: 1, gate: midStreamGate)
+        })
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
         // Deterministic: wait until A has actually processed its action (the
-        // seek lands on the playback recording) before B starts.
+        // seek lands on the playback recording). The mid-stream gate holds A's
+        // stream open from here on — A cannot complete.
         let sawSeek = await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
             self.playback.calls.contains { if case .seekTo = $0 { return true }; return false }
         }
-        XCTAssertTrue(sawSeek, "turn A processed its action")
+        XCTAssertTrue(sawSeek, "turn A processed its action while still in flight")
 
-        // Turn B runs after A's action is on record (superseding whatever of A
-        // is still in flight) and completes with no actions.
+        // Turn B supersedes A while A is held open, and completes.
         self.nextTurnFixture =
             """
             event: done
@@ -761,9 +816,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         let (_, winnerFact) = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        // Unblock A: its receive resumes, the loop top observes cancellation,
+        // and the supersession exit delivers A's own logged fact.
+        midStreamGate.release()
         let (_, loserFact) = await slow.value
         XCTAssertNil(winnerFact, "the winner ran no actions and must not see A's log")
-        XCTAssertEqual(loserFact?.state, "unknown", "A's ran-but-unobserved action reaches A's caller")
+        XCTAssertEqual(loserFact?.state, "unknown", "A's logged action reaches A's caller via supersession")
         XCTAssertEqual(loserFact?.reason, "observation_unavailable")
     }
 
@@ -921,13 +979,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// `pendingFixture` handoff would let the second overwrite the first's.
     private var nextTurnFixture: String?
 
-    private func makeSink() -> CloudRouteSink {
+    private func makeSink(configureTask: ((StubWebSocketTask) -> Void)? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
                 let fixture = self.nextTurnFixture ?? self.nextFixture()
                 self.nextTurnFixture = nil
                 let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture)
+                configureTask?(built.task)
                 if let gate = self.pendingHeldGate {
                     // The held turn waits for frames; the test releases it later.
                     built.task.holdUntilReleased(gate)

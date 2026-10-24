@@ -205,7 +205,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
             case let .action(tool, action, params):
-                executeAction(tool: tool, action: action, params: params, into: &turnActionFacts)
+                turnActionFacts.append(executeAction(tool: tool, action: action, params: params))
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").
             case .token:
@@ -296,44 +296,39 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Seek positions are intentionally not rolled back.
     }
 
-    private func executeAction(tool: String, action: String, params: [String: CloudRouteJSONValue], into log: inout [SinkActionFact]) {
-        // Unmapped tool/action: the event ran as a no-op with unobserved effect
-        // — recorded as an UNKNOWN entry, not omitted (reviewer f96813da).
-        guard tool == "playback" else {
-            log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
-            return
-        }
+    /// Returns ONE fact for EVERY action event — appended once by the caller —
+    /// so an action can never go missing from the turn's log (reviewer
+    /// 2fcedf35). Guard branches return their explicit verdicts (unknown until
+    /// spec approves a different malformed-event semantics); performed branches
+    /// over Void-result sinks return unknown; only real decision channels
+    /// (pauseWithFact) return what the sink stated.
+    private func executeAction(tool: String, action: String, params: [String: CloudRouteJSONValue]) -> SinkActionFact {
+        let unobserved = SinkActionFact(state: "unknown", reason: "observation_unavailable")
+        guard tool == "playback" else { return unobserved }
 
         switch action {
         case "seek_to":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return unobserved }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            // The seek sinks return presentation only — no result channel: the
-            // call ran, its result is unobserved. Recorded as an UNKNOWN entry,
-            // never a completion (spec 1a0661ba/15662487).
-            log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
+            return unobserved
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return unobserved }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            // Same Void-result rule as seek_to (spec 1a0661ba).
-            log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
+            return unobserved
         case "stop_quote":
             guard let restoreMs = preQuotePositionMs else {
                 // The action's own decline: no quote is in flight to stop.
-                log.append(SinkActionFact(state: "not_run", reason: "precondition_failed"))
-                return
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
             }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
-            // The performed branch is a Void seek too — an unknown entry; only
-            // the decline above is an observed fact.
+            return unobserved
         case "seek_relative":
-            // Recorded below once performed (see the shared tail of this case).
             // Per the recovery contract (PR 59, cloud-seek-relative):
             // Capture previous position so "go back to where I was" works
             // after a relative seek.
@@ -347,23 +342,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // next call site that passes the wrapper where a string is wanted.
             let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
-            // Same Void-result rule: ran, result unobserved.
-            log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
+            return unobserved
         case "pause":
             let (response, fact) = playbackSink.pauseWithFact()
             _ = response
-            if let fact {
-                log.append(fact)
-            } else {
-                // pause rode a sink without a result channel: unobserved.
-                log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
-            }
-            didAutoPause = false
+            return fact ?? unobserved
         case "resume":
             _ = playbackSink.resume()
-            didAutoPause = false
+            return unobserved
         default:
-            log.append(SinkActionFact(state: "unknown", reason: "observation_unavailable"))
+            return unobserved
         }
     }
 
@@ -399,12 +387,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return .forward // default: app's configurable interval
     }
 
-    /// Maps the turn's per-action outcomes to a single fact ONLY where a
-    /// truthful mapping exists: any failed action dominates; a uniform set of
-    /// declines or a uniform set of observed completions maps to that state;
-    /// anything else (mixed completed+declined, any unknown entry) has no
-    /// truthful single state and stays UNKNOWN — never a false aggregate
-    /// (reviewer f96813da, spec 15662487). An empty log states no fact.
     static func aggregateActionFact(_ facts: [SinkActionFact]) -> SinkActionFact? {
         guard !facts.isEmpty else { return nil }
         if facts.contains(where: { $0.state == "failed" }) {

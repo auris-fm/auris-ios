@@ -312,7 +312,17 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.gate = gate
     }
 
+    /// MID-STREAM hold: block delivery when exactly `count` frames remain
+    /// undelivered, until `gate` is released. Unlike `holdUntilReleased` (which
+    /// stalls the whole turn before its first frame), this lets a turn consume
+    /// earlier frames — so a control can observe a logged action while the turn
+    /// is still provably in flight (reviewer 2fcedf35).
+    var holdWhenRemaining: (count: Int, gate: Gate)?
+
     func receive() async throws -> URLSessionWebSocketTask.Message {
+        if let hold = holdWhenRemaining, incoming.count == hold.count {
+            try await hold.gate.wait()
+        }
         if let gate { try await gate.wait() }
         if let receiveError { throw receiveError }
         guard !incoming.isEmpty else {
