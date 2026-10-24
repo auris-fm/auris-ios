@@ -87,6 +87,10 @@ final class VoiceSharingCoordinator {
     /// Each refresh REPLACES the pending schedule (newest token wins), so a renewed lease never
     /// fires the previous deadline's purge.
     var expiryScheduler: ((_ delay: TimeInterval, _ body: @escaping () -> Void) -> Void)?
+    /// Guards `expiryScheduleToken` (review 15a18d5d). Installs now arrive on WHICHEVER thread the
+    /// refresh ran on, and the scheduled body validates the token later on the scheduler's queue — a
+    /// renewal racing a stale fire is exactly the pair that must not interleave.
+    private let expiryScheduleLock = NSLock()
     private var expiryScheduleToken = UUID()
 
     static let defaultExpiryScheduler: (_ delay: TimeInterval, @escaping () -> Void) -> Void = { delay, body in
@@ -101,10 +105,18 @@ final class VoiceSharingCoordinator {
         guard let deadline = policy.installedLeaseExpiry else { return }
         let delay = max(0, deadline - monotonicClock.now())
         let token = UUID()
+        expiryScheduleLock.lock()
         expiryScheduleToken = token
+        expiryScheduleLock.unlock()
         let schedule = expiryScheduler ?? Self.defaultExpiryScheduler
         schedule(delay) { [weak self] in
-            guard let self, self.expiryScheduleToken == token else { return }
+            // Token validation INSIDE the same lock the replacement uses: a renewal and a stale fire
+            // cannot both hold it, so a stale schedule can never act on a lease it no longer owns.
+            guard let self else { return }
+            self.expiryScheduleLock.lock()
+            let current = self.expiryScheduleToken
+            self.expiryScheduleLock.unlock()
+            guard current == token else { return }
             if !self.policy.permitsCollection { self.consentGateLost() }
         }
     }
@@ -320,9 +332,18 @@ final class VoiceSharingCoordinator {
     }
 
     /// Called by the identity provider once the new account state is readable; lifts the fence
-    /// so a refresh against the CURRENT identity can install again.
+    /// so a refresh against the CURRENT identity can install again — and then INITIATES the normal
+    /// refresh, because lifting the fence alone re-arms nothing (review 15a18d5d: production's only
+    /// refresh calls live in AppDelegate launch and the developer menu, so a re-login in a
+    /// long-running process never fetched, never installed, and the gate stayed closed until relaunch).
+    /// Injectable so tests drive the real sequence. NO-OP by default, because the production fetch
+    /// entry point touches Firebase and must be wired where Firebase is configured (VoiceControlAssembly),
+    /// not from a default property initializer a test can trip over.
+    var initiateIdentityRecoveryRefresh: () -> Void = {}
+
     func identityBecameReadable() {
         policy.identityBecameReadable()
+        initiateIdentityRecoveryRefresh()
     }
 
     deinit {

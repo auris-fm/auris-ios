@@ -180,6 +180,12 @@ class VoiceControlAssembly {
         // refresh observing the switch off, and the scheduled lease-expiry trigger. It must reach
         // the SINK's revocation generation, not just purge storage, or a queued event from the
         // superseded epoch could publish after the switch reads true again.
+        // Re-login recovery (review 15a18d5d): identityBecameReadable must INITIATE the normal
+        // refresh, not merely permit a later one. Wired here where Firebase is configured; the
+        // coordinator's default is a no-op so tests can drive the sequence without Firebase.
+        VoiceSharingCoordinator.shared.initiateIdentityRecoveryRefresh = {
+            FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
+        }
         contributionCollector.gateLostSubscription =
             VoiceSharingCoordinator.shared.registerGateLostHandler {
                 [weak contributionCollector, weak contributionSink] in

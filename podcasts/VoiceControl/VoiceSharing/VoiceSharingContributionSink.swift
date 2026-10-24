@@ -42,6 +42,11 @@ final class VoiceSharingContributionSink {
     private let slotLock = NSLock()
     private let publicationLock = NSLock()
     private var revocationGeneration = 0
+    /// Test-visible generation so controls can assert supersession (not just purge) at the boundary.
+    var revocationGenerationForTesting: Int {
+        slotLock.lock(); defer { slotLock.unlock() }
+        return revocationGeneration
+    }
     /// Bounded pending slot accounting, OUTSIDE the worker (the bound must hold while the worker
     /// is blocked or slow, so the check cannot live inside the serialized worker block).
     private var pendingSlots = 0

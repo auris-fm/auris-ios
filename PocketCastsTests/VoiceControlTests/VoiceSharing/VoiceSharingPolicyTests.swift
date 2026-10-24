@@ -774,8 +774,10 @@ final class VoiceSharingPolicyTests: XCTestCase {
     /// AUDIT FIX CONTROL (spec c252767f): an installed lease must arm expiry-driven revocation FROM THE
     /// INSTALL SITE, so nothing depends on which caller installed it. This drives the production path —
     /// install through `policyRefreshAfterActivation`, a scheduler that CAPTURES the real deadline, then
-    /// advance the injected clock past expiry and RUN the captured body — and observes the generation and
-    /// the ring actually being purged. Asserting "no purge" would prove nothing; this asserts the purge.
+    /// advance the injected clock past expiry and RUN the captured body — and observes the purge.
+    /// Asserting "no purge" would prove nothing; this asserts the purge, of ALL THREE holders the
+    /// production gate-lost handler names (assembly registration): the sink's revocation generation, the
+    /// collector's ring, and the DURABLE queue (review 15a18d5d: the ring alone is not the whole estate).
     func test_anInstalledLeaseArmsExpiryRevocationAndPurgesTheCollector() throws {
         let clock = StubMonotonicClock(time: 1_000)
         final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
@@ -804,7 +806,41 @@ final class VoiceSharingPolicyTests: XCTestCase {
             epochProvider: { "e1" },
             sessionIdentity: { "gen-A" },
             sink: { event in variables["event"] = event })
-        let subscription = coordinator.registerGateLostHandler { collector.gateLost() }
+
+        // The DURABLE half of the estate: a real queue holding a prepared entry, and a sink whose
+        // generation must move. The registered handler mirrors the production assembly registration.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsexpiry-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { true },
+            encoderProvenance: {
+                .init(platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+                      models: .init(vad: .init(id: "vad-1", version: "1"),
+                                    wakeword: .init(id: "wake-1", version: "1"),
+                                    asr: .init(id: "asr-1", version: "1"), translation: nil,
+                                    router: .init(id: "router-1", version: "1")),
+                      conversionVersion: "v1")
+            })
+        sink.handle(.init(kind: .completed, captureID: UUID(), enrollmentEpoch: "e1",
+                          authorizationSession: "sess-1", retainedSamples: 640, truncated: false,
+                          droppedSpans: [], originalSampleCount: nil,
+                          audio: [Float](repeating: 0.1, count: 640), isGateControl: false))
+        sink.waitForIdleForTesting()
+        guard case .known(let readyBefore) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("premise: coverage known")
+        }
+        XCTAssertGreaterThan(readyBefore.count, 0,
+                             "premise: a durable entry exists before expiry")
+        let generationBefore = sink.revocationGenerationForTesting
+
+        let subscription = coordinator.registerGateLostHandler {
+            sink.noteRevocation()
+            collector.gateLost()
+            _ = queue.purgeAll()
+        }
 
         withExtendedLifetime(subscription) {
             // Install through the POLICY's own single install point, NOT through the coordinator's
@@ -842,7 +878,53 @@ final class VoiceSharingPolicyTests: XCTestCase {
             }
             XCTAssertTrue(event.isGateControl,
                           "the purge reports itself as gate control, not as captured audio")
+            XCTAssertEqual(sink.revocationGenerationForTesting, generationBefore + 1,
+                           "expiry must supersede the sink's authorization, not just free space")
+            guard case .known(let readyAfter) = queue.readyEntriesReportingUnknownCoverage() else {
+                return XCTFail("coverage known")
+            }
+            XCTAssertEqual(readyAfter.count, 0,
+                           "expiry itself purged the DURABLE queue")
         }
+    }
+
+    /// REVIEW 15a18d5d: lifting the identity fence must INITIATE the normal refresh. A fence without
+    /// a fetch never installs, and production's only fetch calls lived at launch and in the developer
+    /// menu — so a re-login in a long-running process stayed closed until relaunch. This drives the
+    /// REAL login transition and observes the refresh being initiated, then completes it through the
+    /// production activation path and asserts the install plus its expiry schedule.
+    func test_reLoginInitiatesTheNormalRefreshAndInstalls() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        var scheduled = false
+        coordinator.expiryScheduler = { _, _ in scheduled = true }
+        var refreshInitiated = false
+        coordinator.initiateIdentityRecoveryRefresh = { refreshInitiated = true }
+
+        // A fenced state first: an identity transition raises the fence, so installs are refused.
+        coordinator.policy.invalidateForIdentityChange()
+        let fencedToken = coordinator.policy.tokenForFetchStart()
+        XCTAssertNil(coordinator.policy.refreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: fencedToken),
+            "premise: the fence refuses installs")
+
+        // The RE-LOGIN transition: fence lifts AND the normal refresh is initiated, in one step.
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertTrue(refreshInitiated,
+                      "recovery must initiate the refresh, not merely permit a future one")
+
+        // The initiated refresh completes through the production activation path: install + schedule.
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "the recovered lease is installed")
+        XCTAssertTrue(scheduled, "the recovered install armed its expiry schedule")
     }
 
     /// Token-ownership control: the COLLECTOR owns its registration, so releasing the old ENGINE
