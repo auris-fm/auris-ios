@@ -71,11 +71,6 @@ class VoiceAsrEngine {
     /// reject anything, so the scope alone is not sufficient wiring.
     private var echoReference: PlaybackEchoReference?
 
-    /// The emitted audio currently retained, or empty when no reference is attached.
-    private var playbackBuffer: [Float] {
-        echoReference?.snapshot() ?? []
-    }
-
     /// Attaches the shared emitted-PCM reference.
     func setEchoReference(_ reference: PlaybackEchoReference) {
         echoReference = reference

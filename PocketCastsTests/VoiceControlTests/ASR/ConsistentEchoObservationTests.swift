@@ -43,30 +43,61 @@ final class ConsistentEchoObservationTests: XCTestCase {
     /// the append storm satisfies 0 ≤ offset ≤ samples.count — the audible position is always
     /// inside the window the RETURNED samples index.
     func test_concurrentAppendsNeverSplitTheObservation() {
-        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 0.05)
-        reference.append([Float](repeating: 0.1, count: 800))
+        // LARGE window + THROTTLED producer: the producer advances the anchor continuously for
+        // the whole observation run (an append every ~150µs across ~150ms), so anchor advances
+        // land inside any split read's inter-acquisition gaps at a high rate. The first version
+        // of this control exhausted its headroom in ~9ms and the split mutant survived it.
+        let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 10.0)
+        let capacity = 16_000 * 10 // 160000
+        let stride = 8
+        let appended = Counter() // total samples the producer has appended
+        reference.append([Float](repeating: 0.1, count: capacity / 2))
+        appended.bump(by: capacity / 2)
+        // NOTE: the producer below runs UNGATED (no sleep): an anchor advance every ~1µs is
+        // what makes a nanosecond-scale inter-acquisition gap detectable at all. A throttled
+        // producer never lands an advance inside a split read's gap and the mutant survives.
+
         reference.recordRenderPosition(PlaybackRenderAnchor(
-            renderedFrames: 800, sourceSampleRate: 16_000, hostTime: 0))
+            renderedFrames: Double(capacity / 2), sourceSampleRate: 16_000, hostTime: 0))
 
         let producerStop = AtomicFlag()
-        let producer = Thread.detachNewThread {
+        var producer: Thread? = nil
+        producer = Thread { [appended] in
             var tick: Float = 0.1
             while !producerStop.load() {
+                // Stay below capacity so the window never trims: count == tracked total.
+                if appended.load() + stride > capacity * 9 / 10 { break }
                 tick += 0.001
-                reference.append([Float](repeating: tick, count: 64))
+                reference.append([Float](repeating: tick, count: stride))
+                let total = appended.bump(by: stride)
+                reference.recordRenderPosition(PlaybackRenderAnchor(
+                    renderedFrames: Double(total), sourceSampleRate: 16_000, hostTime: 0))
             }
         }
-        _ = producer
-        for iteration in 0..<5_000 {
+        producer?.start()
+        for iteration in 0..<150_000 {
             let observation = reference.consistentObservation()
             if let offset = observation.audibleEndOffset {
                 XCTAssertTrue(offset >= 0 && offset <= observation.samples.count,
                               "iteration \(iteration): the offset (\(offset)) must index the "
                                   + "returned window (\(observation.samples.count) samples) — a "
-                                  + "violation means the observation was split across appends")
+                                  + "violation means the observation was split across reads")
+                if let anchor = observation.renderAnchor {
+                    // The window never trims and the anchor IS the appended total the window
+                    // ends at, so a consistent read's offset equals its own anchor.
+                    XCTAssertEqual(offset, Int(anchor.renderedPipelineSamples),
+                                   "iteration \(iteration): the offset must be computed from "
+                                       + "the anchor read WITH it — a mismatch means the pair "
+                                       + "was split across reads")
+                }
             }
         }
         producerStop.store(true)
+        // Join the producer (review nit): no busy loop contending into subsequent tests.
+        let joinDeadline = Date().addingTimeInterval(5)
+        while producer?.isFinished == false && Date() < joinDeadline {
+            Thread.sleep(forTimeInterval: 0.002)
+        }
     }
 
     /// The engine consumes the OBSERVATION it took, not a fresh read: an append landing after the
@@ -166,7 +197,8 @@ private final class Counter {
     private var value = 0
     func load() -> Int { lock.lock(); defer { lock.unlock() }; return value }
     @discardableResult
-    func bump() -> Int { lock.lock(); value += 1; lock.unlock(); return value }
+    func bump() -> Int { bump(by: 1) }
+    func bump(by delta: Int) -> Int { lock.lock(); value += delta; lock.unlock(); return value }
 }
 
 private extension Thread {

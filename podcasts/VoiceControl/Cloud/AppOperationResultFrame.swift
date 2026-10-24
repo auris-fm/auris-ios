@@ -88,9 +88,11 @@ extension AppOperationResultSocket {
     /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
     /// never on producer completion, which `AsyncStream` signals via `onTermination` on
     /// `finish()` while the consumer may still be mid-turn.
-    /// True once the turn's close hook has been TAKEN for running — i.e. the ORIGINAL
-    /// registration was retired (close is idempotent at the lifetime, so re-checking after the
-    /// first close is safe).
+    /// True once the turn's close hook has been TAKEN for running. NOTE this is not yet the
+    /// lifetime's actual close: taking nils the hook here, and the hook BODY (which retires the
+    /// registration via `lifetime.close()`) runs afterwards, outside the lock. A caller that must
+    /// know whether a result send is still deliverable cannot decide from this flag alone — the
+    /// binding/registration check remains the authority.
     var isTurnFinished: Bool {
         bindingLock.lock(); defer { bindingLock.unlock() }
         return _closeHook == nil
