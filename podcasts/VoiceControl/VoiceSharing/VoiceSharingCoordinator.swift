@@ -48,6 +48,16 @@ final class VoiceSharingCoordinator {
             // Production previously hard-coded `{ false }` because nothing fed membership yet.
             isAccountEnrolled: isAccountEnrolled ?? { store.currentEffectiveEnrolled }
         )
+        // EVERY installed lease arms the expiry trigger from the install site, not from this
+        // coordinator's refresh tail. Otherwise a lease installed by another route lapses with no
+        // time-driven revocation: collection stops (safe) but nothing purges buffered or durable audio.
+        // Fired on whatever thread installed the lease, and armed SYNCHRONOUSLY: the install and its
+        // expiry schedule must be one deterministic step. Deferring to the main queue here made the
+        // ordering unspecified — a control could then never distinguish an armed trigger from an
+        // unarmed one, which is exactly the state this hook exists to prevent.
+        self.policy.onLeaseInstalled = { [weak self] _ in
+            self?.scheduleLeaseExpiryTrigger()
+        }
         // Membership moves must invalidate an in-flight refresh immediately, not at lease expiry: a
         // withdrawal or account switch that lands while a fetch is running would otherwise install the
         // departed state's permission when that fetch returns. Registered for ANY store this coordinator

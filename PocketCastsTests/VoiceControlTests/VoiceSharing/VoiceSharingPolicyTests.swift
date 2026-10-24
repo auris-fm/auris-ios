@@ -771,6 +771,80 @@ final class VoiceSharingPolicyTests: XCTestCase {
     }
 
 
+    /// AUDIT FIX CONTROL (spec c252767f): an installed lease must arm expiry-driven revocation FROM THE
+    /// INSTALL SITE, so nothing depends on which caller installed it. This drives the production path —
+    /// install through `policyRefreshAfterActivation`, a scheduler that CAPTURES the real deadline, then
+    /// advance the injected clock past expiry and RUN the captured body — and observes the generation and
+    /// the ring actually being purged. Asserting "no purge" would prove nothing; this asserts the purge.
+    func test_anInstalledLeaseArmsExpiryRevocationAndPurgesTheCollector() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) }
+        )
+        // Capture the production schedule so the test can run it at the real deadline.
+        var scheduled: (delay: TimeInterval, body: () -> Void)?
+        coordinator.expiryScheduler = { delay, body in scheduled = (delay, body) }
+
+        var variables: [String: Any] = [:]
+        var state = VoiceSharingEnrollmentStore.State()
+        state.localOptIn = true
+        state.hasAuthoritativeProjection = true
+        state.membership = VoiceSharingMembership(
+            membershipRevision: "r1", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active)
+        let collector = VoiceSharingCollector(
+            policy: coordinator.policy,
+            membership: { state },
+            epochProvider: { "e1" },
+            sessionIdentity: { "gen-A" },
+            sink: { event in variables["event"] = event })
+        let subscription = coordinator.registerGateLostHandler { collector.gateLost() }
+
+        withExtendedLifetime(subscription) {
+            // Install through the POLICY's own single install point, NOT through the coordinator's
+            // refresh wrapper: the wrapper arms its own schedule, so routing through it would mask a
+            // missing install-site hook entirely. This is the path a lease takes whenever it is
+            // installed by anything other than that wrapper.
+            let token = coordinator.policy.tokenForFetchStart()
+            XCTAssertNotNil(
+                coordinator.policy.refreshAfterActivation(
+                    freshActivationSucceeded: true, fetchToken: token),
+                "premise: the lease installed at the policy's own install point")
+            XCTAssertTrue(coordinator.policy.permitsCollection, "premise: lease installed")
+            guard let schedule = scheduled else {
+                return XCTFail("an installed lease must arm an expiry schedule at the install site")
+            }
+            XCTAssertEqual(schedule.delay, VoiceSharingPolicy.leaseSecondsDefault,
+                           "the schedule targets the lease deadline")
+
+            // The COLLECTOR is holding audio, so the purge has something real to destroy.
+            _ = collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+            XCTAssertGreaterThan(collector.aggregateAudioSamplesForTesting, 0,
+                                 "premise: the collector owns buffered audio")
+
+            // Time passes with NO refresh, NO frames, NO launch: the schedule alone must act.
+            clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+            schedule.body()
+
+            XCTAssertFalse(coordinator.policy.permitsCollection, "the lease has lapsed")
+            XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
+                           "expiry itself purged the collector's ring")
+            XCTAssertTrue(collector.waitForDrain(), "premise: the async drain completed")
+            guard let event = variables["event"] as? VoiceSharingCollector.SegmentEvent else {
+                return XCTFail("consent loss must emit a cancellation record")
+            }
+            XCTAssertTrue(event.isGateControl,
+                          "the purge reports itself as gate control, not as captured audio")
+        }
+    }
+
     /// Token-ownership control: the COLLECTOR owns its registration, so releasing the old ENGINE
     /// during a held delivery does not unregister it — a later consent loss still purges the
     /// collector that the held drain keeps alive. (One engine attached, then released: retaining

@@ -160,24 +160,17 @@ final class VoiceSharingPolicy {
         let value = readRemoteSwitch()
         let now = clock.now()
         lock.lock()
-        defer { lock.unlock() }
-        // The generation is the authority: any real account transition bumps it, so a token from
-        // before the transition can never install afterwards — including the case where the fence
-        // has already been lifted by the newer identity. Enrollment is re-read for the snapshot
-        // itself rather than trusted from the token.
-        // Enrollment is compared too: a transition that does NOT bump the generation (e.g. an
-        // in-account withdrawal) still changes this, so the read-time value cannot be trusted as
-        // "still the identity we started for".
-        // Generation alone is the identity authority: every real transition — sign-out, account
-        // switch, and in-account withdrawal — bumps it. Comparing enrollment here would re-check the
-        // same fact twice; enrollment is instead read at decision time by `permitsCollection`.
+        // NOT `defer unlock`: the install notification must be delivered with the lock RELEASED. Its
+        // handler reads the policy back (to learn the deadline), so holding the lock across the call
+        // re-enters it. Doing exactly that deadlocked the suite — the symptom was a hang, not a failure.
         guard pendingIdentityFence == 0,
               fetchToken.identityGeneration == identityGenerationCounter,
               generationNowAtStart == identityGenerationCounter
-        else { return nil }
+        else { lock.unlock(); return nil }
         switch value {
         case .unavailable:
             installed = nil
+            lock.unlock()
             return nil
         case .valid(let enabled):
             let snapshot = VoiceSharingSnapshot(
@@ -188,6 +181,12 @@ final class VoiceSharingPolicy {
                 accountEnrolled: isAccountEnrolled()
             )
             installed = snapshot
+            lock.unlock()
+            // EVERY installed lease announces itself, so expiry-driven revocation cannot depend on the
+            // caller remembering to schedule it. The coordinator arms the expiry trigger here rather
+            // than only at the tail of its refresh (audit finding 2026-10-23: a lease installed by any
+            // other route had no time-driven purge).
+            onLeaseInstalled?(snapshot)
             return snapshot
         }
     }
@@ -243,6 +242,11 @@ final class VoiceSharingPolicy {
         defer { lock.unlock() }
         pendingIdentityFence = 0
     }
+
+    /// Fired for EVERY successfully installed lease, from the single place a lease can be installed.
+    /// Set by the coordinator; nil in tests that do not care. INVOKED OUTSIDE THE POLICY LOCK (below),
+    /// because the handler reads the policy back and re-entering the lock would deadlock.
+    var onLeaseInstalled: ((VoiceSharingSnapshot) -> Void)?
 
     /// The installed lease's expiry DEADLINE, for a scheduler that must fire exactly at expiry.
     /// Nil when no snapshot is installed — an expiry schedule only makes sense against a live lease.
