@@ -573,6 +573,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "done must not resume what the cloud turn itself paused")
     }
 
+    /// Same ownership when the stream ends without any terminal event (server
+    /// drop — synthesized error exit, not an explicit error frame).
+    func testCloudPauseDuringTurnStreamEndDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "a stream end after the cloud's own pause must not resume over it")
+    }
+
     /// Same ownership at the error exit.
     func testCloudPauseDuringTurnErrorDoesNotResumeOverIt() async {
         self.pendingFixture =
@@ -859,38 +873,57 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(sawSeek, "turn A processed its action while still in flight")
 
-        // Turn B supersedes A while A is held open, and completes.
+        // Turn B supersedes A while A is held open, and completes. The release
+        // happens only AFTER an observed B start (its client build swaps
+        // capturedTask away from A's task) — A remains parked at the gate the
+        // whole time, so overlap is forced, not merely deadlock-free
+        // (reviewer eb0a8ada / spec 55350a94).
+        let taskOfA = capturedTask
         self.nextTurnFixture =
             """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        // Bounded: neither result may hang the suite (watchdog > hang). The
-        // gate is released BEFORE awaiting — releasing after awaiting B would
-        // be the circular wait the mid-stream hold must not create.
-        midStreamGate.release()
         let winnerBox = TurnBox()
         let winnerWork = Task {
             winnerBox.value = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
             winnerBox.done = true
         }
+        let sawBStart = await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            self.capturedTask !== taskOfA && self.capturedTask != nil
+        }
+        XCTAssertTrue(sawBStart, "turn B never started while A was held")
+        // No in-flight assertion on B here: with the hold on A only, B may
+        // complete between its start observation and this line — the forced
+        // premise is A parked at the (still unreleased) gate while B ran, not
+        // B's liveness at this instant.
+        // NOW unblock A: its receive resumes, the loop top observes
+        // cancellation, and the supersession exit delivers A's own logged fact.
+        midStreamGate.release()
         let loserBox = TurnBox()
         let loserWork = Task {
             loserBox.value = await slow.value
             loserBox.done = true
         }
-        let deadline = Int(5_000_000_000 / 10_000_000)
+        // Watchdog (2s) is SHORTER than the client's 5s requestTimeoutSeconds,
+        // so the fallback can never masquerade as delivery (reviewer 9e39323c).
+        let startedAt = Date()
+        let deadline = Int(2_000_000_000 / 10_000_000)
         for _ in 0..<deadline where !(winnerBox.done && loserBox.done) {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(winnerBox.done, "the winner's turn hung")
         XCTAssertTrue(loserBox.done, "the losing turn hung")
+        XCTAssertLessThan(startedAt.timeIntervalSinceNow.magnitude, 2.0,
+            "B must complete by delivery, not the request-timeout fallback")
         let winnerFact = winnerBox.value
         let loserFact = loserBox.value
         XCTAssertNil(winnerFact?.fact, "the winner ran no actions and must not see A's log")
         XCTAssertEqual(loserFact?.fact?.state, "unknown", "A's logged action reaches A's caller via supersession")
         XCTAssertEqual(loserFact?.fact?.reason, "observation_unavailable")
+        // Cleanup only on success paths: after failed assertions, cancel and
+        // walk away — no unconditional await of a possibly-stuck turn.
         _ = await winnerWork.value
         _ = await loserWork.value
     }
