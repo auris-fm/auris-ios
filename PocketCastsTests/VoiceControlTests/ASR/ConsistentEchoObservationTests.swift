@@ -141,11 +141,12 @@ final class ConsistentEchoObservationTests: XCTestCase {
     func test_processUtteranceFeedsTheFilterTheObservationItTook() async {
         let reference = PlaybackEchoReference(sampleRate: 16_000, retainedSeconds: 10.0)
         let capacity = 16_000 * 10
+        let filter = RecordingFilter()
         let engine = VoiceAsrEngine(
             capture: ParkedCapture(),
             segmenter: NativeVadSegmenter(threshold: 0.020),
             backend: IdleBackend(),
-            signalFilter: RecordingFilter(),
+            signalFilter: filter,
             wakeWordDetector: QuietWake(),
             gracePeriodSignal: GracePeriodSignal())
         // Route FIRST: a route transition retires the reference to its acoustic tail, so the
@@ -169,7 +170,6 @@ final class ConsistentEchoObservationTests: XCTestCase {
         let utterance = [Float](repeating: 0.05, count: 160)
         await engine.processUtterance(utterance, capturedAt: 0)
 
-        let filter = engine.signalFilterForTesting as! RecordingFilter
         XCTAssertEqual(filter.recordedObservations.count, 1, "premise: the filter ran once")
         let seen = filter.recordedObservations[0]
         XCTAssertEqual(seen.reference.count, expectedCount,
@@ -249,9 +249,6 @@ private final class RecordingFilter: SignalFilter {
     }
     var recordedObservations: [Observed] {
         lock.lock(); defer { lock.unlock() }; return observedReferences
-    }
-    func clearObservations() {
-        lock.lock(); observedReferences.removeAll(); lock.unlock()
     }
 }
 
