@@ -48,38 +48,50 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// THE EXECUTOR'S OWN VERDICT (spec: execution.outcome must become a structured executor
-    /// verdict, not a response-derived unknown). The executor is the decision site for the record:
-    /// its per-intent result IS the verdict — the error earcon is a failed action, a
-    /// confirm-required earcon is the client declining to act without confirmation, and every
-    /// returned non-error presentation (silent seek, spoken pause, query answer) is a COMPLETED
-    /// execution. The response classifier this supersedes reported unknown for all of those,
-    /// discarding facts the executor knew. RED until executeWithVerdict lands.
+    /// CORRECTED CONTRACT (spec 6a033773 — my first cut inferred verdicts from presentation
+    /// classes; withdrawn). Only the executor's OWN decisions are verdicts: the error earcon is
+    /// the failure the executor itself logs and acts on (spec 012b19dd); confirm-required is its
+    /// own decision not to act without confirmation. Every other presentation stays UNKNOWN —
+    /// a success-shaped presentation cannot prove action completion.
     func test_executeWithVerdictReportsTheExecutorStructuredVerdict() async {
         typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
 
-        // A successful local pause: the sink performed the action and announced it.
-        let (pauseResponse, pauseVerdict) = await executor.executeWithVerdict(PlaybackIntent.pause)
-        XCTAssertEqual(pauseVerdict.state, "completed",
-                       "a returned non-error result is a completed execution, not an unobserved one")
-        XCTAssertNil(pauseVerdict.reason, "completed stages carry no reason")
-        XCTAssertEqual(pauseVerdict.outcome, "executed")
-        _ = pauseResponse
-
-        // The error earcon is the executor's failure verdict.
+        // The executor's own failure verdict.
         mockPlaybackSink.nextEpisodeResponse = .earcon(.error)
         let (_, failedVerdict) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
         XCTAssertEqual(failedVerdict.state, "failed")
         XCTAssertEqual(failedVerdict.reason, "action_failed")
         XCTAssertEqual(failedVerdict.outcome, "failed")
 
-        // Confirm-required is a decision NOT to act, not an unobserved turn.
+        // The executor's own decision not to act without confirmation.
         mockEffectsSink.nextAdjustResponse = .earcon(.confirmRequired)
         let (_, refusedVerdict) = await executor.executeWithVerdict(
             EffectsIntent.adjustSpeed(delta: 0.5))
         XCTAssertEqual(refusedVerdict.state, "not_run")
         XCTAssertEqual(refusedVerdict.reason, "client_refused")
         XCTAssertEqual(refusedVerdict.outcome, "refused")
+        _ = Outcome.self
+    }
+
+    /// THE DISCRIMINATING CONTROL (spec 6a033773: "add discriminating
+    /// same-presentation/different-action-outcome controls where the action API supports them").
+    /// The sleep sink presents the SAME spoken confirmation whether or not its timer was actually
+    /// armed (the mock models both worlds). The verdict must NOT follow the presentation: both
+    /// worlds stay unknown until a sink-side structured fact channel exists — and the mock's
+    /// fact is recorded here as exactly what such a channel must carry. When the sink-fact slice
+    /// lands, the armed world becomes completed and this control becomes the pair that proves
+    /// the verdict followed the FACT, not the presentation.
+    func test_samePresentationDifferentActionOutcome_staysUnknownUntilSinkFactsExist() async {
+        mockSleepSink.armedFact = true
+        let (_, armed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
+        XCTAssertEqual(armed.state, "unknown",
+                       "an armed timer behind a spoken confirmation is still not PROVEN by the "
+                           + "presentation; unknown until sink facts exist")
+        mockSleepSink.armedFact = false
+        let (_, notArmed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
+        XCTAssertEqual(notArmed.state, "unknown",
+                       "identical presentation, different action outcome — the verdict must not "
+                           + "have followed the presentation")
     }
 
     /// The origin branch is what decides whether a dispatch re-arms the allowance
@@ -269,6 +281,23 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(gracePeriodSignal.isActive)
     }
 
+    /// REVIEW 8bc80b2b regression control: the verdict path must ride the ONE shared execution
+    /// path — the first cut duplicated the dispatch switch and silently skipped the shared
+    /// post-execute effects (analytics.recordCommand, grace restore). The grace effect is the
+    /// observable half asserted here; the verdict must not cost the turn its side effects.
+    func test_executeWithVerdict_preservesTheSharedGraceEffect() async {
+        XCTAssertFalse(gracePeriodSignal.isActive)
+        _ = await executor.executeWithVerdict(PlaybackIntent.pause)
+        // GracePeriodSignal.startOrReset hops to the main queue (Timer must bind
+        // to the main run loop), so activation lands asynchronously. Drain the
+        // main queue before asserting, otherwise this test races the hop.
+        let mainQueueDrained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { mainQueueDrained.fulfill() }
+        await fulfillment(of: [mainQueueDrained], timeout: 2)
+        XCTAssertTrue(gracePeriodSignal.isActive,
+                      "the verdict path must preserve the shared grace restore")
+    }
+
     func test_runtimePlaybackContextProvider_populatesPlaybackAndReferenceContext() {
         let episode = Episode()
         episode.uuid = "episode-1"
@@ -373,6 +402,9 @@ private final class MockVolumeSink: VoiceVolumeSink {
 private final class MockSleepSink: VoiceSleepSink {
     var setCalled = false
     var lastMinutes: Int?
+    /// The structured fact a sink-side verdict channel must carry: whether the timer actually
+    /// armed. The presentation is identical in both worlds (see the discriminating control).
+    var armedFact = true
 
     func set(minutes: Int) -> VoiceResponse { setCalled = true; lastMinutes = minutes; return .earcon(.success) }
     func endOfEpisode() -> VoiceResponse { .earcon(.success) }

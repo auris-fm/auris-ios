@@ -115,9 +115,12 @@ protocol VoiceIntentExecuting: AnyObject {
 }
 
 extension VoiceIntentExecuting {
-    /// Default bridge for conformers that have not adopted structured verdicts: preserves the
-    /// prior response-only contract exactly (including the response-derived classification the
-    /// service used to apply) so adoption can proceed slice by slice.
+    /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
+    /// 6a033773): only the executor's OWN decisions are stated here — the error earcon is the
+    /// failure the executor itself logs and acts on, and confirm-required is the executor's own
+    /// decision not to act without confirmation. Every OTHER response is a presentation choice:
+    /// a success-shaped presentation alone cannot prove action completion, so the verdict stays
+    /// unknown until sinks report structured facts from their action results.
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
         let response = await execute(intent)
         switch response {
@@ -126,7 +129,7 @@ extension VoiceIntentExecuting {
         case .earcon(.confirmRequired):
             return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
         default:
-            return (response, ExecutionVerdict(state: "completed", outcome: "executed"))
+            return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
         }
     }
 }
@@ -242,47 +245,24 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         return response
     }
 
-    /// The executor's own verdict, decided at the executor boundary per intent result: the error
-    /// earcon is a failed action; confirm-required is the client declining to act without
-    /// confirmation; every other returned presentation (silent seek, spoken pause, query answer)
-    /// is a COMPLETED execution. CLOUD ROUTES are the follow-up slice: their honest verdicts
-    /// (outcome_wait_expired, server refusals) live inside CloudRouteSink and still ride the
-    /// default bridge — disclosed, not silently claimed.
+    /// CORRECTED (spec 6a033773): this executor boundary adds NOTHING over the default bridge —
+    /// the local sinks return only presentations, and a presentation cannot prove an outcome.
+    /// Local sinks still ride the default bridge; honest completed verdicts require sink-side
+    /// structured facts (the sink knows whether its operation acted), which is the remaining
+    /// slice together with the CloudRouteSink verdict. Kept explicit only to document that.
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
-        if intent is CloudRouteIntent {
-            let response = await execute(intent)
-            switch response {
-            case .earcon(.error):
-                return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
-            case .earcon(.confirmRequired):
-                return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
-            default:
-                // A spoken cloud answer may be the "not configured" refusal rather than a
-                // completed turn — the sink knows which, and the record must not claim
-                // executed on presentation alone. Stay unobserved until the sink slice lands.
-                return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
-            }
-        }
-        let response: VoiceResponse
-        switch intent {
-        case let p as PlaybackIntent: response = executePlayback(p)
-        case let e as EffectsIntent: response = executeEffects(e)
-        case let v as VolumeIntent: response = executeVolume(v)
-        case let s as SleepIntent: response = executeSleep(s)
-        case let c as ChapterIntent: response = executeChapter(c)
-        case let b as BookmarkIntent: response = executeBookmark(b)
-        case let q as QueueIntent: response = executeQueue(q)
-        case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
-        case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
-        default: response = .earcon(.error)
-        }
+        await executeWithVerdictViaBridge(intent)
+    }
+
+    private func executeWithVerdictViaBridge(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        let response = await execute(intent)
         switch response {
         case .earcon(.error):
             return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
         case .earcon(.confirmRequired):
             return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
         default:
-            return (response, ExecutionVerdict(state: "completed", outcome: "executed"))
+            return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
         }
     }
 

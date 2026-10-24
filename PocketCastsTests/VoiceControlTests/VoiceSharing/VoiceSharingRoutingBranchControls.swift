@@ -223,26 +223,24 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             let executionReason: String?
         }
         let cases: [Case] = [
-            // SUPERSEDED CONTRACT (spec: structured executor verdicts). The prior wording — "a
-            // success tone leaves execution UNOBSERVED, reporting completed would invent a
-            // success" — was the response-derived classifier's stance, and it discarded facts the
-            // executor knew. The executor is now the decision site: its own verdict rides with the
-            // response (`executeWithVerdict`), a non-error result of a local action is a COMPLETED
-            // execution, and the disposition follows the verdict instead of staying pending.
-            Case(label: "intent succeeded, executor completed", result: .intent(PlaybackIntent.pause),
-                 response: .earcon(.success), routingDisposition: "executed",
-                 executionState: "completed", executionReason: nil),
+            // RESTORED after a withdrawn first cut (spec 6a033773): my intermediate version
+            // reported a success tone as completed — but a success-shaped presentation cannot
+            // prove action completion, so the honest verdict stays unknown until sinks report
+            // structured facts from their action results. SPEC 012b19dd stands: only the
+            // executor's own error verdict concludes anything today.
+            Case(label: "intent succeeded, result unobserved", result: .intent(PlaybackIntent.pause),
+                 response: .earcon(.success), routingDisposition: "pending",
+                 executionState: "unknown", executionReason: "observation_unavailable"),
             // The executor's OWN failure verdict: it logs "Command failed" and withholds the grace
             // period on exactly this value, so this one conclusion comes from the executor.
             Case(label: "intent action failed", result: .intent(PlaybackIntent.pause),
                  response: .earcon(.error), routingDisposition: "failed",
                  executionState: "failed", executionReason: "action_failed"),
-            // `.silent` is how a seek or a resume presents success — the executor's verdict for it
-            // is completed, not unobserved and not a refusal (the earlier version of this control
-            // got that wrong in the other direction).
-            Case(label: "silent response, executor completed", result: .intent(PlaybackIntent.pause),
-                 response: .silent, routingDisposition: "executed",
-                 executionState: "completed", executionReason: nil),
+            // `.silent` is a PRESENTATION choice (resume succeeds silently), so it must not be
+            // read as a refusal either — and not as a completion, for the same reason.
+            Case(label: "silent response, result unobserved", result: .intent(PlaybackIntent.pause),
+                 response: .silent, routingDisposition: "pending",
+                 executionState: "unknown", executionReason: "observation_unavailable"),
             // The router declined: nothing to execute.
             // The router declined, and this window has no escalation budget, so the dispatch the service
             // would otherwise make is refused by policy: nothing executed, and the reason says which
@@ -357,10 +355,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                                          captureContext: first)
         finishCapture(harness, first)
         let firstStages = publishedStages(for: first.id)
-        // SUPERSEDED premise (structured executor verdicts): the first turn now reports the
-        // executor's verdict — completed — instead of the response classifier's unobserved.
-        XCTAssertEqual(firstStages["execution"]?.state, "completed",
-                       "premise: the first turn ran and the executor stated its verdict")
+        // RESTORED premise: the first turn's verdict is the executor's, and a non-error
+        // presentation is still unobserved (spec 6a033773) — completed was withdrawn.
+        XCTAssertEqual(firstStages["execution"]?.state, "unknown",
+                       "premise: the first turn ran and its result is unobserved")
         XCTAssertEqual(executor.executed.count, 1, "premise: the first turn reached the executor")
 
         // Second identical turn inside the debounce window: suppressed, and must still PUBLISH.

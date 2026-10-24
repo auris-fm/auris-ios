@@ -369,6 +369,9 @@ class VoiceControlService: ObservableObject {
     ) -> String {
         switch outcome.state {
         case "failed": return "failed"
+        // `completed` is stated only by a sink-side structured fact (none exists yet — the
+        // presentation-inference that briefly produced it was withdrawn, spec 6a033773). The
+        // mapping stays correct for when real sink facts arrive.
         case "completed": return "executed"
         // `unknown` cannot claim a disposition either: the turn finished, but what became of it was not
         // observed, so the routing verdict stays honest about that rather than guessing.
