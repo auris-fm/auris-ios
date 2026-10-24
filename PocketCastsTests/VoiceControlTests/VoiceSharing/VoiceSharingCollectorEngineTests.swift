@@ -935,6 +935,45 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             XCTAssertEqual(routing["predicted_tool"] as? String, "playback")
             XCTAssertNil(routing["reason"])
         }
+        collectedEvents.removeAll()
+
+        // A FAILED settlement is still about the classified action (the GG binding asserts a failed
+        // turn names its classification), so the names carry; a NOT_RUN settlement means the router
+        // declined — carrying names would invent a classification that never happened.
+        do {
+            let ctx = makeCase()
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "completed", routingDisposition: "pending",
+                               predictedIntent: "playback.pause", predictedTool: "playback"),
+                context: ctx)
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "failed", reason: "no_candidates",
+                               routingDisposition: "failed"), context: ctx)
+            let routing = try encodedObservations(ctx)["routing"] as! [String: Any]
+            XCTAssertEqual(routing["execution_disposition"] as? String, "failed")
+            XCTAssertEqual(routing["predicted_intent"] as? String, "playback.pause",
+                           "a failed settlement is about the classified action: names carry")
+            XCTAssertEqual(routing["predicted_tool"] as? String, "playback")
+            XCTAssertEqual(routing["reason"] as? String, "no_candidates")
+        }
+        collectedEvents.removeAll()
+        do {
+            let ctx = makeCase()
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "completed", routingDisposition: "pending",
+                               predictedIntent: "playback.pause", predictedTool: "playback"),
+                context: ctx)
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "not_run", reason: "low_confidence",
+                               routingDisposition: "not_run"), context: ctx)
+            let routing = try encodedObservations(ctx)["routing"] as! [String: Any]
+            XCTAssertEqual(routing["execution_disposition"] as? String, "not_run")
+            XCTAssertNil(routing["predicted_intent"],
+                         "a not_run settlement must not carry classification intent")
+            XCTAssertNil(routing["predicted_tool"],
+                         "a not_run settlement must not carry classification tool")
+            XCTAssertEqual(routing["reason"] as? String, "low_confidence")
+        }
     }
 
     /// THE THREE TRANSLATION SKIPS ARE DISTINCT FACTS (spec delta 4d10275f). Collapsing them into

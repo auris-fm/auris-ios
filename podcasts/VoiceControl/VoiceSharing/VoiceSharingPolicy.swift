@@ -201,6 +201,10 @@ final class VoiceSharingPolicy {
                 accountEnrolled: isAccountEnrolled()
             )
             lock.unlock()
+            // TEST-ONLY arrival seam: fires immediately BEFORE the barrier wait, so a control can
+            // await "the installer is at the barrier" instead of sleeping (review 83e0177b). Never
+            // set in production.
+            onInstallBarrierArrivalForTesting?()
             installPublicationBarrier.lock()
             lock.lock()
             guard pendingIdentityFence == 0,
@@ -315,6 +319,10 @@ final class VoiceSharingPolicy {
     /// Set by the coordinator; nil in tests that do not care. INVOKED OUTSIDE THE POLICY LOCK (below),
     /// because the handler reads the policy back and re-entering the lock would deadlock.
     var onLeaseInstalled: ((VoiceSharingSnapshot) -> Void)?
+
+    /// Test-only signal fired just before an install waits on the publication barrier. See the
+    /// call site for the disclosure; nil in production.
+    var onInstallBarrierArrivalForTesting: (() -> Void)?
 
     /// The installed lease's expiry DEADLINE, for a scheduler that must fire exactly at expiry.
     /// Nil when no snapshot is installed — an expiry schedule only makes sense against a live lease.

@@ -1160,20 +1160,26 @@ final class VoiceSharingPolicyTests: XCTestCase {
         let barrier = coordinator.policy.installPublicationBarrier
         barrier.lock() // MAIN holds the install barrier: any installer must now wait at it.
         let release = NSCondition()
-        var installEntered = false
+        var installerAtBarrier = false
         var revokeCompleted = false
-        let installer = DispatchQueue.global(qos: .userInitiated)
-        installer.async {
+        // DETERMINISTIC ARRIVAL SIGNAL (review 83e0177b): the policy fires this immediately
+        // before its barrier wait, so the overlap is awaited, not slept into.
+        coordinator.policy.onInstallBarrierArrivalForTesting = {
+            release.lock(); installerAtBarrier = true; release.signal(); release.unlock()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
             let t2 = coordinator.policy.tokenForFetchStart()
             _ = coordinator.policy.refreshAfterActivation(
                 freshActivationSucceeded: true, fetchToken: t2)
         }
-        // Wait until the installer is genuinely INSIDE its policy-lock region (observable because
-        // the first region completes and then the install blocks at the barrier main holds).
-        let revoker = DispatchQueue.global(qos: .userInitiated)
-        revoker.async {
-            // Give the installer a moment to reach its barrier-wait; then run the revoke.
-            Thread.sleep(forTimeInterval: 0.2)
+        release.lock()
+        let arrivalDeadline = Date().addingTimeInterval(3)
+        while !installerAtBarrier, Date() < arrivalDeadline { release.wait(until: arrivalDeadline) }
+        release.unlock()
+        XCTAssertTrue(installerAtBarrier, "premise: the installer reached the barrier")
+        // ONLY NOW the revoker runs: under the inversion the installer holds the policy lock
+        // while blocked at the barrier, so the revoke can never proceed.
+        DispatchQueue.global(qos: .userInitiated).async {
             _ = coordinator.policy.revokeIfLeaseExpired(
                 generation: target.generation, deadline: target.deadline)
             release.lock(); revokeCompleted = true; release.signal(); release.unlock()
@@ -1187,7 +1193,6 @@ final class VoiceSharingPolicyTests: XCTestCase {
         XCTAssertTrue(revokeCompleted,
                       "the expiry revoke must not be starved by an install holding the policy "
                           + "lock while waiting on the install barrier (lock inversion)")
-        _ = installEntered
     }
 
     /// REVIEW 15a18d5d: lifting the identity fence must INITIATE the normal refresh. A fence without

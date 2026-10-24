@@ -308,7 +308,15 @@ final class VoiceSharingCollector {
                     stage: String
         ) -> VoiceSharingContributionEncoder.StageOutcome {
             guard let previous else { return outcome }
-            if stage == "routing" {
+            if stage == "routing",
+               // Retention is constrained to the intended classification→settlement transition
+               // (review 83e0177b). The only INCOMPATIBLE settlement is not_run: the router
+               // declined, so nothing was classified and carrying names would invent a
+               // classification that never happened. failed still concerns the classified action
+               // (its control, spec 012b19dd/78480a17, asserts a failed turn NAMES its
+               // classification), and pending means the classification stands unconcluded.
+               VoiceSharingRecordBinding
+                   .routingDispositionCarriesClassification(outcome.routingDisposition) {
                 return .init(
                     state: outcome.state,
                     reason: outcome.reason,
@@ -316,8 +324,7 @@ final class VoiceSharingCollector {
                     decision: outcome.decision,
                     translatedText: outcome.translatedText,
                     targetLanguage: outcome.targetLanguage,
-                    routingDisposition: outcome.routingDisposition
-                        ?? previous.routingDisposition,
+                    routingDisposition: outcome.routingDisposition,
                     sourceLanguage: outcome.sourceLanguage,
                     routerInput: outcome.routerInput,
                     predictedIntent: outcome.predictedIntent ?? previous.predictedIntent,

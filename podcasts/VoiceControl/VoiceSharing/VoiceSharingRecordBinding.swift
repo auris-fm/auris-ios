@@ -280,6 +280,16 @@ enum VoiceSharingRecordBinding {
 
     private static let routingDispositions: Set<String> = ["executed", "refused", "failed", "not_run", "pending"]
 
+    /// A settlement with this disposition is still ABOUT the prior classification, so the
+    /// classification's predicted facts may carry into it. `executed`/`refused` conclude it;
+    /// `failed` is the executor's verdict ON the classified action (spec 012b19dd binding: a failed
+    /// turn names its classification); `pending` means the classification stands unconcluded. Only
+    /// `not_run` is incompatible — the router declined, nothing was classified, and carrying a
+    /// previous report's names would invent a classification that never happened.
+    static func routingDispositionCarriesClassification(_ disposition: String?) -> Bool {
+        disposition != "not_run"
+    }
+
     private static let stageFields: [String: Set<String>] = [
         "wake": ["state", "reason", "decision", "score", "threshold", "speech_offset_ms", "wake_offset_ms"],
         "bleed": ["state", "reason", "decision", "overlap_ratio"],
