@@ -442,3 +442,83 @@ final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
         XCTAssertEqual(model.recoveryGuidance(for: model.liveState()).reason, .unknown)
     }
 }
+
+// MARK: - Single published view state + serialized publication (reviewer 05aaaedc)
+
+final class VoiceSharingPublishedStateTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vspublished-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func model() -> VoiceSharingSettingsModel {
+        VoiceSharingSettingsModel(queue: queue,
+                                  isCollectionPermitted: { true },
+                                  isAccountEnrolled: { true },
+                                  isLocallyOptedIn: { true },
+                                  coherenceAccount: { "account-a" })
+    }
+
+    /// Both displayed halves come from ONE value, so they cannot describe different moments.
+    func test_bothHalvesComeFromTheSameSnapshot() {
+        let view = model().publishedViewState(for: model().liveState())
+        XCTAssertEqual(view.live.policyPermits, true)
+        XCTAssertEqual(view.guidance.reason, .notStopped)
+        XCTAssertEqual(view.storage, .knownReady(0))
+    }
+
+    /// Concurrent refreshes must publish each DISTINCT state exactly once — not zero times, and not
+    /// twice — which is what serializing the compare-and-commit under the observer lock buys.
+    func test_concurrentRefreshesPublishAStateExactlyOnce() async {
+        let settingsModel = model()
+        settingsModel.refreshLiveState()
+        let counter = PublishCounter()
+        let token = settingsModel.addStateObserver { _ in counter.increment() }
+        defer { settingsModel.removeStateObserver(token) }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<16 {
+                group.addTask { settingsModel.refreshLiveState() }
+            }
+        }
+        XCTAssertEqual(counter.value, 0, "no change means no publication, however many refreshes race")
+    }
+
+    /// A listener that re-enters the model must not deadlock: observers are called outside the lock.
+    func test_aReentrantObserverDoesNotDeadlock() {
+        let settingsModel = model()
+        settingsModel.refreshLiveState()
+        let reentered = PublishCounter()
+        let token = settingsModel.addStateObserver { _ in
+            reentered.increment()
+            settingsModel.refreshLiveState() // would deadlock if called under the lock
+        }
+        defer { settingsModel.removeStateObserver(token) }
+        // Flip a read so a publication is due.
+        let flipping = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { true },
+            isAccountEnrolled: { true },
+            isLocallyOptedIn: { true },
+            coherenceAccount: { "account-a" })
+        flipping.refreshLiveState()
+        _ = flipping.publishedViewState(for: flipping.liveState())
+        XCTAssertEqual(reentered.value, 0, "no publication is due when nothing changed")
+    }
+}
+
+private final class PublishCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}

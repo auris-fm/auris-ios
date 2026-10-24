@@ -328,6 +328,13 @@ final class VoiceSharingPolicy {
     /// Nil when no snapshot is installed — an expiry schedule only makes sense against a live lease.
     /// Read-only bookkeeping: expiry itself is still enforced by `permitsCollection`; this only lets
     /// composition trigger the purge at the deadline rather than at the next unrelated event.
+    /// The lease generation, exposed so a consumer that must prove several reads belong to one
+    /// moment can detect an install/expiry/fence between them (reviewer 05aaaedc).
+    var currentLeaseGeneration: Int {
+        lock.lock(); defer { lock.unlock() }
+        return leaseGeneration
+    }
+
     var installedLeaseExpiry: MonotonicTime? {
         lock.lock()
         defer { lock.unlock() }

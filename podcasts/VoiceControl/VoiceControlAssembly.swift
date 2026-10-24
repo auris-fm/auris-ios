@@ -162,14 +162,17 @@ class VoiceControlAssembly {
         let settingsModel = VoiceSharingSettingsModel(
             queue: contributionQueue,
             isCollectionPermitted: { VoiceSharingCoordinator.shared.policy.permitsCollection },
-            isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEffectiveEnrolled },
+            // TRI-STATE: no authoritative projection yet ⇒ unknown, not "not enrolled".
+            isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEnrollmentAnswer },
             isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn },
             // Coherence stamps: the account the reads belong to and the enrollment generation that
             // moves when intent/membership changes. A read taken across a move is detected and the
             // whole snapshot degrades to `unknown` rather than mixing two moments.
             coherenceAccount: { ServerSettings.userId },
             coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
-            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
+            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
+            policyLeaseGeneration: { VoiceSharingCoordinator.shared.policy.currentLeaseGeneration },
+            queueHoldGeneration: { contributionQueue.currentHoldGeneration })
         self.voiceSharingSettingsModel = settingsModel
         // ACTUAL update source (reviewer 8ae2b980): the enrollment store is the production state
         // that changes underneath the surface (opt-in, projection acceptance, account transition).

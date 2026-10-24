@@ -12,9 +12,10 @@ import SwiftUI
 struct VoiceSharingSettingsView: View {
     let model: VoiceSharingSettingsModel
 
-    @State private var status: VoiceSharingSettingsModel.ContributionStatus?
     /// The single live snapshot the surface renders from; updated by the model's subscription.
     @State private var liveState: VoiceSharingSettingsModel.LiveState?
+    /// ONE published value carrying every displayed field, so the two UI parts cannot disagree.
+    @State private var published: VoiceSharingSettingsModel.PublishedViewState?
     @State private var stateObserver: UUID?
     @State private var lastDelete: VoiceSharingSettingsModel.DeleteResult?
     @State private var showingDeleteConfirmation = false
@@ -32,16 +33,24 @@ struct VoiceSharingSettingsView: View {
         }
     }
 
-    /// Titles are keyed around what the app actually knows; `.unknown` deliberately says nothing
-    /// about why.
-    /// The model owns the change detection; the view just mirrors the published snapshot.
+    /// The model owns the change detection; the view just mirrors the published value.
     private var subscription: some View {
         content
             .onAppear {
                 liveState = model.liveState()
+                published = model.publishedViewState(for: liveState!)
                 stateObserver = model.addStateObserver { updated in
-                    liveState = updated
-                    status = model.status()
+                    // The model may publish from any source thread; SwiftUI state must be written
+                    // on the main actor, so the hop is explicit (reviewer 05aaaedc).
+                    if Thread.isMainThread {
+                        liveState = updated
+                        published = model.publishedViewState(for: updated)
+                    } else {
+                        DispatchQueue.main.async {
+                            liveState = updated
+                            published = model.publishedViewState(for: updated)
+                        }
+                    }
                 }
                 model.refreshLiveState()
             }
@@ -51,6 +60,7 @@ struct VoiceSharingSettingsView: View {
             }
     }
 
+    /// Titles are keyed around what the app actually knows; `.unknown` says nothing about why.
     private func title(for reason: VoiceSharingSettingsModel.StoppedReason) -> String {
         switch reason {
         case .notStopped: return L10n.voiceSharingStatusOn
@@ -68,8 +78,8 @@ struct VoiceSharingSettingsView: View {
             // this single LiveState, so the surface never mixes a cached permit with fresh reads
             // (reviewer 8ae2b980). The snapshot is refreshed by the model's subscription, so the
             // surface tracks real state changes instead of freezing the first read.
-            let live = liveState ?? model.liveState()
-            let stopped = model.recoveryGuidance(for: live)
+            let view = published ?? model.publishedViewState(for: model.liveState())
+            let stopped = view.guidance
             if stopped.reason != .notStopped {
                 Section {
                     Text(title(for: stopped.reason))
@@ -83,26 +93,24 @@ struct VoiceSharingSettingsView: View {
             }
 
             Section(L10n.voiceSharingSectionTitle) {
-                if let status {
-                    row(L10n.voiceSharingRowUploads,
-                        value: status.collectionPermitted ? L10n.voiceSharingValueActive : L10n.voiceSharingValueNotActive,
-                        tint: status.collectionPermitted ? .green : .secondary)
-                    switch status.storage {
-                    case .knownReady(let count):
-                        row(L10n.voiceSharingRowWaiting, value: "\(count)",
-                            tint: count == 0 ? .secondary : .primary)
-                    case .unknown:
-                        // NOT "0": we could not determine what is stored, and saying zero would be
-                        // a claim we cannot back.
-                        row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueUnknown, tint: .orange)
-                        Text(L10n.voiceSharingUnknownStorageExplainer)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    case .revocationInDoubt:
-                        // Count is deliberately not shown: the set is unprovable until a purge
-                        // reconciles. The reason row above already offers the verified remedy.
-                        row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueNotConfirmed, tint: .orange)
-                    }
+                row(L10n.voiceSharingRowUploads,
+                    value: view.live.policyPermits == true ? L10n.voiceSharingValueActive : L10n.voiceSharingValueNotActive,
+                    tint: view.live.policyPermits == true ? .green : .secondary)
+                switch view.storage {
+                case .knownReady(let count):
+                    row(L10n.voiceSharingRowWaiting, value: "\(count)",
+                        tint: count == 0 ? .secondary : .primary)
+                case .unknown:
+                    // NOT "0": we could not determine what is stored, and saying zero would be a
+                    // claim we cannot back.
+                    row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueUnknown, tint: .orange)
+                    Text(L10n.voiceSharingUnknownStorageExplainer)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                case .revocationInDoubt:
+                    // Count is deliberately not shown: the set is unprovable until a purge
+                    // reconciles. The reason row above already offers the verified remedy.
+                    row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueNotConfirmed, tint: .orange)
                 }
             }
 
@@ -117,7 +125,11 @@ struct VoiceSharingSettingsView: View {
                                     titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {
                         lastDelete = model.deletePendingRecordingsOnThisDevice()
-                        status = model.status()
+                        // A purge moves the queue's hold generation: refresh so the surface shows
+                        // the post-purge truth rather than the pre-purge snapshot.
+                        model.refreshLiveState()
+                        liveState = model.liveState()
+                        published = model.publishedViewState(for: model.liveState())
                     }
                     Button("Cancel", role: .cancel) {}
                 }
@@ -140,8 +152,7 @@ struct VoiceSharingSettingsView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .navigationTitle("Voice Sharing")
-        .onAppear { status = model.status() }
+        .navigationTitle(L10n.voiceSharingSectionTitle)
     }
 
     /// Reports the purge's own disposition. Every branch states exactly what is known — in

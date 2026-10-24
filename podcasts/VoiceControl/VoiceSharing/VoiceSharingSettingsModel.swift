@@ -73,6 +73,8 @@ final class VoiceSharingSettingsModel {
     private let coherenceAccount: () -> String?
     private let coherenceGeneration: () -> Int?
     private let coherenceVersion: () -> String?
+    private let policyLeaseGeneration: () -> Int
+    private let queueHoldGeneration: () -> Int
 
     /// `nil`-returning reads are REQUIRED: a wiring that cannot determine enrollment or opt-in must
     /// report `unknown`, not `false`. Passing a constant `false` closure would invent an opt-out.
@@ -82,7 +84,9 @@ final class VoiceSharingSettingsModel {
          isLocallyOptedIn: @escaping () -> Bool?,
          coherenceAccount: @escaping () -> String? = { nil },
          coherenceGeneration: @escaping () -> Int? = { 0 },
-         coherenceVersion: @escaping () -> String? = { nil }) {
+         coherenceVersion: @escaping () -> String? = { nil },
+         policyLeaseGeneration: @escaping () -> Int = { 0 },
+         queueHoldGeneration: @escaping () -> Int = { 0 }) {
         self.queue = queue
         self.isCollectionPermitted = isCollectionPermitted
         self.isEnrolled = isAccountEnrolled
@@ -90,6 +94,8 @@ final class VoiceSharingSettingsModel {
         self.coherenceAccount = coherenceAccount
         self.coherenceGeneration = coherenceGeneration
         self.coherenceVersion = coherenceVersion
+        self.policyLeaseGeneration = policyLeaseGeneration
+        self.queueHoldGeneration = queueHoldGeneration
     }
 
     var isSurfaceEnabled: Bool { Self.surfaceEnabled }
@@ -161,6 +167,9 @@ final class VoiceSharingSettingsModel {
         var localOptIn: Bool?
         /// Storage fault, already classified by the queue (never inferred from a single flag).
         var storageFault: StoppedReason.StorageFault = .none
+        /// Ready-to-upload count from the SAME queue read that produced `storageFault`. `nil` when
+        /// coverage was unknown/held, so a count can never be invented from a second read.
+        var knownReadyCount: Int?
         /// The account+generation+lease generation all three reads were taken under. When the
         /// stamps disagree the reads were NOT coherent, and every derived conclusion is unknown
         /// rather than a mix of two moments (reviewer e40508a1).
@@ -217,6 +226,36 @@ final class VoiceSharingSettingsModel {
         let action: String?
     }
 
+    // MARK: - The single published view state (reviewer 05aaaedc)
+
+    /// Everything the surface displays, derived from ONE coherent snapshot. The two UI parts cannot
+    /// disagree because they read the same value, and a listener cannot be called with values from
+    /// two different moments.
+    struct PublishedViewState: Equatable {
+        let live: LiveState
+        let storage: ContributionStatus.Storage
+        let guidance: RecoveryGuidance
+    }
+
+    func publishedViewState(for live: LiveState) -> PublishedViewState {
+        PublishedViewState(live: live,
+                           storage: storage(for: live),
+                           guidance: recoveryGuidance(for: live))
+    }
+
+    /// Storage projection FROM the snapshot (not a second read of the queue).
+    private func storage(for live: LiveState) -> ContributionStatus.Storage {
+        switch live.storageFault {
+        case .revocationInDoubt: return .revocationInDoubt
+        case .unreadable: return .unknown
+        case .none: break
+        }
+        switch live.knownReadyCount {
+        case .some(let count): return .knownReady(count)
+        case .none: return .unknown
+        }
+    }
+
     // MARK: - Change subscription (reviewer 8ae2b980)
 
     private var changeObservers: [UUID: (LiveState) -> Void] = [:]
@@ -238,12 +277,19 @@ final class VoiceSharingSettingsModel {
     /// production update paths (enrollment store mutations, queue purges) — a snapshot per render
     /// is not a subscription, and pretending otherwise was the reviewer's point.
     func refreshLiveState() {
-        let state = liveState()
+        // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
+        // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
+        // an out-of-order snapshot cannot overwrite a newer one (reviewer 05aaaedc). Observers are
+        // called OUTSIDE the lock, so a listener that re-enters cannot deadlock.
         changeLock.lock()
+        let state = liveState()
+        guard state != lastPublishedState else {
+            changeLock.unlock()
+            return
+        }
+        lastPublishedState = state
         let observers = Array(changeObservers.values)
         changeLock.unlock()
-        guard state != lastPublishedState else { return }
-        lastPublishedState = state
         for observer in observers { observer(state) }
     }
 
@@ -254,10 +300,17 @@ final class VoiceSharingSettingsModel {
     /// the user of opting out (reviewer 8ae2b980).
     func liveState() -> LiveState {
         let fault: StoppedReason.StorageFault
+        let readyCount: Int?
         switch queue.readyEntriesReportingUnknownCoverage() {
-        case .revocationHeld: fault = .revocationInDoubt
-        case .unknownCoverage: fault = .unreadable
-        case .known: fault = .none
+        case .revocationHeld:
+            fault = .revocationInDoubt
+            readyCount = nil
+        case .unknownCoverage:
+            fault = .unreadable
+            readyCount = nil
+        case .known(let entries):
+            fault = .none
+            readyCount = entries.count
         }
         // Stamp BEFORE and AFTER the reads: a read that happened across an account/enrollment
         // move cannot be combined with the others into one conclusion (reviewer e40508a1).
@@ -278,6 +331,7 @@ final class VoiceSharingSettingsModel {
                          enrolled: enrolled,
                          localOptIn: optedIn,
                          storageFault: fault,
+                         knownReadyCount: readyCount,
                          coherence: coherence)
     }
 
@@ -289,13 +343,22 @@ final class VoiceSharingSettingsModel {
         // belong together. The version is informative only and may legitimately be nil.
         guard let account = coherenceAccount(),
               let generation = coherenceGeneration() else { return nil }
-        return CoherenceStamp(account: account, generation: generation, version: coherenceVersion())
+        return CoherenceStamp(account: account,
+                              generation: generation,
+                              version: coherenceVersion(),
+                              policyLease: policyLeaseGeneration(),
+                              queueHold: queueHoldGeneration())
     }
 
     struct CoherenceStamp: Equatable {
         let account: String?
         let generation: Int
         let version: String?
+        /// The policy's own lease generation and the queue's hold generation: these version the
+        /// OTHER two authorities the snapshot reads, so a lease expiry/fence or a queue hold change
+        /// during the read is detected (reviewer 05aaaedc).
+        let policyLease: Int
+        let queueHold: Int
     }
 
     /// Projection over explicit live state. Pure: no reads, no writes, no cached mixing.

@@ -297,6 +297,19 @@ final class VoiceSharingUploadQueue {
     /// answer to "the disqualification might not be durable": refuse everything rather than
     /// report success or miscount an unmarked survivor as disqualified.
     private var revocationHoldLocked = false
+    /// Bumped whenever the hold changes, so a snapshot can prove its queue read was not split by a
+    /// concurrent purge/hold transition (reviewer 05aaaedc).
+    private var holdGeneration = 0
+
+    var currentHoldGeneration: Int { serialQueue.sync { holdGeneration } }
+
+    private func setRevocationHold(_ held: Bool, originUnknown: Bool = false) {
+        if revocationHoldLocked != held || revocationOriginUnknownLocked != originUnknown {
+            holdGeneration &+= 1
+        }
+        revocationHoldLocked = held
+        revocationOriginUnknownLocked = originUnknown
+    }
     /// True when the revocation hold exists because its evidence could not be READ. Reported as
     /// `unknownCoverage`, not `revocationHeld` (reviewer 8ae2b980).
     private var revocationOriginUnknownLocked = false
@@ -549,12 +562,10 @@ final class VoiceSharingUploadQueue {
             try synchronizer(revocationIntentPath, false)
             try synchronizer(rootDirectory, true)
         } catch {
-            revocationHoldLocked = true
-            revocationOriginUnknownLocked = false // KNOWN: we could not even record the intent
+            setRevocationHold(true) // KNOWN: we could not even record the intent
             return .refused
         }
-        revocationHoldLocked = true
-        revocationOriginUnknownLocked = false // KNOWN: the intent is on disk
+        setRevocationHold(true) // KNOWN: the intent is on disk
         let listing: [URL]
         do {
             let (urls, overflowed) = try listDirectoryBounded(
@@ -619,19 +630,16 @@ final class VoiceSharingUploadQueue {
             do {
                 try fileManager.removeItem(at: revocationIntentPath)
                 try synchronizer(rootDirectory, true)
-                revocationHoldLocked = false
                 // The origin must be re-derived at EVERY transition (reviewer e40508a1): leaving it
                 // set would mislabel a LATER, genuine failed revocation as unknown coverage.
-                revocationOriginUnknownLocked = false
+                setRevocationHold(false)
             } catch {
                 // Intent could not be retired: stay held. A fresh instance would re-derive it.
-                revocationHoldLocked = true
-                revocationOriginUnknownLocked = false // KNOWN: the intent is still on disk
+                setRevocationHold(true) // KNOWN: the intent is still on disk
                 reconciled = false
             }
         } else {
-            revocationHoldLocked = true
-            revocationOriginUnknownLocked = false // KNOWN: barriers failed to reconcile
+            setRevocationHold(true) // KNOWN: barriers failed to reconcile
         }
         return reconciled ? .reconciled(removed: removed, retained: retained)
                           : .held(removed: removed, retained: retained)
@@ -2556,14 +2564,11 @@ final class VoiceSharingUploadQueue {
         // "a revocation failed", which would offer the user a remedy that may not apply.
         switch intentDiscovery(revocationIntentPath) {
         case .present:
-            revocationHoldLocked = true
-            revocationOriginUnknownLocked = false // KNOWN: the intent was read and is present
+            setRevocationHold(true) // KNOWN: the intent was read and is present
         case .absent:
-            revocationHoldLocked = false
-            revocationOriginUnknownLocked = false
+            setRevocationHold(false)
         case .failure:
-            revocationHoldLocked = true
-            revocationOriginUnknownLocked = true
+            setRevocationHold(true, originUnknown: true)
         }
         // The retry hold re-derives the same way: an `attempt.pause.intent` left by a failed
         // not-before barrier keeps admission held across restart until reconciliation.

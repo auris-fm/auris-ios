@@ -211,6 +211,15 @@ final class VoiceSharingEnrollmentStore {
     /// makes "user opts out, then a slow old GET arrives" impossible to honour.
     private var operationGeneration: Int = 0
 
+    /// Enrollment as a TRI-STATE for consumers that must not conflate "the server has not told us"
+    /// with "not enrolled" (reviewer 05aaaedc). `nil` means there is no authoritative projection in
+    /// this session — the answer is unknown, not negative.
+    var currentEnrollmentAnswer: Bool? {
+        lock.lock(); defer { lock.unlock() }
+        guard state.hasAuthoritativeProjection else { return nil }
+        return state.effectiveEnrolled
+    }
+
     /// The current membership-operation generation. Consumers that must prove several reads belong
     /// to ONE moment (the settings surface) stamp with this: a mutation between their reads bumps it
     /// and the combination is rejected as incoherent (reviewer e40508a1).
