@@ -579,10 +579,20 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// where the same control passed 3 runs in 5. The binding is therefore asserted from both sides in one
     /// run: the named capture must be consumed AND every other deferred capture must remain publishable.
     func test_aNamedCancelBindsItsOwnCaptureAndLeavesTheOthersPublishable() async throws {
-        // TRIALS: a hash-order implementation passes one arrangement by luck (observed 2 of 6 runs when the
-        // first version of this control was mutated). Repeating the scenario over several independent
-        // captures makes passing require the binding to be correct EVERY time, not once.
-        for trial in 0..<12 {
+        // DETERMINISTIC BY CONSTRUCTION, not by repetition (spec 85cec5b7, reviewer 15900665). The old
+        // version ran 12 independent trials because a hash-ordered implementation could pass one
+        // arrangement by luck. Repeating a scenario whose ORDER is fixed only lowers the odds — it does
+        // not remove the randomness. So this control instead fixes the arrangement that EXPOSES binding:
+        // the named capture is never the most recent deferred entry (a fourth is deferred after it), so
+        // a recency-fallback implementation must miss, not pass by coincidence. Cancelling by name at
+        // every position in the finalize sequence covers when the cancel lands.
+        let orderings: [(label: String, cancelAt: Int)] = [
+            ("cancel first", 0),
+            ("cancel in the middle", 1),
+            ("cancel last", 2),
+        ]
+
+        for ordering in orderings {
             let policy = openGate(enrolled: true)
             let collector = makeRecordingCollector(policy)
             let backend = EngineStubBackend()
@@ -598,23 +608,29 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 return ctx
             }
             guard let first = deferCapture(), let target = deferCapture(),
-                let third = deferCapture() else {
-                return XCTFail("premise: three deferred captures (trial \(trial))")
+                let third = deferCapture(), let latest = deferCapture() else {
+                return XCTFail("premise: four deferred captures")
             }
-            let all = [first, target, third]
-            XCTAssertEqual(Set(all.map(\.id)).count, 3, "trial \(trial): distinct captures")
+            let survivors = [first, third, latest]
+            XCTAssertEqual(Set((survivors + [target]).map(\.id)).count, 4,
+                           "distinct captures")
 
-            // Cancel the middle one BY NAME: its position in the set guarantees the survivor set is not
-            // accidentally equal to "everything the implementation happened to consume".
-            collector.speechCancelled(context: target)
-            for ctx in all { collector.finalizeDeferredCompletion(context: ctx) }
+            // Cancel `target` BY NAME at the chosen point. It is never the most recent deferred entry
+            // (`latest` always is), so a recency-fallback implementation consumes the WRONG capture.
+            var steps: [() -> Void] = survivors.map { ctx in
+                { collector.finalizeDeferredCompletion(context: ctx) }
+            }
+            steps.insert({ collector.speechCancelled(context: target) }, at: ordering.cancelAt)
+            for step in steps { step() }
 
             let completedIDs = Set(snapshot()
                 .filter { (event: VoiceSharingCollector.SegmentEvent) in event.kind == .completed }
                 .map(\.captureID))
-            XCTAssertEqual(completedIDs, Set([first.id, third.id]),
-                           "trial \(trial): the named cancel must consume exactly its own capture; "
-                               + "completed=\(completedIDs)")
+            XCTAssertEqual(completedIDs, Set(survivors.map(\.id)),
+                           "the named cancel must consume exactly its own capture; "
+                               + "completed=\(completedIDs.sorted())")
+            XCTAssertFalse(completedIDs.contains(target.id),
+                           "the cancelled capture must never publish")
             collectedLock.lock(); collectedEvents = []; collectedLock.unlock()
         }
     }
