@@ -208,12 +208,12 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         try manifestData.write(to: base.appendingPathComponent("manifest.json"))
     }
 
-    /// The PINNED f8 WIRE fixtures (spec: exact `3dd0c91d` emitted-byte parity). Three deterministic
-    /// records exercising every byte shape f8 introduced — routing with a structured disposition,
-    /// completed stages carrying NO reason, the asr/empty_result exception, and the three translation
-    /// skip reasons — exported for the pinned Worker intake so parity is checked against bytes this
-    /// encoder ACTUALLY emits, bound-verified before they leave the runner. Always written to a fixed
-    /// runner-temporary location (host env does not reach the simulator); copied out via simctl.
+    /// The PINNED f8 WIRE fixtures (spec 35da2677). SCOPE, stated exactly: these are ENCODER fixtures
+    /// whose observations are TEST-SUPPLIED, not engine/branch producer output — they pin the bytes
+    /// the encoder emits for the f8 stage-claim combinations, including ALL THREE translation skip
+    /// reasons, and one emitted-byte NEGATIVE (a completed stage carrying a reason) that both the
+    /// production binding and the pinned intake must refuse. Producer provenance is separate work.
+    /// Always written to a fixed runner-temporary location (host env does not reach the simulator).
     func test_exportF8FixturesForPinnedWorkerIntake() throws {
         func capture(_ id: String) -> VoiceSharingCollector.SegmentEvent {
             .init(kind: .completed, captureID: UUID(uuidString: id)!,
@@ -246,7 +246,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "execution": .init(state: "not_run", reason: "precondition_failed")]),
             // The backend-translation skip: translation NOT RUN for a reason that is a DECISION,
             // while asr still carries its own text facts (spec 4d10275f).
-            "f8-translation-skip": (
+            "f8-translation-backend-handles": (
                 "44444444-2222-3333-4444-555555555555",
                 ["wake": .init(state: "completed"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
@@ -254,6 +254,29 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "translation": .init(state: "not_run", reason: "backend_handles_translation"),
                  "routing": .init(state: "completed", routingDisposition: "pending"),
                  "execution": .init(state: "unknown", reason: "observation_unavailable")]),
+            // The two remaining translation skips (spec 4d10275f): the source language could not
+            // be established, and a translator existed but was unavailable.
+            "f8-translation-source-unavailable": (
+                "55555555-2222-3333-4444-555555555555",
+                ["wake": .init(state: "completed"),
+                 "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                 "asr": .init(state: "completed", text: "unintelligible tail"),
+                 "translation": .init(state: "not_run", reason: "source_language_unavailable"),
+                 "routing": .init(state: "not_run", reason: "no_candidates"),
+                 "execution": .init(state: "not_run", reason: "precondition_failed")]),
+            "f8-translation-translator-unavailable": (
+                "66666666-2222-3333-4444-555555555555",
+                ["wake": .init(state: "completed"),
+                 "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                 "asr": .init(state: "completed", text: "öffne die App"),
+                 "translation": .init(state: "not_run", reason: "translator_unavailable"),
+                 "routing": .init(state: "completed", routingDisposition: "executed"),
+                 "execution": .init(state: "completed")]),
+        ]
+        // Emitted-byte NEGATIVE (f8): a completed stage carrying a reason. The production binding
+        // MUST refuse it, and the pinned intake must refuse the bytes too.
+        let negatives: [String: String] = [
+            "f8-negative-completed-with-reason": "77777777-2222-3333-4444-555555555555",
         ]
         let base = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("auris-f8-fixtures")
@@ -281,6 +304,39 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             ]
             try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys, .prettyPrinted])
                 .write(to: dir.appendingPathComponent("manifest.json"))
+        }
+        for (name, captureID) in negatives {
+            // The encoder itself refuses the invalid claim, so the negative bytes are built by
+            // MUTATION: encode a valid record, inject the reason into the completed stage, and
+            // re-seal with the PRODUCTION canonicalizer so the digest is not what refuses it —
+            // the f8 rule is. Exported WITHOUT a bind self-check: refusing it is the point.
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: capture(captureID), provenance: provenance, observations: [
+                    "wake": .init(state: "completed"),
+                    "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                    "asr": .init(state: "not_run", reason: "local_only_action"),
+                    "translation": .init(state: "not_run", reason: "no_text"),
+                    "routing": .init(state: "not_run", reason: "no_candidates"),
+                    "execution": .init(state: "not_run", reason: "client_refused")])
+            let object = try JSONSerialization.jsonObject(with: encoded.metadataEnvelope)
+                as! [String: Any]
+            var record = try XCTUnwrap(object["record"] as? [String: Any])
+            var observationsBlock = try XCTUnwrap(record["observations"] as? [String: Any])
+            observationsBlock["wake"] = ["state": "completed", "reason": "no_wake_detected"]
+            record["observations"] = observationsBlock
+            var resealed = object
+            resealed["record"] = record
+            resealed["record_sha256"] = SHA256.hash(
+                data: try VoiceSharingRecordBinding.canonicalizeForTesting(resealed))
+                .map { String(format: "%02x", $0) }.joined()
+            let envelope = try JSONSerialization.data(withJSONObject: resealed)
+            XCTAssertThrowsError(try VoiceSharingRecordBinding.bind(
+                envelope: envelope, audio: encoded.wav),
+                "\(name): the production binding must refuse these bytes")
+            let dir = base.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try envelope.write(to: dir.appendingPathComponent("metadata.json"))
+            try encoded.wav.write(to: dir.appendingPathComponent("audio.wav"))
         }
     }
 
