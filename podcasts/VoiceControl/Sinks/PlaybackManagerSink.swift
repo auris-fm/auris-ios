@@ -19,7 +19,6 @@ protocol PlaybackManagerProtocol {
     /// fact channel: a skip with nothing queued is a real decline (the object is absent), not a
     /// completion wearing a success template. Default-derived from the existing method where a
     /// count is not directly available is NOT possible, so this is a requirement.
-    var upNextCountForFact: Int { get }
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -56,11 +55,17 @@ class PlaybackManagerSink: VoicePlaybackSink {
     /// emitted at that real decision: skip performed → completed; no object to act on →
     /// not_run/precondition_failed. The user-facing presentation is preserved unchanged.
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
-        let queued = playbackManager.upNextCountForFact
-        let response = nextEpisode()
-        return queued > 0
-            ? (response, SinkActionFact(state: "completed", reason: nil))
-            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        let title = playbackManager.skipToNextUpNextEpisode()
+        // The fact is the action's OWN decision, returned at the decision site: the
+        // skip hands back the title it actually played, and nil when the up-next
+        // queue had nothing to hand over. A prior queue count is not a decision —
+        // it can only be read before the action runs (spec 5108c9ba).
+        let fact = title != nil
+            ? SinkActionFact(state: "completed", reason: nil)
+            : SinkActionFact(state: "not_run", reason: "precondition_failed")
+        let response = VoiceResponse.spoken(templates.resolve("playback.next_episode", title ?? "next episode"))
+        return (response, fact)
     }
 
     func resume() -> VoiceResponse {

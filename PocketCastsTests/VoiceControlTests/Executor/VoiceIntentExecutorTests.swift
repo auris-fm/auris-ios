@@ -82,8 +82,8 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// RED until the fact channel lands; the sleep half (below) pins the world where NO fact
     /// channel exists — unknown in both worlds.
     func test_samePresentationDifferentActionOutcome_verdictFollowsTheSinkFactNotThePresentation() async {
-        // The skip happened: the queue held an episode.
-        mockPlaybackSink.upNextCountFact = 1
+        // The skip happened: the action handed back the title it played.
+        mockPlaybackSink.skipResult = "Episode B"
         let (_, skipped) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
         XCTAssertEqual(skipped.state, "completed",
                        "the sink fact (an actual skip) must conclude the turn, not the "
@@ -92,7 +92,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(skipped.outcome, "executed")
 
         // The IDENTICAL template with nothing queued: the sink declined — nothing moved.
-        mockPlaybackSink.upNextCountFact = 0
+        mockPlaybackSink.skipResult = nil
         let (_, declined) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
         XCTAssertEqual(declined.state, "not_run",
                        "with no episode to skip to, nothing happened; the identical template "
@@ -219,7 +219,9 @@ final class VoiceIntentExecutorTests: XCTestCase {
     }
 
     func test_execute_nextEpisode_returnsSpokenWithTitle() async {
-        mockPlaybackSink.nextEpisodeResponse = .spoken("Playing The Daily")
+        // The mock builds its spoken text from the skip's returned title — the
+        // same single-result seam the real sink uses.
+        mockPlaybackSink.skipResult = "The Daily"
         let response = await executor.execute(PlaybackIntent.nextEpisode)
         if case .spoken(let text) = response {
             XCTAssertTrue(text.contains("The Daily"))
@@ -394,13 +396,18 @@ private final class MockPlaybackSink: VoicePlaybackSink {
         pauseCalled = true
         return (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
     }
-    /// The skip's fact: an actual skip only when the queue held an episode.
-    var upNextCountFact = 0
-    func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
+    /// The skip's fact mirrors the REAL sink: it follows the action's own
+    /// returned decision (the title the skip actually played; nil = declined),
+    /// NOT a prior queue count — the real manager rechecks the queue inside the
+    /// action, so a prior positive count proves nothing (reviewer 89014b1e).
+    /// The discriminator here is exactly that returned decision.
+    var skipResult: String? = "Episode A"
+    func nextEpisode() -> VoiceResponse { nextEpisodeWithFact().response }
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
-        upNextCountFact > 0
-            ? (nextEpisodeResponse, SinkActionFact(state: "completed", reason: nil))
-            : (nextEpisodeResponse, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+        let response = VoiceResponse.spoken("Playback: \(skipResult ?? "next episode")")
+        return skipResult != nil
+            ? (response, SinkActionFact(state: "completed", reason: nil))
+            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
     }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {

@@ -2931,10 +2931,6 @@ extension PlaybackManager: PlaybackManagerProtocol {
     func play() {
         play(completion: nil, userInitiated: true)
     }
-
-    var upNextCountForFact: Int {
-        queue.upNextCount()
-    }
 }
 #endif
 #endif

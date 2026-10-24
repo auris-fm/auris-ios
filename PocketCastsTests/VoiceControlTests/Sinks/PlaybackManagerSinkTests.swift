@@ -8,7 +8,6 @@ final class MockPlaybackManager: PlaybackManagerProtocol {
     var currentTimeValue: TimeInterval = 0
     var skipResult: String? = nil
     var isPlaying = false
-    var upNextCountForFact = 0
 
     func duration() -> TimeInterval { durationValue }
     func currentTime() -> TimeInterval { currentTimeValue }
