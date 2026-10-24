@@ -915,15 +915,20 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(winnerBox.done, "the winner's turn hung")
         XCTAssertTrue(loserBox.done, "the losing turn hung")
-        XCTAssertLessThan(startedAt.timeIntervalSinceNow.magnitude, 2.0,
-            "B must complete by delivery, not the request-timeout fallback")
+        // done-before-deadline is the discriminator against the client's 5s
+        // requestTimeout fallback (the elapsed-time check is scheduler-
+        // sensitive); the 2s watchdog above already bounds it.
+        guard winnerBox.done, loserBox.done else {
+            // Failure path: cancel and walk away — no await of a stuck turn.
+            winnerWork.cancel()
+            loserWork.cancel()
+            return
+        }
         let winnerFact = winnerBox.value
         let loserFact = loserBox.value
         XCTAssertNil(winnerFact?.fact, "the winner ran no actions and must not see A's log")
         XCTAssertEqual(loserFact?.fact?.state, "unknown", "A's logged action reaches A's caller via supersession")
         XCTAssertEqual(loserFact?.fact?.reason, "observation_unavailable")
-        // Cleanup only on success paths: after failed assertions, cancel and
-        // walk away — no unconditional await of a possibly-stuck turn.
         _ = await winnerWork.value
         _ = await loserWork.value
     }
