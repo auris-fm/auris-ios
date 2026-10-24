@@ -272,12 +272,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
 
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics. This turn
-            // ran to no server outcome — and supersession alone does NOT
-            // establish user cancellation (spec 152b86a5): a supersede is the
-            // pipeline moving on, not an observed user act against this turn.
-            // The sink states no fact; the turn stays conservatively unknown.
-            return (.silent, nil)
+            // The superseding turn owns pause/restore and analytics. Supersession
+            // itself proves no outcome (spec 152b86a5) — but actions this turn
+            // ALREADY observed before being replaced stay known: their facts are
+            // delivered, not discarded (spec 1a0661ba).
+            return (.silent, Self.aggregateActionFact(turnActionFacts))
         }
         restoreTransientAudioState()
         // Stream ended without a `done` — no server outcome was observed; the
@@ -306,7 +305,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            turnActionFacts.append(SinkActionFact(state: "completed", reason: nil))
+            // The seek sinks return presentation only — no result channel — so
+            // the call is a Void call, not an observed completion. Nothing is
+            // recorded here (spec 1a0661ba: claims track actual results).
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
@@ -314,7 +315,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
-            turnActionFacts.append(SinkActionFact(state: "completed", reason: nil))
+            // Same Void-result rule as seek_to (spec 1a0661ba).
         case "stop_quote":
             guard let restoreMs = preQuotePositionMs else {
                 // The action's own decline: no quote is in flight to stop.
@@ -323,7 +324,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
-            turnActionFacts.append(SinkActionFact(state: "completed", reason: nil))
+            // The performed branch is a Void seek too — only the decline above
+            // is an observed fact.
         case "seek_relative":
             // Recorded below once performed (see the shared tail of this case).
             // Per the recovery contract (PR 59, cloud-seek-relative):
@@ -339,7 +341,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // next call site that passes the wrapper where a string is wanted.
             let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
-            turnActionFacts.append(SinkActionFact(state: "completed", reason: nil))
+            // Same Void-result rule: no observed result, no claim.
         case "pause":
             let (response, fact) = playbackSink.pauseWithFact()
             _ = response

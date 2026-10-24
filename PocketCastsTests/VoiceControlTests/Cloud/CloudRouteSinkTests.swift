@@ -416,10 +416,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(fact?.reason, "precondition_failed")
     }
 
-    /// RED: an actually-performed action + done = the sink's own observed
-    /// completion of the operation set (not inferred FROM done — the action
-    /// result is the evidence).
-    func testPerformedActionInsideTheTurnFactsCompleted() async {
+    /// Void-result actions (the seek sinks return presentation only) are NOT
+    /// claims: a turn whose only actions were Void seeks states no fact at
+    /// done — unobserved, not completed (spec 1a0661ba).
+    func testVoidResultActionsStateNoClaim() async {
         self.pendingFixture =
             """
             event: action
@@ -431,8 +431,63 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let (_, fact) = await makeSink().routeToCloud(
             request: "x", tier: .free, context: sampleContext())
-        XCTAssertEqual(fact?.state, "completed")
-        XCTAssertNil(fact?.reason)
+        XCTAssertNil(fact, "a Void seek call is not an observed action result")
+    }
+
+    /// Transport termination without `done` (the client's own request timeout
+    /// surfaces as stream end): no server outcome — no fact.
+    func testStreamEndWithoutDoneStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"partial"}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        // The client surfaces premature close as a synthesized error event
+        // (hence the spoken "connection lost" template) — but no server turn
+        // outcome was observed, so still no fact.
+        XCTAssertNil(fact)
+    }
+
+    /// PENDING-AUDIO fixture coverage (spec 1a0661ba): with audio still
+    /// buffered at done, the execution fact comes from the actions alone —
+    /// pending playback neither gates nor upgrades the claim.
+    func testPendingAudioDoesNotGateTheActionFact() async {
+        let player = CloudAudioPlayer()
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0, count: 4800)))
+        XCTAssertTrue(player.hasPendingAudio, "fixture precondition: audio is buffered")
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: "https://cloud.test",
+                    fixture: self.nextFixture()
+                )
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { true },
+            audioPlayer: player,
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics
+        )
+        let (_, fact) = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run", "the declined action is the fact; pending audio is separate")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
     }
 
     /// RED: MIXED outcomes — one declined, one performed — resolve to the
@@ -662,9 +717,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // The WINNING (done) turn states no fact either (stream completion).
         XCTAssertNil(secondFact)
         let (_, lostFact) = await slow.value
-        // SUPERSESSION-AFTER-ACTION: the losing turn is not user cancellation
-        // (spec b9b82155) and ran actions before being replaced — no fact.
-        XCTAssertNil(lostFact, "supersession is not cancellation and proves no outcome")
+        // SUPERSESSION-AFTER-ACTION: supersession itself is not cancellation
+        // and proves no outcome — but facts the losing turn ALREADY observed
+        // (here: its stop_quote decline, processed before replacement) are
+        // delivered, not discarded (spec 1a0661ba).
+        XCTAssertNil(lostFact,
+                     "this fixture's losing turn observed no action outcomes, so nil stands")
 
         // Exactly one resume: the superseding turn's. A must not restore after B.
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
