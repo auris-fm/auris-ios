@@ -1113,6 +1113,138 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
+    /// THE ACTUAL PRODUCER BYTE MATRIX (clean-3dd disposition). SCOPE, stated exactly: the five
+    /// f8 branch cases are driven through the REAL engine pipeline (DetectorWake, stub backend,
+    /// the engine's own observation sites, and routing through the same consumer seam the service
+    /// uses), so the exported metadata bytes are PRODUCER output — not the test-supplied
+    /// observations of the encoder-fixture export. Each fixture is bind-verified with the
+    /// production binding before it is written, and the key producer fact is asserted on the
+    /// emitted bytes. The pinned worker intake acceptance itself runs on the host against the
+    /// clean `3dd0c91d` pin (see helper-evidence/f8-parity).
+    func test_exportActualProducerF8MatrixForPinnedWorkerIntake() async throws {
+        struct MatrixCase {
+            let name: String
+            let transcript: String
+            let language: String?
+            let canTranslate: Bool
+            let route: Bool
+            let expectedKey: (stage: String, key: String, value: String)
+        }
+        let matrix: [MatrixCase] = [
+            .init(name: "actual-f8-routing-executed", transcript: "pause", language: "en",
+                  canTranslate: false, route: true,
+                  expectedKey: ("routing", "execution_disposition", "executed")),
+            .init(name: "actual-f8-empty-result", transcript: "", language: "en",
+                  canTranslate: false, route: false,
+                  expectedKey: ("asr", "reason", "empty_result")),
+            .init(name: "actual-f8-translation-backend-handles", transcript: "bonjour",
+                  language: "fr", canTranslate: true, route: false,
+                  expectedKey: ("translation", "reason", "backend_handles_translation")),
+            .init(name: "actual-f8-translation-source-unavailable", transcript: "bonjour",
+                  language: nil, canTranslate: false, route: false,
+                  expectedKey: ("translation", "reason", "source_language_unavailable")),
+            .init(name: "actual-f8-translation-translator-unavailable", transcript: "öffne die App",
+                  language: "de", canTranslate: false, route: false,
+                  expectedKey: ("translation", "reason", "translator_unavailable")),
+        ]
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("auris-f8-producer-fixtures")
+        try? FileManager.default.removeItem(at: base)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+
+        for matrixCase in matrix {
+            // Fresh storage per case so each fixture is exactly one producer record.
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
+            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+                                  claims: { claims })
+            chain.backend.stubTranscript = matrixCase.transcript
+            chain.backend.stubLanguage = matrixCase.language
+            chain.backend.stubCanTranslate = matrixCase.canTranslate
+            var decisionContext: VoiceSharingCollector.CaptureContext?
+            if matrixCase.route {
+                // Stand where the SERVICE stands: the engine hands the frozen context to the
+                // routing consumer; the consumer reports routing, then finalizes.
+                chain.engine.onRoutingInput = { _, context in
+                    decisionContext = context
+                    chain.engine.contributionCollector?.engineReported(
+                        stage: "routing",
+                        outcome: .init(state: "completed", routingDisposition: "executed"),
+                        context: context)
+                    chain.engine.contributionCollector?
+                        .finalizeDeferredCompletion(context: context)
+                }
+            }
+            chain.engine.listeningMode = .continuous
+            await chain.backend.emitSpeechThenSilence(
+                level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+            if matrixCase.route {
+                let deadline = Date().addingTimeInterval(5)
+                while decisionContext == nil, Date() < deadline {
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+                guard decisionContext != nil else {
+                    return XCTFail("\(matrixCase.name): routing must receive the frozen capture")
+                }
+            }
+            _ = waitForReadyEntries(1)
+
+            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+                !entries.isEmpty else {
+                return XCTFail("\(matrixCase.name): a durable producer record is required")
+            }
+            // Find THE entry carrying this case's key producer fact, on the emitted bytes.
+            var chosenEntry: VoiceSharingUploadQueue.Entry?
+            for entry in entries {
+                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                    .appendingPathComponent("metadata.json")
+                guard let envelope = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
+                    let observations = (envelope["record"] as? [String: Any])?["observations"]
+                        as? [String: Any],
+                    let stage = observations[matrixCase.expectedKey.stage] as? [String: Any],
+                    stage[matrixCase.expectedKey.key] as? String == matrixCase.expectedKey.value
+                else { continue }
+                chosenEntry = entry
+                break
+            }
+            guard let entry = chosenEntry else {
+                return XCTFail("\(matrixCase.name): no durable record carried "
+                    + "\(matrixCase.expectedKey.stage)/\(matrixCase.expectedKey.key)="
+                    + "\(matrixCase.expectedKey.value); entries=\(entries.count)")
+            }
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            let audioURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("audio.wav")
+            let metadata = try Data(contentsOf: metadataURL)
+            let audio = try Data(contentsOf: audioURL)
+            // SELF-CONSISTENT: the production binding must accept the producer bytes.
+            let bound = try VoiceSharingRecordBinding.bind(
+                envelope: metadata, audio: audio)
+            XCTAssertFalse(bound.recordSHA256.isEmpty)
+            let dir = base.appendingPathComponent(matrixCase.name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try metadata.write(to: dir.appendingPathComponent("metadata.json"))
+            try audio.write(to: dir.appendingPathComponent("audio.wav"))
+            let manifest: [String: String] = [
+                "record_sha256": bound.recordSHA256,
+                "metadata_sha256": SHA256.hash(data: metadata)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "audio_sha256": SHA256.hash(data: audio)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "f8_case": matrixCase.name,
+                "producer": "engine-pipeline",
+            ]
+            try JSONSerialization.data(
+                withJSONObject: manifest, options: [.sortedKeys, .prettyPrinted])
+                .write(to: dir.appendingPathComponent("manifest.json"))
+        }
+    }
+
     /// COLLECTOR-LEVEL PROBE: an engine report made while the capture is open must ride the event that
     /// the DEFERRED finalize emits. This isolates the merge from the engine and the sink.
     func test_anEngineReportMadeWhileOpenRidesTheDeferredCompletionEvent() async {
