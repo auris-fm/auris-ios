@@ -6,8 +6,6 @@ class VoiceAsrEngine {
     private let segmenter: NativeVadSegmenter
     private let backend: AsrBackend
     private let signalFilter: SignalFilter
-    /// TEST SEAM (r4366062986): read-only access so a control can inspect what the production
-    /// filter path actually handed the filter. Nil in production logic; never mutated.
     private let wakeWordDetector: WakeWordDetectorProtocol
     private let gracePeriodSignal: GracePeriodSignal
     private let stageTimer: RecognitionStageTimer
