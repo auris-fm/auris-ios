@@ -15,10 +15,10 @@ protocol PlaybackManagerProtocol {
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
-    /// Whether the Up-Next queue currently holds an episode to skip to. Read by the sink's
-    /// fact channel: a skip with nothing queued is a real decline (the object is absent), not a
-    /// completion wearing a success template. Default-derived from the existing method where a
-    /// count is not directly available is NOT possible, so this is a requirement.
+    /// The skip WITH its actual decision: `outcome` is returned at the manager's own
+    /// guard/action branches (played episode — shuffle-attributed — vs decline). The
+    /// `presentationTitle` carries only the historical spoken candidate and proves nothing.
+    func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: PlaybackManager.NextEpisodeSkipOutcome)
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -56,15 +56,16 @@ class PlaybackManagerSink: VoicePlaybackSink {
     /// not_run/precondition_failed. The user-facing presentation is preserved unchanged.
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
-        let title = playbackManager.skipToNextUpNextEpisode()
-        // The fact is the action's OWN decision, returned at the decision site: the
-        // skip hands back the title it actually played, and nil when the up-next
-        // queue had nothing to hand over. A prior queue count is not a decision —
-        // it can only be read before the action runs (spec 5108c9ba).
-        let fact = title != nil
-            ? SinkActionFact(state: "completed", reason: nil)
-            : SinkActionFact(state: "not_run", reason: "precondition_failed")
-        let response = VoiceResponse.spoken(templates.resolve("playback.next_episode", title ?? "next episode"))
+        let result = playbackManager.skipToNextUpNextEpisodeWithFact()
+        // The fact is the action's OWN decision from the manager's guard/action
+        // branches — never the pre-read candidate title, which exists even when
+        // the action declines (reviewer 50103ef9).
+        let fact: SinkActionFact
+        switch result.outcome {
+        case .played: fact = SinkActionFact(state: "completed", reason: nil)
+        case .declined: fact = SinkActionFact(state: "not_run", reason: "precondition_failed")
+        }
+        let response = VoiceResponse.spoken(templates.resolve("playback.next_episode", result.presentationTitle ?? "next episode"))
         return (response, fact)
     }
 

@@ -396,11 +396,11 @@ private final class MockPlaybackSink: VoicePlaybackSink {
         pauseCalled = true
         return (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
     }
-    /// The skip's fact mirrors the REAL sink: it follows the action's own
-    /// returned decision (the title the skip actually played; nil = declined),
-    /// NOT a prior queue count — the real manager rechecks the queue inside the
-    /// action, so a prior positive count proves nothing (reviewer 89014b1e).
-    /// The discriminator here is exactly that returned decision.
+    /// The skip's fact mirrors the REAL sink's outcome seam: it follows the
+    /// action's own decision (`skipResult` non-nil models the manager's
+    /// `.played` outcome; nil models `.declined`). The real manager contract —
+    /// earlier candidate title vs declined action, shuffle attribution — is
+    /// pinned separately in PlaybackManagerSinkTests (reviewer 50103ef9).
     var skipResult: String? = "Episode A"
     func nextEpisode() -> VoiceResponse { nextEpisodeWithFact().response }
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
