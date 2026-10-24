@@ -95,19 +95,26 @@ final class VoiceSharingCoordinator {
     /// frames, or any other event. At fire time the gate is re-read — if the lease lapsed (or the
     /// gate is closed for any other reason), consent is gone and the collector must purge NOW.
     /// A lease renewed in between re-reads open, so a stale schedule is harmless.
+    /// Serializes RENEWAL PUBLICATION against the revocation fan-out (review e827a22e, second
+    /// race): without it, a renewal could install a fresh lease between the revoke and the end of
+    /// the fan-out, and the old generation's unscoped handlers would purge the fresh lease's
+    /// captures. The refresh path takes this barrier around the install; the expiry body holds it
+    /// across revoke AND fan-out, so a renewal can only publish AFTER the old generation's effects
+    /// have finished. Handlers must not synchronously refresh (same rule as the reentrant-lock rule).
+    private let renewalBarrier = NSLock()
+
     private func scheduleLeaseExpiryTrigger() {
-        guard let deadline = policy.installedLeaseExpiry else { return }
-        let delay = max(0, deadline - monotonicClock.now())
-        // Generation-bound, not token-bound (review 5ae8f430): a locked token snapshot still left
-        // check-then-purge interleavable — a renewal could land between the lapsed-lease check and
-        // the purge, letting a stale expiry revoke a FRESH lease. The revoke itself is now the
-        // atomic step at the policy authority: it validates the armed generation under the same
-        // lock that invalidates, so a superseded schedule can only ever do nothing.
-        let armedGeneration = policy.latestInstalledLeaseGeneration
+        // Deadline and generation are captured in ONE locked policy call: a concurrent install moves
+        // both together, so they can never be paired across installs.
+        guard let target = policy.leaseExpiryTarget() else { return }
+        let delay = max(0, target.deadline - monotonicClock.now())
         let schedule = expiryScheduler ?? Self.defaultExpiryScheduler
         schedule(delay) { [weak self] in
             guard let self else { return }
-            if self.policy.revokeIfLeaseGenerationMatches(armedGeneration) {
+            self.renewalBarrier.lock()
+            defer { self.renewalBarrier.unlock() }
+            if self.policy.revokeIfLeaseExpired(
+                generation: target.generation, deadline: target.deadline) {
                 self.consentGateLost()
             }
         }
@@ -186,6 +193,8 @@ final class VoiceSharingCoordinator {
         freshActivationSucceeded: Bool,
         fetchToken: VoiceSharingPolicy.FetchToken
     ) {
+        renewalBarrier.lock()
+        defer { renewalBarrier.unlock() }
         policy.refreshAfterActivation(
             freshActivationSucceeded: freshActivationSucceeded,
             fetchToken: fetchToken

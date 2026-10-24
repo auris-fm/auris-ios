@@ -192,26 +192,34 @@ final class VoiceSharingPolicy {
             // caller remembering to schedule it. The coordinator arms the expiry trigger here rather
             // than only at the tail of its refresh (audit finding 2026-10-23: a lease installed by any
             // other route had no time-driven purge).
-            latestInstalledLeaseGeneration = leaseGeneration
             // Delivered with the lock released (the handler reads the policy back) and AFTER the
-            // generation is published: the arming hook reads it, so publishing after the call would
-            // arm the expiry against the PREVIOUS lease's generation.
+            // generation is bumped: the arming hook reads it, so arming before the bump would arm
+            // the expiry against the PREVIOUS lease's generation.
             onLeaseInstalled?(snapshot)
             return snapshot
         }
     }
 
-    /// The generation of the MOST RECENT successful install. The coordinator's schedule captures this
-    /// at arm time and hands it back to `revokeIfLeaseGenerationMatches`, which validates it atomically.
-    private(set) var latestInstalledLeaseGeneration = 0
-
-    /// ATOMIC expiry transition (review 5ae8f430): invalidate the lease ONLY if it is still the one
-    /// the caller armed. Returns false without touching anything when a renewal (or an identity
-    /// move) has superseded the armed generation — the stale expiry then does nothing, and cannot
-    /// revoke a lease it no longer owns. True means the caller owns the revocation fan-out.
-    func revokeIfLeaseGenerationMatches(_ generation: Int) -> Bool {
+    /// The scheduling token: deadline AND generation read in ONE locked step (review e827a22e —
+    /// reading them separately let a concurrent install pair an old deadline with a new generation).
+    func leaseExpiryTarget() -> (deadline: MonotonicTime, generation: Int)? {
         lock.lock()
-        guard leaseGeneration == generation, installed != nil else {
+        defer { lock.unlock() }
+        guard let installed else { return nil }
+        return (installed.leaseExpiresAt, leaseGeneration)
+    }
+
+    /// ATOMIC expiry transition (reviews 5ae8f430, e827a22e): invalidate the lease ONLY if ALL of
+    /// these hold under ONE lock — the lease is still the one the caller armed (generation), it is
+    /// still the SAME deadline (a renewing install moves both), and the deadline has actually
+    /// lapsed. Otherwise a stale timer could revoke an UNEXPIRED fresh lease whose generation it
+    /// happened to pair with. True means the caller owns the revocation fan-out.
+    func revokeIfLeaseExpired(generation: Int, deadline: MonotonicTime) -> Bool {
+        lock.lock()
+        guard leaseGeneration == generation, installed != nil,
+              installed?.leaseExpiresAt == deadline,
+              clock.now() >= deadline
+        else {
             lock.unlock()
             return false
         }

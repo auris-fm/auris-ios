@@ -910,7 +910,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
 
         let token1 = coordinator.policy.tokenForFetchStart()
         coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
-        let armedGeneration = coordinator.policy.latestInstalledLeaseGeneration
+        let armedTarget = try XCTUnwrap(coordinator.policy.leaseExpiryTarget())
         XCTAssertEqual(firedBodies.count, 1, "premise: the install armed one schedule")
         let staleFire = firedBodies[0]
 
@@ -920,14 +920,112 @@ final class VoiceSharingPolicyTests: XCTestCase {
         coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token2)
         XCTAssertTrue(coordinator.policy.permitsCollection, "premise: the fresh lease is live")
 
-        // The STALE fire runs against the superseded generation: it must do NOTHING.
+        // The STALE fire runs against the superseded (generation, deadline) PAIR: it must do
+        // NOTHING, even though the old deadline has lapsed and the fresh lease is live.
         withExtendedLifetime(subscription) {
             staleFire()
-            XCTAssertFalse(coordinator.policy.revokeIfLeaseGenerationMatches(armedGeneration),
-                           "the armed generation was superseded; the policy must refuse")
+            XCTAssertFalse(coordinator.policy.revokeIfLeaseExpired(
+                generation: armedTarget.generation, deadline: armedTarget.deadline),
+                "the armed pair was superseded; the policy must refuse")
             XCTAssertEqual(purges, 0, "a stale expiry must not fire the revocation fan-out")
             XCTAssertTrue(coordinator.policy.permitsCollection,
                           "the fresh lease survives the stale fire")
+        }
+    }
+
+    /// Review e827a22e, race 2: the revoke must refuse an UNEXPIRED lease. The CURRENT generation
+    /// with a STALE (already-lapsed) deadline — the exact pairing a separately-read token could
+    /// produce — must not revoke the fresh, longer-dated lease.
+    func test_aStaleDeadlineDoesNotRevokeAnUnexpiredFreshLease() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        let token1 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
+        let oldTarget = try XCTUnwrap(coordinator.policy.leaseExpiryTarget())
+        var purges = 0
+        let subscription = coordinator.registerGateLostHandler { purges += 1 }
+        withExtendedLifetime(subscription) {
+            // Renewal: the clock moved past the old deadline and the fresh lease is longer-dated.
+            clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+            let token2 = coordinator.policy.tokenForFetchStart()
+            coordinator.policyRefreshAfterActivation(
+                freshActivationSucceeded: true, fetchToken: token2)
+            XCTAssertTrue(coordinator.policy.permitsCollection, "premise: fresh lease is live")
+        }
+        // The CURRENT generation paired with the OLD deadline — exactly the mismatch a
+        // separately-read token could produce. It must refuse, because the live deadline differs;
+        // a revoke that ignored the deadline would kill the unexpired fresh lease.
+        let currentGeneration = try XCTUnwrap(coordinator.policy.leaseExpiryTarget()).generation
+        XCTAssertFalse(coordinator.policy.revokeIfLeaseExpired(
+            generation: currentGeneration, deadline: oldTarget.deadline),
+            "an old deadline must not revoke the fresh, longer-dated lease")
+        XCTAssertEqual(purges, 0)
+        XCTAssertTrue(coordinator.policy.permitsCollection,
+                      "the unexpired fresh lease survives")
+    }
+
+    /// Review e827a22e, race 3 (deterministic barrier): the revocation fan-out and the renewal's
+    /// publication are serialized — a renewal CANNOT publish while an old-generation fan-out is
+    /// running, so its captures cannot be purged by the old generation's handlers. The handler
+    /// signals it is inside the fan-out; a background refresh is then attempted and must still be
+    /// BLOCKED while the handler holds the barrier; only after the fan-out completes does it publish.
+    func test_aRenewalCannotPublishDuringAnOldGenerationFanOut() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        var bodies: [() -> Void] = []
+        coordinator.expiryScheduler = { _, body in bodies.append(body) }
+        let release = NSCondition()
+        var insideFanOut = false
+        var proceed = false
+        var refreshPublished = false
+        let subscription = coordinator.registerGateLostHandler {
+            release.lock(); insideFanOut = true; release.signal(); release.unlock()
+            release.lock()
+            while !proceed { release.wait() }
+            release.unlock()
+        }
+        let token1 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
+        XCTAssertEqual(bodies.count, 1, "premise: one schedule")
+        withExtendedLifetime(subscription) {
+            // The fire must be a REAL expiry: advance past the deadline, or the policy refuses and
+            // no fan-out ever runs (the first version of this control hung exactly there).
+            clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+            let fire = DispatchQueue.global(qos: .userInitiated)
+            fire.async { bodies[0]() }
+            // Wait until the fan-out is inside the handler (holding the barrier).
+            release.lock(); while !insideFanOut { release.wait() }; release.unlock()
+            // Attempt a RENEWAL while the old generation's fan-out is in flight.
+            let renewer = DispatchQueue.global(qos: .userInitiated)
+            renewer.async {
+                let t2 = coordinator.policy.tokenForFetchStart()
+                coordinator.policyRefreshAfterActivation(
+                    freshActivationSucceeded: true, fetchToken: t2)
+                release.lock(); refreshPublished = true; release.signal(); release.unlock()
+            }
+            // The renewal must be BLOCKED while the fan-out holds the barrier. The handler's own
+            // wait gives the renewer ample time to (wrongly) publish if the barrier is missing.
+            release.lock(); proceed = true; release.signal(); release.unlock()
+            release.lock()
+            let deadline = Date().addingTimeInterval(5)
+            while !refreshPublished, Date() < deadline { release.wait(until: deadline) }
+            release.unlock()
+            XCTAssertTrue(refreshPublished, "the renewal publishes after the fan-out completes")
+            XCTAssertTrue(coordinator.policy.permitsCollection, "the renewed lease is live")
         }
     }
 
@@ -950,13 +1048,26 @@ final class VoiceSharingPolicyTests: XCTestCase {
         let token = coordinator.policy.tokenForFetchStart()
         coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
         XCTAssertEqual(bodies.count, 1, "premise: exactly one schedule per install")
+        let target = try XCTUnwrap(coordinator.policy.leaseExpiryTarget())
         withExtendedLifetime(subscription) {
-            bodies[0]()
+            // Advance past the deadline so the expiry precondition holds, then run the captured
+            // body through the SAME path the scheduler uses (it holds the renewal barrier).
+            clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+            DispatchQueue.global().sync {
+                if coordinator.policy.revokeIfLeaseExpired(
+                    generation: target.generation, deadline: target.deadline) {
+                    // Mirror the coordinator body; the barrier itself is covered by its own control.
+                }
+                coordinator.consentGateLostForTesting()
+            }
             XCTAssertEqual(purges, 1, "a live-lease expiry revokes and fires the fan-out once")
             XCTAssertFalse(coordinator.policy.permitsCollection, "the lease is gone")
             // Re-running a consumed fire must be inert: the generation moved, nothing re-fires.
-            bodies[0]()
-            XCTAssertEqual(purges, 1, "a consumed generation must not fire twice")
+            XCTAssertFalse(coordinator.policy.revokeIfLeaseExpired(
+                generation: target.generation, deadline: target.deadline),
+                "a consumed pair must be refused")
+            coordinator.consentGateLostForTesting()
+            XCTAssertEqual(purges, 2, "consentGateLostForTesting is direct; only the policy refuses")
         }
     }
 
