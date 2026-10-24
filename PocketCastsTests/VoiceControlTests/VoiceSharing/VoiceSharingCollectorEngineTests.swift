@@ -849,6 +849,94 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "router_input is the exact text handed onward as the command input")
     }
 
+    /// REVIEW 5f42fb0c: same-stage re-reports must NOT carry a generic merge across state changes —
+    /// a completed report must not inherit a previous reason, an empty_result must not inherit
+    /// previous text/router_input, and ONLY routing's classification facts survive to settlement.
+    /// Each case binds the ENCODED record, so a contradiction is a schema refusal, not just a
+    /// dictionary mismatch.
+    func test_sameStageReReportsCarryOnlyIntendedFactsAcrossTransitions() throws {
+        let policy = openGate(enrolled: true)
+        let collector = makeRecordingCollector(policy)
+        func makeCase() -> VoiceSharingCollector.CaptureContext {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            guard let ctx = collector.currentCaptureContextForTesting else {
+                fatalError("premise: an open capture")
+            }
+            return ctx
+        }
+        func encodedObservations(_ ctx: VoiceSharingCollector.CaptureContext) throws
+            -> [String: Any] {
+            collector.segmentationEnded(ctx)
+            collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx)
+            let completed = collectedEvents.first {
+                $0.captureID == ctx.id && $0.kind == .completed
+            }
+            let provenance = VoiceSharingContributionEncoder.Provenance(
+                platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+                models: VoiceSharingContributionEncoder.Models(
+                    vad: .init(id: "vad-1", version: "1"),
+                    wakeword: .init(id: "wake-1", version: "1"),
+                    asr: .init(id: "asr-1", version: "1"), translation: nil,
+                    router: .init(id: "router-1", version: "1")),
+                conversionVersion: "v1")
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: completed!, provenance: provenance,
+                observations: completed!.reportedStages)
+            let envelope = try JSONSerialization.jsonObject(
+                with: encoded.metadataEnvelope, options: []) as? [String: Any]
+            _ = try VoiceSharingRecordBinding.bind(
+                envelope: encoded.metadataEnvelope, audio: encoded.wav)
+            return ((envelope!["record"] as! [String: Any])["observations"] as! [String: Any])
+        }
+
+        do { // failed → completed: the failure reason must NOT leak into the success.
+            let ctx = makeCase()
+            collector.engineReported(stage: "asr",
+                outcome: .init(state: "failed", reason: "provider_error"), context: ctx)
+            collector.engineReported(stage: "asr",
+                outcome: .init(state: "completed", text: "pause",
+                               sourceLanguage: "en", routerInput: "pause"), context: ctx)
+            let asr = try encodedObservations(ctx)["asr"] as! [String: Any]
+            XCTAssertNil(asr["reason"], "a completed stage must not inherit a failed report's reason")
+            XCTAssertEqual(asr["text"] as? String, "pause")
+        }
+        collectedEvents.removeAll()
+
+        do { // completed-with-text → empty_result: text/router_input must NOT leak (the binding
+             // refuses a carrying empty_result, which is exactly why inheritance is dangerous).
+            let ctx = makeCase()
+            collector.engineReported(stage: "asr",
+                outcome: .init(state: "completed", text: "pause",
+                               sourceLanguage: "en", routerInput: "pause"), context: ctx)
+            collector.engineReported(stage: "asr",
+                outcome: .init(state: "completed",
+                               reason: VoiceSharingRecordBinding.emptyResultReasonForEngine),
+                context: ctx)
+            let asr = try encodedObservations(ctx)["asr"] as! [String: Any]
+            XCTAssertNil(asr["text"], "empty_result must not inherit previous text")
+            XCTAssertNil(asr["router_input"], "empty_result must not inherit previous router_input")
+            XCTAssertEqual(asr["reason"] as? String,
+                           VoiceSharingRecordBinding.emptyResultReasonForEngine)
+        }
+        collectedEvents.removeAll()
+
+        do { // classification → settlement: ONLY the classification facts survive, and the
+             // disposition reaches its terminal value.
+            let ctx = makeCase()
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "completed", routingDisposition: "pending",
+                               predictedIntent: "playback.pause", predictedTool: "playback"),
+                context: ctx)
+            collector.engineReported(stage: "routing",
+                outcome: .init(state: "completed", routingDisposition: "executed"), context: ctx)
+            let routing = try encodedObservations(ctx)["routing"] as! [String: Any]
+            XCTAssertEqual(routing["execution_disposition"] as? String, "executed")
+            XCTAssertEqual(routing["predicted_intent"] as? String, "playback.pause")
+            XCTAssertEqual(routing["predicted_tool"] as? String, "playback")
+            XCTAssertNil(routing["reason"])
+        }
+    }
+
     /// THE THREE TRANSLATION SKIPS ARE DISTINCT FACTS (spec delta 4d10275f). Collapsing them into
     /// `observation_unavailable` threw away what the engine actually knew. Each must reach the durable
     /// record under its own reason, and none may borrow `source_language_target_language`.

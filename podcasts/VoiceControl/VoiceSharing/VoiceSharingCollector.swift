@@ -298,33 +298,41 @@ final class VoiceSharingCollector {
         // carries it. A capture already emitted cannot be amended: its record is immutable, which is
         // the point of the digest.
         // A stage can be reported MORE THAN ONCE (e.g. routing at classification time, then again at
-        // settlement with its terminal disposition). Replacement would erase the first report's
-        // facts, so members the new outcome does not state are carried forward from the prior one;
-        // the new report wins wherever it states a member.
-        func merged(_ previous: VoiceSharingContributionEncoder.StageOutcome?
+        // settlement with its terminal disposition). But a GENERIC carry-forward is unsafe across
+        // state changes (review 5f42fb0c): a completed report would inherit a previous reason, and
+        // an empty_result would inherit previous text/router_input — contradictions or schema
+        // refusals. Nil cannot always mean preserve. So: ONLY routing's classification facts
+        // (predicted names and disposition) are intentionally retained for settlement; every other
+        // member comes from the new report alone, and a nil CLEARS.
+        func merged(_ previous: VoiceSharingContributionEncoder.StageOutcome?,
+                    stage: String
         ) -> VoiceSharingContributionEncoder.StageOutcome {
             guard let previous else { return outcome }
-            return .init(
-                state: outcome.state,
-                reason: outcome.reason ?? previous.reason,
-                text: outcome.text ?? previous.text,
-                decision: outcome.decision ?? previous.decision,
-                translatedText: outcome.translatedText ?? previous.translatedText,
-                targetLanguage: outcome.targetLanguage ?? previous.targetLanguage,
-                routingDisposition: outcome.routingDisposition ?? previous.routingDisposition,
-                sourceLanguage: outcome.sourceLanguage ?? previous.sourceLanguage,
-                routerInput: outcome.routerInput ?? previous.routerInput,
-                predictedIntent: outcome.predictedIntent ?? previous.predictedIntent,
-                predictedTool: outcome.predictedTool ?? previous.predictedTool,
-                outcome: outcome.outcome ?? previous.outcome)
+            if stage == "routing" {
+                return .init(
+                    state: outcome.state,
+                    reason: outcome.reason,
+                    text: outcome.text,
+                    decision: outcome.decision,
+                    translatedText: outcome.translatedText,
+                    targetLanguage: outcome.targetLanguage,
+                    routingDisposition: outcome.routingDisposition
+                        ?? previous.routingDisposition,
+                    sourceLanguage: outcome.sourceLanguage,
+                    routerInput: outcome.routerInput,
+                    predictedIntent: outcome.predictedIntent ?? previous.predictedIntent,
+                    predictedTool: outcome.predictedTool ?? previous.predictedTool,
+                    outcome: outcome.outcome)
+            }
+            return outcome
         }
         if var c = current, c.id == context.id, !c.terminal, c.sawStart {
-            c.reportedStages[stage] = merged(c.reportedStages[stage])
+            c.reportedStages[stage] = merged(c.reportedStages[stage], stage: stage)
             current = c
             return
         }
         if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
-            rec.capture.reportedStages[stage] = merged(rec.capture.reportedStages[stage])
+            rec.capture.reportedStages[stage] = merged(rec.capture.reportedStages[stage], stage: stage)
             terminalRing[context.id] = rec
         }
     }
