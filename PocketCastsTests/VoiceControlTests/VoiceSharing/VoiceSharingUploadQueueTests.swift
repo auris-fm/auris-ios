@@ -202,8 +202,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(entryDirSyncs.count, 5,
                        "content barrier, created.at barrier, owner barrier, post-stage barrier, "
                        + "then the commit point after the marker")
-        // THREE root syncs: the stage-file removal, the marker-replacement temporary, and the
-        // commit-point confirmation. Each root-metadata change needs its own barrier; the previous
+        // TWO root syncs: the stage-file removal and the commit-point confirmation. (The marker's
+        // temporary is written INSIDE the entry directory, so it is covered by the entry-dir
+        // barrier, not the root's.) The previous
         // "once, at the commit" was true of an older protocol that wrote no root temporary.
         XCTAssertEqual(rootSyncs.count, 2,
                        "the root is synced after the stage removal and at the commit; the marker "

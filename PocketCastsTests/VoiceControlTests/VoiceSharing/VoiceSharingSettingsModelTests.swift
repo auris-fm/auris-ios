@@ -882,3 +882,104 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
                        "a superseded timer must not publish")
     }
 }
+
+// MARK: - Timer lifecycle gaps (reviewer 71088b91)
+
+final class VoiceSharingTimerLifecycleTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vstimer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// TWO entries of different ages: the schedule must follow the NEAREST expiry (the OLDEST
+    /// entry), not the youngest one's — which would leave the oldest displayed almost a full extra
+    /// retention period.
+    func test_theNearestExpiryIsScheduledForTwoEntriesOfDifferentAges() throws {
+        var now = Foundation.Date()
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        let entries = queue.readyEntries()
+        XCTAssertEqual(entries.count, 2, "setup: two retained entries")
+        // One is nearly expired, the other nearly fresh.
+        try VoiceSharingDeletionFixture.backdate(entries[0], in: queue,
+                                                 by: VoiceSharingUploadQueue.maxEntryAge - 60)
+        let delay = try XCTUnwrap(queue.secondsUntilNextAgeBoundary())
+        XCTAssertLessThan(delay, 120,
+                          "the schedule must follow the OLDEST entry (\(delay)s is the youngest's expiry)")
+    }
+
+    /// An EMPTY visible queue schedules nothing, but the entry added right after it must arm a
+    /// timer — the assembly's queue observer calls refresh, which must re-arm.
+    func test_anEntryAddedAfterAnEmptyRenderArmsATimer() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        var scheduled: [TimeInterval] = []
+        model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
+        model.refreshLiveState()
+        XCTAssertTrue(scheduled.isEmpty, "nothing retained ⇒ nothing to wait for")
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        model.refreshLiveState()   // what the production queue observer does
+        XCTAssertEqual(scheduled.count, 1,
+                       "an authoritative update must re-arm, or the new entry never gets a timer")
+    }
+
+    /// An EXPIRED lease must not re-arm forever. The refresh happens once; a past transition is not
+    /// a reason to wake again.
+    func test_anExpiredLeaseRefreshesOnceWithoutARecurringTimer() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var leaseDelay: TimeInterval? = 30
+        model.nextLeaseExpirySeconds = { leaseDelay }
+        var bodies: [(TimeInterval, () -> Void)] = []
+        model.scheduleTimeDrivenRefresh = { delay, body in bodies.append((delay, body)) }
+        model.refreshLiveState()
+        XCTAssertEqual(bodies.count, 1, "a future deadline arms once")
+        XCTAssertGreaterThan(bodies[0].0, 0, "and it is a real delay, not a 50 ms spin")
+
+        // The deadline passes: the timer fires, the refresh runs, the delay is now negative.
+        leaseDelay = -5
+        bodies[0].1()
+        XCTAssertEqual(bodies.count, 1,
+                       "an EXPIRED lease must not re-arm: that is the 50 ms loop the reviewer found")
+    }
+
+    /// Arming again must invalidate a previously armed timer even when nothing is now due.
+    func test_rearmingWithNothingDueInvalidatesTheOldTimer() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var boundary: TimeInterval? = 600
+        model.nextAgeBoundarySeconds = { boundary }
+        var bodies: [() -> Void] = []
+        model.scheduleTimeDrivenRefresh = { _, body in bodies.append(body) }
+        model.refreshLiveState()
+        XCTAssertEqual(bodies.count, 1)
+        // The situation that armed it goes away (e.g. the entry was uploaded/removed).
+        boundary = nil
+        model.armTimeDrivenRefresh()
+        let publishedBefore = model.publicationSequence
+        bodies[0]()   // the superseded timer fires late
+        XCTAssertEqual(model.publicationSequence, publishedBefore,
+                       "a timer superseded by an arm with nothing due must not publish")
+    }
+}

@@ -381,8 +381,11 @@ final class VoiceSharingUploadQueue {
                 .filter { (try? confirmDurableLocked(directory: entryDirectoryLocked(for: $0))) != nil }
                 .compactMap { markerAgeLocked($0) }
                 .filter { $0 >= 0 && $0 <= Self.maxEntryAge }
-            guard let soonest = ages.min() else { return nil }
-            return max(0, Self.maxEntryAge - soonest)
+            // The NEAREST expiry is the OLDEST eligible entry (largest age), not the youngest
+            // (reviewer 71088b91): `ages.min()` waited for the newest entry's expiry and left the
+            // oldest displayed for almost a full extra retention period.
+            guard let oldest = ages.max() else { return nil }
+            return max(0, Self.maxEntryAge - oldest)
         }
     }
 
@@ -616,39 +619,36 @@ final class VoiceSharingUploadQueue {
     /// entry left in place — retained, still charged, never silently "gone".
     @discardableResult
     func discardUnready(_ entry: Entry) throws -> Bool {
-        let discarded = try discardUnreadyLocked(entry)
-        // The version commit runs AFTER the removal completed: `readyEntryCountLocked` reads the
-        // disk, so computing it inside the mutation's critical section could observe the remove as
-        // not yet applied and sign a stale count. The window the reviewer named was the reverse
-        // ordering (commit on a DIFFERENT later hop); this one commits immediately after the same
-        // synchronous operation, with the count read from the post-mutation state.
-        serialQueue.sync { bumpHoldGenerationForContentChange() }
-        return discarded
+        try serialQueue.sync {
+            // Mutation and version commit in ONE critical section: `removeItem` has already
+            // returned by the time the bump reads the post-removal state, so there is no window in
+            // which the changed content carries the old version (reviewer 71088b91).
+            defer { bumpHoldGenerationForContentChange() }
+            return try discardUnreadyLocked(entry)
+        }
     }
 
     private func discardUnreadyLocked(_ entry: Entry) throws -> Bool {
-        try serialQueue.sync {
-            guard entry.root == rootDirectory,
-                UUID(uuidString: entry.name) != nil,
-                !entry.name.contains("/")
-            else { throw CocoaError(.fileNoSuchFile) }
-            let directory = try validatedEntryDirectoryLocked(entry)
-            switch Self.statKind(of: directory.appendingPathComponent(Self.readyMarkerName)) {
-            case .present:
-                return false
-            case .failure:
-                throw PrepareError.accountingUnavailable
-            case .absent:
-                break
-            }
-            do {
-                try fileManager.removeItem(at: directory)
-            } catch {
-                // Cleanup failure: the entry REMAINS (charged, unready). Never collapse into gone.
-                throw PrepareError.accountingUnavailable
-            }
-            return true
+        guard entry.root == rootDirectory,
+            UUID(uuidString: entry.name) != nil,
+            !entry.name.contains("/")
+        else { throw CocoaError(.fileNoSuchFile) }
+        let directory = try validatedEntryDirectoryLocked(entry)
+        switch Self.statKind(of: directory.appendingPathComponent(Self.readyMarkerName)) {
+        case .present:
+            return false
+        case .failure:
+            throw PrepareError.accountingUnavailable
+        case .absent:
+            break
         }
+        do {
+            try fileManager.removeItem(at: directory)
+        } catch {
+            // Cleanup failure: the entry REMAINS (charged, unready). Never collapse into gone.
+            throw PrepareError.accountingUnavailable
+        }
+        return true
     }
 
     /// Consent revocation (withdrawal, sign-out, switch-off, lease loss): removes EVERY entry —

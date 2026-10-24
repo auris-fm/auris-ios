@@ -299,14 +299,20 @@ final class VoiceSharingSettingsModel {
     /// silently stopped being served.
     var scheduleTimeDrivenRefresh: ((_ after: TimeInterval, _ body: @escaping () -> Void) -> Void)?
 
-    /// Seconds until the nearest time-caused transition: the next age boundary, or the lease
-    /// deadline. Generous +1s margin so the refresh lands AFTER the transition, never before it.
+    /// Seconds until the nearest time-caused transition that is still IN THE FUTURE: the next age
+    /// boundary, or the lease deadline. Generous +1s margin so the refresh lands AFTER the
+    /// transition, never before it.
+    ///
+    /// Transitions already in the past are EXCLUDED (reviewer 71088b91): an expired lease reports a
+    /// negative delay, and turning that into a 50 ms delay re-armed the timer forever, once per
+    /// fire. A past transition is not a reason to wake again — its refresh already happened.
     private func secondsUntilNextTimeTransition() -> TimeInterval? {
         var candidates: [TimeInterval] = []
         if let age = nextAgeBoundarySeconds?() { candidates.append(age) }
         if let lease = nextLeaseExpirySeconds?() { candidates.append(lease) }
-        guard let soonest = candidates.min() else { return nil }
-        return max(0.05, soonest + 1)
+        let future = candidates.filter { $0 > 0 }
+        guard let soonest = future.min() else { return nil }
+        return soonest + 1
     }
 
     /// Injected sources for the time-driven refresh: the queue's next age boundary and the
@@ -319,12 +325,15 @@ final class VoiceSharingSettingsModel {
     private var pendingTimeRefreshToken = 0
 
     func armTimeDrivenRefresh() {
-        guard let schedule = scheduleTimeDrivenRefresh,
-              let delay = secondsUntilNextTimeTransition() else { return }
+        // INVALIDATE FIRST, ALWAYS (reviewer 71088b91): even when nothing is due, any previously
+        // armed timer must be superseded — otherwise a stale timer from an earlier, longer delay
+        // keeps ownership and the newer deadline is never scheduled.
         changeLock.lock()
         pendingTimeRefreshToken &+= 1
         let token = pendingTimeRefreshToken
         changeLock.unlock()
+        guard let schedule = scheduleTimeDrivenRefresh,
+              let delay = secondsUntilNextTimeTransition() else { return }
         schedule(delay) { [weak self] in
             guard let self else { return }
             self.changeLock.lock()
@@ -373,6 +382,11 @@ final class VoiceSharingSettingsModel {
 
         let sent = SentLiveState(sequence: sequence, state: state)
         for observer in observers { observer(sent) }
+        // RE-ARM ON EVERY AUTHORITATIVE UPDATE (reviewer 71088b91): an initially empty visible
+        // queue schedules nothing, so the entry added right after it would never be given an expiry
+        // timer, and a SHORTENED or newly installed lease could miss its deadline. Re-arming here
+        // covers every source — queue, policy, enrollment — because they all refresh through here.
+        armTimeDrivenRefresh()
     }
 
     /// The sequence of the most recently committed publication; seeded on subscribe so a new
