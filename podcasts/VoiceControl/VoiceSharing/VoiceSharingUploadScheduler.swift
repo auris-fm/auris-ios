@@ -14,9 +14,18 @@ final class VoiceSharingUploadScheduler {
     enum PassOutcome {
         /// Nothing was eligible (empty, held, or every entry behind its not-before boundary).
         case idle
+        /// ANOTHER PASS OWNS THIS SCHEDULER, so this call attempted NOTHING. Distinct from `.idle`
+        /// (reviewer/spec a857340b): a refused pass reports "try again shortly", while `.idle` says
+        /// "there was nothing to do". Conflating them let a foreground trigger be silently dropped
+        /// whenever a drain was already running.
+        case busy
         /// Every entry result, in the order attempted.
         case drained([(entry: VoiceSharingUploadQueue.Entry, outcome: VoiceSharingUploader.Outcome)])
     }
+
+    /// DIAGNOSTIC (spec a857340b): the identity of the scheduler that most recently REFUSED a pass,
+    /// so a competing pass can be attributed to a specific instance instead of assumed.
+    private(set) var lastRefusedPassByDiagnostic: (scheduler: ObjectIdentifier, at: Date)?
 
     private let queue: VoiceSharingUploadQueue
     private let uploader: VoiceSharingUploader
@@ -45,9 +54,11 @@ final class VoiceSharingUploadScheduler {
     /// entries themselves are attempted through the uploader, which re-checks and enforces the
     /// queue's coverage hold, attempt leases and not-before boundaries.
     func drainOnce() async -> PassOutcome {
-        // Refuse a concurrent second pass: serialized by construction.
+        // Refuse a concurrent second pass: serialized by construction. The refusal is REPORTED as
+        // `.busy`, not `.idle`, so a caller can tell "another pass owns this" from "nothing to do".
         guard passLock.withLockElse({ !passInFlight }, set: { passInFlight = true }) else {
-            return .idle
+            lastRefusedPassByDiagnostic = (ObjectIdentifier(self), Date())
+            return .busy
         }
         defer { passLock.withLock { passInFlight = false } }
         guard isAuthorized() else { return .idle }

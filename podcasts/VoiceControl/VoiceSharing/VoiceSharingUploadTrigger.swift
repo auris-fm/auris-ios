@@ -66,7 +66,17 @@ final class VoiceSharingUploadTrigger {
         activeToken = token
         stateLock.unlock()
         drainTask = Task { [scheduler] in
-            _ = await scheduler.drainOnce()
+            // A REFUSED pass is not a completed one (spec a857340b): the scheduler reports `.busy`
+            // when another pass owns it, and returning here would drop this trigger's work forever
+            // (the new entry would wait for the NEXT foreground event). Re-offer once the current
+            // pass ends, bounded, with no spin: the scheduler itself serializes, so the retry is
+            // queued behind the owner rather than racing it.
+            let outcome = await scheduler.drainOnce()
+            guard case .busy = outcome else { return }
+            // Yield to the owning pass, then offer this work exactly once more. Bounded by
+            // construction: a second refusal ends the attempt instead of looping.
+            await Task.yield()
+            guard case .busy = await scheduler.drainOnce() else { return }
         }
         Task { [weak self] in
             await self?.drainTask?.value
