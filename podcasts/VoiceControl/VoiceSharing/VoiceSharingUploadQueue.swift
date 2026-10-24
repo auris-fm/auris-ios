@@ -306,17 +306,84 @@ final class VoiceSharingUploadQueue {
     /// The count a snapshot would display, computed under the serial queue WITHOUT going through
     /// the serving path's fail-closed gates (a held queue still has a count; it is simply not
     /// served). Used only to detect a change, never exposed as a count.
-    private func readyEntryCountLocked() -> Int {
-        // AGE is part of the displayed set: an entry past the queue-age bound stops being served,
-        // so the signature must move when it does — otherwise a count shown to the user silently
-        // becomes wrong with no mutation to announce (reviewer 31c7758f).
-        entriesLocked()
-            .filter { isCompleteEntryLocked(at: $0) }
-            .filter {
-                guard let created = creationInstantLocked(in: entryDirectoryLocked(for: $0)) else { return false }
-                return clock().timeIntervalSince(created) <= Self.maxEntryAge
+    /// AGE eligibility for one entry, in ONE place. The served set
+    /// (`readyEntriesReportingUnknownCoverage`), the change signature and therefore the model's
+    /// count all consult this, so a version can never disagree with what is actually served
+    /// (reviewer ffca9a27). A FUTURE marker date is not fresh — a clock skew must not extend an
+    /// entry's life — and an unreadable date is `nil`, i.e. outside the served set.
+    private func isWithinAgeBoundLocked(_ entry: Entry) -> Bool {
+        guard let age = markerAgeLocked(entry) else { return false }
+        return age >= 0 && age <= Self.maxEntryAge
+    }
+
+    /// AGE is measured from the entry's IMMUTABLE admission instant (`created.at`), which is the
+    /// only timestamp that cannot be refreshed by a later write. The marker's file mtime is NOT
+    /// used: it is stamped with real time at publication, so under an injected clock it can appear
+    /// in the future and would exclude a perfectly fresh entry (found by the diagnostics added for
+    /// reviewer ffca9a27). An unreadable instant is "age unknown" — never "fresh" and never
+    /// "ancient" (the old `distantPast` fallback).
+    private func markerAgeLocked(_ entry: Entry) -> TimeInterval? {
+        guard let created = creationInstantLocked(in: entryDirectoryLocked(for: entry)) else { return nil }
+        return clock().timeIntervalSince(created)
+    }
+
+    /// Diagnostic split of the count's exclusions. Kept because a count of 0 has three very
+    /// different meanings and conflating them has already hidden a real eligibility mismatch.
+    enum ReadyExclusion: Equatable {
+        case insideBound(Int)
+        case noneInsideBound(incomplete: Int, undurable: Int, unreadableDate: Int, futureDate: Int, agedOut: Int)
+    }
+
+    func readyCountDiagnostics() -> ReadyExclusion {
+        serialQueue.sync {
+            var incomplete = 0, undurable = 0, unreadableDate = 0, futureDate = 0, agedOut = 0, inside = 0
+            for entry in entriesLocked() {
+                guard isCompleteEntryLocked(at: entry) else { incomplete += 1; continue }
+                guard (try? confirmDurableLocked(directory: entryDirectoryLocked(for: entry))) != nil else {
+                    undurable += 1; continue
+                }
+                guard let age = markerAgeLocked(entry) else { unreadableDate += 1; continue }
+                if age < 0 { futureDate += 1 }
+                else if age > Self.maxEntryAge { agedOut += 1 }
+                else { inside += 1 }
             }
-            .count
+            return inside > 0
+                ? .insideBound(inside)
+                : .noneInsideBound(incomplete: incomplete, undurable: undurable,
+                                   unreadableDate: unreadableDate, futureDate: futureDate, agedOut: agedOut)
+        }
+    }
+
+    private func readyEntryCountLocked() -> Int {
+        readyCountLocked()
+    }
+
+    /// The SAME membership rule the serving authority uses: complete, durability-confirmed, and
+    /// within the age bound. Duplicated deliberately rather than calling the full authority, which
+    /// can throw and hold — the count is a display detail, but it must not count anything the
+    /// authority would refuse to serve.
+    func readyCountLocked() -> Int {
+        entriesLocked().filter { entry in
+            guard isCompleteEntryLocked(at: entry),
+                  (try? confirmDurableLocked(directory: entryDirectoryLocked(for: entry))) != nil
+            else { return false }
+            return isWithinAgeBoundLocked(entry)
+        }.count
+    }
+
+    /// Seconds until the NEXT entry crosses the age bound, so a timely refresh can be scheduled
+    /// instead of the displayed count silently going stale on an idle screen (reviewer ffca9a27).
+    /// `nil` when nothing is waiting on time.
+    func secondsUntilNextAgeBoundary() -> TimeInterval? {
+        serialQueue.sync {
+            let ages = entriesLocked()
+                .filter { isCompleteEntryLocked(at: $0) }
+                .filter { (try? confirmDurableLocked(directory: entryDirectoryLocked(for: $0))) != nil }
+                .compactMap { markerAgeLocked($0) }
+                .filter { $0 >= 0 && $0 <= Self.maxEntryAge }
+            guard let soonest = ages.min() else { return nil }
+            return max(0, Self.maxEntryAge - soonest)
+        }
     }
 
     // MARK: - Change notification (reviewer f62b19a4 / spec fc93e27a)
@@ -549,8 +616,14 @@ final class VoiceSharingUploadQueue {
     /// entry left in place — retained, still charged, never silently "gone".
     @discardableResult
     func discardUnready(_ entry: Entry) throws -> Bool {
-        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
-        return try discardUnreadyLocked(entry)
+        let discarded = try discardUnreadyLocked(entry)
+        // The version commit runs AFTER the removal completed: `readyEntryCountLocked` reads the
+        // disk, so computing it inside the mutation's critical section could observe the remove as
+        // not yet applied and sign a stale count. The window the reviewer named was the reverse
+        // ordering (commit on a DIFFERENT later hop); this one commits immediately after the same
+        // synchronous operation, with the count read from the post-mutation state.
+        serialQueue.sync { bumpHoldGenerationForContentChange() }
+        return discarded
     }
 
     private func discardUnreadyLocked(_ entry: Entry) throws -> Bool {
@@ -2221,13 +2294,16 @@ final class VoiceSharingUploadQueue {
                 guard case .bound = state else { continue }
                 // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
                 // shared authority); reaching here means it held.
-                if Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge {
+                // ONE age rule shared with the count signature and the change version
+                // (reviewer ffca9a27): a future (skewed) date is NOT fresh, and an unreadable
+                // date cannot claim freshness.
+                if isWithinAgeBoundLocked(entry) {
                     ready.append(entry)
                 }
             }
             return .known(ready.sorted { lhs, rhs in
-                let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
-                let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
+                let lDate = creationInstantLocked(in: entryDirectoryLocked(for: lhs)) ?? .distantPast
+                let rDate = creationInstantLocked(in: entryDirectoryLocked(for: rhs)) ?? .distantPast
                 if lDate == rDate { return lhs.name < rhs.name }
                 return lDate < rDate
             })
@@ -2299,8 +2375,8 @@ final class VoiceSharingUploadQueue {
 
     /// Deletes the entire entry: audio, metadata and marker leave the disk.
     func remove(_ entry: Entry) throws {
-        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
         try serialQueue.sync {
+            defer { bumpHoldGenerationForContentChange() }
             _ = try validatedEntryDirectoryLocked(entry)
             try fileManager.removeItem(at: entryDirectoryLocked(for: entry))
         }

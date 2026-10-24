@@ -175,6 +175,16 @@ class VoiceControlAssembly {
             coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
             policyLeaseGeneration: { VoiceSharingCoordinator.shared.policy.currentLeaseGeneration },
             queueHoldGeneration: { contributionQueue.currentHoldGeneration })
+        // Time-driven freshness: the queue's next age boundary and the policy's lease deadline.
+        settingsModel.nextAgeBoundarySeconds = { [weak contributionQueue] in
+            contributionQueue?.secondsUntilNextAgeBoundary()
+        }
+        settingsModel.nextLeaseExpirySeconds = {
+            VoiceSharingCoordinator.shared.policy.secondsUntilLeaseExpiry
+        }
+        settingsModel.scheduleTimeDrivenRefresh = { delay, body in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
+        }
         self.voiceSharingSettingsModel = settingsModel
         // EVERY authoritative update source, not just enrollment (spec fc93e27a / reviewer
         // f62b19a4): opt-in and projection acceptance, lease install/expiry/fence/withdrawal, and

@@ -55,6 +55,10 @@ struct VoiceSharingSettingsView: View {
                     if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
                 }
                 model.refreshLiveState()
+                // TIME, not just mutations, makes this surface stale: an entry crossing the
+                // queue-age bound and a lease lapsing both change what is displayed with no other
+                // event (reviewer ffca9a27).
+                model.armTimeDrivenRefresh()
             }
             .onDisappear {
                 if let stateObserver { model.removeStateObserver(stateObserver) }

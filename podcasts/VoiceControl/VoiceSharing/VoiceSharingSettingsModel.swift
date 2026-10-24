@@ -291,6 +291,51 @@ final class VoiceSharingSettingsModel {
     /// control can hold an older read open while a newer one completes (reviewer 31c7758f).
     var afterReadBeforeCommitForTesting: (() -> Void)?
 
+    // MARK: - Time-driven freshness (reviewer ffca9a27 / spec e3db4e30)
+
+    /// Schedules the call that refreshes when TIME (not a mutation) makes the displayed state
+    /// stale: an entry crossing the queue-age bound, or a lease lapsing. Without this the surface
+    /// only changed when something else pushed, so an idle screen kept showing a count that had
+    /// silently stopped being served.
+    var scheduleTimeDrivenRefresh: ((_ after: TimeInterval, _ body: @escaping () -> Void) -> Void)?
+
+    /// Seconds until the nearest time-caused transition: the next age boundary, or the lease
+    /// deadline. Generous +1s margin so the refresh lands AFTER the transition, never before it.
+    private func secondsUntilNextTimeTransition() -> TimeInterval? {
+        var candidates: [TimeInterval] = []
+        if let age = nextAgeBoundarySeconds?() { candidates.append(age) }
+        if let lease = nextLeaseExpirySeconds?() { candidates.append(lease) }
+        guard let soonest = candidates.min() else { return nil }
+        return max(0.05, soonest + 1)
+    }
+
+    /// Injected sources for the time-driven refresh: the queue's next age boundary and the
+    /// policy's lease deadline. Defaults are nil so nothing is scheduled when unset.
+    var nextAgeBoundarySeconds: (() -> TimeInterval?)?
+    var nextLeaseExpirySeconds: (() -> TimeInterval?)?
+
+    /// Arms ONE pending time-driven refresh, replacing any previous one (newest wins), so a clock
+    /// change or a renewed lease cannot leave a stale timer behind.
+    private var pendingTimeRefreshToken = 0
+
+    func armTimeDrivenRefresh() {
+        guard let schedule = scheduleTimeDrivenRefresh,
+              let delay = secondsUntilNextTimeTransition() else { return }
+        changeLock.lock()
+        pendingTimeRefreshToken &+= 1
+        let token = pendingTimeRefreshToken
+        changeLock.unlock()
+        schedule(delay) { [weak self] in
+            guard let self else { return }
+            self.changeLock.lock()
+            let isCurrent = self.pendingTimeRefreshToken == token
+            self.changeLock.unlock()
+            guard isCurrent else { return }  // superseded: a newer timer owns the next refresh
+            self.refreshLiveState()
+            self.armTimeDrivenRefresh()      // re-arm for the NEXT boundary
+        }
+    }
+
     func refreshLiveState() {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
@@ -355,6 +400,8 @@ final class VoiceSharingSettingsModel {
             readyCount = nil
         case .known(let entries):
             fault = .none
+            // The serving authority's OWN count, so the displayed number can never disagree with
+            // what is served (reviewer ffca9a27).
             readyCount = entries.count
         }
         let permits = isCollectionPermitted()

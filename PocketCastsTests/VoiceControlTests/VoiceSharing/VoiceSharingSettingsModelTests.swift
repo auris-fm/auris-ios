@@ -765,11 +765,17 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
     /// AGEING: an entry past the queue-age bound is no longer served. The count must stop counting
     /// it, because the displayed "waiting" number is derived from that same read.
     func test_anAgedEntryLeavesTheServedCount() throws {
-        var now = Date()
+        // Seeded under the REAL clock: `created.at` is written with real time, so an installed
+        // clock must start at real time too or the entry reads as future-dated (ineligible).
+        var now = Foundation.Date()
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
         try VoiceSharingDeletionFixture.seed(in: queue)
+        // Backdate the recorded instant so the entry is UNAMBIGUOUSLY inside the bound under the
+        // injected clock, instead of racing wall time between the write and the read.
+        let seeded = try XCTUnwrap(queue.readyEntries().first)
+        try VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
         let initial = countFromModel(queue)
-        XCTAssertEqual(initial, 1)
+        XCTAssertEqual(initial, 1, "diagnostics: \(queue.readyCountDiagnostics())")
         now = now.addingTimeInterval(VoiceSharingUploadQueue.maxEntryAge + 60)
         XCTAssertEqual(countFromModel(queue), 0,
                        "an aged entry is not served, so the displayed count must not include it")
@@ -782,5 +788,97 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
         return model.liveState().knownReadyCount
+    }
+}
+
+// MARK: - Time-driven freshness: no mutation, no UI read (reviewer ffca9a27 / spec e3db4e30)
+
+final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vstime-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// An IDLE rendered snapshot must update when an entry crosses the age bound, with NO mutation
+    /// and NO further UI read to trigger it.
+    func test_anIdleSnapshotUpdatesWhenAnEntryAgesOut() {
+        var now = Foundation.Date()
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        try? VoiceSharingDeletionFixture.seed(in: queue)
+        if let seeded = queue.readyEntries().first {
+            try? VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
+        }
+
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        // The scheduler is driven manually so the test owns the clock.
+        var scheduled: [(delay: TimeInterval, body: () -> Void)] = []
+        model.scheduleTimeDrivenRefresh = { delay, body in scheduled.append((delay, body)) }
+
+        var delivered: [Int?] = []
+        let token = model.addStateObserver { delivered.append($0.state.knownReadyCount) }
+        defer { model.removeStateObserver(token) }
+
+        model.refreshLiveState()          // first render shows 1
+        XCTAssertEqual(delivered.last ?? nil, 1, "diagnostics: \(queue.readyCountDiagnostics())")
+        model.armTimeDrivenRefresh()      // the view's onAppear hook
+        let pending = try? XCTUnwrap(scheduled.last)
+        XCTAssertNotNil(pending, "a time-driven refresh must be scheduled while something can age out")
+        XCTAssertGreaterThan(pending?.delay ?? 0, 0)
+
+        // Time passes with NO other event, then the timer fires.
+        now = now.addingTimeInterval((pending?.delay ?? 0) + 5)
+        scheduled.last?.body()
+
+        XCTAssertEqual(delivered.last ?? nil, 0,
+                       "the idle snapshot must drop the aged entry without a mutation or UI read")
+    }
+
+    /// Nothing waiting on time ⇒ nothing scheduled, so the surface does not wake pointlessly.
+    func test_nothingScheduledWhenNoTransitionIsPending() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        var scheduled = 0
+        model.scheduleTimeDrivenRefresh = { _, _ in scheduled += 1 }
+        model.refreshLiveState()
+        model.armTimeDrivenRefresh()
+        XCTAssertEqual(scheduled, 0, "an empty queue has no age boundary to wait for")
+    }
+
+    /// A SUPERSEDED timer must not refresh: a newer arm owns the next wake-up.
+    func test_aSupersededTimerDoesNotRefresh() {
+        var now = Date()
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        model.nextAgeBoundarySeconds = { 60 }
+        var bodies: [() -> Void] = []
+        model.scheduleTimeDrivenRefresh = { _, body in bodies.append(body) }
+        model.refreshLiveState()
+        model.armTimeDrivenRefresh()
+        model.armTimeDrivenRefresh()  // supersedes the first
+        let publishedBefore = model.publicationSequence
+        bodies.first?()               // the superseded timer fires late
+        XCTAssertEqual(model.publicationSequence, publishedBefore,
+                       "a superseded timer must not publish")
     }
 }

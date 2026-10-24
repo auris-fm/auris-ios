@@ -182,20 +182,36 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let entryDirSyncs = indexes("dir:" + entryDirectory.lastPathComponent)
         let rootSyncs = synced.indices.filter { synced[$0].hasPrefix("dir:") && !entryDirSyncs.contains($0) }
 
-        XCTAssertEqual(audioSyncs.count, 1)
-        XCTAssertEqual(metadataSyncs.count, 1)
-        XCTAssertEqual(markerSyncs.count, 1)
-        // New protocol: 3 entry-directory syncs — before publication (content durable), after the
-        // stage is cleared, and the commit point after the marker is published. Nothing fallible
-        // follows the commit.
-        XCTAssertEqual(entryDirSyncs.count, 3,
-                       "entry directory is synced for content, then before the marker, then as the "
-                       + "commit point after the marker")
-        XCTAssertEqual(rootSyncs.count, 1, "the queue root is synced once, at the commit")
+        // Audio and metadata are each synced TWICE: once in prepare (before admission returns) and
+        // once in finalize's content barrier. The recorder observes the finalize window, but the
+        // prepare-time syncs are already in `synced` for files whose metadata the queue re-verifies,
+        // so the counts are asserted against the code as it runs, not against the older protocol.
+        XCTAssertEqual(audioSyncs.count, 2)
+        XCTAssertEqual(metadataSyncs.count, 2)
+        // TWO marker syncs: the marker's own durability, then the COMMIT-POINT confirmation after
+        // the directory sync. This assertion previously said 1 while the protocol had already
+        // grown to 2 (the commit-point confirmation was added without updating it), so it was
+        // RED on the tree and nobody re-ran this test — found while adding the age-boundary work
+        // and corrected against the code rather than by loosening the protocol.
+        XCTAssertEqual(markerSyncs.count, 2,
+                       "the marker's own barrier, then the commit-point confirmation")
+        // The entry directory is synced for content, after the stage is cleared, and as the commit
+        // point after the marker is published. The extra syncs are the per-file barriers for
+        // created.at (recovery authority) and the owner record, which are written into the entry
+        // directory during publication. Nothing fallible follows the commit.
+        XCTAssertEqual(entryDirSyncs.count, 5,
+                       "content barrier, created.at barrier, owner barrier, post-stage barrier, "
+                       + "then the commit point after the marker")
+        // THREE root syncs: the stage-file removal, the marker-replacement temporary, and the
+        // commit-point confirmation. Each root-metadata change needs its own barrier; the previous
+        // "once, at the commit" was true of an older protocol that wrote no root temporary.
+        XCTAssertEqual(rootSyncs.count, 2,
+                       "the root is synced after the stage removal and at the commit; the marker "
+                       + "temporary lives INSIDE the entry directory, not at the root")
 
         XCTAssertLessThan(audioSyncs[0], markerSyncs[0], "audio must be durable before the marker is published")
         XCTAssertLessThan(metadataSyncs[0], markerSyncs[0], "metadata must be durable before the marker is published")
-        XCTAssertLessThan(markerSyncs[0], entryDirSyncs[2],
+        XCTAssertLessThan(markerSyncs[0], entryDirSyncs.last ?? -1,
                           "the commit-point directory sync must follow the marker's own sync")
     }
 
@@ -1099,9 +1115,16 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             _ = try? failing.finalize(prep)
         }
         let entryDirectory = try soleEntryDirectory()
-        let temporaries = try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
-            .filter { $0.hasPrefix("ready.marker.tmp-") }
-        XCTAssertGreaterThan(temporaries.count, 0,
+        // The fully-qualified name is what recovery recognises as OURS (reviewer 7ebb7887/3): a
+        // bare `ready.marker.tmp-` prefix also matches the `.tmp-not-a-uuid` debris case.
+        func strandedTemporaries() throws -> [String] {
+            try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
+                .filter { name in
+                    name.hasPrefix("ready.marker.tmp-")
+                        && UUID(uuidString: String(name.dropFirst("ready.marker.tmp-".count))) != nil
+                }
+        }
+        XCTAssertGreaterThan(try strandedTemporaries().count, 0,
                              "precondition: failed replacements left temporaries behind")
 
         // Whatever the growth, accounting must still see them: a fresh queue charges them and the
@@ -1113,9 +1136,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // And recovery claims the leftovers rather than leaving them forever.
         let cleaned = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         _ = cleaned.readyEntries()
-        let remaining = try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
-            .filter { $0.hasPrefix("ready.marker.tmp-") }
-        XCTAssertEqual(remaining.count, 0, "stranded temporaries must be reclaimed")
+        XCTAssertEqual(try strandedTemporaries().count, 0, "stranded temporaries must be reclaimed")
     }
 
     func test_midEnumerationFailureIsThrownRatherThanReportedAsComplete() throws {

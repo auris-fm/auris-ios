@@ -72,6 +72,20 @@ final class VoiceSharingAccountDeletionTests: XCTestCase {
 }
 
 enum VoiceSharingDeletionFixture {
+    /// Seeds OUTSIDE the injected-clock window the tests that use it rely on: the queue writes
+    /// `created.at` from its own injected clock, so a test that installs its own clock must reduce
+    /// the entry's recorded age before running, rather than depending on wall time.
+    static func backdate(_ entry: VoiceSharingUploadQueue.Entry,
+                         in queue: VoiceSharingUploadQueue,
+                         by seconds: TimeInterval) throws {
+        let created = queue.rootDirectory
+            .appendingPathComponent(entry.name, isDirectory: true)
+            .appendingPathComponent("created.at")
+        let text = try String(contentsOf: created, encoding: .utf8)
+        let instant = try XCTUnwrap(TimeInterval(text))
+        try String(instant - seconds).write(to: created, atomically: true, encoding: .utf8)
+    }
+
     static func seed(in queue: VoiceSharingUploadQueue) throws {
         let sampleFrames: [Float] = [0, 0.2, -0.3, 0.4]
         let event = VoiceSharingCollector.SegmentEvent(

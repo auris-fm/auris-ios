@@ -395,6 +395,15 @@ final class VoiceSharingPolicy {
         return installed.map { $0.leaseExpiresAt }
     }
 
+    /// Seconds until the installed lease lapses, or nil when no lease is installed. Negative means
+    /// already lapsed. Feeds the settings surface's time-driven refresh (reviewer ffca9a27).
+    var secondsUntilLeaseExpiry: TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let installed else { return nil }
+        return installed.leaseExpiresAt - clock.now()
+    }
+
     /// Current effective permission. Expired leases report false without mutating
     /// state; a fresh `refreshAfterActivation()` is the only path back to enabled.
     var permitsCollection: Bool {
