@@ -287,6 +287,10 @@ final class VoiceSharingSettingsModel {
         let state: LiveState
     }
 
+    /// Test seam: invoked INSIDE a refresh, right after its read and BEFORE the commit, so a
+    /// control can hold an older read open while a newer one completes (reviewer 31c7758f).
+    var afterReadBeforeCommitForTesting: (() -> Void)?
+
     func refreshLiveState() {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
@@ -298,16 +302,25 @@ final class VoiceSharingSettingsModel {
         changeLock.unlock()
 
         let state = liveState()
+        afterReadBeforeCommitForTesting?()
 
         // LAST WRITER WINS: a refresh whose read is OLDER than one already published is obsolete —
         // it must not deliver, even if its read finished later (reviewer f62b19a4). Ordering is by
         // the read that produced the state, not by the order callbacks happen to run.
         changeLock.lock()
-        guard state != lastPublishedState, sequence > lastPublishedSequence else {
+        // THE WATERMARK ADVANCES ON EVERY COMPLETED READ, CHANGE OR NOT (reviewer 31c7758f): a
+        // refresh that found nothing new still proves every EARLIER read is obsolete, so a slow
+        // older read must not publish afterwards. Advancing only when the state differed let a
+        // stale read slip through behind an unchanged newer one.
+        guard sequence > lastPublishedSequence else {
             changeLock.unlock()
             return
         }
         lastPublishedSequence = sequence
+        guard state != lastPublishedState else {
+            changeLock.unlock()
+            return
+        }
         lastPublishedState = state
         currentSequence = sequence
         let observers = Array(changeObservers.values)

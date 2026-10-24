@@ -156,10 +156,9 @@ final class VoiceSharingPolicy {
         guard freshActivationSucceeded else {
             // Transient config failure: clear permission, but do NOT touch the identity fence.
             // Fabricating an identity change here would latch the fence and prevent any later
-            // genuine success from ever installing again.
-            lock.lock()
-            installed = nil
-            lock.unlock()
+            // genuine success from ever installing again. It still VERSIONS and ANNOUNCES: a
+            // rendered "active" must not survive a failed activation.
+            clearInstalledAndAnnounce()
             return nil
         }
         // The fence from an identity change blocks installs until the new identity is readable;
@@ -190,7 +189,10 @@ final class VoiceSharingPolicy {
         switch value {
         case .unavailable:
             installed = nil
+            leaseGeneration += 1
             lock.unlock()
+            // Announced OUTSIDE the lock (listeners read the policy back).
+            notifyChanged()
             return nil
         case .valid(let enabled):
             let snapshot = VoiceSharingSnapshot(
@@ -296,6 +298,7 @@ final class VoiceSharingPolicy {
             pendingIdentityFence += 1
         }
         identityGenerationCounter += 1
+        leaseGeneration += 1  // a cleared permission is a lease version change (reviewer 31c7758f)
         lock.unlock()
         // Withdrawal/account switch removes a permission the surface may be showing.
         notifyChanged()
@@ -306,8 +309,15 @@ final class VoiceSharingPolicy {
     /// never accidentally fence the feature.
     func raiseIdentityFence() {
         lock.lock()
-        defer { lock.unlock() }
+        installed = nil
         pendingIdentityFence += 1
+        // The fence CLEARS permission, so the LEASE version must move — but NOT the identity
+        // generation: that counter versions install eligibility, and `invalidateForIdentityChange`
+        // (which the same sign-out already performs) is its single owner. Bumping it here too made
+        // one sign-out advance identity twice, which existing controls correctly reject.
+        leaseGeneration += 1
+        lock.unlock()
+        notifyChanged()
     }
 
     /// Called by the identity provider once the new account state is readable. Later refreshes
@@ -351,6 +361,18 @@ final class VoiceSharingPolicy {
     func removeChangeObserver(_ token: UUID) {
         observerLock.lock(); defer { observerLock.unlock() }
         changeObservers.removeValue(forKey: token)
+    }
+
+    /// EVERY path that CLEARS a previously visible permission goes through here: it drops the
+    /// snapshot, advances the lease generation (so a consumer's stamp notices) and notifies — the
+    /// three things the reviewer found missing on the activation-failure and config-unavailable
+    /// paths (31c7758f). Callers must NOT hold the policy lock.
+    fileprivate func clearInstalledAndAnnounce() {
+        lock.lock()
+        installed = nil
+        leaseGeneration += 1
+        lock.unlock()
+        notifyChanged()
     }
 
     fileprivate func notifyChanged() {

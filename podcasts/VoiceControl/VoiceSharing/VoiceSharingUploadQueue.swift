@@ -307,7 +307,16 @@ final class VoiceSharingUploadQueue {
     /// the serving path's fail-closed gates (a held queue still has a count; it is simply not
     /// served). Used only to detect a change, never exposed as a count.
     private func readyEntryCountLocked() -> Int {
-        entriesLocked().filter { isCompleteEntryLocked(at: $0) }.count
+        // AGE is part of the displayed set: an entry past the queue-age bound stops being served,
+        // so the signature must move when it does — otherwise a count shown to the user silently
+        // becomes wrong with no mutation to announce (reviewer 31c7758f).
+        entriesLocked()
+            .filter { isCompleteEntryLocked(at: $0) }
+            .filter {
+                guard let created = creationInstantLocked(in: entryDirectoryLocked(for: $0)) else { return false }
+                return clock().timeIntervalSince(created) <= Self.maxEntryAge
+            }
+            .count
     }
 
     // MARK: - Change notification (reviewer f62b19a4 / spec fc93e27a)
@@ -730,8 +739,8 @@ final class VoiceSharingUploadQueue {
     /// (atomic replace) and synchronized. A crash before the marker leaves an unready entry that
     /// recovery removes.
     func finalize(_ entry: Entry) throws {
-        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
         try serialQueue.sync {
+            defer { bumpHoldGenerationForContentChange() }
             let directory = try validatedEntryDirectoryLocked(entry)
             // Publication must not launder an over-age preparation into a fresh lifetime: the
             // creation instant is immutable, so an entry past the bound refuses publication.
@@ -1399,6 +1408,14 @@ final class VoiceSharingUploadQueue {
     /// they are the only reconciliation state their owner or a fresh successor has. CONFIRMED
     /// records (completion already durable) are verified against on-disk state and retired.
     func recoverAbandonedSettlements() {
+        serialQueue.sync {
+            recoverAbandonedSettlementsLocked()
+            bumpHoldGenerationForContentChange()
+        }
+    }
+
+    /// The body, for callers ALREADY on the serial queue.
+    private func recoverAbandonedSettlementsLocked() {
         guard let listed = try? listDirectoryBounded(
             rootDirectory, [.isDirectoryKey], Self.maxDirectoryEntries), !listed.overflowed else {
             return
@@ -2282,6 +2299,7 @@ final class VoiceSharingUploadQueue {
 
     /// Deletes the entire entry: audio, metadata and marker leave the disk.
     func remove(_ entry: Entry) throws {
+        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
         try serialQueue.sync {
             _ = try validatedEntryDirectoryLocked(entry)
             try fileManager.removeItem(at: entryDirectoryLocked(for: entry))
@@ -2715,7 +2733,10 @@ final class VoiceSharingUploadQueue {
                 try? fileManager.removeItem(at: stray)
             }
         }
-        // Settlement records are recovery state, not debris: reconcile-retire them here.
-        recoverAbandonedSettlements()
+        // Settlement records are recovery state, not debris: reconcile-retire them here. Runs
+        // ALREADY on the serial queue, so the in-place variant is used — the public entry point
+        // takes the queue itself and would trap (deadlock) called from inside it.
+        recoverAbandonedSettlementsLocked()
+        bumpHoldGenerationForContentChange()
     }
 }

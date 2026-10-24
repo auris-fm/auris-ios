@@ -612,3 +612,175 @@ final class VoiceSharingChangeHookTests: XCTestCase {
                       "no delivery may carry a sequence older than the committed one")
     }
 }
+
+// MARK: - Publication watermark (reviewer 31c7758f)
+
+final class VoiceSharingWatermarkTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vswatermark-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The exact sequence the reviewer named: initial X, an OLDER read Y held open, a NEWER read that
+    /// finds X unchanged, then Y released. Y must never publish — otherwise the stale half-known
+    /// world would overwrite the confirmed one.
+    func test_anOlderReadHeldOpenNeverPublishesBehindAnUnchangedNewerRead() {
+        var permits = true
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { permits },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var deliveries: [Int] = []
+        let token = model.addStateObserver { deliveries.append($0.sequence) }
+        defer { model.removeStateObserver(token) }
+
+        // initial X
+        model.refreshLiveState()
+        XCTAssertEqual(deliveries.count, 1)
+
+        // the OLDER read: performs its read with permits still true, then BLOCKS before committing
+        let gate = DispatchSemaphore(value: 0)
+        let readDone = DispatchSemaphore(value: 0)
+        model.afterReadBeforeCommitForTesting = {
+            readDone.signal()
+            _ = gate.wait(timeout: .now() + 5)
+        }
+        let older = DispatchQueue(label: "older-refresh")
+        older.async { model.refreshLiveState() }
+        XCTAssertEqual(readDone.wait(timeout: .now() + 5), .success, "the older read must run first")
+
+        // the NEWER read completes while the older one is parked; it finds X UNCHANGED
+        model.afterReadBeforeCommitForTesting = nil
+        model.refreshLiveState()
+        XCTAssertEqual(deliveries.count, 1, "no change means no delivery — but the watermark advances")
+
+        // release the older read: its state (also X) must not deliver
+        gate.signal()
+        older.sync {}
+        XCTAssertEqual(deliveries.count, 1, "a superseded read may never publish, even unchanged")
+        XCTAssertTrue(deliveries.allSatisfy { $0 == model.publicationSequence })
+    }
+}
+
+// MARK: - Every permission-clearing policy path is versioned and announced (reviewer 31c7758f)
+
+final class VoiceSharingPolicyTransitionHookTests: XCTestCase {
+    private func policy() -> VoiceSharingPolicy {
+        VoiceSharingPolicy(readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
+    }
+
+    /// A FAILED activation clears permission: the version must move and listeners must hear it,
+    /// or a rendered "active" survives a failed refresh.
+    func test_aFailedActivationVersionsAndAnnounces() {
+        let subject = policy()
+        let before = subject.currentLeaseGeneration
+        var announced = 0
+        let token = subject.addChangeObserver { announced += 1 }
+        defer { subject.removeChangeObserver(token) }
+        _ = subject.refreshAfterActivation(freshActivationSucceeded: false,
+                                           fetchToken: subject.tokenForFetchStart())
+        XCTAssertGreaterThan(subject.currentLeaseGeneration, before, "clearing permission is a version change")
+        XCTAssertEqual(announced, 1, "and it is announced")
+    }
+
+    /// An unavailable config value clears permission the same way.
+    func test_anUnavailableValueVersionsAndAnnounces() {
+        let subject = VoiceSharingPolicy(readRemoteSwitch: { .unavailable }, isAccountEnrolled: { true })
+        let before = subject.currentLeaseGeneration
+        var announced = 0
+        let token = subject.addChangeObserver { announced += 1 }
+        defer { subject.removeChangeObserver(token) }
+        _ = subject.refreshAfterActivation(freshActivationSucceeded: true,
+                                           fetchToken: subject.tokenForFetchStart())
+        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
+        XCTAssertEqual(announced, 1)
+    }
+
+    /// Raising the fence removes the visible permission: version AND announcement.
+    func test_raisingTheFenceVersionsAndAnnounces() {
+        let subject = policy()
+        let before = subject.currentLeaseGeneration
+        var announced = 0
+        let token = subject.addChangeObserver { announced += 1 }
+        defer { subject.removeChangeObserver(token) }
+        subject.raiseIdentityFence()
+        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
+        XCTAssertEqual(announced, 1)
+        XCTAssertFalse(subject.permitsCollection, "a fence means no permission")
+    }
+
+    /// Membership invalidation (withdrawal inside the session) does the same.
+    func test_membershipInvalidationVersionsAndAnnounces() {
+        let subject = policy()
+        let before = subject.currentLeaseGeneration
+        var announced = 0
+        let token = subject.addChangeObserver { announced += 1 }
+        defer { subject.removeChangeObserver(token) }
+        subject.invalidateForIdentityChange(kind: .membershipChange)
+        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
+        XCTAssertEqual(announced, 1)
+    }
+}
+
+// MARK: - Every ready-set mutation is versioned and announced (reviewer 31c7758f)
+
+final class VoiceSharingReadySetHookTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsreadyset-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// UPLOAD REMOVAL: the entry leaves the ready set, so the count changes — versioned + announced.
+    func test_removalOfAUploadedEntryVersionsAndAnnounces() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        let entry = try XCTUnwrap(queue.readyEntries().first)
+        let before = queue.currentHoldGeneration
+        let fired = expectation(description: "removal announced")
+        fired.assertForOverFulfill = false
+        let token = queue.addContentObserver { fired.fulfill() }
+        defer { queue.removeContentObserver(token) }
+        try queue.remove(entry)
+        wait(for: [fired], timeout: 2)
+        XCTAssertNotEqual(queue.currentHoldGeneration, before, "the displayed count moved")
+    }
+
+    /// AGEING: an entry past the queue-age bound is no longer served. The count must stop counting
+    /// it, because the displayed "waiting" number is derived from that same read.
+    func test_anAgedEntryLeavesTheServedCount() throws {
+        var now = Date()
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        let initial = countFromModel(queue)
+        XCTAssertEqual(initial, 1)
+        now = now.addingTimeInterval(VoiceSharingUploadQueue.maxEntryAge + 60)
+        XCTAssertEqual(countFromModel(queue), 0,
+                       "an aged entry is not served, so the displayed count must not include it")
+    }
+
+    private func countFromModel(_ queue: VoiceSharingUploadQueue) -> Int? {
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        return model.liveState().knownReadyCount
+    }
+}

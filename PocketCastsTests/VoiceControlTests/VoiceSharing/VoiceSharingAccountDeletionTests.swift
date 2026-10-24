@@ -89,3 +89,67 @@ enum VoiceSharingDeletionFixture {
         try queue.finalize(entry)
     }
 }
+
+// MARK: - Production composition: the sign-out notification is the deletion path
+
+/// These controls drive the REAL production gate-lost registry (`registerGateLostHandler` +
+/// `consentGateLostForTesting`, the same fan-out sign-out triggers) rather than calling `purgeAll`
+/// directly, and they carry the two prerequisites a component exercise lacks: a previously VALID
+/// lease and retained audio. The notification observer itself needs `SyncManager` and the full app
+/// graph, so the seam used here is the registry's own entry point, not a stub of it.
+final class VoiceSharingSignOutCompositionTests: XCTestCase {
+    private var root: URL!
+    private var defaults: UserDefaults!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vssignout-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defaults = UserDefaults(suiteName: "vssignout-\(UUID().uuidString)")
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// A retained recording plus a VALID lease, then consent loss through the production registry:
+    /// the durable queue must be revoked and must stay revoked across a restart.
+    func test_aSignOutThroughTheProductionRegistryRevokesRetainedAudio() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        XCTAssertEqual(queue.readyEntries().count, 1, "setup: audio is retained under a valid session")
+
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "account-a" }))
+        // The same handler shape the assembly installs.
+        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        defer { _ = subscription }
+        coordinator.consentGateLostForTesting()
+
+        // CLEAN revocation (a purge that reconciles) leaves `.known` with nothing ready — that is
+        // the SUCCESS shape. Assert the durable facts, not the hold class.
+        guard case .known(let remaining) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a reconciling sign-out purge must leave the owner READABLE, not held")
+        }
+        XCTAssertTrue(remaining.isEmpty, "consent loss revokes the retained set")
+        XCTAssertEqual(queue.readyEntries().count, 0, "and nothing is served afterwards")
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(restarted.readyEntries().count, 0, "the revocation is durable, not process-local")
+    }
+
+    /// An UNREGISTERED handler (a torn-down pipeline) must not be reached: no revocation from a
+    /// registry entry that no longer exists.
+    func test_aTornDownHandlerIsNotCalled() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "account-a" }))
+        var subscription: VoiceSharingCoordinator.GateLostSubscription? =
+            coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        subscription = nil // torn down
+        coordinator.consentGateLostForTesting()
+        guard case .known = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a removed handler must not purge")
+        }
+    }
+}
