@@ -276,7 +276,7 @@ final class CloudTokenProvidingTests: XCTestCase {
             webSocketTaskFactory: { _ in task }
         )
 
-        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).first { _ in true }
+        _ = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).first { _ in true }
 
         XCTAssertEqual(
             task.sentAuthFrame?["access_token"] as? String,
@@ -312,12 +312,16 @@ final class CloudTokenFailClosedTests: XCTestCase {
             tokenProvider: NoTokenProvider(),
         )
 
-        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
         XCTAssertEqual(requests, 0, "no credential ⇒ nothing dialed")
         // Code only: the message is empty so the sink emits its localized earcon
         // rather than TTS reading English prose to a non-English user.
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        // SOURCE = .requestConstruction: no credential means no frame was ever built, let alone
+        // sent, so the failure is provably client-side pre-send. The expectation tracked
+        // `.server` from before the error source became structural (5a58795f6) and was not
+        // updated when the emission site moved to `.requestConstruction` (e2dc42d1d).
+        XCTAssertEqual(events, [.error(source: .requestConstruction, code: "unauthorized", message: "")])
     }
 
     func testPrefetchSendsNoRequestWithoutACredential() async {

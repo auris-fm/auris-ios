@@ -1,0 +1,4 @@
+/* Cloud assistant — free daily limit reached (spec c259dc64 / reviewer cffd67d1).
+   Regional variant of the same key: real locale discovery selects fr-CA/es-MX for
+   fr_CA/es_MX users, so the key must exist HERE too, not only in the base bundle. */
+"cloud_error_limit_exceeded" = "Vous avez atteint votre limite quotidienne gratuite d’Auris. Veuillez réessayer demain.";

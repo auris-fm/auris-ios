@@ -137,6 +137,32 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     /// and drops a frame the wire defines. That is a fidelity defect rather than
     /// a user-visible one — `CloudRouteSink` plays answers instead of speaking
     /// them — and the frame still has to be read for what it is.
+    /// The app-operation wire contract (rev da327e624, section 1): every cloud app operation's
+    /// `action` frame carries `operation_id` and `capability_version`. The parser must read both
+    /// through to the event — the executor's journal claim and refusal gate key on the identity,
+    /// and a parser that drops it forces the exact legacy fallback the contract forbids. Frames
+    /// without the fields (existing local-path holds) parse as nils.
+    func testParsesAppOperationIdentityOnActionFrames() {
+        let withIdentity = CloudRouteClient.parseTextFrame(
+            #"{"type":"action","operation_id":"6f1c…","capability_version":"v7","tool":"playback","action":"pause","params":{}}"#
+        )
+        XCTAssertEqual(
+            withIdentity,
+            [.action(tool: "playback", action: "pause", params: [:],
+                     operationId: "6f1c…", capabilityVersion: "v7")],
+            "operation_id and capability_version ride the action event"
+        )
+        let withoutIdentity = CloudRouteClient.parseTextFrame(
+            #"{"type":"action","tool":"playback","action":"pause","params":{}}"#
+        )
+        XCTAssertEqual(
+            withoutIdentity,
+            [.action(tool: "playback", action: "pause", params: [:],
+                     operationId: nil, capabilityVersion: nil)],
+            "local-path holds without identity still parse, as nils"
+        )
+    }
+
     func testParsesTokenOnTheSocket() {
         XCTAssertEqual(
             CloudRouteClient.parseTextFrame(#"{"type":"token","text":"forty-two"}"#),
@@ -206,7 +232,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"action","tool":"playback","action":"seek_to","params":{"reference_position_ms":1234567}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .action(let tool, let action, let params) = events.first {
+        if case .action(let tool, let action, let params, _, _) = events.first {
             XCTAssertEqual(tool, "playback")
             XCTAssertEqual(action, "seek_to")
             XCTAssertEqual(params["reference_position_ms"]?.int64Value, 1_234_567)
@@ -249,7 +275,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"error","code":"limit_exceeded","message":"Daily limit reached"}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .error(let code, let message) = events.first {
+        if case .error(_, let code, let message) = events.first {
             XCTAssertEqual(code, "limit_exceeded")
             XCTAssertEqual(message, "Daily limit reached")
         } else {

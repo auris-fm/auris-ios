@@ -827,7 +827,10 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertEqual(session.configureCount, 1, "device A gets one acquisition attempt")
 
         // A re-evaluation for the *same* identity must not retry the failed route.
-        postRouteChange()
+        // The reason is non-physical on purpose: a physical change re-presents the
+        // device and is allowed one fresh attempt (see `ReconnectReacquisitionTests`),
+        // so `.routeConfigurationChange` is the observation that must stay suppressed.
+        postRouteChange(reason: .routeConfigurationChange)
         try? await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(session.configureCount, 1, "a failed route is not retried while it is unchanged")
 

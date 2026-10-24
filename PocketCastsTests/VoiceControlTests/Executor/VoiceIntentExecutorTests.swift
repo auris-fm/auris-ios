@@ -48,16 +48,19 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// The origin branch is what decides whether a dispatch re-arms the allowance
-    /// that permitted it. A fallback pays for its permission; a cloud route the
-    /// model chose is a deliberate act and does restore it. Asserting the pair is
-    /// what makes this a distinction rather than a blanket rule — and it fails if
-    /// the origin branch is removed.
-    func test_execute_fallbackCloudRouteKeepsTheAllowanceSpent() async {
+    /// The origin branch decides whether a completion RENEWS the window. Observable without a
+    /// window budget (owner delta 3484cbc/5eca874): announce a refusal (holding the tone claim for
+    /// this generation), run the completion, then check whether the window was renewed — only a
+    /// renewing completion clears the claim. A fallback pays for its permission; a model-chosen
+    /// cloud route is a deliberate act. Asserting the pair is what makes this a distinction rather
+    /// than a blanket rule, and it fails if the origin branch is removed.
+    func test_execute_fallbackCloudRouteDoesNotRenewTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        let generation = gracePeriodSignal.claimEscalationBudget()
-        XCTAssertNotNil(generation)
+        let generation = gracePeriodSignal.currentGeneration()
+        // A refusal in this window is announced once, holding the tone claim for this generation.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the refusal is announced")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(), "the window is not renewed while spent")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -67,17 +70,20 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "a fallback must not re-arm the allowance that let it happen")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a fallback extends the window WITHOUT renewing it"
+        )
     }
 
-    func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
+    func test_execute_modelChosenCloudRouteRenewsTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
         // Stamped the way the service stamps it: a completion must carry the window
         // it ran under, so this test supplies one rather than relying on a default.
         let generation = gracePeriodSignal.currentGeneration()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget())
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "a refusal is announced")
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(), "spent before the completion")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -86,23 +92,113 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(),
-                        "a cloud route the model chose is a deliberate act, so the window is refreshed")
+        XCTAssertTrue(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a cloud route the model chose is a deliberate act, so the window is RENEWED"
+        )
     }
 
     /// A model-chosen cloud route resets the allowance, but only inside the window
     /// it was issued under. Completing after a privacy close and a new wake must
     /// not reset whatever window is current — that would re-arm a session this
     /// turn never belonged to.
+    /// QUIET DUPLICATES (reviewer 0c546ce5 item 4): a duplicate of an utterance the executor
+    /// already completed — the joined or settled copy the sink hands back — observes completion
+    /// WITHOUT repeating the owner's effects. The grace renewal happens exactly once (the
+    /// duplicate cannot restore a spent allowance), the duplicate's response renders nothing,
+    /// and analytics record the command once. Two independent utterances both count.
+    func test_execute_duplicateUtteranceIsQuietToGraceAndAnalytics() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "a refusal is announced (spent)")
+
+        let owner = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-dup", origin: .modelCall, generation: generation
+        )
+        // The REAL executor path with the sink's once-per-utterance effect claim (the mock's
+        // default): the first call owns, later calls for the same id are duplicates.
+        _ = await executor.execute(owner)
+        XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "the OWNER's completion renews the window")
+        XCTAssertEqual(mockCloudRouteSink.claimObservedBeforeDispatch, [true],
+                       "effect ownership is claimed BEFORE the dispatch — a joiner cannot win it")
+        // Re-arm the observable: the owner's renewal cleared the refusal-tone claim, so holding
+        // it again gives the duplicate a detectable renewal to (NOT) perform.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the re-armed refusal is announced")
+
+        // The duplicate: identical captured intent (same utterance id + generation).
+        let duplicate = await executor.execute(owner)
+        XCTAssertEqual(duplicate, .silent, "a duplicate renders nothing")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "the duplicate must NOT renew the window again (a joined copy cannot re-arm a spent allowance)"
+        )
+
+        // An INDEPENDENT utterance in the same window still gets its effects.
+        let independent = CloudRouteIntent(
+            request: "skip forward", tier: .unknown,
+            utteranceId: "utterance-ind", origin: .modelCall, generation: generation
+        )
+        _ = await executor.execute(independent)
+        XCTAssertTrue(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "an independent utterance is not quieted by the duplicate rule"
+        )
+    }
+
+    /// CROSS-GENERATION INTERLEAVING (reviewer 39beabc7): completions can interleave — A(gen1)
+    /// completes, B(gen2) completes, then a DELAYED A duplicate completes. Effects are granted
+    /// by the request owner at dispatch, not inferred from a generation change, so A's late
+    /// duplicate cannot replay A's effects, and it cannot disturb B's.
+    func test_execute_delayedDuplicateFromAnEarlierGenerationCannotReplayEffects() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generationA = gracePeriodSignal.currentGeneration()
+
+        let intentA = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
+        )
+        _ = await executor.execute(intentA)  // A owns its effects
+
+        // A NEW window: generation B.
+        gracePeriodSignal.onWakeWordDetected()
+        let generationB = gracePeriodSignal.currentGeneration()
+        XCTAssertNotEqual(generationB, generationA, "premise: a new generation")
+        let intentB = CloudRouteIntent(
+            request: "skip forward", tier: .unknown,
+            utteranceId: "utterance-B", origin: .modelCall, generation: generationB
+        )
+        _ = await executor.execute(intentB)  // B owns its effects
+        XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "B renewed its own window")
+
+        // The DELAYED duplicate of A arrives last. It must be quiet: no renewal of B's window.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "re-arm the observable for B's window")
+        let lateA = CloudRouteIntent(
+            request: "play something", tier: .unknown,
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
+        )
+        let lateAResponse = await executor.execute(lateA)
+        XCTAssertEqual(lateAResponse, .silent, "the delayed duplicate renders nothing")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "a delayed duplicate from an earlier generation cannot replay effects into the current window"
+        )
+    }
+
     func test_execute_modelChosenRouteFromAnEndedWindowCannotResetTheNewOne() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        let oldGeneration = gracePeriodSignal.claimEscalationBudget()
+        let oldGeneration = gracePeriodSignal.currentGeneration()
         XCTAssertNotNil(oldGeneration)
 
         await MainActor.run { gracePeriodSignal.onAppBackgrounded() }
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "the new window's allowance is spent here")
+        let newGeneration = gracePeriodSignal.currentGeneration()
+        XCTAssertNotEqual(oldGeneration, newGeneration, "a fresh wake opens a new window")
+        // Mark the NEW window spent so a stray reset would be visible.
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the new window's refusal is announced")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -110,8 +206,14 @@ final class VoiceIntentExecutorTests: XCTestCase {
             generation: oldGeneration
         ))
 
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "the ended window's completion must not reset the current one")
+        XCTAssertEqual(
+            gracePeriodSignal.currentGeneration(), newGeneration,
+            "the ended window's completion must not reset the current one"
+        )
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "the ended window's completion must not renew the current one"
+        )
     }
 
     /// A cloud completion with no window identity cannot be attributed to any
@@ -120,7 +222,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_execute_cloudCompletionWithoutAWindowLeavesGraceStateUntouched() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
-        XCTAssertNotNil(gracePeriodSignal.claimEscalationBudget(), "this window's allowance is spent")
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
 
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
@@ -129,8 +231,128 @@ final class VoiceIntentExecutorTests: XCTestCase {
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
-        XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
-                     "an unattributable completion must not restore the allowance")
+        XCTAssertFalse(
+            gracePeriodSignal.windowIsRenewedForTesting(),
+            "an unattributable completion must not renew the window"
+        )
+    }
+
+    /// A cloud turn that failed but reports itself by SPEAKING must not restore the
+    /// allowance. A spoken error and a silent success are both "no earcon", so the old
+    /// response-shape rule read this exact turn as a completion and reopened the window
+    /// for a turn that never happened.
+    func test_execute_spokenCloudErrorDoesNotRenewTheWindow() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
+
+        mockCloudRouteSink.response = .spoken("Connection lost. Please try again.")
+        mockCloudRouteSink.outcome = .failed(code: "connection_lost")
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
+                       "a spoken cloud error was treated as a completed turn")
+    }
+
+    /// The coming-soon refusal is the same shape: it renders as `.spoken` and must not
+    /// be recorded as a completed cloud route.
+    func test_execute_cloudRefusalDoesNotRenewTheWindow() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "this window is spent")
+
+        mockCloudRouteSink.response = .spoken("Cloud processing is coming soon.")
+        mockCloudRouteSink.outcome = .refused
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
+                       "the coming-soon refusal was recorded as a completed cloud turn")
+    }
+
+    /// The executor must hand the sink the origin the turn was DISPATCHED under. Without
+    /// this the sink can only default, and a default makes the conversation bound inert: the
+    /// origin is then a constant, so no turn can ever be stale and every turn reads as a
+    /// fresh `create`. Asserting the captured value reaches the sink is what keeps that
+    /// property real rather than described.
+    func test_execute_passesTheCapturedOriginToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimDispatchOwnership())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastOrigin, generation,
+            "the sink did not receive the turn's captured origin, so the conversation bound "
+                + "cannot distinguish a live dispatc from a stale one"
+        )
+    }
+
+    /// With nothing playing — the app's normal first interaction — the cloud turn must still be
+    /// dispatched with an ABSENT context, not refused locally. Refusing here is what made the
+    /// discovery turn unreachable on the client while the server had already been corrected.
+    func test_execute_dispatchesTheCloudTurnWithNoCurrentEpisode() async {
+        mockPlaybackContextProvider.context = nil
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what should I listen to",
+            tier: .unknown,
+            generation: generation
+        ))
+
+        XCTAssertTrue(
+            mockCloudRouteSink.routeToCloudCalled,
+            "the turn was refused locally instead of being dispatched with absent context"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.episodeId,
+            "an episode id was invented for a turn with nothing playing"
+        )
+        XCTAssertNil(
+            mockCloudRouteSink.lastContext?.clientPositionMs,
+            "a position was invented for a turn with nothing playing"
+        )
+    }
+
+    /// The selection the turn was created with must reach the sink, not be re-read there. A
+    /// re-read happens after routing, so a queued turn would be classified by whatever the
+    /// window looks like later rather than by what selected it.
+    func test_execute_forwardsTheCapturedSelectionToTheCloudSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimDispatchOwnership())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "and then",
+            tier: .unknown,
+            generation: generation,
+            selection: .followUp
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastSelection, .followUp,
+            "the sink did not receive the selection captured with the input"
+        )
     }
 
     func test_execute_pause_callsSinkPause() async {
@@ -222,6 +444,13 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")
         XCTAssertEqual(mockCloudRouteSink.lastContext, context)
     }
+
+
+
+
+
+
+
 
     func test_execute_success_activatesGracePeriod() async {
         XCTAssertFalse(gracePeriodSignal.isActive)
@@ -419,11 +648,59 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var lastRequest: String?
     var lastContext: PlaybackContext?
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    /// Overridable so a case can drive a non-completing turn: the executor's grace
+    /// decision now depends on this, not on the rendered response.
+    var outcome: CloudRouteOutcome = .completed
+    var response: VoiceResponse = .spoken("Here's what I found")
+
+    /// The captured origin the executor passed, so a case can assert the turn carries the
+    /// window it was dispatched under rather than a live one.
+    var lastOrigin: Int?
+    /// The selection the executor captured, so a case can assert the turn carries what selected
+    /// it rather than whatever the window looks like later.
+    var lastSelection: CloudConversationSelection?
+    /// The request ids a retry named, in order.
+    var retriedRequestIds: [String] = []
+
+    func routeToCloud(
+        request: String, tier: CloudTier, context: PlaybackContext, origin: Int?,
+        selection: CloudConversationSelection?,
+        utteranceId: String?,
+        preparedObserver: CloudRouteSink.PreparedObserver?,
+        sourceTranscript: String?, sourceLanguage: String?,
+        ownership: CloudDispatchOwnership?
+    ) async -> CloudRouteResult {
         routeToCloudCalled = true
+        dispatchInProgress = true
         lastRequest = request
         lastContext = context
-        return .spoken("Here's what I found")
+        lastOrigin = origin
+        lastSelection = selection
+        return CloudRouteResult(response: response, outcome: outcome)
+    }
+
+    /// Effect ownership follows the mock's configured policy: by default the FIRST caller owns
+    /// (stand-in for the real sink's once-per-utterance claim), with `effectOwnerForTesting`
+    /// overriding for the duplicate controls.
+    var effectOwnerForTesting: ((String?) -> Bool)?
+    /// ORDER EVIDENCE (reviewer 39beabc7): was the effect claim taken BEFORE the dispatch began?
+    /// Effects must be granted by the owner at dispatch time, not after the await — otherwise a
+    /// joiner the dispatch awaits can win them. The claim records whether routeToCloud had
+    /// already run; the control asserts this stayed true.
+    private(set) var claimObservedBeforeDispatch: [Bool] = []
+    private var claimedUtteranceIds: Set<String> = []
+    private var dispatchInProgress = false
+    private var ownerTokens: [String: CloudDispatchOwnership.DispatchToken] = [:]
+    func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
+        claimObservedBeforeDispatch.append(!dispatchInProgress)
+        if let effectOwnerForTesting, !effectOwnerForTesting(utteranceId) {
+            return .join(.init(utteranceId: utteranceId ?? "", instance: UUID(), record: nil))
+        }
+        guard let utteranceId else { return .owner(.init(utteranceId: "", instance: UUID(), record: nil)) }
+        if let owner = ownerTokens[utteranceId] { return .join(owner) }
+        let token = CloudDispatchOwnership.DispatchToken(utteranceId: utteranceId, instance: UUID(), record: nil)
+        ownerTokens[utteranceId] = token
+        return .owner(token)
     }
 }
 

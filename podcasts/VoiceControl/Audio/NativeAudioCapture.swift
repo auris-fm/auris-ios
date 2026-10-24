@@ -14,6 +14,20 @@ protocol CaptureAudioSession: AnyObject {
     func setActive(_ active: Bool, notifyOthers: Bool) throws
 }
 
+/// The microphone source the ASR engine consumes.
+///
+/// Extracted so a test can substitute capture and drive the REAL start/input path — the service
+/// reaches `start(in:)` only through its gate, and `start(in:)` begins capture, so without this
+/// seam a caller-level control cannot run without opening the microphone. Substituting is
+/// behaviourally what the production object does; nothing about the listening or provenance
+/// semantics changes.
+protocol AudioCaptureSource: AnyObject {
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? { get set }
+    func start() throws
+    func stop()
+}
+
+
 /// Live `AVAudioSession` adapter for capture.
 final class RealCaptureAudioSession: CaptureAudioSession {
     private var session: AVAudioSession { AVAudioSession.sharedInstance() }
@@ -42,7 +56,7 @@ final class RealCaptureAudioSession: CaptureAudioSession {
     }
 }
 
-class NativeAudioCapture {
+class NativeAudioCapture: AudioCaptureSource {
     let engine = AVAudioEngine()
     private let sampleRate = 16000.0
     private var energyLogged = false
@@ -52,7 +66,9 @@ class NativeAudioCapture {
     /// session playback owns would stop the user's podcast, so only a session
     /// capture itself activated may be deactivated.
     private let isPlaybackActive: () -> Bool
-    var onSamples: (([Float]) -> Void)?
+    /// Delivers converted samples with the instant the hardware captured them (from the
+    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route.
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
 
     init(
         session: CaptureAudioSession = RealCaptureAudioSession(),
@@ -60,6 +76,23 @@ class NativeAudioCapture {
     ) {
         self.session = session
         self.isPlaybackActive = isPlaybackActive
+    }
+
+    /// The callback BOUNDARY: maps the tap buffer's own time to a capture instant.
+    /// A valid host time IS the hardware capture moment; an invalid one yields nil so
+    /// the consumer declines to align rather than guessing from arrival time.
+    static func captureInstant(when: AVAudioTime) -> MonotonicTime? {
+        when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
+    }
+
+    /// Delivers one tap buffer to the subscribed consumer with its capture instant.
+    ///
+    /// The tap calls THIS, and a control observes the same function, so the boundary under test
+    /// is the one production runs — not a parallel copy of its arithmetic. `when` is the
+    /// buffer's own capture time, not this call's arrival; on a route whose host time is invalid
+    /// the instant is nil and the echo filter declines to align rather than guessing.
+    func deliver(_ samples: [Float], when: AVAudioTime) {
+        onCapturedSamples?(samples, Self.captureInstant(when: when))
     }
 
     func start() throws {
@@ -83,7 +116,7 @@ class NativeAudioCapture {
         // may deliver Int16 PCM from the Mac's audio hardware. When floatChannelData
         // is nil (non-float format), fall back to int16ChannelData and convert.
         var formatWarningLogged = false
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, _ in
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
             let nativeRate = buf.format.sampleRate
@@ -128,7 +161,7 @@ class NativeAudioCapture {
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
-                self.onSamples?(converted)
+                self.deliver(converted, when: when)
             }
         }
         tapInstalled = true

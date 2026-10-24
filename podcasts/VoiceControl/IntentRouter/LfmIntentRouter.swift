@@ -106,8 +106,8 @@ final class LfmIntentRouter {
     }
 
     /// Compatibility adapter: English-only envelope with `translationKind = none`.
-    func classify(transcript: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
-        classify(input: .english(transcript: transcript), pendingDialog: pendingDialog)
+    func classify(transcript: String, utteranceId: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
+        classify(input: .english(transcript: transcript, utteranceId: utteranceId), pendingDialog: pendingDialog)
     }
 
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
@@ -204,7 +204,11 @@ final class LfmIntentRouter {
                     sourceTranscript: input.sourceTranscript,
                     sourceLanguage: input.sourceLanguage,
                     routerTranscript: trimmed,
-                    translationKind: input.translationKind
+                    translationKind: input.translationKind,
+                    selection: input.selection,
+                    // REQUEST OWNERSHIP: trimming is a view of the SAME utterance, so the id
+                    // travels — a duplicate callback joins the same request, not a new one.
+                    utteranceId: input.utteranceId
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)
