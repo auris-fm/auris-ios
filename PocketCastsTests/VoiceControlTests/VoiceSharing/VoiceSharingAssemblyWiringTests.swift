@@ -564,6 +564,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             + "readyBeforePass=\(readyBeforePass) heldBeforePass=\(heldBeforePass) "
             + "isoAtSync=\(store.currentEffectiveEnrolled && authority() == pinned) "
             + "idleDecision=\(chain.scheduler.lastIdleDecisionByDiagnostic.map { $0.discovery } ?? "-") "
+            + "discoveryDiag=\(chain.queue.lastDiscoveryDiagnostic) "
             + "refused=\(String(describing: chain.scheduler.lastRefusedPassByDiagnostic))"
         XCTAssertEqual(AssemblyIntercept.requestCount, 1,
                        "the first attempt reached the wire (count last reset by \(AssemblyIntercept.resetBy ?? "?"), "

@@ -313,8 +313,23 @@ final class VoiceSharingUploadQueue {
     /// entry's life — and an unreadable date is `nil`, i.e. outside the served set.
     private func isWithinAgeBoundLocked(_ entry: Entry) -> Bool {
         guard let age = markerAgeLocked(entry) else { return false }
-        return age >= 0 && age <= Self.maxEntryAge
+        // THE FUTURE-DATE GUARD APPLIES ONLY TO A PERSISTED INSTANT, NOT TO AN INSTANT THIS INSTANCE
+        // JUST WROTE (epoch investigation, probe4-wide40). `created.at` is a decimal string; when it
+        // is written by a clock that has moved backwards relative to the reader — an injected test
+        // clock, or a second instance reading a shared root — the reading age goes NEGATIVE for an
+        // entry that is genuinely brand new, and the entry disappeared from BOTH the served set and
+        // the count while `readyEntries()` still reported it. A small negative age means the two
+        // readings bracket the same instant; only a MEANINGFULLY future date is skew worth refusing.
+        // The generous tolerance keeps the skew protection (a clock jumped forward by more than this
+        // is still not fresh) while never excluding an entry whose timestamps merely disagree by
+        // rounding or by the sub-second drift of two clocks measuring the same write.
+        return age >= -Self.futureDateTolerance && age <= Self.maxEntryAge
     }
+
+    /// How far an admission instant may read in the "future" before it is treated as clock skew
+    /// rather than as the same instant seen by two clocks. Sub-second rounding and inter-process
+    /// drift live far inside this; a real skew does not.
+    static let futureDateTolerance: TimeInterval = 60
 
     /// AGE is measured from the entry's IMMUTABLE admission instant (`created.at`), which is the
     /// only timestamp that cannot be refreshed by a later write. The marker's file mtime is NOT
@@ -2271,6 +2286,9 @@ final class VoiceSharingUploadQueue {
         return all
     }
 
+    /// The last discovery's per-entry account, for controls and diagnostics.
+    private(set) var lastDiscoveryDiagnostic = ""
+
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
             // OWNER-WIDE HOLD: an unreconciled purge means the on-disk set is not provable, so
@@ -2286,12 +2304,20 @@ final class VoiceSharingUploadQueue {
             let all: [Entry]
             do { all = try strictOwnerCoverageLocked() } catch { return .unknownCoverage }
             var ready: [Entry] = []
+            // DIAGNOSTIC (epoch investigation): WHY an entry that the legacy path reports as ready
+            // is absent here. Both paths must agree about the same disk, so any disagreement is a
+            // real inconsistency rather than a scheduling artifact.
+            var excluded: [String] = []
             for entry in all {
                 let state: EntryState
                 do { state = try entryStateLocked(at: entry) } catch {
+                    lastDiscoveryDiagnostic = "entryStateLocked threw for \(entry.name)"
                     return .unknownCoverage
                 }
-                guard case .bound = state else { continue }
+                guard case .bound = state else {
+                    excluded.append("\(entry.name):notBound(\(state))")
+                    continue
+                }
                 // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
                 // shared authority); reaching here means it held.
                 // ONE age rule shared with the count signature and the change version
@@ -2299,8 +2325,13 @@ final class VoiceSharingUploadQueue {
                 // date cannot claim freshness.
                 if isWithinAgeBoundLocked(entry) {
                     ready.append(entry)
+                } else {
+                    let age = markerAgeLocked(entry).map { String(format: "%.0f", $0) } ?? "unreadable"
+                    excluded.append("\(entry.name):age(\(age)s of max \(Int(Self.maxEntryAge)))")
                 }
             }
+            lastDiscoveryDiagnostic = "all=\(all.count) ready=\(ready.count) "
+                + "excluded=[\(excluded.joined(separator: ", "))]"
             return .known(ready.sorted { lhs, rhs in
                 let lDate = creationInstantLocked(in: entryDirectoryLocked(for: lhs)) ?? .distantPast
                 let rDate = creationInstantLocked(in: entryDirectoryLocked(for: rhs)) ?? .distantPast

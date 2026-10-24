@@ -3210,3 +3210,92 @@ extension VoiceSharingRevocationRestartTests {
         }
     }
 }
+
+
+// MARK: - A "future" admission instant that is really the same instant (epoch investigation)
+
+/// The served set and the legacy path must agree about the same disk. An entry whose `created.at`
+/// reads slightly AHEAD of the reader's clock (two clocks bracketing one write, or an injected test
+/// clock) previously scored a NEGATIVE age, so it vanished from `readyEntriesReportingUnknownCoverage`
+/// and from the count while `readyEntries()` still reported it — which surfaced as a full-suite
+/// failure where the scheduler saw a ready entry and then found nothing to serve.
+final class VoiceSharingAgeBoundAgreementTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsage-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func seedEntry(_ queue: VoiceSharingUploadQueue) throws -> VoiceSharingUploadQueue.Entry {
+        let samples: [Float] = [0, 0.25]
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed, captureID: UUID(),
+            enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+            conversionVersion: "v1")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: [:])
+        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
+        try queue.finalize(entry)
+        return entry
+    }
+
+    /// An admission instant a few seconds AHEAD of the reader is still a live entry: both paths must
+    /// report it, and the discovery must not exclude it for being "from the future".
+    func test_anInstantSlightlyAheadOfTheReaderIsStillServedByBothPaths() throws {
+        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let entry = try seedEntry(writer)
+        // Rewrite the immutable instant 5s AHEAD, as a fast writer clock would leave it.
+        let created = root.appendingPathComponent(entry.name, isDirectory: true)
+            .appendingPathComponent("created.at")
+        try String(Date().timeIntervalSince1970 + 5).write(
+            to: created, atomically: true, encoding: .utf8)
+
+        let reader = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(reader.readyEntries().count, 1, "the legacy path still sees it")
+        guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage must stay known for a readable entry")
+        }
+        XCTAssertEqual(ready.count, 1,
+                       "and the discovery must AGREE: a few seconds of clock disagreement is not "
+                       + "a reason to drop a live entry. Diag: \(reader.lastDiscoveryDiagnostic)")
+    }
+
+    /// The skew protection still holds: an instant meaningfully in the future is not fresh.
+    func test_anInstantFarInTheFutureIsNotTreatedAsFresh() throws {
+        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let entry = try seedEntry(writer)
+        let created = root.appendingPathComponent(entry.name, isDirectory: true)
+            .appendingPathComponent("created.at")
+        try String(Date().timeIntervalSince1970 + 3600).write(
+            to: created, atomically: true, encoding: .utf8)
+
+        let reader = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage stays known")
+        }
+        XCTAssertTrue(ready.isEmpty,
+                      "an hour in the future is skew, not freshness — it must not serve")
+    }
+
+    /// The normal case is unchanged: an entry written and read by the same clock serves normally.
+    func test_anOrdinaryEntryIsServedByBothPaths() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        _ = try seedEntry(queue)
+        XCTAssertEqual(queue.readyEntries().count, 1)
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage stays known")
+        }
+        XCTAssertEqual(ready.count, 1)
+    }
+}
