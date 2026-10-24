@@ -208,6 +208,82 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         try manifestData.write(to: base.appendingPathComponent("manifest.json"))
     }
 
+    /// The PINNED f8 WIRE fixtures (spec: exact `3dd0c91d` emitted-byte parity). Three deterministic
+    /// records exercising every byte shape f8 introduced — routing with a structured disposition,
+    /// completed stages carrying NO reason, the asr/empty_result exception, and the three translation
+    /// skip reasons — exported for the pinned Worker intake so parity is checked against bytes this
+    /// encoder ACTUALLY emits, bound-verified before they leave the runner. Always written to a fixed
+    /// runner-temporary location (host env does not reach the simulator); copied out via simctl.
+    func test_exportF8FixturesForPinnedWorkerIntake() throws {
+        func capture(_ id: String) -> VoiceSharingCollector.SegmentEvent {
+            .init(kind: .completed, captureID: UUID(uuidString: id)!,
+                  enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+                  retainedSamples: samples.count, truncated: false, droppedSpans: [],
+                  originalSampleCount: nil, audio: samples, isGateControl: false)
+        }
+        let cases: [String: (String, [String: VoiceSharingContributionEncoder.StageOutcome])] = [
+            // Full happy path AS THE ENCODER EMITS IT: completed stages carry NO reason; routing
+            // carries its structured disposition. NOTE: StageOutcome has no members for asr's
+            // source_language/router_input, routing's predicted_intent/tool/validation, or
+            // execution's outcome — if the pinned intake requires any of those, this fixture is
+            // the exact bytes that show the gap.
+            "f8-routing-executed": (
+                "22222222-2222-3333-4444-555555555555",
+                ["wake": .init(state: "completed"),
+                 "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                 "asr": .init(state: "completed", text: "pause"),
+                 "translation": .init(state: "not_run", reason: "source_language_target_language"),
+                 "routing": .init(state: "completed", routingDisposition: "executed"),
+                 "execution": .init(state: "completed")]),
+            // A genuinely empty recognition: asr COMPLETED with the sole sanctioned reason.
+            "f8-empty-result": (
+                "33333333-2222-3333-4444-555555555555",
+                ["wake": .init(state: "completed"),
+                 "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                 "asr": .init(state: "completed", reason: "empty_result"),
+                 "translation": .init(state: "not_run", reason: "no_text"),
+                 "routing": .init(state: "not_run", reason: "no_candidates"),
+                 "execution": .init(state: "not_run", reason: "precondition_failed")]),
+            // The backend-translation skip: translation NOT RUN for a reason that is a DECISION,
+            // while asr still carries its own text facts (spec 4d10275f).
+            "f8-translation-skip": (
+                "44444444-2222-3333-4444-555555555555",
+                ["wake": .init(state: "completed"),
+                 "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                 "asr": .init(state: "completed", text: "spielt den nächsten Titel"),
+                 "translation": .init(state: "not_run", reason: "backend_handles_translation"),
+                 "routing": .init(state: "completed", routingDisposition: "pending"),
+                 "execution": .init(state: "unknown", reason: "observation_unavailable")]),
+        ]
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("auris-f8-fixtures")
+        try? FileManager.default.removeItem(at: base)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        for (name, (captureID, observations)) in cases {
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: capture(captureID), provenance: provenance, observations: observations)
+            // SELF-CONSISTENT before export: the production binding must accept these bytes.
+            let bound = try VoiceSharingRecordBinding.bind(
+                envelope: encoded.metadataEnvelope, audio: encoded.wav)
+            XCTAssertFalse(bound.recordSHA256.isEmpty)
+            let dir = base.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try encoded.metadataEnvelope.write(to: dir.appendingPathComponent("metadata.json"))
+            try encoded.wav.write(to: dir.appendingPathComponent("audio.wav"))
+            let manifest: [String: String] = [
+                "record_sha256": bound.recordSHA256,
+                "metadata_sha256": SHA256.hash(data: encoded.metadataEnvelope)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "audio_sha256": SHA256.hash(data: encoded.wav)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "capture_id": captureID,
+                "f8_case": name,
+            ]
+            try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys, .prettyPrinted])
+                .write(to: dir.appendingPathComponent("manifest.json"))
+        }
+    }
+
     func test_wavRepresentationIsCanonicalPcmS16leMono16k() throws {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(), provenance: provenance, observations: observations)
