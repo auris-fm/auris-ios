@@ -1071,6 +1071,69 @@ final class VoiceSharingPolicyTests: XCTestCase {
         }
     }
 
+    /// Review a1809497: DIRECT policy installation (bypassing the coordinator wrapper entirely) must
+    /// be serialized against an old-generation fan-out too, because the barrier lives at the POLICY's
+    /// install authority, not in any caller. A direct install attempted while an old-generation
+    /// fan-out is running may only publish after the fan-out completes.
+    func test_aDirectPolicyInstallCannotPublishDuringAnOldGenerationFanOut() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        var bodies: [() -> Void] = []
+        coordinator.expiryScheduler = { _, body in bodies.append(body) }
+        let release = NSCondition()
+        var insideFanOut = false
+        var proceed = false
+        var installPublished = false
+        // The point of the control: the install must not publish WHILE the old fan-out is running.
+        // The handler itself watches for that — a final-state assertion alone cannot tell "after"
+        // from "during" (the first version of this control passed the no-barrier mutant on exactly
+        // that blindness).
+        var publishedDuringFanOut = false
+        let subscription = coordinator.registerGateLostHandler {
+            release.lock(); insideFanOut = true; release.signal(); release.unlock()
+            release.lock()
+            while !proceed {
+                if installPublished { publishedDuringFanOut = true }
+                release.wait()
+            }
+            if installPublished { publishedDuringFanOut = true }
+            release.unlock()
+        }
+        let token1 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
+        XCTAssertEqual(bodies.count, 1, "premise: one schedule")
+        withExtendedLifetime(subscription) {
+            clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+            let fire = DispatchQueue.global(qos: .userInitiated)
+            fire.async { bodies[0]() }
+            release.lock(); while !insideFanOut { release.wait() }; release.unlock()
+            // The DIRECT path: the policy's own install entry point, no coordinator wrapper.
+            let installer = DispatchQueue.global(qos: .userInitiated)
+            installer.async {
+                let t2 = coordinator.policy.tokenForFetchStart()
+                _ = coordinator.policy.refreshAfterActivation(
+                    freshActivationSucceeded: true, fetchToken: t2)
+                release.lock(); installPublished = true; release.signal(); release.unlock()
+            }
+            release.lock(); proceed = true; release.signal(); release.unlock()
+            release.lock()
+            let deadline = Date().addingTimeInterval(5)
+            while !installPublished, Date() < deadline { release.wait(until: deadline) }
+            release.unlock()
+            XCTAssertTrue(installPublished, "the direct install publishes after the fan-out")
+            XCTAssertFalse(publishedDuringFanOut,
+                           "a direct install must not publish DURING an old-generation fan-out")
+            XCTAssertTrue(coordinator.policy.permitsCollection, "the installed lease is live")
+        }
+    }
+
     /// REVIEW 15a18d5d: lifting the identity fence must INITIATE the normal refresh. A fence without
     /// a fetch never installs, and production's only fetch calls lived at launch and in the developer
     /// menu — so a re-login in a long-running process stayed closed until relaunch. This drives the

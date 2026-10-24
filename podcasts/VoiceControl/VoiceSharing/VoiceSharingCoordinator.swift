@@ -95,14 +95,6 @@ final class VoiceSharingCoordinator {
     /// frames, or any other event. At fire time the gate is re-read — if the lease lapsed (or the
     /// gate is closed for any other reason), consent is gone and the collector must purge NOW.
     /// A lease renewed in between re-reads open, so a stale schedule is harmless.
-    /// Serializes RENEWAL PUBLICATION against the revocation fan-out (review e827a22e, second
-    /// race): without it, a renewal could install a fresh lease between the revoke and the end of
-    /// the fan-out, and the old generation's unscoped handlers would purge the fresh lease's
-    /// captures. The refresh path takes this barrier around the install; the expiry body holds it
-    /// across revoke AND fan-out, so a renewal can only publish AFTER the old generation's effects
-    /// have finished. Handlers must not synchronously refresh (same rule as the reentrant-lock rule).
-    private let renewalBarrier = NSLock()
-
     private func scheduleLeaseExpiryTrigger() {
         // Deadline and generation are captured in ONE locked policy call: a concurrent install moves
         // both together, so they can never be paired across installs.
@@ -111,8 +103,11 @@ final class VoiceSharingCoordinator {
         let schedule = expiryScheduler ?? Self.defaultExpiryScheduler
         schedule(delay) { [weak self] in
             guard let self else { return }
-            self.renewalBarrier.lock()
-            defer { self.renewalBarrier.unlock() }
+            // The barrier is the POLICY's install-publication barrier: every install path (through
+            // this coordinator or a direct policy call) publishes under it, so holding it across
+            // revoke AND fan-out means a fresh lease cannot become visible mid-fan-out.
+            self.policy.installPublicationBarrier.lock()
+            defer { self.policy.installPublicationBarrier.unlock() }
             if self.policy.revokeIfLeaseExpired(
                 generation: target.generation, deadline: target.deadline) {
                 self.consentGateLost()
@@ -129,6 +124,11 @@ final class VoiceSharingCoordinator {
         /// Explicit teardown, for a handler that must remove ITSELF during fan-out (reentrant
         /// teardown): same path as deinit, safe to call from inside a handler invocation.
         func unregisterNow() { unregister() }
+        /// REENTRANCY CONTRACT, stated at registration because it is a deadlock hazard, not style:
+        /// a handler may unregister (itself or others) freely, but MUST NOT synchronously install
+        /// or refresh a lease. The gate-lost fan-out runs under the policy's install-publication
+        /// barrier; a synchronous refresh from a handler would deadlock on that nonrecursive lock.
+        /// Anything a handler needs from a refresh must be scheduled off the fan-out stack.
         deinit { unregister() }
     }
 
@@ -193,8 +193,6 @@ final class VoiceSharingCoordinator {
         freshActivationSucceeded: Bool,
         fetchToken: VoiceSharingPolicy.FetchToken
     ) {
-        renewalBarrier.lock()
-        defer { renewalBarrier.unlock() }
         policy.refreshAfterActivation(
             freshActivationSucceeded: freshActivationSucceeded,
             fetchToken: fetchToken

@@ -93,6 +93,17 @@ final class VoiceSharingPolicy {
 
     private let lock = NSLock()
     private var installed: VoiceSharingSnapshot?
+
+    /// THE install-publication barrier (reviews e827a22e, a1809497). It lives HERE, at the single
+    /// install authority, not in any caller: a refresh published through the coordinator and a
+    /// DIRECT `refreshAfterActivation` call both pass through this lock, so no install path can
+    /// publish while an old-generation revocation fan-out is running. The expiry body holds it
+    /// across revoke AND fan-out; every install holds it across making the lease visible and arming.
+    /// HANDLERS INVOKED UNDER THIS BARRIER (the gate-lost fan-out) MUST NOT SYNCHRONOUSLY INSTALL
+    /// OR REFRESH — a synchronous refresh from a handler would deadlock on this nonrecursive lock.
+    /// That rule is restated at handler registration.
+    let installPublicationBarrier = NSLock()
+
     /// Bumped on EVERY successful install. Expiry revocation is generation-bound: the schedule
     /// captures the generation at arm time and the revoke validates it under the SAME lock —
     /// otherwise a renewal that lands between "the lease looks lapsed" and "purge" lets a stale
@@ -185,6 +196,10 @@ final class VoiceSharingPolicy {
                 // re-reads current identity so withdrawal/sign-out takes effect immediately.
                 accountEnrolled: isAccountEnrolled()
             )
+            // Publication (installed + generation bump) and arming happen UNDER the install
+            // barrier: no revocation fan-out may run in the gap between a fresh lease becoming
+            // visible and its expiry schedule being armed, whichever caller installed it.
+            installPublicationBarrier.lock()
             installed = snapshot
             leaseGeneration += 1
             lock.unlock()
@@ -192,10 +207,11 @@ final class VoiceSharingPolicy {
             // caller remembering to schedule it. The coordinator arms the expiry trigger here rather
             // than only at the tail of its refresh (audit finding 2026-10-23: a lease installed by any
             // other route had no time-driven purge).
-            // Delivered with the lock released (the handler reads the policy back) and AFTER the
-            // generation is bumped: the arming hook reads it, so arming before the bump would arm
-            // the expiry against the PREVIOUS lease's generation.
+            // Delivered with the POLICY lock released (the handler reads the policy back) and AFTER
+            // the generation is bumped: the arming hook reads it, so arming before the bump would
+            // arm the expiry against the PREVIOUS lease's generation.
             onLeaseInstalled?(snapshot)
+            installPublicationBarrier.unlock()
             return snapshot
         }
     }
