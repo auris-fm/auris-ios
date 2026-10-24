@@ -983,3 +983,100 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
                        "a timer superseded by an arm with nothing due must not publish")
     }
 }
+
+// MARK: - Re-arm with unchanged displayed state (reviewer e48ebcc6)
+
+final class VoiceSharingDeadlineMoveTests: XCTestCase {
+    private var root: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsdeadline-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// A SHORTENED lease changes no displayed field — permission, count and guidance are identical —
+    /// yet the deadline moved. The timer must be re-armed anyway, or the old deadline owns the
+    /// surface.
+    func test_aShortenedLeaseRearmsEvenThoughNothingDisplayedChanges() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var leaseDelay: TimeInterval? = 900
+        model.nextLeaseExpirySeconds = { leaseDelay }
+        var scheduled: [(delay: TimeInterval, body: () -> Void)] = []
+        model.scheduleTimeDrivenRefresh = { delay, body in scheduled.append((delay, body)) }
+
+        model.refreshLiveState()
+        XCTAssertEqual(scheduled.count, 1)
+        let firstDelay = scheduled[0].delay
+        XCTAssertGreaterThan(firstDelay, 900, "the first arm follows the long lease")
+
+        // Renewal shortened the lease: nothing the user SEES changes.
+        let liveBefore = model.liveState()
+        leaseDelay = 60
+        model.refreshLiveState()
+        XCTAssertEqual(model.liveState(), liveBefore, "precondition: the displayed state is identical")
+        XCTAssertEqual(scheduled.count, 2,
+                       "an unchanged-state read with a MOVED deadline must still re-arm")
+        XCTAssertLessThan(scheduled[1].delay, firstDelay,
+                          "and the new arm must follow the SHORTER deadline")
+    }
+
+    /// An obsolete (superseded) read must not re-arm either — only the newest accepted read owns
+    /// scheduling.
+    func test_anObsoleteReadDoesNotRearm() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        model.nextLeaseExpirySeconds = { 300 }
+        var scheduled = 0
+        model.scheduleTimeDrivenRefresh = { _, _ in scheduled += 1 }
+
+        let gate = DispatchSemaphore(value: 0)
+        let readDone = DispatchSemaphore(value: 0)
+        model.afterReadBeforeCommitForTesting = {
+            readDone.signal()
+            _ = gate.wait(timeout: .now() + 5)
+        }
+        let older = DispatchQueue(label: "older")
+        older.async { model.refreshLiveState() }
+        XCTAssertEqual(readDone.wait(timeout: .now() + 5), .success)
+        model.afterReadBeforeCommitForTesting = nil
+        model.refreshLiveState()          // newer read completes first: it owns scheduling
+        let afterNewer = scheduled
+        gate.signal()
+        older.sync {}
+        XCTAssertEqual(scheduled, afterNewer,
+                       "the superseded read must not queue another timer")
+    }
+
+    /// ONE arm per fire: the timer's refresh must not queue a second closure on top of its own.
+    func test_afireQueuesExactlyOneNextArm() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var boundary: TimeInterval? = 120
+        model.nextAgeBoundarySeconds = { boundary }
+        var bodies: [(delay: TimeInterval, body: () -> Void)] = []
+        model.scheduleTimeDrivenRefresh = { delay, body in bodies.append((delay, body)) }
+        model.refreshLiveState()
+        XCTAssertEqual(bodies.count, 1)
+        boundary = 240
+        bodies[0].body()                  // the timer fires
+        XCTAssertEqual(bodies.count, 2, "one fire ⇒ exactly one new pending arm")
+    }
+}

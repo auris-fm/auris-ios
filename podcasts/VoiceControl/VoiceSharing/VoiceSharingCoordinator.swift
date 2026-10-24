@@ -248,7 +248,7 @@ final class VoiceSharingCoordinator {
 
     /// The center an installed observer was registered on. Removing an observer must be done through
     /// the SAME center that added it — `removeObserver(_:)` alone would not reach a non-default center.
-    private var identityCenter: NotificationCenter?
+    private var identityCenter: NotificationRegistering?
 
     /// Subscribes to sign-out/identity change so permission drops synchronously instead of surviving
     /// inside a still-valid snapshot. IDEMPOTENT by construction: `setupVoiceControlIfNeeded()` runs on
@@ -258,8 +258,23 @@ final class VoiceSharingCoordinator {
     ///
     /// Returns the invalidation closure so a composition site that already observes this notification
     /// can call it directly rather than registering a duplicate.
+    /// The notification API the sign-out wiring needs, isolated behind a protocol (spec e3db4e30 /
+    /// d718c160) because the observer's body reaches `SyncManager` and the app graph: a test cannot
+    /// build that graph, but it CAN drive the REAL registration and callback path if the center is
+    /// injectable. `NotificationCenter` already satisfies this, so production is unchanged — the
+    /// AppDelegate still passes `.default`, and this is a conformance, not a wrapper.
+    protocol NotificationRegistering {
+        func addObserver(forName name: NSNotification.Name?,
+                         object obj: Any?,
+                         queue: OperationQueue?,
+                         using block: @escaping (Notification) -> Void) -> NSObjectProtocol
+        func removeObserver(_ observer: Any)
+    }
+
     @discardableResult
-    func installIdentityInvalidation(onNotificationCenter center: NotificationCenter = .default) -> () -> Void {
+    func installIdentityInvalidation(
+        onNotificationCenter center: NotificationRegistering = NotificationCenter.default
+    ) -> () -> Void {
         removeAllIdentityObservers()
         let invalidate: () -> Void = { [weak self] in
             guard let self else { return }
@@ -382,3 +397,6 @@ final class VoiceSharingCoordinator {
         return RemoteValueSource(data: value.dataValue as Data, sourceIsRemote: value.source == .remote)
     }
 }
+
+
+extension NotificationCenter: VoiceSharingCoordinator.NotificationRegistering {}

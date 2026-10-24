@@ -340,8 +340,10 @@ final class VoiceSharingSettingsModel {
             let isCurrent = self.pendingTimeRefreshToken == token
             self.changeLock.unlock()
             guard isCurrent else { return }  // superseded: a newer timer owns the next refresh
+            // `refreshLiveState` is the SINGLE owner of arming (reviewer e48ebcc6): it re-arms on
+            // both the published and the unchanged path, so calling `armTimeDrivenRefresh` here as
+            // well queued two closures per fire.
             self.refreshLiveState()
-            self.armTimeDrivenRefresh()      // re-arm for the NEXT boundary
         }
     }
 
@@ -373,6 +375,13 @@ final class VoiceSharingSettingsModel {
         lastPublishedSequence = sequence
         guard state != lastPublishedState else {
             changeLock.unlock()
+            // NO CHANGE IN DISPLAYED STATE, BUT THE DEADLINE MAY HAVE MOVED (reviewer e48ebcc6):
+            // a renewed or shortened lease changes the snapshot's stamp and its deadline while
+            // permission, count and guidance stay identical. The timer must be re-armed even when
+            // nothing is published, or the OLD deadline keeps ownership. This read is still the
+            // newest accepted one (`sequence > lastPublishedSequence` held above), so an obsolete
+            // read cannot supersede newer scheduling.
+            armTimeDrivenRefresh()
             return
         }
         lastPublishedState = state

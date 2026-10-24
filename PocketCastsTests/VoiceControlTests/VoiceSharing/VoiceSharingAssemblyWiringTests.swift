@@ -12,7 +12,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     private var root: URL!
 
     override func setUpWithError() throws {
-        AssemblyIntercept.requestCount = 0
+        AssemblyIntercept.reset(for: name)
         AssemblyIntercept.responder = nil
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vsassembly-\(UUID().uuidString)")
@@ -409,11 +409,19 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         let chain = makeChain(policyPermits: { pin.isCurrent }, tokenProvider: tokens,
                               attemptLimits: .init(maxUploadAttempts: 4), now: { now })
         let entry = try makeReadyEntry(chain.queue)
+        // SHARED-STATE DISCIPLINE (the cause of the intermittent full-suite failure): the
+        // intercepted session runs on URLSession's own threads, so a fixture that mutates its
+        // state from the responder and then OBSERVES it on the test thread is racing. Both sides
+        // take the host lock, which is what makes the post-drain assertion meaningful instead of
+        // dependent on whether the URLSession thread had run yet.
+        let hostLock = AssemblyIntercept.diagnosticLock
         AssemblyIntercept.responder = { request in
             let token = (request.value(forHTTPHeaderField: "Authorization") ?? "")
                 .replacingOccurrences(of: "Bearer ", with: "")
             if token == "stale-token" {
+                hostLock.lock()
                 epoch = "epoch-2"   // the account re-enrolls while the credential refreshes
+                hostLock.unlock()
                 return (HTTPURLResponse(url: request.url!, statusCode: 401,
                                         httpVersion: nil, headerFields: nil)!,
                         Data("{\"schema_version\":1,\"code\":\"invalid_token\"}".utf8))
@@ -422,8 +430,14 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         defer { AssemblyIntercept.responder = nil }
         _ = await chain.scheduler.drainOnce()
-        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt went out")
-        XCTAssertFalse(pin.isCurrent, "precondition: the epoch moved during the refresh")
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "the first attempt went out (count last reset by \(AssemblyIntercept.resetBy ?? "?"), "
+                       + "hosts=\(AssemblyIntercept.seenHosts))")
+        hostLock.lock()
+        let epochAtObservation = epoch
+        hostLock.unlock()
+        XCTAssertFalse(pin.isCurrent,
+                       "precondition: the epoch moved during the refresh (epoch read=\(epochAtObservation ?? "nil"))")
 
         // Past the back-off the retry would otherwise fire — the pin must hold it.
         now = now.addingTimeInterval(500)
@@ -481,12 +495,31 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         let pinned = authority()
         XCTAssertEqual(pinned, "acct-A|epoch-1")
 
-        var now = Date()
+        var currentTime = Date()
+        // DIAGNOSTIC: recording WHERE the pin diverges, and also memoizing the last TRUE answer so
+        // a transient `false` (whatever produced it) cannot be mistaken for a settled refusal.
+        let isoBefore = store.currentEffectiveEnrolled && authority() == pinned
+        var isoCalls = 0
+        var isoFalseAt: String? = nil
+        var isoTrueSeen = isoBefore
         let chain = makeChain(
-            policyPermits: { store.currentEffectiveEnrolled && authority() == pinned },
+            policyPermits: {
+                isoCalls += 1
+                let isoNow = store.currentEffectiveEnrolled && authority() == pinned
+                if isoNow != isoBefore, isoFalseAt == nil, isoCalls > 1 {
+                    let probe = VoiceSharingEnrollmentStore(defaults: defaults,
+                                                           accountScopeProvider: { accountID },
+                                                           sessionIdentityProvider: { "gen-1" })
+                    isoFalseAt = "call#\(isoCalls) -> \(isoNow); sameStoreEpoch=\(String(describing: store.activeEnrollmentEpoch)) "
+                        + "reopenedEpoch=\(String(describing: probe.activeEnrollmentEpoch)) "
+                        + "reopenedEffective=\(probe.currentEffectiveEnrolled)"
+                }
+                if isoNow { isoTrueSeen = true }
+                return isoNow
+            },
             tokenProvider: StaticTokenProvider(token: "tok"),
             attemptLimits: .init(maxUploadAttempts: 4),
-            now: { now })
+            now: { currentTime })
         let entry = try makeReadyEntry(chain.queue)
         var attempts = 0
         AssemblyIntercept.responder = { request in
@@ -499,8 +532,20 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         defer { AssemblyIntercept.responder = nil }
 
-        _ = await chain.scheduler.drainOnce()
-        XCTAssertEqual(AssemblyIntercept.requestCount, 1, "the first attempt reached the wire")
+        let firstPass = await chain.scheduler.drainOnce()
+        // DIAGNOSTIC for the intermittent full-suite failure: the assertion message carries the
+        // evidence, so a failing run explains itself. (A stray `print` is not reliably captured in
+        // the xcodebuild log, which is why the earlier attempt produced nothing.)
+        let pinNow = authority()
+        let diag = "counting=\(AssemblyIntercept.requestCount) "
+            + "ready=\(chain.queue.readyEntries().count) "
+            + "held=\(chain.queue.readyEntriesReportingUnknownCoverage()) "
+            + "pass=\(firstPass) pin=\(String(describing: pinNow)) pinned=\(String(describing: pinned)) "
+            + "enrolled=\(store.currentEffectiveEnrolled) isoBefore=\(isoBefore) "
+            + "isoCalls=\(isoCalls) isoFalseAt=\(isoFalseAt ?? "-") isoTrueSeen=\(isoTrueSeen)"
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "the first attempt reached the wire (count last reset by \(AssemblyIntercept.resetBy ?? "?"), "
+                       + "hosts=\(AssemblyIntercept.seenHosts); \(diag))")
 
         // The account's epoch moves: same account, re-enrolled under a new epoch.
         try applyMembership(to: store, revision: "rev-2", epoch: "epoch-2")
@@ -508,7 +553,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertEqual(store.activeEnrollmentEpoch, "epoch-2")
 
         // Past the back-off: the retained entry must not be sent under the old authority.
-        now = now.addingTimeInterval(500)
+        currentTime = currentTime.addingTimeInterval(500)
         let secondPass = await chain.scheduler.drainOnce()
         guard case .idle = secondPass else {
             return XCTFail("a moved account/epoch must hold the retry, got \(secondPass)")
@@ -1038,7 +1083,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         // A SUCCESSOR instance on the same disk: with consent still revoked it must attempt
         // NOTHING — the late receipt neither delivered the entry nor left it borrowable.
-        AssemblyIntercept.requestCount = 0
+        AssemblyIntercept.reset(for: name + " (mid-test: successor)")
         let successor = makeChain(policyPermits: { permitted },
                                   tokenProvider: StaticTokenProvider(token: "tok"))
         let successorOutcome = await successor.scheduler.drainOnce()
@@ -1121,12 +1166,36 @@ private final class StaticTokenProvider: CloudTokenProviding {
 private final class AssemblyIntercept: URLProtocol {
     static var responder: ((URLRequest) -> (HTTPURLResponse, Data))?
     static var requestCount = 0
+    /// WHICH test last reset the counter. Two wiring tests in a full run both drove the count to 0
+    /// mid-flight; recording the resetter makes the interference claim checkable instead of a guess.
+    static var resetBy: String?
+    /// The URL host each intercepted request was actually built for, so a route/keying bug is
+    /// visible rather than inferred.
+    static var seenHosts: [String] = []
+
+    /// One place that mutates the shared diagnostics, so the count and the resetter can never
+    /// disagree about ordering.
+    static let diagnosticLock = NSLock()
+    static func record(_ request: URLRequest) {
+        diagnosticLock.lock()
+        requestCount += 1
+        if let host = request.url?.host { seenHosts.append(host) }
+        diagnosticLock.unlock()
+    }
+
+    static func reset(for test: String) {
+        diagnosticLock.lock()
+        requestCount = 0
+        resetBy = test
+        seenHosts = []
+        diagnosticLock.unlock()
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        AssemblyIntercept.requestCount += 1
+        AssemblyIntercept.record(request)
         guard let responder = AssemblyIntercept.responder else {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
             return

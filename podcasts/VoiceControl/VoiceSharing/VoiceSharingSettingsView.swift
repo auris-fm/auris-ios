@@ -54,11 +54,10 @@ struct VoiceSharingSettingsView: View {
                     }
                     if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
                 }
+                // ONE entry point: refreshLiveState publishes AND arms the time-driven refresh
+                // (an aged entry or a lapsing lease changes the display with no other event), so
+                // appearance does not need a second arm.
                 model.refreshLiveState()
-                // TIME, not just mutations, makes this surface stale: an entry crossing the
-                // queue-age bound and a lease lapsing both change what is displayed with no other
-                // event (reviewer ffca9a27).
-                model.armTimeDrivenRefresh()
             }
             .onDisappear {
                 if let stateObserver { model.removeStateObserver(stateObserver) }

@@ -86,6 +86,26 @@ enum VoiceSharingDeletionFixture {
         try String(instant - seconds).write(to: created, atomically: true, encoding: .utf8)
     }
 
+    /// A live, authoritative enrollment: the precondition every "previously valid lease" fixture
+    /// needs before the queue will admit or serve anything.
+    @discardableResult
+    static func enroll(_ store: VoiceSharingEnrollmentStore, defaults: UserDefaults,
+                       account: String = "account-a") throws -> VoiceSharingEnrollmentStore {
+        let live = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { account },
+            sessionIdentityProvider: { "gen-1" })
+        let token = try XCTUnwrap(live.projectionToken(), "no session generation for the fence")
+        XCTAssertTrue(live.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "v1",
+                withdrawalState: .active),
+            readUnder: token), "the fixture must begin with a valid, authoritative lease")
+        live.setLocalOptIn(true)
+        XCTAssertTrue(live.currentEffectiveEnrolled, "precondition: enrolled")
+        return live
+    }
+
     static func seed(in queue: VoiceSharingUploadQueue) throws {
         let sampleFrames: [Float] = [0, 0.2, -0.3, 0.4]
         let event = VoiceSharingCollector.SegmentEvent(
@@ -165,5 +185,122 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
         guard case .known = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a removed handler must not purge")
         }
+    }
+}
+
+// MARK: - The REAL sign-out registration and callback (spec e3db4e30 / d718c160)
+
+/// A test notification center that satisfies the same protocol production uses, so these controls
+/// drive `installIdentityInvalidation` itself — the actual observer the app registers — rather than
+/// calling the registry or the coordinator's handler directly.
+final class RecordingNotificationCenter: VoiceSharingCoordinator.NotificationRegistering {
+    private var observers: [(name: NSNotification.Name?, block: (Notification) -> Void)] = []
+    private(set) var removed = 0
+
+    func addObserver(forName name: NSNotification.Name?, object obj: Any?, queue: OperationQueue?,
+                     using block: @escaping (Notification) -> Void) -> NSObjectProtocol {
+        observers.append((name, block))
+        return NSObject()
+    }
+
+    func removeObserver(_ observer: Any) { removed += 1 }
+
+    /// Posts to the registered blocks for that name, synchronously (the production queue is `.main`
+    /// and these controls run on the main thread, so this is the same ordering).
+    func post(name: NSNotification.Name) {
+        for observer in observers where observer.name == name {
+            observer.block(Notification(name: name, object: nil))
+        }
+    }
+
+    var registeredNames: [NSNotification.Name?] { observers.map { $0.name } }
+}
+
+final class VoiceSharingSignOutNotificationTests: XCTestCase {
+    private var root: URL!
+    private var defaults: UserDefaults!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsnotif-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defaults = UserDefaults(suiteName: "vsnotif-\(UUID().uuidString)")
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The ACTUAL registration: installing the identity invalidation must subscribe to the sign-out
+    /// notification, and posting it must revoke a set that was admitted under a VALID lease.
+    func test_theRealSignOutRegistrationRevokesRetainedAudio() throws {
+        let store = try VoiceSharingDeletionFixture.enroll(
+            VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" }),
+            defaults: defaults)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        XCTAssertEqual(queue.readyEntries().count, 1, "setup: audio retained under a valid session")
+
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        defer { _ = subscription }
+
+        let center = RecordingNotificationCenter()
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        XCTAssertTrue(center.registeredNames.contains(.serverUserWillBeSignedOut),
+                      "the sign-out observer must be registered on the center the app observes")
+
+        center.post(name: .serverUserWillBeSignedOut)
+
+        XCTAssertEqual(queue.readyEntries().count, 0, "the sign-out notification revokes retained audio")
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(restarted.readyEntries().count, 0, "durably, across a restart")
+    }
+
+    /// Re-activation removes the previous observers from the SAME center, so one sign-out cannot
+    /// fire the invalidation twice.
+    func test_reinstallingRemovesThePreviousObservers() {
+        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let center = RecordingNotificationCenter()
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        XCTAssertEqual(center.removed, 2, "both observers from the first install are removed")
+    }
+
+    /// LOST CALLBACK: enrolled, with a retained recording and a valid lease, the delete completes
+    /// but the sign-out notification never arrives (the process died before the completion ran).
+    /// Nothing is revoked in that process — and the audio is still THERE afterwards. That residue,
+    /// not a clean "not enrolled" label, is the real cost of a lost callback.
+    func test_aLostSignOutCallbackLeavesTheAudioInPlace() throws {
+        let store = try VoiceSharingDeletionFixture.enroll(
+            VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" }),
+            defaults: defaults)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        XCTAssertEqual(queue.readyEntries().count, 1, "precondition: servable under a valid lease")
+
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        defer { _ = subscription }
+        let center = RecordingNotificationCenter()
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        // NO post: the callback never ran.
+        XCTAssertEqual(queue.readyEntries().count, 1, "nothing was revoked, because nothing was told")
+
+        // MEASURED WHILE STILL ENROLLED. (Driving `transitionToAccount` here instead would drop the
+        // reading to zero for a reason that has nothing to do with removal — sign-out clears the
+        // account scope the queue reads its identity from — so this control observes the residue at
+        // the only moment it is observable: before that transition.)
+        XCTAssertEqual(queue.readyEntries().count, 1,
+                       "the recording survives, un-revoked, under the still-live lease")
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil)) ?? []
+        XCTAssertTrue(files.contains { UUID(uuidString: $0.lastPathComponent) != nil },
+                      "and it is durable: the entry directory is still on disk afterwards")
+
+        // WHAT THE LOST CALLBACK COSTS: the files remain, so they persist past the process and past
+        // the sign-out that would have purged them. Nothing here claims they are still SERVED after
+        // a later sign-out — only that the revocation never happened, so nothing removed them.
     }
 }
