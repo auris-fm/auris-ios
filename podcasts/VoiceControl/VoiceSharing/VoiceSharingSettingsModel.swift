@@ -323,17 +323,44 @@ final class VoiceSharingSettingsModel {
     /// Arms ONE pending time-driven refresh, replacing any previous one (newest wins), so a clock
     /// change or a renewed lease cannot leave a stale timer behind.
     private var pendingTimeRefreshToken = 0
+    /// The read sequence the current timer was armed for. Scheduling refuses anything older, so a
+    /// slow read cannot replace a newer deadline.
+    private var armedForSequence = 0
 
+    /// Arms from the LATEST accepted read. Call only with `changeLock` already held or from a path
+    /// that has just accepted a sequence — it commits the scheduling under the same lock as the
+    /// sequence it belongs to (reviewer 5a4738ca).
     func armTimeDrivenRefresh() {
+        armTimeDrivenRefresh(afterAcceptedSequence: currentSequence)
+    }
+
+    /// Test seam for the ordering control: an EXPLICIT sequence, as a read that was accepted earlier
+    /// would present when it resumes and tries to arm.
+    func armTimeDrivenRefreshForTesting(afterAcceptedSequence sequence: Int) {
+        armTimeDrivenRefresh(afterAcceptedSequence: sequence)
+    }
+
+    /// Arms the timer, FENCED BY THE READ SEQUENCE IT BELONGS TO (reviewer 5a4738ca). An accepted
+    /// read used to release `changeLock` and arm afterwards, so it could pause between the two: a
+    /// NEWER read would arm the correct deadline, then the older one would invalidate it and how
+    /// long it happened to wait before pausing decided the schedule. The delay is therefore measured
+    /// and the token committed under ONE hold, and a sequence older than the armed one is refused.
+    private func armTimeDrivenRefresh(afterAcceptedSequence sequence: Int) {
+        changeLock.lock()
+        guard sequence >= armedForSequence else {
+            changeLock.unlock()
+            return
+        }
         // INVALIDATE FIRST, ALWAYS (reviewer 71088b91): even when nothing is due, any previously
         // armed timer must be superseded — otherwise a stale timer from an earlier, longer delay
         // keeps ownership and the newer deadline is never scheduled.
-        changeLock.lock()
         pendingTimeRefreshToken &+= 1
         let token = pendingTimeRefreshToken
+        armedForSequence = sequence
+        let delay = secondsUntilNextTimeTransition()
+        let schedule = scheduleTimeDrivenRefresh
         changeLock.unlock()
-        guard let schedule = scheduleTimeDrivenRefresh,
-              let delay = secondsUntilNextTimeTransition() else { return }
+        guard let schedule, let delay else { return }
         schedule(delay) { [weak self] in
             guard let self else { return }
             self.changeLock.lock()
@@ -374,14 +401,15 @@ final class VoiceSharingSettingsModel {
         }
         lastPublishedSequence = sequence
         guard state != lastPublishedState else {
-            changeLock.unlock()
             // NO CHANGE IN DISPLAYED STATE, BUT THE DEADLINE MAY HAVE MOVED (reviewer e48ebcc6):
             // a renewed or shortened lease changes the snapshot's stamp and its deadline while
             // permission, count and guidance stay identical. The timer must be re-armed even when
             // nothing is published, or the OLD deadline keeps ownership. This read is still the
             // newest accepted one (`sequence > lastPublishedSequence` held above), so an obsolete
             // read cannot supersede newer scheduling.
-            armTimeDrivenRefresh()
+            let armedSequence = sequence
+            changeLock.unlock()
+            armTimeDrivenRefresh(afterAcceptedSequence: armedSequence)
             return
         }
         lastPublishedState = state
@@ -395,7 +423,7 @@ final class VoiceSharingSettingsModel {
         // queue schedules nothing, so the entry added right after it would never be given an expiry
         // timer, and a SHORTENED or newly installed lease could miss its deadline. Re-arming here
         // covers every source — queue, policy, enrollment — because they all refresh through here.
-        armTimeDrivenRefresh()
+        armTimeDrivenRefresh(afterAcceptedSequence: sequence)
     }
 
     /// The sequence of the most recently committed publication; seeded on subscribe so a new

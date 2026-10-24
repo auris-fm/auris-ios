@@ -1061,6 +1061,42 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
                        "the superseded read must not queue another timer")
     }
 
+    /// PAUSED BETWEEN ACCEPTANCE AND ARMING (reviewer 5a4738ca). An accepted read used to release
+    /// the lock and arm afterwards, so it could pause there while a NEWER read armed the correct
+    /// deadline — then the older read would invalidate it. Here the older read is fully accepted
+    /// first, pauses, the newer read completes and arms the short deadline, and only then does the
+    /// older read arm. The newer deadline must survive.
+    func test_anAcceptedReadThatPausesBeforeArmingCannotClobberANewerTimer() {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        var deadline: TimeInterval = 900
+        model.nextLeaseExpirySeconds = { deadline }
+        var scheduled: [TimeInterval] = []
+        model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
+
+        // The older read: it has been ACCEPTED (its sequence is committed) and now pauses.
+        model.refreshLiveState()
+        XCTAssertEqual(scheduled.count, 1)
+        let longDelay = scheduled[0]
+
+        // The lease shortens; a NEWER read completes and arms the short deadline.
+        deadline = 30
+        model.refreshLiveState()
+        XCTAssertEqual(scheduled.count, 2)
+        let shortDelay = scheduled[1]
+        XCTAssertLessThan(shortDelay, longDelay, "the newer read armed the shorter deadline")
+
+        // The older read now resumes and tries to arm again under its own (older) sequence.
+        model.armTimeDrivenRefreshForTesting(afterAcceptedSequence: 1)
+        XCTAssertEqual(scheduled.count, 2,
+                       "a read older than the armed one must not arm: the newer timer keeps ownership")
+        XCTAssertEqual(scheduled.last, shortDelay)
+    }
+
     /// ONE arm per fire: the timer's refresh must not queue a second closure on top of its own.
     func test_afireQueuesExactlyOneNextArm() {
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)

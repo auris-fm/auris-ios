@@ -194,26 +194,58 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
 /// drive `installIdentityInvalidation` itself — the actual observer the app registers — rather than
 /// calling the registry or the coordinator's handler directly.
 final class RecordingNotificationCenter: VoiceSharingCoordinator.NotificationRegistering {
-    private var observers: [(name: NSNotification.Name?, block: (Notification) -> Void)] = []
-    private(set) var removed = 0
-
-    func addObserver(forName name: NSNotification.Name?, object obj: Any?, queue: OperationQueue?,
-                     using block: @escaping (Notification) -> Void) -> NSObjectProtocol {
-        observers.append((name, block))
-        return NSObject()
+    /// REAL TOKEN-BASED REMOVAL (reviewer 5a4738ca): the earlier version only incremented a counter,
+    /// so a "removed" block still delivered — posting after reinstall fired BOTH registrations and
+    /// the test proved nothing. A token identifies its own entry and removal deletes it.
+    private final class Token: NSObject {
+        let id = UUID()
     }
 
-    func removeObserver(_ observer: Any) { removed += 1 }
-
-    /// Posts to the registered blocks for that name, synchronously (the production queue is `.main`
-    /// and these controls run on the main thread, so this is the same ordering).
-    func post(name: NSNotification.Name) {
-        for observer in observers where observer.name == name {
-            observer.block(Notification(name: name, object: nil))
+    private final class Entry {
+        let token: Token
+        let name: NSNotification.Name?
+        let block: (Notification) -> Void
+        init(token: Token, name: NSNotification.Name?, block: @escaping (Notification) -> Void) {
+            self.token = token; self.name = name; self.block = block
         }
     }
 
-    var registeredNames: [NSNotification.Name?] { observers.map { $0.name } }
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private(set) var removedTokens: [UUID] = []
+
+    func addObserver(forName name: NSNotification.Name?, object obj: Any?, queue: OperationQueue?,
+                     using block: @escaping (Notification) -> Void) -> NSObjectProtocol {
+        let token = Token()
+        lock.lock(); entries.append(Entry(token: token, name: name, block: block)); lock.unlock()
+        return token
+    }
+
+    func removeObserver(_ observer: Any) {
+        guard let token = observer as? Token else { return }
+        lock.lock()
+        removedTokens.append(token.id)
+        entries.removeAll { $0.token === token }
+        lock.unlock()
+    }
+
+    /// Posts SYNCHRONOUSLY to every LIVE registration for that name (production's queue is `.main`
+    /// and these controls run on the main thread, so the ordering matches).
+    @discardableResult
+    func post(name: NSNotification.Name) -> Int {
+        lock.lock()
+        let live = entries.filter { $0.name == name }.map { $0.block }
+        lock.unlock()
+        for block in live { block(Notification(name: name, object: nil)) }
+        return live.count
+    }
+
+    var registeredNames: [NSNotification.Name?] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.map { $0.name }
+    }
+
+    var liveCount: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
 }
 
 final class VoiceSharingSignOutNotificationTests: XCTestCase {
@@ -257,19 +289,41 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
         XCTAssertEqual(restarted.readyEntries().count, 0, "durably, across a restart")
     }
 
-    /// Re-activation removes the previous observers from the SAME center, so one sign-out cannot
-    /// fire the invalidation twice.
-    func test_reinstallingRemovesThePreviousObservers() {
+    /// Re-activation must replace the previous registration, so ONE sign-out fires ONE invalidation.
+    /// This asserts DELIVERY COUNTS, not removal calls: with token-based removal, a post after
+    /// reinstall must reach exactly one live observer.
+    func test_reinstallingLeavesExactlyOneLiveDelivery() {
         let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let center = RecordingNotificationCenter()
         coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        let afterFirst = center.liveCount
         coordinator.installIdentityInvalidation(onNotificationCenter: center)
-        XCTAssertEqual(center.removed, 2, "both observers from the first install are removed")
+        XCTAssertEqual(center.liveCount, afterFirst,
+                       "reinstalling must not accumulate live observers")
+        XCTAssertEqual(center.post(name: .serverUserWillBeSignedOut), 1,
+                       "ONE sign-out must reach exactly ONE registration")
     }
 
-    /// LOST CALLBACK: enrolled, with a retained recording and a valid lease, the delete completes
-    /// but the sign-out notification never arrives (the process died before the completion ran).
+    /// SWITCHING CENTERS: installing against a second center must also drop the registration on the
+    /// FIRST one, or the old center keeps a live observer pointing at this coordinator.
+    func test_switchingCentersDropsTheOldRegistration() {
+        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let first = RecordingNotificationCenter()
+        let second = RecordingNotificationCenter()
+        coordinator.installIdentityInvalidation(onNotificationCenter: first)
+        coordinator.installIdentityInvalidation(onNotificationCenter: second)
+        XCTAssertEqual(first.post(name: .serverUserWillBeSignedOut), 0,
+                       "the abandoned center must have no live observer left")
+        XCTAssertEqual(second.post(name: .serverUserWillBeSignedOut), 1,
+                       "and the new center delivers exactly once")
+    }
+
+    /// LOST CALLBACK, SCOPE STATED EXACTLY (reviewer 5a4738ca): this control performs NO deletion.
+    /// It establishes only what the absence of the notification does to an otherwise valid,
+    /// enrolled, servable set — that nothing is revoked and the entry stays on disk. It is NOT
+    /// evidence about the delete call, the completion handler, `SyncManager`, or a real restart.
     /// Nothing is revoked in that process — and the audio is still THERE afterwards. That residue,
     /// not a clean "not enrolled" label, is the real cost of a lost callback.
     func test_aLostSignOutCallbackLeavesTheAudioInPlace() throws {

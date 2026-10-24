@@ -532,17 +532,27 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         defer { AssemblyIntercept.responder = nil }
 
+        // SYNCHRONOUS PROBE, taken BEFORE any await (diagnostic for the intermittent full-suite
+        // failure): if the pass below reports `.idle` with a ready entry, this says whether the
+        // refusal came from a live authorization signal or from the queue's own view of the entry.
+        var readyBeforePass = -1
+        var heldBeforePass = "n/a"
+        do {
+            readyBeforePass = chain.queue.readyEntries().count
+            heldBeforePass = String(describing: chain.queue.readyEntriesReportingUnknownCoverage())
+        }
         let firstPass = await chain.scheduler.drainOnce()
-        // DIAGNOSTIC for the intermittent full-suite failure: the assertion message carries the
-        // evidence, so a failing run explains itself. (A stray `print` is not reliably captured in
-        // the xcodebuild log, which is why the earlier attempt produced nothing.)
+        // The assertion message carries the evidence, so a failing run explains itself. (A stray
+        // `print` is not reliably captured in the xcodebuild log.)
         let pinNow = authority()
         let diag = "counting=\(AssemblyIntercept.requestCount) "
             + "ready=\(chain.queue.readyEntries().count) "
             + "held=\(chain.queue.readyEntriesReportingUnknownCoverage()) "
             + "pass=\(firstPass) pin=\(String(describing: pinNow)) pinned=\(String(describing: pinned)) "
             + "enrolled=\(store.currentEffectiveEnrolled) isoBefore=\(isoBefore) "
-            + "isoCalls=\(isoCalls) isoFalseAt=\(isoFalseAt ?? "-") isoTrueSeen=\(isoTrueSeen)"
+            + "isoCalls=\(isoCalls) isoFalseAt=\(isoFalseAt ?? "-") isoTrueSeen=\(isoTrueSeen) "
+            + "readyBeforePass=\(readyBeforePass) heldBeforePass=\(heldBeforePass) "
+            + "isoAtSync=\(store.currentEffectiveEnrolled && authority() == pinned)"
         XCTAssertEqual(AssemblyIntercept.requestCount, 1,
                        "the first attempt reached the wire (count last reset by \(AssemblyIntercept.resetBy ?? "?"), "
                        + "hosts=\(AssemblyIntercept.seenHosts); \(diag))")
