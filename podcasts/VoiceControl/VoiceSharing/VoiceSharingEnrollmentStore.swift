@@ -211,6 +211,14 @@ final class VoiceSharingEnrollmentStore {
     /// makes "user opts out, then a slow old GET arrives" impossible to honour.
     private var operationGeneration: Int = 0
 
+    /// The current membership-operation generation. Consumers that must prove several reads belong
+    /// to ONE moment (the settings surface) stamp with this: a mutation between their reads bumps it
+    /// and the combination is rejected as incoherent (reviewer e40508a1).
+    var currentEnrollmentGeneration: Int {
+        lock.lock(); defer { lock.unlock() }
+        return operationGeneration
+    }
+
     private func bumpOperationGenerationLocked() { operationGeneration += 1 }
 
     /// Replaces the projection from a 409 conflict payload. Surfacing the real state is required; the caller

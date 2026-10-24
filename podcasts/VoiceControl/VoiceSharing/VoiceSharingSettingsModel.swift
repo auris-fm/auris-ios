@@ -70,17 +70,26 @@ final class VoiceSharingSettingsModel {
 
     private let isEnrolled: () -> Bool?
     private let isOptedIn: () -> Bool?
+    private let coherenceAccount: () -> String?
+    private let coherenceGeneration: () -> Int?
+    private let coherenceVersion: () -> String?
 
     /// `nil`-returning reads are REQUIRED: a wiring that cannot determine enrollment or opt-in must
     /// report `unknown`, not `false`. Passing a constant `false` closure would invent an opt-out.
     init(queue: VoiceSharingUploadQueue,
          isCollectionPermitted: @escaping () -> Bool?,
          isAccountEnrolled: @escaping () -> Bool?,
-         isLocallyOptedIn: @escaping () -> Bool?) {
+         isLocallyOptedIn: @escaping () -> Bool?,
+         coherenceAccount: @escaping () -> String? = { nil },
+         coherenceGeneration: @escaping () -> Int? = { 0 },
+         coherenceVersion: @escaping () -> String? = { nil }) {
         self.queue = queue
         self.isCollectionPermitted = isCollectionPermitted
         self.isEnrolled = isAccountEnrolled
         self.isOptedIn = isLocallyOptedIn
+        self.coherenceAccount = coherenceAccount
+        self.coherenceGeneration = coherenceGeneration
+        self.coherenceVersion = coherenceVersion
     }
 
     var isSurfaceEnabled: Bool { Self.surfaceEnabled }
@@ -152,6 +161,24 @@ final class VoiceSharingSettingsModel {
         var localOptIn: Bool?
         /// Storage fault, already classified by the queue (never inferred from a single flag).
         var storageFault: StoppedReason.StorageFault = .none
+        /// The account+generation+lease generation all three reads were taken under. When the
+        /// stamps disagree the reads were NOT coherent, and every derived conclusion is unknown
+        /// rather than a mix of two moments (reviewer e40508a1).
+        var coherence: Coherence = .incoherent
+
+        enum Coherence: Equatable {
+            /// Every read was taken under the same account, enrollment generation and lease epoch.
+            case coherent(account: String?, generation: Int, version: String?)
+            /// At least one read had no stamp, or the stamps disagree.
+            case incoherent
+        }
+
+        /// A snapshot may only support a conclusion about WHY sharing is stopped when its reads
+        /// were mutually coherent. Otherwise the honest answer is `.unknown`.
+        var isCoherent: Bool {
+            if case .coherent = coherence { return true }
+            return false
+        }
     }
 
     /// Why collection is not running. Every case is derived from `LiveState` — the surface reports
@@ -190,6 +217,38 @@ final class VoiceSharingSettingsModel {
         let action: String?
     }
 
+    // MARK: - Change subscription (reviewer 8ae2b980)
+
+    private var changeObservers: [UUID: (LiveState) -> Void] = [:]
+    private let changeLock = NSLock()
+
+    /// Registers a listener for state changes. The returned token must be removed on teardown.
+    func addStateObserver(_ body: @escaping (LiveState) -> Void) -> UUID {
+        changeLock.lock(); defer { changeLock.unlock() }
+        let id = UUID()
+        changeObservers[id] = body
+        return id
+    }
+
+    func removeStateObserver(_ id: UUID) {
+        changeLock.lock(); changeObservers.removeValue(forKey: id); changeLock.unlock()
+    }
+
+    /// Re-reads live state and notifies listeners ONLY when it actually changed. Called from the
+    /// production update paths (enrollment store mutations, queue purges) — a snapshot per render
+    /// is not a subscription, and pretending otherwise was the reviewer's point.
+    func refreshLiveState() {
+        let state = liveState()
+        changeLock.lock()
+        let observers = Array(changeObservers.values)
+        changeLock.unlock()
+        guard state != lastPublishedState else { return }
+        lastPublishedState = state
+        for observer in observers { observer(state) }
+    }
+
+    private var lastPublishedState: LiveState?
+
     /// The model's ONE live snapshot: queue coverage plus whatever the two injected reads return.
     /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
     /// the user of opting out (reviewer 8ae2b980).
@@ -200,10 +259,43 @@ final class VoiceSharingSettingsModel {
         case .unknownCoverage: fault = .unreadable
         case .known: fault = .none
         }
-        return LiveState(policyPermits: isCollectionPermitted(),
-                         enrolled: isEnrolled(),
-                         localOptIn: isOptedIn(),
-                         storageFault: fault)
+        // Stamp BEFORE and AFTER the reads: a read that happened across an account/enrollment
+        // move cannot be combined with the others into one conclusion (reviewer e40508a1).
+        let before = coherenceStamp()
+        let permits = isCollectionPermitted()
+        let enrolled = isEnrolled()
+        let optedIn = isOptedIn()
+        let after = coherenceStamp()
+        let coherence: LiveState.Coherence
+        if let before, let after, before == after {
+            coherence = .coherent(account: before.account,
+                                  generation: before.generation,
+                                  version: before.version)
+        } else {
+            coherence = .incoherent
+        }
+        return LiveState(policyPermits: permits,
+                         enrolled: enrolled,
+                         localOptIn: optedIn,
+                         storageFault: fault,
+                         coherence: coherence)
+    }
+
+    /// Account + enrollment generation + lease version, read atomically enough to detect a move
+    /// between two calls. `nil` when the caller cannot answer — which makes the snapshot
+    /// incoherent rather than silently trusting a half-known world.
+    private func coherenceStamp() -> CoherenceStamp? {
+        // Account and generation are required: without them there is nothing to prove the reads
+        // belong together. The version is informative only and may legitimately be nil.
+        guard let account = coherenceAccount(),
+              let generation = coherenceGeneration() else { return nil }
+        return CoherenceStamp(account: account, generation: generation, version: coherenceVersion())
+    }
+
+    struct CoherenceStamp: Equatable {
+        let account: String?
+        let generation: Int
+        let version: String?
     }
 
     /// Projection over explicit live state. Pure: no reads, no writes, no cached mixing.
@@ -218,6 +310,10 @@ final class VoiceSharingSettingsModel {
             return RecoveryGuidance(reason: .storageUnreadable, action: nil)
         case .none:
             break
+        }
+        guard live.isCoherent else {
+            // Reads from two different moments (or an unstamped read) cannot name a reason.
+            return RecoveryGuidance(reason: .unknown, action: nil)
         }
         guard let permits = live.policyPermits,
               let enrolled = live.enrolled,

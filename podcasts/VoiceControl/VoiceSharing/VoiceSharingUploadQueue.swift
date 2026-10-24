@@ -550,9 +550,11 @@ final class VoiceSharingUploadQueue {
             try synchronizer(rootDirectory, true)
         } catch {
             revocationHoldLocked = true
+            revocationOriginUnknownLocked = false // KNOWN: we could not even record the intent
             return .refused
         }
         revocationHoldLocked = true
+        revocationOriginUnknownLocked = false // KNOWN: the intent is on disk
         let listing: [URL]
         do {
             let (urls, overflowed) = try listDirectoryBounded(
@@ -618,13 +620,18 @@ final class VoiceSharingUploadQueue {
                 try fileManager.removeItem(at: revocationIntentPath)
                 try synchronizer(rootDirectory, true)
                 revocationHoldLocked = false
+                // The origin must be re-derived at EVERY transition (reviewer e40508a1): leaving it
+                // set would mislabel a LATER, genuine failed revocation as unknown coverage.
+                revocationOriginUnknownLocked = false
             } catch {
                 // Intent could not be retired: stay held. A fresh instance would re-derive it.
                 revocationHoldLocked = true
+                revocationOriginUnknownLocked = false // KNOWN: the intent is still on disk
                 reconciled = false
             }
         } else {
             revocationHoldLocked = true
+            revocationOriginUnknownLocked = false // KNOWN: barriers failed to reconcile
         }
         return reconciled ? .reconciled(removed: removed, retained: retained)
                           : .held(removed: removed, retained: retained)
@@ -2548,8 +2555,12 @@ final class VoiceSharingUploadQueue {
         // A failed discovery is a hold whose ORIGIN is unknown — it must not be reported as
         // "a revocation failed", which would offer the user a remedy that may not apply.
         switch intentDiscovery(revocationIntentPath) {
-        case .present: revocationHoldLocked = true
-        case .absent: revocationHoldLocked = false
+        case .present:
+            revocationHoldLocked = true
+            revocationOriginUnknownLocked = false // KNOWN: the intent was read and is present
+        case .absent:
+            revocationHoldLocked = false
+            revocationOriginUnknownLocked = false
         case .failure:
             revocationHoldLocked = true
             revocationOriginUnknownLocked = true

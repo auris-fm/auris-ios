@@ -6692,7 +6692,7 @@
 "network_fail_to_load" = "This network couldn't be loaded";
 
 /* Voice Sharing recovery: shown when a revocation could not be proven complete; the verified remedy is deleting stored recordings on this device. */
-"voice_sharing_recovery_held" = "Some stored recordings could not be removed. Deleting recordings on this device finishes it.";
+"voice_sharing_recovery_held" = "Some stored recordings could not be removed. Deleting recordings on this device will try to finish it, and will tell you if it cannot.";
 
 /* Voice Sharing recovery: shown when the app cannot determine whether collection is permitted. */
 "voice_sharing_recovery_paused" = "Voice Sharing is paused until the app can check its settings. Open the app with a connection to resume.";
@@ -6702,3 +6702,45 @@
 
 /* Voice Sharing recovery: shown when the user has turned Voice Sharing off on this device. */
 "voice_sharing_recovery_turned_off" = "Turn on Voice Sharing to resume.";
+
+/* Voice Sharing status title: sharing is running. */
+"voice_sharing_status_on" = "Voice Sharing is on";
+
+/* Voice Sharing status title: sharing is paused (the app cannot confirm its settings). */
+"voice_sharing_status_paused" = "Voice Sharing is paused";
+
+/* Voice Sharing status title: sharing is off (user gesture or account state). */
+"voice_sharing_status_off" = "Voice Sharing is off";
+
+/* Voice Sharing status title: sharing stopped because stored recordings could not be confirmed removed. */
+"voice_sharing_status_stopped" = "Voice Sharing stopped";
+
+/* Voice Sharing settings row label for pending contribution uploads. */
+"voice_sharing_row_uploads" = "Contribution uploads";
+
+/* Voice Sharing settings row label for stored recordings. */
+"voice_sharing_row_waiting" = "Recordings waiting to upload";
+
+/* Voice Sharing settings value: collection is permitted. */
+"voice_sharing_value_active" = "Active";
+
+/* Voice Sharing settings value: collection is not permitted. */
+"voice_sharing_value_not_active" = "Not active";
+
+/* Voice Sharing settings value: the count could not be determined. */
+"voice_sharing_value_unknown" = "Unknown";
+
+/* Voice Sharing settings value: the stored set could not be confirmed. */
+"voice_sharing_value_not_confirmed" = "Not confirmed";
+
+/* Voice Sharing settings: unknown storage explanation. */
+"voice_sharing_unknown_storage_explainer" = "Some stored recordings cannot be checked right now. Deleting will attempt them all and tell you exactly what could not be resolved.";
+
+/* Voice Sharing settings: section title. */
+"voice_sharing_section_title" = "Voice Sharing";
+
+/* Voice Sharing settings: local deletion button. */
+"voice_sharing_delete_local" = "Delete recordings on this device";
+
+/* Voice Sharing settings: local deletion confirmation. */
+"voice_sharing_delete_local_confirm" = "Delete recordings still waiting to upload on this device?";

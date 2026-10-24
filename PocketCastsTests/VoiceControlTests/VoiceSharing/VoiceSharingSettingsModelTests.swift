@@ -27,7 +27,8 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         VoiceSharingSettingsModel(queue: queue ?? self.queue,
                                   isCollectionPermitted: { permitted },
                                   isAccountEnrolled: { nil },
-                                  isLocallyOptedIn: { nil })
+                                  isLocallyOptedIn: { nil },
+                                  coherenceAccount: { "account-a" })
     }
 
     /// The surface must be COMPILED OFF. Flipping this activates a feature — an owner decision.
@@ -195,7 +196,8 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         VoiceSharingSettingsModel(queue: queue,
                                   isCollectionPermitted: { nil },
                                   isAccountEnrolled: { nil },
-                                  isLocallyOptedIn: { nil })
+                                  isLocallyOptedIn: { nil },
+                                  coherenceAccount: { "account-a" })
     }
 
     private func guidance(permits: Bool? = true, enrolled: Bool? = true, optedIn: Bool? = true,
@@ -203,7 +205,8 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         -> VoiceSharingSettingsModel.RecoveryGuidance {
         model().recoveryGuidance(
             for: .init(policyPermits: permits, enrolled: enrolled, localOptIn: optedIn,
-                       storageFault: fault))
+                       storageFault: fault,
+                       coherence: .coherent(account: "account-a", generation: 1, version: "v1")))
     }
 
     func test_permittedEnrolledAndOptedInReportsNotStoppedWithNoAction() {
@@ -269,12 +272,14 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         let live = VoiceSharingSettingsModel(queue: fresh,
                                             isCollectionPermitted: { true },
                                             isAccountEnrolled: { true },
-                                            isLocallyOptedIn: { true }).liveState()
+                                            isLocallyOptedIn: { true },
+                                            coherenceAccount: { "account-a" }).liveState()
         XCTAssertEqual(live.storageFault, .revocationInDoubt)
         XCTAssertEqual(VoiceSharingSettingsModel(queue: fresh,
                                                  isCollectionPermitted: { true },
                                                  isAccountEnrolled: { true },
-                                                 isLocallyOptedIn: { true })
+                                                 isLocallyOptedIn: { true },
+                                                 coherenceAccount: { "account-a" })
                         .recoveryGuidance(for: live).reason, .storageHeld)
     }
 
@@ -286,7 +291,154 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         let live = VoiceSharingSettingsModel(queue: unreadable,
                                             isCollectionPermitted: { true },
                                             isAccountEnrolled: { true },
-                                            isLocallyOptedIn: { true }).liveState()
+                                            isLocallyOptedIn: { true },
+                                            coherenceAccount: { "account-a" }).liveState()
         XCTAssertEqual(live.storageFault, .unreadable)
+    }
+}
+
+// MARK: - Change subscription (reviewer 8ae2b980)
+
+/// A snapshot per render is not a subscription. These controls drive the PRODUCTION change source
+/// (the enrollment store) and require the surface's snapshot to update — and require it NOT to
+/// publish when nothing changed, so a listener is not spammed by identical reads.
+final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vssubscription-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The real production shape: the model's opt-in read is the enrollment store's live value, and
+    /// an opt-in flip reaches a subscribed observer.
+    func test_aProductionStoreMutationPublishesTheNewState() {
+        let store = VoiceSharingEnrollmentStore(
+            defaults: UserDefaults(suiteName: "vs-sub-\(UUID().uuidString)")!,
+            accountScopeProvider: { "account-a" })
+        store.setLocalOptIn(false)
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { false },
+            isAccountEnrolled: { false },
+            isLocallyOptedIn: { store.currentState.localOptIn },
+            coherenceAccount: { "account-a" })
+        model.refreshLiveState() // seed: the first state is the baseline
+
+        var published: [VoiceSharingSettingsModel.LiveState] = []
+        let token = model.addStateObserver { published.append($0) }
+        defer { model.removeStateObserver(token) }
+
+        store.setLocalOptIn(true)   // production mutation
+        model.refreshLiveState()    // the wiring the assembly installs
+
+        XCTAssertEqual(published.count, 1, "a real change must publish exactly once")
+        XCTAssertEqual(published.last?.localOptIn, true)
+        let guidance = model.recoveryGuidance(for: published[0])
+        XCTAssertEqual(published[0].localOptIn, true, "the published snapshot carries the NEW value")
+        XCTAssertEqual(guidance.reason, .notEnrolled,
+                       "with opt-in on, the next real blocker (enrollment) is named — the old read would have said turnedOffLocally")
+    }
+
+    /// Identical reads do not publish: a UI that re-renders on every keystroke of state would be
+    /// noise, and it would also mask genuinely stuck sources.
+    func test_anUnchangedReadPublishesNothing() {
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { true },
+            isAccountEnrolled: { true },
+            isLocallyOptedIn: { true },
+            coherenceAccount: { "account-a" })
+        model.refreshLiveState()
+        var publications = 0
+        let token = model.addStateObserver { _ in publications += 1 }
+        defer { model.removeStateObserver(token) }
+        model.refreshLiveState()
+        model.refreshLiveState()
+        XCTAssertEqual(publications, 0, "unchanged state must not publish")
+    }
+
+    /// Removing the observer stops delivery — a torn-down surface must not keep being called.
+    func test_removingTheObserverStopsDelivery() {
+        var flipped = false
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { flipped },
+            isAccountEnrolled: { true },
+            isLocallyOptedIn: { true },
+            coherenceAccount: { "account-a" })
+        model.refreshLiveState()
+        var publications = 0
+        let token = model.addStateObserver { _ in publications += 1 }
+        model.removeStateObserver(token)
+        flipped = true
+        model.refreshLiveState()
+        XCTAssertEqual(publications, 0)
+    }
+}
+
+// MARK: - Coherent snapshot + origin re-derivation (reviewer e40508a1)
+
+final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vscoherence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// An account move BETWEEN the reads must not be combined into one conclusion.
+    func test_anAccountMoveDuringTheReadsYieldsUnknown() {
+        var account = "account-a"
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { true },
+            isAccountEnrolled: {
+                // The account moves BETWEEN the pre-stamp and the post-stamp.
+                account = "account-b"
+                return true
+            },
+            isLocallyOptedIn: { true },
+            coherenceAccount: { account })
+        let live = model.liveState()
+        XCTAssertFalse(live.isCoherent, "reads taken across an account move are not one moment")
+        XCTAssertEqual(model.recoveryGuidance(for: live).reason, .unknown)
+    }
+
+    /// Stamps that agree keep the conclusion available.
+    func test_agreeingStampsStayCoherent() {
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { true },
+            isAccountEnrolled: { true },
+            isLocallyOptedIn: { true },
+            coherenceAccount: { "account-a" })
+        XCTAssertTrue(model.liveState().isCoherent)
+        XCTAssertEqual(model.recoveryGuidance(for: model.liveState()).reason, .notStopped)
+    }
+
+    /// A caller that cannot stamp the reads gets `unknown`, not a trusted half-known world.
+    func test_anUnstampedReadIsIncoherent() {
+        let model = VoiceSharingSettingsModel(
+            queue: queue,
+            isCollectionPermitted: { true },
+            isAccountEnrolled: { true },
+            isLocallyOptedIn: { true })  // no coherenceAccount / version
+        XCTAssertFalse(model.liveState().isCoherent)
+        XCTAssertEqual(model.recoveryGuidance(for: model.liveState()).reason, .unknown)
     }
 }

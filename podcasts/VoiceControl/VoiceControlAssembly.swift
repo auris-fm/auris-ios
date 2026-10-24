@@ -10,6 +10,7 @@ class VoiceControlAssembly {
     /// Production settings model, wired with live reads. Retained so the surface can be handed a
     /// real dependency rather than a stub; the surface itself stays compiled OFF.
     private(set) var voiceSharingSettingsModel: VoiceSharingSettingsModel?
+    private var voiceSharingSettingsModelObserver: UUID?
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -158,11 +159,25 @@ class VoiceControlAssembly {
         // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
         // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
         // renders as `unknown` rather than inventing an opt-out.
-        self.voiceSharingSettingsModel = VoiceSharingSettingsModel(
+        let settingsModel = VoiceSharingSettingsModel(
             queue: contributionQueue,
             isCollectionPermitted: { VoiceSharingCoordinator.shared.policy.permitsCollection },
             isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEffectiveEnrolled },
-            isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn })
+            isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn },
+            // Coherence stamps: the account the reads belong to and the enrollment generation that
+            // moves when intent/membership changes. A read taken across a move is detected and the
+            // whole snapshot degrades to `unknown` rather than mixing two moments.
+            coherenceAccount: { ServerSettings.userId },
+            coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
+            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
+        self.voiceSharingSettingsModel = settingsModel
+        // ACTUAL update source (reviewer 8ae2b980): the enrollment store is the production state
+        // that changes underneath the surface (opt-in, projection acceptance, account transition).
+        // The model re-reads and republishes; it publishes only on a real change.
+        self.voiceSharingSettingsModelObserver =
+            VoiceSharingEnrollmentStore.shared.addObserver { [weak settingsModel] _ in
+                settingsModel?.refreshLiveState()
+            }
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },

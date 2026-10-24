@@ -13,13 +13,16 @@ struct VoiceSharingSettingsView: View {
     let model: VoiceSharingSettingsModel
 
     @State private var status: VoiceSharingSettingsModel.ContributionStatus?
+    /// The single live snapshot the surface renders from; updated by the model's subscription.
+    @State private var liveState: VoiceSharingSettingsModel.LiveState?
+    @State private var stateObserver: UUID?
     @State private var lastDelete: VoiceSharingSettingsModel.DeleteResult?
     @State private var showingDeleteConfirmation = false
 
     var body: some View {
         Group {
             if model.isSurfaceEnabled {
-                content
+                subscription
             } else {
                 // The disabled surface has no UI at all rather than a greyed-out shell: a shell
                 // invites "why can't I use this" support load for a feature the owner has not
@@ -31,12 +34,29 @@ struct VoiceSharingSettingsView: View {
 
     /// Titles are keyed around what the app actually knows; `.unknown` deliberately says nothing
     /// about why.
+    /// The model owns the change detection; the view just mirrors the published snapshot.
+    private var subscription: some View {
+        content
+            .onAppear {
+                liveState = model.liveState()
+                stateObserver = model.addStateObserver { updated in
+                    liveState = updated
+                    status = model.status()
+                }
+                model.refreshLiveState()
+            }
+            .onDisappear {
+                if let stateObserver { model.removeStateObserver(stateObserver) }
+                stateObserver = nil
+            }
+    }
+
     private func title(for reason: VoiceSharingSettingsModel.StoppedReason) -> String {
         switch reason {
-        case .notStopped: return "Voice Sharing is on"
-        case .noActiveLease, .unknown: return "Voice Sharing is paused"
-        case .notEnrolled, .turnedOffLocally: return "Voice Sharing is off"
-        case .storageHeld, .storageUnreadable: return "Voice Sharing stopped"
+        case .notStopped: return L10n.voiceSharingStatusOn
+        case .noActiveLease, .unknown: return L10n.voiceSharingStatusPaused
+        case .notEnrolled, .turnedOffLocally: return L10n.voiceSharingStatusOff
+        case .storageHeld, .storageUnreadable: return L10n.voiceSharingStatusStopped
         }
     }
 
@@ -46,8 +66,9 @@ struct VoiceSharingSettingsView: View {
             // projection (spec 62d39f8f). Present only when something is actually blocking.
             // ONE snapshot for the whole render: the status read and the guidance both come from
             // this single LiveState, so the surface never mixes a cached permit with fresh reads
-            // (reviewer 8ae2b980).
-            let live = model.liveState()
+            // (reviewer 8ae2b980). The snapshot is refreshed by the model's subscription, so the
+            // surface tracks real state changes instead of freezing the first read.
+            let live = liveState ?? model.liveState()
             let stopped = model.recoveryGuidance(for: live)
             if stopped.reason != .notStopped {
                 Section {
@@ -61,27 +82,26 @@ struct VoiceSharingSettingsView: View {
                 }
             }
 
-            Section("Voice Sharing") {
+            Section(L10n.voiceSharingSectionTitle) {
                 if let status {
-                    row("Contribution uploads",
-                        value: status.collectionPermitted ? "Active" : "Not active",
+                    row(L10n.voiceSharingRowUploads,
+                        value: status.collectionPermitted ? L10n.voiceSharingValueActive : L10n.voiceSharingValueNotActive,
                         tint: status.collectionPermitted ? .green : .secondary)
                     switch status.storage {
                     case .knownReady(let count):
-                        row("Recordings waiting to upload", value: "\(count)",
+                        row(L10n.voiceSharingRowWaiting, value: "\(count)",
                             tint: count == 0 ? .secondary : .primary)
                     case .unknown:
                         // NOT "0": we could not determine what is stored, and saying zero would be
                         // a claim we cannot back.
-                        row("Recordings waiting to upload", value: "Unknown", tint: .orange)
-                        Text("Some stored recordings cannot be checked right now. Deleting will "
-                             + "attempt them all and tell you exactly what could not be resolved.")
+                        row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueUnknown, tint: .orange)
+                        Text(L10n.voiceSharingUnknownStorageExplainer)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     case .revocationInDoubt:
                         // Count is deliberately not shown: the set is unprovable until a purge
                         // reconciles. The reason row above already offers the verified remedy.
-                        row("Recordings waiting to upload", value: "Not confirmed", tint: .orange)
+                        row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueNotConfirmed, tint: .orange)
                     }
                 }
             }
@@ -90,9 +110,9 @@ struct VoiceSharingSettingsView: View {
                 Button(role: .destructive) {
                     showingDeleteConfirmation = true
                 } label: {
-                    Text("Delete recordings on this device")
+                    Text(L10n.voiceSharingDeleteLocal)
                 }
-                .confirmationDialog("Delete recordings still waiting to upload on this device?",
+                .confirmationDialog(L10n.voiceSharingDeleteLocalConfirm,
                                     isPresented: $showingDeleteConfirmation,
                                     titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {

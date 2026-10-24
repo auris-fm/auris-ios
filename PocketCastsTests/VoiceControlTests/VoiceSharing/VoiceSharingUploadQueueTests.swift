@@ -3127,3 +3127,64 @@ final class VoiceSharingRevocationRestartTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Revocation origin re-derivation (reviewer e40508a1)
+
+extension VoiceSharingRevocationRestartTests {
+    /// `revocationOriginUnknownLocked` must be re-derived at EVERY hold transition: an instance
+    /// that first held because a READ failed must not label a later GENUINE failed revocation as
+    /// unknown coverage (and vice versa).
+    func test_unknownOriginIsRederviedByALaterKnownHold() throws {
+        try seedEntry()
+        // 1. Intent lookup cannot be read → hold with UNKNOWN origin.
+        var failDiscovery = true
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            intentDiscovery: { url in
+                if failDiscovery, url.lastPathComponent == "revocation.intent" { return .failure }
+                return VoiceSharingUploadQueue.statKind(of: url)
+            })
+        guard case .unknownCoverage = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("setup: an unreadable intent must report unknown coverage")
+        }
+        // 2. Discovery recovers and a REAL revocation attempt fails durably → KNOWN hold.
+        failDiscovery = false
+        let refusingSync = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        guard case .refused = refusingSync.purgeAll() else {
+            return XCTFail("setup: expected a refused purge")
+        }
+        // 3. The same owner, freshly constructed, must now report a KNOWN revocation hold,
+        //    not "unknown coverage".
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a KNOWN failed revocation must not be re-labelled as unknown coverage")
+        }
+    }
+
+    /// And the reverse: after a KNOWN hold is released by a successful purge, a later unreadable
+    /// intent must again report unknown coverage rather than a stale known hold.
+    func test_aSuccessfulPurgeClearsTheKnownOrigin() throws {
+        try seedEntry()
+        let refusing = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        guard case .refused = refusing.purgeAll() else { return XCTFail("setup: expected a refused purge") }
+        let reconciling = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .reconciled = reconciling.purgeAll() else {
+            return XCTFail("setup: expected a reconciled purge")
+        }
+        guard case .known = reconciling.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("after a reconciled purge the owner is readable and not held")
+        }
+        let unreadableIntent = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            intentDiscovery: { url in
+                url.lastPathComponent == "revocation.intent" ? .failure : VoiceSharingUploadQueue.statKind(of: url)
+            })
+        guard case .unknownCoverage = unreadableIntent.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("an unreadable intent is unknown coverage, never a revocation claim")
+        }
+    }
+}
