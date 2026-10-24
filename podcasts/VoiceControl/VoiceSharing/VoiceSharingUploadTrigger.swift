@@ -27,6 +27,11 @@ final class VoiceSharingUploadTrigger {
     /// `Task.yield` — which does not await the owner, so both attempts could finish refused and the
     /// event was lost anyway. The flag is the handoff: whoever COMPLETES a drain re-offers once.
     private var workPending = false
+    /// The scheduler-completion registration this drain is waiting on, so cancellation can drop it.
+    private var pendingCompletionID: UUID?
+    /// Set when the current drain was refused, so its continuation re-offers rather than counting
+    /// as a completed pass.
+    private var drainWasRefused = false
 
     init(
         scheduler: VoiceSharingUploadScheduler,
@@ -68,6 +73,22 @@ final class VoiceSharingUploadTrigger {
         return drainInFlight
     }
 
+    /// CANCELLATION, exercised while the trigger is still alive (reviewer 280f4c52): drop any
+    /// pending completion registration, clear the slot, and refuse further work until cancelled
+    /// tasks have drained. A cancelled trigger must neither send nor keep waking up.
+    func cancelForTesting() {
+        stateLock.lock()
+        let completionID = pendingCompletionID
+        pendingCompletionID = nil
+        workPending = false
+        drainInFlight = false
+        activeToken = nil
+        let task = drainTask
+        stateLock.unlock()
+        if let completionID { scheduler.cancelOwnerCompletion(completionID) }
+        task?.cancel()
+    }
+
     /// The guarded entry a lifecycle event reaches. Also callable directly (background task
     /// expiration, push-to-sync) with the SAME gates — there is no unguarded path.
     func triggerDrainIfPermitted() {
@@ -93,42 +114,78 @@ final class VoiceSharingUploadTrigger {
         startDrain(token: token)
     }
 
-    /// One drain, then a COALESCED follow-up if work arrived while it ran. Completion is the
-    /// handoff point — not a yield-based poll (reviewer 44d39ef8): the re-offer happens when the
-    /// owning pass has actually finished, and any number of arrivals collapse into ONE extra pass.
+    /// One drain, then a COALESCED follow-up if work arrived while it ran or if the scheduler was
+    /// owned by someone else.
+    ///
+    /// NO POLLING (reviewer 280f4c52): a refused pass COMPLETES straight away with `.busy`, so
+    /// re-offering from its own completion recurses for as long as another owner holds the
+    /// scheduler. Instead the refusal registers with the scheduler for the owner's completion and
+    /// stops; that callback (fired exactly once, under the same lock that decides ownership) is
+    /// what re-offers. `Task.isCancelled` is checked at every transition so a cancelled trigger
+    /// neither sends nor keeps a registration.
     private func startDrain(token: UUID) {
         drainTask = Task { [weak self, scheduler] in
+            guard let self, !Task.isCancelled else { return }
             let outcome = await scheduler.drainOnce()
-            guard let self else { return }
-            // A REFUSED PASS IS NOT A COMPLETED PASS (reviewer 44d39ef8): another pass owns the
-            // scheduler, so this drain attempted nothing. Treat it as work still owed, exactly as
-            // if the event had arrived mid-drain — the completion handoff below re-offers once the
-            // owner releases, instead of dropping the event.
-            if case .busy = outcome {
-                self.stateLock.lock()
-                self.workPending = true
-                self.stateLock.unlock()
+            guard !Task.isCancelled else {
+                self.finishDrain(token: token, refused: false)
+                return
             }
+            if case .busy = outcome {
+                self.finishRefusedDrain(token: token)
+                return
+            }
+            self.finishDrain(token: token, refused: false)
+        }
+    }
+
+    /// A refused pass: wait for the OWNER to finish, then re-offer once. Never recurses by itself.
+    private func finishRefusedDrain(token: UUID) {
+        guard !Task.isCancelled else {
+            finishDrain(token: token, refused: false)
+            return
+        }
+        let registration = scheduler.registerOwnerCompletion { [weak self] in
+            guard let self else { return }
             self.stateLock.lock()
-            // Only the drain that still owns the slot may complete it.
             guard self.activeToken == token else {
                 self.stateLock.unlock()
                 return
             }
-            let pending = self.workPending
-            if pending {
-                // HAND THE SLOT ON: the follow-up is this trigger's drain, so the flag stays set
-                // and a new token owns it. Authorization is re-read inside triggerDrainIfPermitted.
-                self.drainInFlight = false
-                self.activeToken = nil
-                self.workPending = false
-                self.stateLock.unlock()
-                self.triggerDrainIfPermitted()
-                return
-            }
+            self.pendingCompletionID = nil
             self.drainInFlight = false
             self.activeToken = nil
+            self.workPending = false
             self.stateLock.unlock()
+            // Re-offer through the SAME gates: authorization and cancellation are re-read.
+            self.triggerDrainIfPermitted()
+        }
+        stateLock.lock()
+        if registration.assumedOwnership {
+            // The owner finished between the refusal and now: run immediately instead of waiting
+            // for a callback that will never come.
+            stateLock.unlock()
+            finishDrain(token: token, refused: true)
+            return
+        }
+        pendingCompletionID = registration.id
+        stateLock.unlock()
+    }
+
+    /// Completes the slot for the drain holding `token`, and re-offers once if work is pending.
+    private func finishDrain(token: UUID, refused: Bool) {
+        stateLock.lock()
+        guard activeToken == token else {
+            stateLock.unlock()
+            return
+        }
+        let pending = workPending
+        drainInFlight = false
+        activeToken = nil
+        workPending = false
+        stateLock.unlock()
+        if pending || refused {
+            triggerDrainIfPermitted()
         }
     }
 

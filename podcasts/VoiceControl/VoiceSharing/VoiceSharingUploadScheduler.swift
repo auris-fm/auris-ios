@@ -24,11 +24,54 @@ final class VoiceSharingUploadScheduler {
     }
 
     /// DIAGNOSTIC (spec a857340b): the identity of the scheduler that most recently REFUSED a pass,
-    /// so a competing pass can be attributed to a specific instance instead of assumed.
-    private(set) var lastRefusedPassByDiagnostic: (scheduler: ObjectIdentifier, at: Date)?
-    /// The exact discovery result behind the most recent `.idle` return, so "nothing eligible" can
-    /// be distinguished from "held" without inference.
-    private(set) var lastIdleDecisionByDiagnostic: (discovery: String, at: Date)?
+    /// so a competing pass can be attributed to a specific instance instead of assumed. Guarded by
+    /// `passLock` — these are written from pass paths and read from tests.
+    private var lastRefusedPassByDiagnosticStorage: (scheduler: ObjectIdentifier, at: Date)?
+    private var lastIdleDecisionByDiagnosticStorage: (discovery: String, at: Date)?
+
+    var lastRefusedPassByDiagnostic: (scheduler: ObjectIdentifier, at: Date)? {
+        passLock.withLock { lastRefusedPassByDiagnosticStorage }
+    }
+
+    var lastIdleDecisionByDiagnostic: (discovery: String, at: Date)? {
+        passLock.withLock { lastIdleDecisionByDiagnosticStorage }
+    }
+
+    /// OWNER-COMPLETION SIGNAL (reviewer 280f4c52). A refused caller used to have no way to learn
+    /// when the owner finished, so recovering from `.busy` meant polling. This is the atomic
+    /// handshake: `registerOwnerCompletion` answers whether this caller already OWNS the scheduler,
+    /// and if it does not, installs the callback under the SAME lock — so a completion that lands
+    /// between the busy result and the registration cannot be missed, and the callback is fired
+    /// exactly once when the owning pass ends.
+    struct OwnerCompletion {
+        let assumedOwnership: Bool
+        let id: UUID
+    }
+
+    private var ownerCompletionWaiters: [UUID: () -> Void] = [:]
+
+    func registerOwnerCompletion(_ body: @escaping () -> Void) -> OwnerCompletion {
+        passLock.lock()
+        if !passInFlight {
+            // Free right now: the caller may simply run rather than wait for someone else.
+            passLock.unlock()
+            return OwnerCompletion(assumedOwnership: true, id: UUID())
+        }
+        let id = UUID()
+        ownerCompletionWaiters[id] = body
+        passLock.unlock()
+        return OwnerCompletion(assumedOwnership: false, id: id)
+    }
+
+    /// The scheduler's ownership state, read under the same lock the pass uses.
+    var isPassInFlightForTesting: Bool {
+        passLock.withLock { passInFlight }
+    }
+
+    /// Cancels a completion registration (a cancelled caller must not be woken).
+    func cancelOwnerCompletion(_ id: UUID) {
+        passLock.withLock { ownerCompletionWaiters.removeValue(forKey: id) }
+    }
 
     private let queue: VoiceSharingUploadQueue
     private let uploader: VoiceSharingUploader
@@ -60,10 +103,22 @@ final class VoiceSharingUploadScheduler {
         // Refuse a concurrent second pass: serialized by construction. The refusal is REPORTED as
         // `.busy`, not `.idle`, so a caller can tell "another pass owns this" from "nothing to do".
         guard passLock.withLockElse({ !passInFlight }, set: { passInFlight = true }) else {
-            lastRefusedPassByDiagnostic = (ObjectIdentifier(self), Date())
+            passLock.withLock {
+                lastRefusedPassByDiagnosticStorage = (ObjectIdentifier(self), Date())
+            }
             return .busy
         }
-        defer { passLock.withLock { passInFlight = false } }
+        defer {
+            // THE OWNER IS DONE: fire every waiter so a refused caller can re-offer exactly once.
+            // Taken and cleared under the lock, then invoked outside it.
+            let waiters: [() -> Void] = passLock.withLock {
+                passInFlight = false
+                let pending = Array(ownerCompletionWaiters.values)
+                ownerCompletionWaiters.removeAll()
+                return pending
+            }
+            for waiter in waiters { waiter() }
+        }
         guard isAuthorized() else { return .idle }
         // Neither unknown coverage nor a revocation hold may feed the scheduler: both yield
         // nothing here (the same fail-closed rule serving uses).
@@ -72,7 +127,9 @@ final class VoiceSharingUploadScheduler {
             // DIAGNOSTIC (reviewer 08e42a5a): `.idle` has two very different causes — an empty
             // served set versus a held one — and inferring between them from the outside was
             // wrong. Record what the decision actually saw.
-            lastIdleDecisionByDiagnostic = (discovery: String(describing: discovery), at: Date())
+            passLock.withLock {
+                lastIdleDecisionByDiagnosticStorage = (discovery: String(describing: discovery), at: Date())
+            }
             return .idle
         }
 

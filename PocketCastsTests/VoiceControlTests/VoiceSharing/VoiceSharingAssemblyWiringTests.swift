@@ -1387,6 +1387,78 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                                     "the busy refusal must be recovered by the follow-up, not dropped")
     }
 
+    /// NO UNBOUNDED RETRY WHILE THE OWNER STAYS HELD (reviewer 280f4c52). With the owner held for a
+    /// long, fixed interval, the trigger must settle into a WAIT, not a re-offer loop: total
+    /// attempts stay at the owner's single one for the whole hold, and the trigger is not spinning.
+    func test_aRefusedTriggerWaitsInsteadOfPollingWhileTheOwnerStaysHeld() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 20)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        chain.trigger.triggerDrainIfPermitted()
+        // Hold for ~1s and sample: a poll loop would keep attempting; a wait attempts nothing.
+        for _ in 0..<10 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(transport.attemptCount, 1,
+                           "the refused trigger must NOT keep re-attempting while the owner holds")
+        }
+
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success, "owner finished")
+        for _ in 0..<60 where transport.attemptCount < 2 {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(transport.attemptCount, 2,
+                                    "and when the owner releases, the registered waiter delivers it")
+    }
+
+    /// CANCELLATION while the trigger is alive: a cancelled trigger must neither send nor keep a
+    /// pending registration.
+    func test_cancellingTheTriggerDropsItsRegistrationAndSendsNothing() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 20)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        chain.trigger.cancelForTesting()
+        XCTAssertFalse(chain.trigger.isDrainingForTesting, "the slot is released on cancellation")
+
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(transport.attemptCount, 1,
+                       "a cancelled trigger must not run its follow-up")
+    }
+
     /// AUTHORIZATION IS RE-READ AT THE FOLLOW-UP: revocation between the arrival and the follow-up
     /// must prevent the second pass.
     func test_theFollowUpRechecksAuthorization() async throws {
