@@ -308,7 +308,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         switch action {
         case "seek_to":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return unobserved }
+            // A missing required parameter is an OBSERVED refusal at this
+            // decision site (spec afe5418e): the event named an action whose
+            // precondition is absent — not an unobserved outcome.
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else {
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
+            }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
             return unobserved
@@ -316,7 +321,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return unobserved }
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else {
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
+            }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
             return unobserved
@@ -346,9 +353,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         case "pause":
             let (response, fact) = playbackSink.pauseWithFact()
             _ = response
+            // The turn that PAUSED owns the restore: without this, the end-of-
+            // turn restore would resume over the cloud's own pause (the
+            // hold/release protocol — reviewer af68a7bb regression).
+            didAutoPause = false
             return fact ?? unobserved
         case "resume":
             _ = playbackSink.resume()
+            didAutoPause = false
             return unobserved
         default:
             return unobserved

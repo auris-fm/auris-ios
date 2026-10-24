@@ -537,9 +537,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         playback.pauseReturnsCompletedFact = false
     }
 
-    /// A MISSING required parameter is an event with unobserved effect — it is
-    /// still logged (unknown), never omitted (reviewer 2fcedf35).
-    func testMalformedActionIsLoggedAsUnknown() async {
+    /// A MISSING required parameter is an OBSERVED refusal at the decision
+    /// site (spec afe5418e): not_run/precondition_failed, never unobserved.
+    func testMalformedActionFactsObservedPreconditionRefusal() async {
         self.pendingFixture =
             """
             event: action
@@ -551,8 +551,42 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let (_, fact) = await makeSink().routeToCloud(
             request: "x", tier: .free, context: sampleContext())
-        XCTAssertEqual(fact?.state, "unknown")
-        XCTAssertEqual(fact?.reason, "observation_unavailable")
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// PLAYBACK OWNERSHIP regression control (reviewer af68a7bb): an initially
+    /// playing episode, cloud pauses it mid-turn — done must NOT resume over
+    /// that pause (the turn that paused owns the restore).
+    func testCloudPauseDuringTurnDoneDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "done must not resume what the cloud turn itself paused")
+    }
+
+    /// Same ownership at the error exit.
+    func testCloudPauseDuringTurnErrorDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "the error exit must not resume what the cloud turn itself paused")
     }
 
     /// Uniform declines still map truthfully to not_run.
@@ -755,6 +789,17 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
+/// Thread-safe turn-result holder for the bounded overlap watchdog.
+private final class TurnBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _done = false
+    var done: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _done }
+        set { lock.lock(); _done = newValue; lock.unlock() }
+    }
+    var value: (response: VoiceResponse, fact: SinkActionFact?)?
+}
+
 final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
@@ -796,7 +841,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         let midStreamGate = Gate()
+        // Arm the hold ONLY on the FIRST built client (turn A). Applying it to
+        // every client would block B's single done frame too — a circular wait
+        // (reviewer af68a7bb).
+        var holdArmed = false
         let sink = makeSink(configureTask: { task in
+            guard !holdArmed else { return }
+            holdArmed = true
             task.holdWhenRemaining = (count: 1, gate: midStreamGate)
         })
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
@@ -815,14 +866,33 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        let (_, winnerFact) = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
-        // Unblock A: its receive resumes, the loop top observes cancellation,
-        // and the supersession exit delivers A's own logged fact.
+        // Bounded: neither result may hang the suite (watchdog > hang). The
+        // gate is released BEFORE awaiting — releasing after awaiting B would
+        // be the circular wait the mid-stream hold must not create.
         midStreamGate.release()
-        let (_, loserFact) = await slow.value
-        XCTAssertNil(winnerFact, "the winner ran no actions and must not see A's log")
-        XCTAssertEqual(loserFact?.state, "unknown", "A's logged action reaches A's caller via supersession")
-        XCTAssertEqual(loserFact?.reason, "observation_unavailable")
+        let winnerBox = TurnBox()
+        let winnerWork = Task {
+            winnerBox.value = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+            winnerBox.done = true
+        }
+        let loserBox = TurnBox()
+        let loserWork = Task {
+            loserBox.value = await slow.value
+            loserBox.done = true
+        }
+        let deadline = Int(5_000_000_000 / 10_000_000)
+        for _ in 0..<deadline where !(winnerBox.done && loserBox.done) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(winnerBox.done, "the winner's turn hung")
+        XCTAssertTrue(loserBox.done, "the losing turn hung")
+        let winnerFact = winnerBox.value
+        let loserFact = loserBox.value
+        XCTAssertNil(winnerFact?.fact, "the winner ran no actions and must not see A's log")
+        XCTAssertEqual(loserFact?.fact?.state, "unknown", "A's logged action reaches A's caller via supersession")
+        XCTAssertEqual(loserFact?.fact?.reason, "observation_unavailable")
+        _ = await winnerWork.value
+        _ = await loserWork.value
     }
 
     private static func waitUntil(timeoutNanoseconds: UInt64,
