@@ -359,23 +359,17 @@ class VoiceControlService: ObservableObject {
     /// Everything else — including `.silent` and `.confirmRequired` — is a presentation choice that does
     /// not record whether the action ran, so it is reported as `observation_unavailable` with `unknown`
     /// state rather than inventing a refusal or an action failure.
-    private static func executionOutcome(
-        for response: VoiceResponse
-    ) -> VoiceSharingContributionEncoder.StageOutcome {
-        switch response {
-        case .earcon(.error):
-            return .init(state: "failed", reason: "action_failed")
-        default:
-            return .init(state: "unknown", reason: "observation_unavailable")
-        }
-    }
 
     /// The routing verdict once execution has finished: the disposition is no longer pending.
+    /// `completed` is now reachable — the structured executor verdict states it — so the
+    /// classified action is EXECUTED, not refused. `cancelled` settles as refused (the turn did
+    /// not run to its conclusion); `not_run` remains refused.
     private static func settledDisposition(
         for outcome: VoiceSharingContributionEncoder.StageOutcome
     ) -> String {
         switch outcome.state {
         case "failed": return "failed"
+        case "completed": return "executed"
         // `unknown` cannot claim a disposition either: the turn finished, but what became of it was not
         // observed, so the routing verdict stays honest about that rather than guessing.
         case "unknown": return "pending"
@@ -392,11 +386,6 @@ class VoiceControlService: ObservableObject {
     #endif
 
     #if DEBUG
-    /// Test seam: the PRODUCTION interpreter, so a control cannot restate the mapping and pass alone.
-    static func executionOutcomeForTesting(_ response: VoiceResponse)
-        -> VoiceSharingContributionEncoder.StageOutcome {
-        executionOutcome(for: response)
-    }
 
     static func settledDispositionForTesting(
         _ outcome: VoiceSharingContributionEncoder.StageOutcome) -> String {
@@ -405,12 +394,14 @@ class VoiceControlService: ObservableObject {
     #endif
 
     /// Reports BOTH stages for a turn that reached the executor. Routing's disposition is corrected
-    /// from `pending` to its terminal value, which is why it is reported a second time.
+    /// from `pending` to its terminal value, which is why it is reported a second time. The
+    /// execution stage carries the EXECUTOR'S OWN structured verdict — not a response-derived
+    /// classification (spec: the record must state what execution concluded, and the executor is
+    /// the decision site).
     private func reportExecution(
-        _ response: VoiceResponse,
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome,
         captureContext: VoiceSharingCollector.CaptureContext?
     ) {
-        let outcome = Self.executionOutcome(for: response)
         let verdict = Self.settledDisposition(for: outcome)
         contributionCollector?.engineReported(
             stage: "routing",
@@ -544,10 +535,9 @@ class VoiceControlService: ObservableObject {
                 settleOwnedCapture(captureContext, cancelled: true, reason: "cancelled_by_user")
                 return
             }
-            let response = await executor.execute(intent)
-            // A RETURNED response is not a performed action: `.earcon(.error)` is a failure and
-            // `.silent`/`.confirmRequired` are refusals. The report carries what the executor said.
-            reportExecution(response, captureContext: captureContext)
+            // The executor's OWN verdict rides with the response — one decision, two faces.
+            let (response, executionVerdict) = await executor.executeWithVerdict(intent)
+            reportExecution(executionVerdict, captureContext: captureContext)
             // Do not reset the window unconditionally here. A cloud route's
             // completion is the executor's to attribute — it already does so
             // against the generation the route was issued under
@@ -575,8 +565,8 @@ class VoiceControlService: ObservableObject {
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
-                let response = await executor.execute(intent)
-                reportExecution(response, captureContext: captureContext)
+                let (response, executionVerdict) = await executor.executeWithVerdict(intent)
+                reportExecution(executionVerdict, captureContext: captureContext)
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
@@ -660,7 +650,7 @@ class VoiceControlService: ObservableObject {
                 // that itself fails carries its own earcon from the sink.
                 // Marked as a fallback so the executor extends the window without
                 // restoring the allowance that permitted it.
-                let response = await executor.execute(
+                let (response, executionVerdict) = await executor.executeWithVerdict(
                     CloudRouteIntent(
                         request: transcript,
                         tier: .unknown,
@@ -671,7 +661,7 @@ class VoiceControlService: ObservableObject {
                 // FINDING a7dfe013 #1: this branch really does dispatch a CloudRouteIntent, so the
                 // earlier "no execution" report was wrong. Routing's disposition and execution are
                 // corrected to what the dispatch actually produced.
-                reportExecution(response, captureContext: captureContext)
+                reportExecution(executionVerdict, captureContext: captureContext)
                 audioRenderer.render(response)
                 return
             }

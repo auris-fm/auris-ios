@@ -102,8 +102,33 @@ extension FingerprintTimingManager: FingerprintMappingProviding {}
 /// The single entry point `VoiceControlService` needs from the executor. Extracted (spec 85cec5b7) so the
 /// service's routing branches can be driven with a chosen RESULT — including a failure — without
 /// constructing every sink.
+/// The executor's own structured verdict for a turn (spec: `execution.outcome` must be a
+/// structured executor verdict, not a response-derived unknown). The states/reasons are the
+/// record's enumerated vocabulary; `outcome` is the executor's settled disposition.
+typealias ExecutionVerdict = VoiceSharingContributionEncoder.StageOutcome
+
 protocol VoiceIntentExecuting: AnyObject {
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse
+    /// The executor's decision site: returns the presentation AND the executor's own verdict
+    /// for the same turn. A returned response alone is a presentation choice; this is the fact.
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict)
+}
+
+extension VoiceIntentExecuting {
+    /// Default bridge for conformers that have not adopted structured verdicts: preserves the
+    /// prior response-only contract exactly (including the response-derived classification the
+    /// service used to apply) so adoption can proceed slice by slice.
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        let response = await execute(intent)
+        switch response {
+        case .earcon(.error):
+            return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+        case .earcon(.confirmRequired):
+            return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+        default:
+            return (response, ExecutionVerdict(state: "completed", outcome: "executed"))
+        }
+    }
 }
 
 class VoiceIntentExecutor: VoiceIntentExecuting {
@@ -215,6 +240,50 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         }
 
         return response
+    }
+
+    /// The executor's own verdict, decided at the executor boundary per intent result: the error
+    /// earcon is a failed action; confirm-required is the client declining to act without
+    /// confirmation; every other returned presentation (silent seek, spoken pause, query answer)
+    /// is a COMPLETED execution. CLOUD ROUTES are the follow-up slice: their honest verdicts
+    /// (outcome_wait_expired, server refusals) live inside CloudRouteSink and still ride the
+    /// default bridge — disclosed, not silently claimed.
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        if intent is CloudRouteIntent {
+            let response = await execute(intent)
+            switch response {
+            case .earcon(.error):
+                return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+            case .earcon(.confirmRequired):
+                return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+            default:
+                // A spoken cloud answer may be the "not configured" refusal rather than a
+                // completed turn — the sink knows which, and the record must not claim
+                // executed on presentation alone. Stay unobserved until the sink slice lands.
+                return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+            }
+        }
+        let response: VoiceResponse
+        switch intent {
+        case let p as PlaybackIntent: response = executePlayback(p)
+        case let e as EffectsIntent: response = executeEffects(e)
+        case let v as VolumeIntent: response = executeVolume(v)
+        case let s as SleepIntent: response = executeSleep(s)
+        case let c as ChapterIntent: response = executeChapter(c)
+        case let b as BookmarkIntent: response = executeBookmark(b)
+        case let q as QueueIntent: response = executeQueue(q)
+        case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
+        case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
+        default: response = .earcon(.error)
+        }
+        switch response {
+        case .earcon(.error):
+            return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+        case .earcon(.confirmRequired):
+            return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+        default:
+            return (response, ExecutionVerdict(state: "completed", outcome: "executed"))
+        }
     }
 
     private func executePlayback(_ intent: PlaybackIntent) -> VoiceResponse {

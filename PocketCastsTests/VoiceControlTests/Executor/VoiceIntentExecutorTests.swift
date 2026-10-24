@@ -48,6 +48,40 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// THE EXECUTOR'S OWN VERDICT (spec: execution.outcome must become a structured executor
+    /// verdict, not a response-derived unknown). The executor is the decision site for the record:
+    /// its per-intent result IS the verdict — the error earcon is a failed action, a
+    /// confirm-required earcon is the client declining to act without confirmation, and every
+    /// returned non-error presentation (silent seek, spoken pause, query answer) is a COMPLETED
+    /// execution. The response classifier this supersedes reported unknown for all of those,
+    /// discarding facts the executor knew. RED until executeWithVerdict lands.
+    func test_executeWithVerdictReportsTheExecutorStructuredVerdict() async {
+        typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
+
+        // A successful local pause: the sink performed the action and announced it.
+        let (pauseResponse, pauseVerdict) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(pauseVerdict.state, "completed",
+                       "a returned non-error result is a completed execution, not an unobserved one")
+        XCTAssertNil(pauseVerdict.reason, "completed stages carry no reason")
+        XCTAssertEqual(pauseVerdict.outcome, "executed")
+        _ = pauseResponse
+
+        // The error earcon is the executor's failure verdict.
+        mockPlaybackSink.nextEpisodeResponse = .earcon(.error)
+        let (_, failedVerdict) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        XCTAssertEqual(failedVerdict.state, "failed")
+        XCTAssertEqual(failedVerdict.reason, "action_failed")
+        XCTAssertEqual(failedVerdict.outcome, "failed")
+
+        // Confirm-required is a decision NOT to act, not an unobserved turn.
+        mockEffectsSink.nextAdjustResponse = .earcon(.confirmRequired)
+        let (_, refusedVerdict) = await executor.executeWithVerdict(
+            EffectsIntent.adjustSpeed(delta: 0.5))
+        XCTAssertEqual(refusedVerdict.state, "not_run")
+        XCTAssertEqual(refusedVerdict.reason, "client_refused")
+        XCTAssertEqual(refusedVerdict.outcome, "refused")
+    }
+
     /// The origin branch is what decides whether a dispatch re-arms the allowance
     /// that permitted it. A fallback pays for its permission; a cloud route the
     /// model chose is a deliberate act and does restore it. Asserting the pair is
@@ -318,7 +352,10 @@ private final class MockEffectsSink: VoiceEffectsSink {
     var lastVolumeBoostEnabled: Bool?
 
     func setSpeed(_ speed: Double) -> VoiceResponse { lastSetSpeed = speed; return .silent }
-    func adjustSpeed(delta: Double) -> VoiceResponse { lastDelta = delta; return .silent }
+    var nextAdjustResponse: VoiceResponse?
+    func adjustSpeed(delta: Double) -> VoiceResponse {
+        lastDelta = delta; return nextAdjustResponse ?? .silent
+    }
     func setTrimMode(_ mode: TrimMode) -> VoiceResponse { lastTrimMode = mode; return .earcon(.success) }
     func setVolumeBoost(enabled: Bool) -> VoiceResponse { lastVolumeBoostEnabled = enabled; return .earcon(.success) }
     func queryEffects() -> VoiceResponse { .spoken("Speed is 1x") }

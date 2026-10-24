@@ -1463,34 +1463,20 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// FINDING a7dfe013 #2: a returned `VoiceResponse` does not establish success. `.earcon(.error)` is
-    /// a FAILED action and `.silent`/`.confirmRequired` refuse to act. Drives the PRODUCTION classifier
-    /// helper the service uses, so an optimistic "completed on return" cannot pass this.
+    /// SUPERSEDED CONTROL (spec: structured executor verdicts). The response classifier this
+    /// control pinned (`executionOutcome(for:)`) is retired: the executor now reports its OWN
+    /// structured verdict at its decision site (`VoiceIntentExecutor.executeWithVerdict`), and
+    /// the successor controls live in VoiceIntentExecutorTests. The superseded mapping treated
+    /// every non-error response as unobserved, discarding facts the executor knew.
     func test_anExecutorResultIsInterpretedByWhatItSaysNotByReturning() {
         typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
-        let cases: [(String, VoiceResponse, String, String?)] = [
-            // Only the executor's own failure verdict concludes anything (spec 012b19dd). Every other
-            // response is a PRESENTATION choice and leaves execution unobserved.
-            ("error tone", .earcon(.error), "failed", "action_failed"),
-            ("confirmation needed", .earcon(.confirmRequired), "unknown", "observation_unavailable"),
-            ("silent", .silent, "unknown", "observation_unavailable"),
-            ("spoken answer", .spoken("playing"), "unknown", "observation_unavailable"),
-            ("success tone", .earcon(.success), "unknown", "observation_unavailable"),
-            ("combined", .combined(earcon: .success, spokenText: "done"), "unknown",
-             "observation_unavailable"),
-        ]
-        for (label, response, state, reason) in cases {
-            let outcome: Outcome = VoiceControlService.executionOutcomeForTesting(response)
-            XCTAssertEqual(outcome.state, state, "\(label): wrong state")
-            XCTAssertEqual(outcome.reason, reason, "\(label): wrong reason")
-            // The routing disposition must AGREE with the execution outcome; a pending disposition
-            // left behind would say the turn was still undecided after it finished.
-            let disposition = VoiceControlService.settledDispositionForTesting(outcome)
-            let expectedDisposition = state == "failed" ? "failed"
-                : (state == "unknown" ? "pending" : "refused")
-            XCTAssertEqual(disposition, expectedDisposition,
-                           "\(label): disposition must follow what was actually observed")
-        }
+        // The surviving invariant: a FAILED verdict must stay a failure, and the disposition
+        // must agree with the outcome the record carries.
+        let failed = Outcome(state: "failed", reason: "action_failed", outcome: "failed")
+        XCTAssertEqual(VoiceControlService.settledDispositionForTesting(failed), "failed")
+        let unknown = Outcome(state: "unknown", reason: "observation_unavailable")
+        XCTAssertEqual(VoiceControlService.settledDispositionForTesting(unknown), "pending",
+                       "an unobserved turn cannot claim a terminal disposition")
     }
 
     /// REVIEW 59841fbc #1: an explicit `reason: null` on a completed stage is still a carded reason. The
