@@ -160,3 +160,75 @@ enum VoiceSharingSettingsFixture {
         return true
     }
 }
+// MARK: - Stopped / recovery projection (spec 62d39f8f)
+
+/// Every branch of the stopped/recovery projection, driven from injected live queries — the
+/// surface must name WHY sharing is off and WHAT makes it work again, and must never attribute a
+/// policy/enrollment stop to a user action they did not take.
+final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vsrecovery-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func guidance(permits: Bool, enrolled: Bool, optedIn: Bool,
+                          queue: VoiceSharingUploadQueue? = nil)
+        -> VoiceSharingSettingsModel.RecoveryGuidance {
+        VoiceSharingSettingsModel(queue: queue ?? self.queue,
+                                  isCollectionPermitted: { permits })
+            .stoppedGuidance(policyPermits: permits, enrolled: enrolled, localOptIn: optedIn)
+    }
+
+    func test_permittedEnrolledAndOptedInReportsNotStoppedWithNoAction() {
+        let result = guidance(permits: true, enrolled: true, optedIn: true)
+        XCTAssertEqual(result.reason, .notStopped)
+        XCTAssertNil(result.action, "nothing to do when sharing works")
+    }
+
+    /// A stop caused by the user's own gesture names itself as such.
+    func test_optedOutLocallyReportsTurnedOffLocally() {
+        let result = guidance(permits: false, enrolled: true, optedIn: false)
+        XCTAssertEqual(result.reason, .turnedOffLocally)
+        XCTAssertNotNil(result.action)
+    }
+
+    /// Server-side non-enrollment must NOT be rendered as the user turning it off.
+    func test_notEnrolledIsNotReportedAsALocalAction() {
+        let result = guidance(permits: false, enrolled: false, optedIn: true)
+        XCTAssertEqual(result.reason, .notEnrolled)
+        XCTAssertNotEqual(result.reason, .turnedOffLocally)
+    }
+
+    /// An expired/absent lease is a PAUSE with a recovery action, not a user-facing "off".
+    func test_missingLeaseReportsAPauseNotAUserAction() {
+        let result = guidance(permits: false, enrolled: true, optedIn: true)
+        XCTAssertEqual(result.reason, .noActiveLease)
+        XCTAssertNotNil(result.action)
+    }
+
+    /// When the owner's revocation is in doubt (coverage unknown ⇒ held), recovery must point at the
+    /// local deletion path — the actual remedy — and take precedence over the other reasons.
+    func test_heldOwnerReportsStorageHeldAndPointsAtDeletion() {
+        let unreadable = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
+        let result = guidance(permits: true, enrolled: true, optedIn: true, queue: unreadable)
+        XCTAssertEqual(result.reason, .storageHeld)
+        XCTAssertTrue(result.action?.lowercased().contains("delete") == true,
+                      "recovery must name the remedy that actually resolves a held owner")
+    }
+
+    /// The surface renders nothing when everything is fine: no empty shell.
+    func test_notStoppedCarriesNoActionText() {
+        XCTAssertNil(guidance(permits: true, enrolled: true, optedIn: true).action)
+    }
+}

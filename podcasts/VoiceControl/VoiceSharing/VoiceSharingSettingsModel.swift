@@ -64,10 +64,22 @@ final class VoiceSharingSettingsModel {
     private let queue: VoiceSharingUploadQueue
     private let isCollectionPermitted: () -> Bool
 
-    init(queue: VoiceSharingUploadQueue, isCollectionPermitted: @escaping () -> Bool) {
+    private let isEnrolled: () -> Bool
+    private let isOptedIn: () -> Bool
+
+    init(queue: VoiceSharingUploadQueue,
+         isCollectionPermitted: @escaping () -> Bool,
+         isAccountEnrolled: @escaping () -> Bool = { false },
+         isLocallyOptedIn: @escaping () -> Bool = { false }) {
         self.queue = queue
         self.isCollectionPermitted = isCollectionPermitted
+        self.isEnrolled = isAccountEnrolled
+        self.isOptedIn = isLocallyOptedIn
     }
+
+    /// Live reads used by the stopped/recovery projection. Read-only, never a write path.
+    func isAccountEnrolled() -> Bool { isEnrolled() }
+    func isLocallyOptedIn() -> Bool { isOptedIn() }
 
     var isSurfaceEnabled: Bool { Self.surfaceEnabled }
 
@@ -117,5 +129,78 @@ final class VoiceSharingSettingsModel {
     var compiledBoundsDescription: String {
         "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
             + "retained for at most \(Int(VoiceSharingUploadQueue.maxEntryAge / 3600)) hours."
+    }
+    // MARK: - Recovery / stopped state (spec 62d39f8f)
+
+    /// Why collection is not running, from ACTUAL live state — never a guess.
+    ///
+    /// Every case derives from a query the caller supplies, so the surface reports what the app
+    /// can verify right now. `unknown` exists for the same reason `.unknown` storage does: a
+    /// reason the app cannot determine must not be rendered as "you turned it off".
+    enum StoppedReason: Equatable {
+        /// The live policy's snapshot permits collection and no other blocker applies.
+        case notStopped
+        /// No usable snapshot (never fetched, fenced, or expired): the app must fetch again.
+        case noActiveLease
+        /// Server membership is withdrawn or the account is not enrolled.
+        case notEnrolled
+        /// The user turned sharing off on this device.
+        case turnedOffLocally
+        /// A revocation is in doubt: the owner is held and stored recordings may survive.
+        case storageHeld
+        /// Could not determine (read failure); never presented as a user action.
+        case unknown
+    }
+
+    struct RecoveryGuidance: Equatable {
+        let reason: StoppedReason
+        /// A short line naming what will make sharing work again. `nil` when nothing is required.
+        let action: String?
+    }
+
+    /// The model's OWN live projection: policy, enrollment and local intent read at call time.
+    func stoppedGuidance(policyPermits: Bool, enrolled: Bool, localOptIn: Bool) -> RecoveryGuidance {
+        // `unknownCoverage` covers exactly the "we could not even enumerate, or a revocation is in
+        // doubt" cases — the same condition the status projection reports as `.unknown`.
+        let ownerHeld: Bool
+        switch queue.readyEntriesReportingUnknownCoverage() {
+        case .unknownCoverage: ownerHeld = true
+        case .known: ownerHeld = false
+        }
+        return recoveryGuidance(policyPermits: policyPermits,
+                                enrolled: enrolled,
+                                localOptIn: localOptIn,
+                                ownerHeld: ownerHeld)
+    }
+
+    /// Read-only projection of why collection is stopped and what the user can do. The queries are
+    /// injected so tests drive every branch without inventing policy state.
+    func recoveryGuidance(
+        policyPermits: Bool,
+        enrolled: Bool,
+        localOptIn: Bool,
+        ownerHeld: Bool
+    ) -> RecoveryGuidance {
+        if ownerHeld {
+            return RecoveryGuidance(
+                reason: .storageHeld,
+                action: "Some stored recordings could not be revoked. Open Voice Sharing and delete "
+                      + "recordings on this device to finish.")
+        }
+        if policyPermits && enrolled && localOptIn {
+            return RecoveryGuidance(reason: .notStopped, action: nil)
+        }
+        if !localOptIn {
+            return RecoveryGuidance(reason: .turnedOffLocally,
+                                    action: "Turn on Voice Sharing in Settings to resume.")
+        }
+        if !enrolled {
+            return RecoveryGuidance(reason: .notEnrolled,
+                                    action: "Voice Sharing is not enabled for this account. "
+                                          + "Check your account on pocketcasts.com.")
+        }
+        return RecoveryGuidance(reason: .noActiveLease,
+                                action: "Voice Sharing is paused until the app can confirm its "
+                                      + "settings. Open the app with a connection to resume.")
     }
 }

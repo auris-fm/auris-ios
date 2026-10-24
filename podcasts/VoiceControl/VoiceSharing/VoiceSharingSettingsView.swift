@@ -29,8 +29,36 @@ struct VoiceSharingSettingsView: View {
         }
     }
 
+    private func title(for reason: VoiceSharingSettingsModel.StoppedReason) -> String {
+        switch reason {
+        case .notStopped: return "Voice Sharing is on"
+        case .noActiveLease: return "Voice Sharing is paused"
+        case .notEnrolled, .turnedOffLocally: return "Voice Sharing is off"
+        case .storageHeld, .unknown: return "Voice Sharing stopped"
+        }
+    }
+
     private var content: some View {
         List {
+            // WHY sharing is stopped and what the user can do about it, from the model's live
+            // projection (spec 62d39f8f). Present only when something is actually blocking.
+            let live = status ?? model.status()
+            let stopped = model.stoppedGuidance(
+                policyPermits: live.collectionPermitted,
+                enrolled: model.isAccountEnrolled(),
+                localOptIn: model.isLocallyOptedIn())
+            if stopped.reason != .notStopped {
+                Section {
+                    Text(title(for: stopped.reason))
+                        .font(.headline)
+                    if let action = stopped.action {
+                        Text(action)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
             Section("Voice Sharing") {
                 if let status {
                     row("Contribution uploads",
