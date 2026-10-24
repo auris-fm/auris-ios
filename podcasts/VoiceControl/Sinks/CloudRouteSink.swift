@@ -228,8 +228,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 audioPlayer.finish()
-                // The server finished the turn: the sink's own completion.
-                return (.silent, SinkActionFact(state: "completed", reason: nil))
+                // `done` is usage/stream completion: audio may still be pending
+                // (drain-restore below) and executed action results are not
+                // aggregated — this branch cannot prove the requested action
+                // completed (reviewer fa2c92ab). The sink states no fact; the
+                // turn stays conservatively unknown at the labeled bridge.
+                return (.silent, nil)
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
@@ -247,19 +251,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let spoken = serverMessage.isEmpty
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
-                // The turn errored on the server side: the sink's own failure.
-                let fact = SinkActionFact(state: "failed", reason: "action_failed")
+                // An error frame may be admission/transport failure rather
+                // than a failed action — the code alone does not distinguish
+                // them (reviewer fa2c92ab), so no fact is stated here either.
                 if spoken.isEmpty {
-                    return (.earcon(.error), fact)
+                    return (.earcon(.error), nil)
                 }
-                return (.spoken(spoken), fact)
+                return (.spoken(spoken), nil)
             }
         }
 
         if turnToken.isCancelled {
             // The superseding turn owns pause/restore and analytics. This turn
-            // did not run to any server outcome.
-            return (.silent, SinkActionFact(state: "not_run", reason: "cancelled_by_user"))
+            // ran to no server outcome — and supersession alone does NOT
+            // establish user cancellation (spec 152b86a5): a supersede is the
+            // pipeline moving on, not an observed user act against this turn.
+            // The sink states no fact; the turn stays conservatively unknown.
+            return (.silent, nil)
         }
         restoreTransientAudioState()
         // Stream ended without a `done` — no server outcome was observed; the

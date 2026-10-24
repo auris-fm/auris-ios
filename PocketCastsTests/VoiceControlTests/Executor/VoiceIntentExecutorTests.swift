@@ -145,31 +145,25 @@ final class VoiceIntentExecutorTests: XCTestCase {
                      "a fallback must not re-arm the allowance that let it happen")
     }
 
-    /// RED: the cloud sink states its own fact at its decision sites; the
-    /// verdict follows the fact, not the (identical) success-shaped template.
-    func test_cloudVerdict_followsTheSinkFact_notThePresentation() async {
+    /// The ONLY cloud fact the sink currently claims is the client's own
+    /// not-configured refusal (cleared by review). done/error/superseded state
+    /// NO fact — the identical success-shaped template must classify as the
+    /// labeled bridge's conservative unknown, never a claimed outcome.
+    func test_cloudVerdict_onlyTheClientRefusalIsClaimed_otherBoundariesStayUnknown() async {
         mockPlaybackContextProvider.context = Self.context
 
-        // The turn completed at the sink's `done` branch.
-        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "completed", reason: nil)
+        // The sink's claimed fact: the client refused to route.
+        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "not_run", reason: "client_refused")
+        let (_, refusedVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(refusedVerdict.state, "not_run")
+        XCTAssertEqual(refusedVerdict.reason, "client_refused")
+
+        // done (audio pending / actions unaggregated): no fact -> unknown.
+        mockCloudRouteSink.cloudFactToReturn = nil
         let (_, doneVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
             request: "what did they say", tier: .unknown, generation: nil))
-        XCTAssertEqual(doneVerdict.state, "completed")
-        XCTAssertEqual(doneVerdict.outcome, "executed")
-
-        // The IDENTICAL template at the sink's `.error` branch: the turn failed.
-        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "failed", reason: "action_failed")
-        let (_, failedVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
-            request: "what did they say", tier: .unknown, generation: nil))
-        XCTAssertEqual(failedVerdict.state, "failed")
-        XCTAssertEqual(failedVerdict.reason, "action_failed")
-
-        // Superseded mid-turn: the user spoke over it — the turn did not run.
-        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "not_run", reason: "cancelled_by_user")
-        let (_, cancelledVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
-            request: "what did they say", tier: .unknown, generation: nil))
-        XCTAssertEqual(cancelledVerdict.state, "not_run")
-        XCTAssertEqual(cancelledVerdict.reason, "cancelled_by_user")
+        XCTAssertEqual(doneVerdict.state, "unknown")
     }
 
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {

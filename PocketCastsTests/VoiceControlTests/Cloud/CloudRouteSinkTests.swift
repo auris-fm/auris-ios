@@ -367,6 +367,36 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     // MARK: - Helpers
 
+    /// PRODUCTION-LOOP boundary control (spec b9b82155): through the REAL sink
+    /// and stubbed transport, a `done` turn states NO fact — stream completion
+    /// with pending audio and unaggregated actions is not an executed claim.
+    func testDoneTurnThroughTheProductionLoopStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact, "done is stream completion, not an action-executed fact")
+    }
+
+    /// PRODUCTION-LOOP boundary control: a server error frame also states NO
+    /// fact — admission/transport refusal is not distinguishable from a failed
+    /// action by the code alone.
+    func testErrorFrameThroughTheProductionLoopStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact, "an error frame is not provably an action failure")
+    }
+
     /// The not-configured guard is the client's own decline to route: the
     /// spoken coming-soon template is still delivered unchanged, but the fact
     /// says nothing was sent (not_run/client_refused).
@@ -555,8 +585,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
-        _ = await slow.value
+        let (_, secondFact) = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        // The WINNING (done) turn states no fact either (stream completion).
+        XCTAssertNil(secondFact)
+        let (_, lostFact) = await slow.value
+        // SUPERSESSION-AFTER-ACTION: the losing turn is not user cancellation
+        // (spec b9b82155) and ran actions before being replaced — no fact.
+        XCTAssertNil(lostFact, "supersession is not cancellation and proves no outcome")
 
         // Exactly one resume: the superseding turn's. A must not restore after B.
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
