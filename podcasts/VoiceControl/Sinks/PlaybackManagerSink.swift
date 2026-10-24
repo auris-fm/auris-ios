@@ -15,6 +15,11 @@ protocol PlaybackManagerProtocol {
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
+    /// Whether the Up-Next queue currently holds an episode to skip to. Read by the sink's
+    /// fact channel: a skip with nothing queued is a real decline (the object is absent), not a
+    /// completion wearing a success template. Default-derived from the existing method where a
+    /// count is not directly available is NOT possible, so this is a requirement.
+    var upNextCountForFact: Int { get }
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -38,15 +43,22 @@ class PlaybackManagerSink: VoicePlaybackSink {
         return .earcon(.success)
     }
 
-    /// THE DECISION-SITE FACT (the first live fact channel): the presentation is the identical
-    /// success earcon whether or not anything was playing; the FACT states which world happened.
-    /// Pausing from playing is a completed action; pausing while paused is a no-op whose
-    /// precondition was absent — stated as not_run/precondition_failed rather than reading the
-    /// earcon as a completion. (Semantic choice disclosed to spec/reviewer for ruling.)
+    /// THE FACT CHANNEL (spec 32305c22 ruling): pause is an IDEMPOTENT success by the existing
+    /// action contract — a prior paused state alone does not turn it into a refusal — so the
+    /// fact is completed in both worlds, stated at the sink rather than inferred from the earcon.
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
-        let wasPlaying = playbackManager.isPlaying
         let response = pause()
-        return wasPlaying
+        return (response, SinkActionFact(state: "completed", reason: nil))
+    }
+
+    /// THE DISCRIMINATING SITE: the skip happens ONLY when the up-next queue is non-empty; with
+    /// none, the sink speaks the same success-shaped template but NOTHING moved. The fact is
+    /// emitted at that real decision: skip performed → completed; no object to act on →
+    /// not_run/precondition_failed. The user-facing presentation is preserved unchanged.
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        let queued = playbackManager.upNextCountForFact
+        let response = nextEpisode()
+        return queued > 0
             ? (response, SinkActionFact(state: "completed", reason: nil))
             : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
     }

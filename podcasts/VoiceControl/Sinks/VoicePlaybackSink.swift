@@ -39,6 +39,9 @@ protocol VoicePlaybackSink {
     /// the default below) so overrides dispatch dynamically through the existential — a protocol
     /// extension alone would silently route every call to the default.
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?)
+    /// Next-episode skip with the sink's own structured fact: completed only when a skip
+    /// actually happened; a declined skip (nothing queued) states not_run/precondition_failed.
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?)
 }
 
 /// THE FACT CHANNEL, introduced one method at a time. The default reports NO fact — the
@@ -48,5 +51,9 @@ extension VoicePlaybackSink {
     /// Pause with the sink's own structured fact. Default: presentation only, no fact.
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
         (pause(), nil)
+    }
+    /// Default: presentation only, no fact.
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        (nextEpisode(), nil)
     }
 }

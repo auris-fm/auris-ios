@@ -56,9 +56,11 @@ final class VoiceIntentExecutorTests: XCTestCase {
     func test_executeWithVerdictReportsTheExecutorStructuredVerdict() async {
         typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
 
-        // The executor's own failure verdict.
-        mockPlaybackSink.nextEpisodeResponse = .earcon(.error)
-        let (_, failedVerdict) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        // The executor's own failure verdict — on an intent whose sink has NO fact channel, so
+        // this is the bridge (nextEpisode's channel would otherwise answer first).
+        mockEffectsSink.nextAdjustResponse = .earcon(.error)
+        let (_, failedVerdict) = await executor.executeWithVerdict(
+            EffectsIntent.adjustSpeed(delta: 0.5))
         XCTAssertEqual(failedVerdict.state, "failed")
         XCTAssertEqual(failedVerdict.reason, "action_failed")
         XCTAssertEqual(failedVerdict.outcome, "failed")
@@ -80,23 +82,30 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// RED until the fact channel lands; the sleep half (below) pins the world where NO fact
     /// channel exists — unknown in both worlds.
     func test_samePresentationDifferentActionOutcome_verdictFollowsTheSinkFactNotThePresentation() async {
-        // Same presentation, real action: the sink fact says the pause acted.
-        mockPlaybackSink.wasPlayingFact = true
-        let (_, acted) = await executor.executeWithVerdict(PlaybackIntent.pause)
-        XCTAssertEqual(acted.state, "completed",
-                       "the sink fact (an actual playing→paused transition) must conclude the "
-                           + "turn, not the identical success earcon")
-        XCTAssertNil(acted.reason)
-        XCTAssertEqual(acted.outcome, "executed")
+        // The skip happened: the queue held an episode.
+        mockPlaybackSink.upNextCountFact = 1
+        let (_, skipped) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        XCTAssertEqual(skipped.state, "completed",
+                       "the sink fact (an actual skip) must conclude the turn, not the "
+                           + "success-shaped template")
+        XCTAssertNil(skipped.reason)
+        XCTAssertEqual(skipped.outcome, "executed")
 
-        // Same presentation again, no-op: the fact says the precondition was absent.
-        mockPlaybackSink.wasPlayingFact = false
-        let (_, noOp) = await executor.executeWithVerdict(PlaybackIntent.pause)
-        XCTAssertEqual(noOp.state, "not_run",
-                       "pausing while paused did nothing; the identical earcon must not read "
-                           + "as a completed action")
-        XCTAssertEqual(noOp.reason, "precondition_failed")
-        XCTAssertEqual(noOp.outcome, "refused")
+        // The IDENTICAL template with nothing queued: the sink declined — nothing moved.
+        mockPlaybackSink.upNextCountFact = 0
+        let (_, declined) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        XCTAssertEqual(declined.state, "not_run",
+                       "with no episode to skip to, nothing happened; the identical template "
+                           + "must not read as a completed action")
+        XCTAssertEqual(declined.reason, "precondition_failed")
+        XCTAssertEqual(declined.outcome, "refused")
+
+        // Pause: idempotent success per the existing contract — completed from either state.
+        let (_, pausedFromPlaying) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(pausedFromPlaying.state, "completed")
+        let (_, pausedWhilePaused) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(pausedWhilePaused.state, "completed",
+                       "a prior paused state alone does not turn an idempotent pause into a refusal")
     }
 
     /// The NO-CHANNEL half: the sleep sink has no fact channel yet, so its identical
@@ -378,16 +387,20 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
-    /// The sink's structured fact, as the real channel will carry it: whether an actual
-    /// playing→paused transition happened.
-    var wasPlayingFact = true
+    /// Pause is idempotent success (spec 32305c22): the fact is completed in both worlds —
+    /// stated at the sink, not inferred from the earcon.
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
         pauseCalled = true
-        let response: VoiceResponse = .earcon(.success)
-        return wasPlayingFact
-            ? (response, SinkActionFact(state: "completed", reason: nil))
-            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+        return (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
+    }
+    /// The skip's fact: an actual skip only when the queue held an episode.
+    var upNextCountFact = 0
+    func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        upNextCountFact > 0
+            ? (nextEpisodeResponse, SinkActionFact(state: "completed", reason: nil))
+            : (nextEpisodeResponse, SinkActionFact(state: "not_run", reason: "precondition_failed"))
     }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
@@ -400,7 +413,6 @@ private final class MockPlaybackSink: VoicePlaybackSink {
         lastSeekToPosition = positionSeconds
         return .silent
     }
-    func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
 }
 
 private final class MockEffectsSink: VoiceEffectsSink {

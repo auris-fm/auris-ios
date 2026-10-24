@@ -180,35 +180,45 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     }
 
     func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
-        let response: VoiceResponse
+        await executeCollectingFact(intent).response
+    }
+
+    /// THE SHARED DISPATCH, threading each sink's fact invocation-locally — no executor-wide
+    /// field spans an await, so overlapping invocations cannot attribute one turn's fact to
+    /// another (reviewer 6133f187). `execute` is exactly this, dropping the fact.
+    private func executeCollectingFact(_ intent: any VoiceIntent) async -> (response: VoiceResponse, fact: SinkActionFact?) {
+        var response: (response: VoiceResponse, fact: SinkActionFact?)
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
-        case let e as EffectsIntent: response = executeEffects(e)
-        case let v as VolumeIntent: response = executeVolume(v)
-        case let s as SleepIntent: response = executeSleep(s)
-        case let c as ChapterIntent: response = executeChapter(c)
-        case let b as BookmarkIntent: response = executeBookmark(b)
-        case let q as QueueIntent: response = executeQueue(q)
-        case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
-        case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
+        case let e as EffectsIntent: response = (executeEffects(e), nil)
+        case let v as VolumeIntent: response = (executeVolume(v), nil)
+        case let s as SleepIntent: response = (executeSleep(s), nil)
+        case let c as ChapterIntent: response = (executeChapter(c), nil)
+        case let b as BookmarkIntent: response = (executeBookmark(b), nil)
+        case let q as QueueIntent: response = (executeQueue(q), nil)
+        case let pq as PlaybackQueryIntent: response = (executePlaybackQuery(pq), nil)
+        case let sq as StatsQueryIntent: response = (executeStatsQuery(sq), nil)
         case let cr as CloudRouteIntent:
             guard let context = playbackContextProvider.current() else {
-                response = .earcon(.error)
+                response = (.earcon(.error), nil)
                 break
             }
-            response = await cloudRouteSink.routeToCloud(
+            // Cloud fact: the sink's own verdict channel lands here (next slice). Until then
+            // the cloud turn stays presentation-classified at the bridge, never fact-claimed.
+            response = (await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
                 context: context
-            )
-        default: response = .earcon(.error)
+            ), nil)
+        default: response = (.earcon(.error), nil)
         }
 
+        let voiceResponse = response.response
         // Record analytics after every command
-        analytics?.recordCommand(intent, response: response)
+        analytics?.recordCommand(intent, response: voiceResponse)
 
         // Start grace period after any successful (non-error) command
-        if case .earcon(.error) = response {
+        if case .earcon(.error) = voiceResponse {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
         } else if let route = intent as? CloudRouteIntent {
             // A cloud completion may only touch the window it was issued under, so
@@ -218,7 +228,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             // grace state at all.
             guard let generation = route.generation else {
                 FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
-                return response   // analytics already recorded above
+                return (voiceResponse, response.fact)   // analytics already recorded above
             }
             switch route.origin {
             case .modelCall:
@@ -242,18 +252,15 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             gracePeriodSignal.onCommandRecognized()
         }
 
-        return response
+        return (voiceResponse, response.fact)
     }
 
-    /// The verdict rides the ONE shared execution path: `execute` performs the turn exactly once
-    /// (analytics + grace effects, reviewer 8bc80b2b), the fact channel is captured inside that
-    /// dispatch, and the verdict is the sink's own fact where the channel is live — else the
-    /// TEMPORARY presentation bridge (labeled at its definition).
+    /// The verdict rides the ONE shared execution path: `executeCollectingFact` performs the
+    /// turn exactly once (analytics + grace effects, reviewer 8bc80b2b) and threads the sink's
+    /// own fact invocation-locally; where the channel is silent the verdict is the TEMPORARY
+    /// presentation bridge (labeled at its definition).
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
-        lastSinkFact = nil
-        let response = await execute(intent)
-        let fact = lastSinkFact
-        lastSinkFact = nil
+        let (response, fact) = await executeCollectingFact(intent)
         guard let fact else {
             return (response, Self.presentationBridgeVerdict(response))
         }
@@ -284,23 +291,17 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         }
     }
 
-    /// The fact the sink stated during the CURRENT dispatch, captured inside the shared path so
-    /// the action (and its analytics/grace effects) happen exactly once. Cleared after each
-    /// verdict read. Executors are used serially per turn; the field is not shared state across
-    /// turns. (Concurrency disclosure: same single-threaded assumption as the rest of this class.)
-    private var lastSinkFact: SinkActionFact?
-
-    private func executePlayback(_ intent: PlaybackIntent) -> VoiceResponse {
+    private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {
         switch intent {
         case .pause:
-            let (response, fact) = playbackSink.pauseWithFact()
-            lastSinkFact = fact
-            return response
-        case .resume: return playbackSink.resume()
+            return playbackSink.pauseWithFact()
+        case .nextEpisode:
+            return playbackSink.nextEpisodeWithFact()
+        case .resume:
+            return (playbackSink.resume(), nil)
         case .seekRelative(let delta, let direction):
-            return playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
-        case .seekTo(let pos): return playbackSink.seekTo(positionSeconds: pos)
-        case .nextEpisode: return playbackSink.nextEpisode()
+            return (playbackSink.seekRelative(deltaSeconds: delta, direction: direction), nil)
+        case .seekTo(let pos): return (playbackSink.seekTo(positionSeconds: pos), nil)
         }
     }
 
