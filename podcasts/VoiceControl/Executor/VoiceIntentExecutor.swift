@@ -203,13 +203,14 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
                 response = (.earcon(.error), nil)
                 break
             }
-            // Cloud fact: the sink's own verdict channel lands here (next slice). Until then
-            // the cloud turn stays presentation-classified at the bridge, never fact-claimed.
-            response = (await cloudRouteSink.routeToCloud(
+            // The cloud sink states its own decision fact at its turn-loop
+            // branches; the executor consumes it invocation-locally like every
+            // other fact channel.
+            response = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,
                 context: context
-            ), nil)
+            )
         default: response = (.earcon(.error), nil)
         }
 

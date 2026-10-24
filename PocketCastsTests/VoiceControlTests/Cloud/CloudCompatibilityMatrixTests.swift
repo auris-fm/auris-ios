@@ -41,7 +41,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("token expired"))
         XCTAssertTrue(playback.calls.contains(.resume), "the turn restores playback after a mid-session failure")
@@ -59,7 +59,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         // `unauthorized` has no user-facing template, so the failure signal is
         // the error earcon — never silence, and never English prose for TTS.
@@ -92,7 +92,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")

@@ -145,6 +145,33 @@ final class VoiceIntentExecutorTests: XCTestCase {
                      "a fallback must not re-arm the allowance that let it happen")
     }
 
+    /// RED: the cloud sink states its own fact at its decision sites; the
+    /// verdict follows the fact, not the (identical) success-shaped template.
+    func test_cloudVerdict_followsTheSinkFact_notThePresentation() async {
+        mockPlaybackContextProvider.context = Self.context
+
+        // The turn completed at the sink's `done` branch.
+        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "completed", reason: nil)
+        let (_, doneVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(doneVerdict.state, "completed")
+        XCTAssertEqual(doneVerdict.outcome, "executed")
+
+        // The IDENTICAL template at the sink's `.error` branch: the turn failed.
+        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "failed", reason: "action_failed")
+        let (_, failedVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(failedVerdict.state, "failed")
+        XCTAssertEqual(failedVerdict.reason, "action_failed")
+
+        // Superseded mid-turn: the user spoke over it — the turn did not run.
+        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "not_run", reason: "cancelled_by_user")
+        let (_, cancelledVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(cancelledVerdict.state, "not_run")
+        XCTAssertEqual(cancelledVerdict.reason, "cancelled_by_user")
+    }
+
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
@@ -535,12 +562,14 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var routeToCloudCalled = false
     var lastRequest: String?
     var lastContext: PlaybackContext?
-
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    /// RED: the cloud sink's own fact channel. Identical success-shaped spoken
+    /// template in every world; only the sink's stated fact differs.
+    var cloudFactToReturn: SinkActionFact? = SinkActionFact(state: "completed", reason: nil)
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
-        return .spoken("Here's what I found")
+        return (.spoken("Here's what I found"), cloudFactToReturn)
     }
 }
 

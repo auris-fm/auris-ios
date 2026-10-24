@@ -47,7 +47,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
         playback.positionMs = 500_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "What did she mean?",
             tier: .free,
             context: sampleContext()
@@ -75,7 +75,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "summarize",
             tier: .free,
             context: sampleContext()
@@ -103,7 +103,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.setPlaying(false)
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "what was that about",
             tier: .free,
             context: sampleContext()
@@ -148,7 +148,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [500.0: 510.0]
         playback.positionMs = 900_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "play that",
             tier: .free,
             context: sampleContext()
@@ -176,7 +176,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.positionMs = 120_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "forward 15 seconds",
             tier: .free,
             context: sampleContext()
@@ -266,7 +266,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [100.0: 110.0]
         playback.positionMs = 50_000
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("rate limited"))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
@@ -366,6 +366,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     // MARK: - Helpers
+
+    /// The not-configured guard is the client's own decline to route: the
+    /// spoken coming-soon template is still delivered unchanged, but the fact
+    /// says nothing was sent (not_run/client_refused).
+    func testUnconfiguredSinkSpeaksComingSoonButFactsClientRefused() async {
+        let sink = CloudRouteSink(
+            isConfigured: { false },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics
+        )
+        let (response, fact) = await sink.routeToCloud(
+            request: "what did they say",
+            tier: .unknown,
+            context: sampleContext()
+        )
+        if case .spoken(let text) = response {
+            XCTAssertFalse(text.isEmpty)
+        } else if case .earcon(.error) = response {
+            // acceptable when the locale has no coming-soon template
+        } else {
+            XCTFail("unexpected response \(response)")
+        }
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "client_refused")
+    }
 
     private func makeSink(
         rendersStructuredResults: Bool = false,
@@ -703,7 +731,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"connection_lost","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
     }
@@ -715,7 +743,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"invalid_response","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
     }
@@ -805,7 +833,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
         let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
-        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
+        let (response, _) = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
         XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
     }
 
@@ -823,7 +851,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         stubError(code: "connection_lost")
         // The test host's own bundle carries the en.lproj translation.
         let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
-        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
+        let (response, _) = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
     }
 }
@@ -874,7 +902,7 @@ final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
         )
         let context = PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
 
-        let response = await sink.routeToCloud(request: "x", tier: .free, context: context)
+        let (response, _) = await sink.routeToCloud(request: "x", tier: .free, context: context)
 
         XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
     }

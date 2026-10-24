@@ -131,12 +131,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
             let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
-            return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
+            // The client declines to route: nothing was sent, regardless of
+            // what the template sounds like.
+            return (comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon),
+                    SinkActionFact(state: "not_run", reason: "client_refused"))
         }
 
         let client = clientFactory()
@@ -225,7 +228,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 audioPlayer.finish()
-                return .silent
+                // The server finished the turn: the sink's own completion.
+                return (.silent, SinkActionFact(state: "completed", reason: nil))
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
@@ -243,19 +247,24 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let spoken = serverMessage.isEmpty
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
+                // The turn errored on the server side: the sink's own failure.
+                let fact = SinkActionFact(state: "failed", reason: "action_failed")
                 if spoken.isEmpty {
-                    return .earcon(.error)
+                    return (.earcon(.error), fact)
                 }
-                return .spoken(spoken)
+                return (.spoken(spoken), fact)
             }
         }
 
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics.
-            return .silent
+            // The superseding turn owns pause/restore and analytics. This turn
+            // did not run to any server outcome.
+            return (.silent, SinkActionFact(state: "not_run", reason: "cancelled_by_user"))
         }
         restoreTransientAudioState()
-        return .silent
+        // Stream ended without a `done` — no server outcome was observed; the
+        // sink states no fact and the turn stays conservatively unknown.
+        return (.silent, nil)
     }
 
     private func restoreTransientAudioState() {
