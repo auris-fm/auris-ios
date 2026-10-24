@@ -164,6 +164,17 @@ final class VoiceIntentExecutorTests: XCTestCase {
         let (_, doneVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
             request: "what did they say", tier: .unknown, generation: nil))
         XCTAssertEqual(doneVerdict.state, "unknown")
+
+        // A no-template SERVER ERROR (earcon .error + no fact) must NOT be
+        // re-invented as failed/action_failed by the presentation bridge —
+        // the real sink returns exactly this shape (reviewer b9b9fe0f).
+        mockCloudRouteSink.errorEarconResponse = true
+        let (_, errorVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        mockCloudRouteSink.errorEarconResponse = false
+        XCTAssertEqual(errorVerdict.state, "unknown",
+                       "an unobserved cloud outcome is unknown, not an action failure")
+        XCTAssertEqual(errorVerdict.reason, "observation_unavailable")
     }
 
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
@@ -559,11 +570,13 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// RED: the cloud sink's own fact channel. Identical success-shaped spoken
     /// template in every world; only the sink's stated fact differs.
     var cloudFactToReturn: SinkActionFact? = SinkActionFact(state: "completed", reason: nil)
+    /// Models the real sink's no-template server-error shape: earcon(.error), nil fact.
+    var errorEarconResponse = false
     func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
-        return (.spoken("Here's what I found"), cloudFactToReturn)
+        return (errorEarconResponse ? .earcon(.error) : .spoken("Here's what I found"), cloudFactToReturn)
     }
 }
 

@@ -397,6 +397,79 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(fact, "an error frame is not provably an action failure")
     }
 
+    /// RED (aggregation slice, spec 3d51f037): a DECLINED action inside the
+    /// turn is the sink's own observed fact — done must not mask it with an
+    /// aggregate success.
+    func testDeclinedActionInsideTheTurnFactsPreconditionFailed_notAggregateSuccess() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run", "stop_quote with no quote in flight declined")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// RED: an actually-performed action + done = the sink's own observed
+    /// completion of the operation set (not inferred FROM done — the action
+    /// result is the evidence).
+    func testPerformedActionInsideTheTurnFactsCompleted() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "completed")
+        XCTAssertNil(fact?.reason)
+    }
+
+    /// RED: MIXED outcomes — one declined, one performed — resolve to the
+    /// declined fact, never to aggregate success.
+    func testMixedOutcomesResolveToTheDecline_notSuccess() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// A turn that executed NO actions states no aggregate fact at done: there
+    /// is nothing observed to claim (a pure-answer turn stays unknown).
+    func testTurnWithoutActionsStatesNoFactAtDone() async {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact)
+    }
+
     /// The not-configured guard is the client's own decline to route: the
     /// spoken coming-soon template is still delivered unchanged, but the fact
     /// says nothing was sent (not_run/client_refused).

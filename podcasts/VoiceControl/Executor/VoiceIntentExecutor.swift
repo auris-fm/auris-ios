@@ -263,6 +263,13 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
         let (response, fact) = await executeCollectingFact(intent)
         guard let fact else {
+            // Cloud turns with no stated fact are EXPLICITLY unknown: the
+            // presentation bridge would recreate the action-failure claim the
+            // sink just declined to make (error earcon on a server
+            // admission/transport error — reviewer b9b9fe0f/516acc58).
+            if intent is CloudRouteIntent {
+                return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+            }
             return (response, Self.presentationBridgeVerdict(response))
         }
         return (response, ExecutionVerdict(
