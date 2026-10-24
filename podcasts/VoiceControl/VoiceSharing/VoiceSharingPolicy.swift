@@ -230,6 +230,7 @@ final class VoiceSharingPolicy {
             // arm the expiry against the PREVIOUS lease's generation.
             onLeaseInstalled?(snapshot)
             installPublicationBarrier.unlock()
+            notifyChanged()  // a new lease changes what the surface displays
             return snapshot
         }
     }
@@ -260,6 +261,7 @@ final class VoiceSharingPolicy {
         installed = nil
         leaseGeneration += 1
         lock.unlock()
+        notifyChanged()  // expiry is a displayed transition, not just a stamp change
         return true
     }
 
@@ -289,12 +291,14 @@ final class VoiceSharingPolicy {
 
     func invalidateForIdentityChange(kind: InvalidationKind = .identityTransition) {
         lock.lock()
-        defer { lock.unlock() }
         installed = nil
         if kind.fences {
             pendingIdentityFence += 1
         }
         identityGenerationCounter += 1
+        lock.unlock()
+        // Withdrawal/account switch removes a permission the surface may be showing.
+        notifyChanged()
     }
 
     /// Raises the install fence without touching the snapshot, for callers that know the account state is
@@ -328,6 +332,34 @@ final class VoiceSharingPolicy {
     /// Nil when no snapshot is installed — an expiry schedule only makes sense against a live lease.
     /// Read-only bookkeeping: expiry itself is still enforced by `permitsCollection`; this only lets
     /// composition trigger the purge at the deadline rather than at the next unrelated event.
+    // MARK: - Change notification (reviewer f62b19a4 / spec fc93e27a)
+
+    /// A displayed fact about the policy changed (lease installed, expired, fenced, or coverage
+    /// withdrawn). The settings surface subscribes so a rendered view cannot stay stale — a
+    /// generation stamp alone only detects a race when somebody reads.
+    private var changeObservers: [UUID: () -> Void] = [:]
+    private let observerLock = NSLock()
+
+    @discardableResult
+    func addChangeObserver(_ observer: @escaping () -> Void) -> UUID {
+        observerLock.lock(); defer { observerLock.unlock() }
+        let token = UUID()
+        changeObservers[token] = observer
+        return token
+    }
+
+    func removeChangeObserver(_ token: UUID) {
+        observerLock.lock(); defer { observerLock.unlock() }
+        changeObservers.removeValue(forKey: token)
+    }
+
+    fileprivate func notifyChanged() {
+        observerLock.lock()
+        let observers = Array(changeObservers.values)
+        observerLock.unlock()
+        for observer in observers { observer() }
+    }
+
     /// The lease generation, exposed so a consumer that must prove several reads belong to one
     /// moment can detect an install/expiry/fence between them (reviewer 05aaaedc).
     var currentLeaseGeneration: Int {

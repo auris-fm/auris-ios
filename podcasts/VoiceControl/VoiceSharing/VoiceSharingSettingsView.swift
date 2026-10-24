@@ -16,6 +16,9 @@ struct VoiceSharingSettingsView: View {
     @State private var liveState: VoiceSharingSettingsModel.LiveState?
     /// ONE published value carrying every displayed field, so the two UI parts cannot disagree.
     @State private var published: VoiceSharingSettingsModel.PublishedViewState?
+    /// The highest publication sequence applied, so an out-of-order delivery is rejected here and
+    /// not just at the producer.
+    @State private var appliedSequence = -1
     @State private var stateObserver: UUID?
     @State private var lastDelete: VoiceSharingSettingsModel.DeleteResult?
     @State private var showingDeleteConfirmation = false
@@ -39,18 +42,17 @@ struct VoiceSharingSettingsView: View {
             .onAppear {
                 liveState = model.liveState()
                 published = model.publishedViewState(for: liveState!)
-                stateObserver = model.addStateObserver { updated in
-                    // The model may publish from any source thread; SwiftUI state must be written
-                    // on the main actor, so the hop is explicit (reviewer 05aaaedc).
-                    if Thread.isMainThread {
-                        liveState = updated
-                        published = model.publishedViewState(for: updated)
-                    } else {
-                        DispatchQueue.main.async {
-                            liveState = updated
-                            published = model.publishedViewState(for: updated)
-                        }
+                stateObserver = model.addStateObserver { sent in
+                    // Two independent protections (reviewer f62b19a4): the main-actor hop for
+                    // SwiftUI state, and a sequence check so a delivery that arrives LATE cannot
+                    // overwrite a newer one — enqueue order alone does not preserve read order.
+                    let apply: () -> Void = {
+                        guard sent.sequence > appliedSequence else { return }
+                        appliedSequence = sent.sequence
+                        liveState = sent.state
+                        published = model.publishedViewState(for: sent.state)
                     }
+                    if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
                 }
                 model.refreshLiveState()
             }

@@ -297,18 +297,71 @@ final class VoiceSharingUploadQueue {
     /// answer to "the disqualification might not be durable": refuse everything rather than
     /// report success or miscount an unmarked survivor as disqualified.
     private var revocationHoldLocked = false
-    /// Bumped whenever the hold changes, so a snapshot can prove its queue read was not split by a
-    /// concurrent purge/hold transition (reviewer 05aaaedc).
+    /// Bumped whenever ANYTHING a snapshot displays about the queue changes — the hold, its origin,
+    /// or the ready count — so a snapshot can prove its queue read was not split by a concurrent
+    /// purge, hold transition, or enqueue (reviewer 05aaaedc/f62b19a4).
     private var holdGeneration = 0
+
+    /// Re-derive the generation from the displayed queue facts after every mutation.
+    /// The count a snapshot would display, computed under the serial queue WITHOUT going through
+    /// the serving path's fail-closed gates (a held queue still has a count; it is simply not
+    /// served). Used only to detect a change, never exposed as a count.
+    private func readyEntryCountLocked() -> Int {
+        entriesLocked().filter { isCompleteEntryLocked(at: $0) }.count
+    }
+
+    // MARK: - Change notification (reviewer f62b19a4 / spec fc93e27a)
+
+    private var contentObservers: [UUID: () -> Void] = [:]
+    private let contentObserverLock = NSLock()
+
+    /// Announces every change to a fact the surface displays (hold, origin, ready count).
+    @discardableResult
+    func addContentObserver(_ observer: @escaping () -> Void) -> UUID {
+        contentObserverLock.lock(); defer { contentObserverLock.unlock() }
+        let token = UUID()
+        contentObservers[token] = observer
+        return token
+    }
+
+    func removeContentObserver(_ token: UUID) {
+        contentObserverLock.lock(); defer { contentObserverLock.unlock() }
+        contentObservers.removeValue(forKey: token)
+    }
+
+    private func bumpHoldGenerationForContentChange() {
+        let signature = QueueContentSignature(held: revocationHoldLocked,
+                                              originUnknown: revocationOriginUnknownLocked,
+                                              readyCount: readyEntryCountLocked())
+        guard signature != lastQueueSignature else { return }
+        lastQueueSignature = signature
+        holdGeneration &+= 1
+        // Notified OUTSIDE the serial queue's critical section: listeners re-read the queue.
+        let observers: [() -> Void]
+        contentObserverLock.lock()
+        observers = Array(contentObservers.values)
+        contentObserverLock.unlock()
+        if !observers.isEmpty {
+            DispatchQueue.global(qos: .utility).async {
+                for observer in observers { observer() }
+            }
+        }
+    }
+
+    private var lastQueueSignature: QueueContentSignature?
+
+    private struct QueueContentSignature: Equatable {
+        let held: Bool
+        let originUnknown: Bool
+        let readyCount: Int
+    }
 
     var currentHoldGeneration: Int { serialQueue.sync { holdGeneration } }
 
     private func setRevocationHold(_ held: Bool, originUnknown: Bool = false) {
-        if revocationHoldLocked != held || revocationOriginUnknownLocked != originUnknown {
-            holdGeneration &+= 1
-        }
         revocationHoldLocked = held
         revocationOriginUnknownLocked = originUnknown
+        bumpHoldGenerationForContentChange()
     }
     /// True when the revocation hold exists because its evidence could not be READ. Reported as
     /// `unknownCoverage`, not `revocationHeld` (reviewer 8ae2b980).
@@ -487,6 +540,11 @@ final class VoiceSharingUploadQueue {
     /// entry left in place — retained, still charged, never silently "gone".
     @discardableResult
     func discardUnready(_ entry: Entry) throws -> Bool {
+        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
+        return try discardUnreadyLocked(entry)
+    }
+
+    private func discardUnreadyLocked(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
@@ -672,6 +730,7 @@ final class VoiceSharingUploadQueue {
     /// (atomic replace) and synchronized. A crash before the marker leaves an unready entry that
     /// recovery removes.
     func finalize(_ entry: Entry) throws {
+        defer { serialQueue.sync { bumpHoldGenerationForContentChange() } }
         try serialQueue.sync {
             let directory = try validatedEntryDirectoryLocked(entry)
             // Publication must not launder an over-age preparation into a fresh lifetime: the

@@ -11,6 +11,8 @@ class VoiceControlAssembly {
     /// real dependency rather than a stub; the surface itself stays compiled OFF.
     private(set) var voiceSharingSettingsModel: VoiceSharingSettingsModel?
     private var voiceSharingSettingsModelObserver: UUID?
+    private var voiceSharingPolicyObserver: UUID?
+    private var voiceSharingQueueObserver: UUID?
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -174,11 +176,20 @@ class VoiceControlAssembly {
             policyLeaseGeneration: { VoiceSharingCoordinator.shared.policy.currentLeaseGeneration },
             queueHoldGeneration: { contributionQueue.currentHoldGeneration })
         self.voiceSharingSettingsModel = settingsModel
-        // ACTUAL update source (reviewer 8ae2b980): the enrollment store is the production state
-        // that changes underneath the surface (opt-in, projection acceptance, account transition).
-        // The model re-reads and republishes; it publishes only on a real change.
+        // EVERY authoritative update source, not just enrollment (spec fc93e27a / reviewer
+        // f62b19a4): opt-in and projection acceptance, lease install/expiry/fence/withdrawal, and
+        // queue hold/count changes. Each one pushes; a rendered view cannot go stale waiting for
+        // the next read.
         self.voiceSharingSettingsModelObserver =
             VoiceSharingEnrollmentStore.shared.addObserver { [weak settingsModel] _ in
+                settingsModel?.refreshLiveState()
+            }
+        self.voiceSharingPolicyObserver =
+            VoiceSharingCoordinator.shared.policy.addChangeObserver { [weak settingsModel] in
+                settingsModel?.refreshLiveState()
+            }
+        self.voiceSharingQueueObserver =
+            contributionQueue.addContentObserver { [weak settingsModel] in
                 settingsModel?.refreshLiveState()
             }
         let contributionSink = VoiceSharingContributionSink(

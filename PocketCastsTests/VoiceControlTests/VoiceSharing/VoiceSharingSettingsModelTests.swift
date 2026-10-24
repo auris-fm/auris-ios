@@ -333,7 +333,7 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
         model.refreshLiveState() // seed: the first state is the baseline
 
         var published: [VoiceSharingSettingsModel.LiveState] = []
-        let token = model.addStateObserver { published.append($0) }
+        let token = model.addStateObserver { published.append($0.state) }
         defer { model.removeStateObserver(token) }
 
         store.setLocalOptIn(true)   // production mutation
@@ -521,4 +521,94 @@ private final class PublishCounter: @unchecked Sendable {
     private var count = 0
     func increment() { lock.lock(); count += 1; lock.unlock() }
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
+// MARK: - Ordered publication + production change hooks (reviewer f62b19a4 / spec fc93e27a)
+
+final class VoiceSharingChangeHookTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vshooks-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The queue PUSHES a hold change: the listener is registered on the instance whose hold
+    /// transitions, so the notification is the same queue's own mutation.
+    func test_aQueueHoldIsPushed() {
+        let observed = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        let fired = expectation(description: "queue change pushed")
+        fired.assertForOverFulfill = false
+        let token = observed.addContentObserver { fired.fulfill() }
+        defer { observed.removeContentObserver(token) }
+        guard case .refused = observed.purgeAll() else {
+            return XCTFail("setup: an unwritable intent refuses the purge")
+        }
+        wait(for: [fired], timeout: 2)
+    }
+
+    /// A ready-count change is ALSO a change: enqueuing must notify, not just a hold transition.
+    func test_aCountChangeIsPushed() throws {
+        let fired = expectation(description: "count change pushed")
+        fired.assertForOverFulfill = false
+        let token = queue.addContentObserver { fired.fulfill() }
+        defer { queue.removeContentObserver(token) }
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        wait(for: [fired], timeout: 2)
+    }
+
+    /// Removing a listener stops delivery.
+    func test_removingAQueueObserverStopsDelivery() {
+        let observed = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: Date.init,
+            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
+        let silence = expectation(description: "no delivery after removal")
+        silence.isInverted = true
+        let token = observed.addContentObserver { silence.fulfill() }
+        observed.removeContentObserver(token)
+        _ = observed.purgeAll()
+        wait(for: [silence], timeout: 1)
+    }
+
+    /// The policy PUSHES a withdrawal/expiry transition.
+    func test_aPolicyTransitionIsPushed() {
+        let policy = VoiceSharingPolicy(readRemoteSwitch: { .unavailable }, isAccountEnrolled: { true })
+        let fired = expectation(description: "policy change pushed")
+        fired.assertForOverFulfill = false
+        let token = policy.addChangeObserver { fired.fulfill() }
+        defer { policy.removeChangeObserver(token) }
+        policy.invalidateForIdentityChange(kind: VoiceSharingPolicy.InvalidationKind.membershipChange)
+        wait(for: [fired], timeout: 2)
+    }
+
+    /// A superseded refresh must NOT deliver. Two refreshes race; only the newer read may publish,
+    /// and an older read finishing later is dropped at the producer.
+    func test_anObsoleteRefreshDoesNotPublish() {
+        let model = VoiceSharingSettingsModel(queue: queue,
+                                             isCollectionPermitted: { true },
+                                             isAccountEnrolled: { true },
+                                             isLocallyOptedIn: { true },
+                                             coherenceAccount: { "account-a" })
+        let seen = NSMutableArray()
+        let lock = NSLock()
+        let token = model.addStateObserver { sent in
+            lock.lock(); seen.add(sent.sequence); lock.unlock()
+        }
+        defer { model.removeStateObserver(token) }
+        model.refreshLiveState()
+        model.refreshLiveState()
+        lock.lock(); let sequences = seen.compactMap { $0 as? Int }; lock.unlock()
+        XCTAssertEqual(sequences.count, 1, "an unchanged world publishes once, never twice")
+        XCTAssertTrue(sequences.allSatisfy { $0 == model.publicationSequence },
+                      "no delivery may carry a sequence older than the committed one")
+    }
 }

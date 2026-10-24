@@ -258,11 +258,15 @@ final class VoiceSharingSettingsModel {
 
     // MARK: - Change subscription (reviewer 8ae2b980)
 
-    private var changeObservers: [UUID: (LiveState) -> Void] = [:]
+    private var changeObservers: [UUID: (SentLiveState) -> Void] = [:]
     private let changeLock = NSLock()
+    private var readSequence = 0
+    private var lastPublishedSequence = -1
+    private var currentSequence = 0
 
     /// Registers a listener for state changes. The returned token must be removed on teardown.
-    func addStateObserver(_ body: @escaping (LiveState) -> Void) -> UUID {
+    /// The delivery carries the sequence it was read at, so a consumer can reject an older one.
+    func addStateObserver(_ body: @escaping (SentLiveState) -> Void) -> UUID {
         changeLock.lock(); defer { changeLock.unlock() }
         let id = UUID()
         changeObservers[id] = body
@@ -276,22 +280,46 @@ final class VoiceSharingSettingsModel {
     /// Re-reads live state and notifies listeners ONLY when it actually changed. Called from the
     /// production update paths (enrollment store mutations, queue purges) — a snapshot per render
     /// is not a subscription, and pretending otherwise was the reviewer's point.
+    /// A published snapshot tagged with the sequence it was taken at. Consumers keep the highest
+    /// sequence they have applied, so a delivery that arrives late cannot overwrite a newer one.
+    struct SentLiveState: Equatable {
+        let sequence: Int
+        let state: LiveState
+    }
+
     func refreshLiveState() {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
         // an out-of-order snapshot cannot overwrite a newer one (reviewer 05aaaedc). Observers are
         // called OUTSIDE the lock, so a listener that re-enters cannot deadlock.
         changeLock.lock()
+        readSequence &+= 1
+        let sequence = readSequence
+        changeLock.unlock()
+
         let state = liveState()
-        guard state != lastPublishedState else {
+
+        // LAST WRITER WINS: a refresh whose read is OLDER than one already published is obsolete —
+        // it must not deliver, even if its read finished later (reviewer f62b19a4). Ordering is by
+        // the read that produced the state, not by the order callbacks happen to run.
+        changeLock.lock()
+        guard state != lastPublishedState, sequence > lastPublishedSequence else {
             changeLock.unlock()
             return
         }
+        lastPublishedSequence = sequence
         lastPublishedState = state
+        currentSequence = sequence
         let observers = Array(changeObservers.values)
         changeLock.unlock()
-        for observer in observers { observer(state) }
+
+        let sent = SentLiveState(sequence: sequence, state: state)
+        for observer in observers { observer(sent) }
     }
+
+    /// The sequence of the most recently committed publication; seeded on subscribe so a new
+    /// listener cannot apply a delivery older than the state it already seeded from.
+    var publicationSequence: Int { changeLock.lock(); defer { changeLock.unlock() }; return currentSequence }
 
     private var lastPublishedState: LiveState?
 
@@ -299,6 +327,10 @@ final class VoiceSharingSettingsModel {
     /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
     /// the user of opting out (reviewer 8ae2b980).
     func liveState() -> LiveState {
+        // Stamp BEFORE and AFTER every read, INCLUDING the queue read: a hold transition or an
+        // account/enrollment move between the queue coverage read and the first stamp used to be
+        // invisible (reviewer f62b19a4). No read happens outside the interval.
+        let before = coherenceStamp()
         let fault: StoppedReason.StorageFault
         let readyCount: Int?
         switch queue.readyEntriesReportingUnknownCoverage() {
@@ -312,9 +344,6 @@ final class VoiceSharingSettingsModel {
             fault = .none
             readyCount = entries.count
         }
-        // Stamp BEFORE and AFTER the reads: a read that happened across an account/enrollment
-        // move cannot be combined with the others into one conclusion (reviewer e40508a1).
-        let before = coherenceStamp()
         let permits = isCollectionPermitted()
         let enrolled = isEnrolled()
         let optedIn = isOptedIn()
