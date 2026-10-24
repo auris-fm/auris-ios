@@ -22,6 +22,11 @@ final class VoiceSharingUploadTrigger {
     private let stateLock = NSLock()
     private var drainInFlight = false
     private var activeToken: UUID?
+    /// WORK THAT ARRIVED WHILE A DRAIN WAS RUNNING (reviewer 44d39ef8). Previously an event during
+    /// a drain was dropped outright by the guard below, and a `.busy` refusal was "retried" with
+    /// `Task.yield` — which does not await the owner, so both attempts could finish refused and the
+    /// event was lost anyway. The flag is the handoff: whoever COMPLETES a drain re-offers once.
+    private var workPending = false
 
     init(
         scheduler: VoiceSharingUploadScheduler,
@@ -40,7 +45,27 @@ final class VoiceSharingUploadTrigger {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        // CANCELLATION IS HONOURED (reviewer 44d39ef8): a cancelled drain must not start a
+        // follow-up, so the slot is cleared and any pending work is discarded with the object.
         drainTask?.cancel()
+        stateLock.lock()
+        drainInFlight = false
+        activeToken = nil
+        workPending = false
+        stateLock.unlock()
+    }
+
+    /// Test seam: await the current drain (used by controls that must observe the FOLLOW-UP pass
+    /// started automatically on completion).
+    func awaitCurrentDrainForTesting() async {
+        let task = drainTask
+        await task?.value
+    }
+
+    /// Test seam: whether a drain currently owns the slot.
+    var isDrainingForTesting: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return drainInFlight
     }
 
     /// The guarded entry a lifecycle event reaches. Also callable directly (background task
@@ -51,41 +76,58 @@ final class VoiceSharingUploadTrigger {
         guard surfaceEnabled() else { return }
         // Gate 2: live collection policy.
         guard isAuthorized() else { return }
-        // SINGLE-FLIGHT, but LIFETIME-CORRECT (reviewer aa84564a / spec 0414c13d): a COMPLETED
-        // drain is not "in flight", so the flag must be cleared when the drain ends — otherwise
-        // every later foreground trigger is refused forever. Each drain carries its own token and
-        // may only clear the slot it owns, so a later drain's slot is never clobbered by an
-        // earlier one finishing. State lives on `stateLock`, never on the capture path.
         stateLock.lock()
         guard !drainInFlight else {
+            // A DRAIN IS ALREADY RUNNING: record that work arrived, and let its COMPLETION re-offer.
+            // Dropping the event here (the previous behaviour) meant new work waited for the next
+            // lifecycle event, and a busy refusal was never retried at all.
+            workPending = true
             stateLock.unlock()
             return
         }
         drainInFlight = true
+        workPending = false
         let token = UUID()
         activeToken = token
         stateLock.unlock()
-        drainTask = Task { [scheduler] in
-            // A REFUSED pass is not a completed one (spec a857340b): the scheduler reports `.busy`
-            // when another pass owns it, and returning here would drop this trigger's work forever
-            // (the new entry would wait for the NEXT foreground event). Re-offer once the current
-            // pass ends, bounded, with no spin: the scheduler itself serializes, so the retry is
-            // queued behind the owner rather than racing it.
+        startDrain(token: token)
+    }
+
+    /// One drain, then a COALESCED follow-up if work arrived while it ran. Completion is the
+    /// handoff point — not a yield-based poll (reviewer 44d39ef8): the re-offer happens when the
+    /// owning pass has actually finished, and any number of arrivals collapse into ONE extra pass.
+    private func startDrain(token: UUID) {
+        drainTask = Task { [weak self, scheduler] in
             let outcome = await scheduler.drainOnce()
-            guard case .busy = outcome else { return }
-            // Yield to the owning pass, then offer this work exactly once more. Bounded by
-            // construction: a second refusal ends the attempt instead of looping.
-            await Task.yield()
-            guard case .busy = await scheduler.drainOnce() else { return }
-        }
-        Task { [weak self] in
-            await self?.drainTask?.value
             guard let self else { return }
+            // A REFUSED PASS IS NOT A COMPLETED PASS (reviewer 44d39ef8): another pass owns the
+            // scheduler, so this drain attempted nothing. Treat it as work still owed, exactly as
+            // if the event had arrived mid-drain — the completion handoff below re-offers once the
+            // owner releases, instead of dropping the event.
+            if case .busy = outcome {
+                self.stateLock.lock()
+                self.workPending = true
+                self.stateLock.unlock()
+            }
             self.stateLock.lock()
-            if self.activeToken == token {
+            // Only the drain that still owns the slot may complete it.
+            guard self.activeToken == token else {
+                self.stateLock.unlock()
+                return
+            }
+            let pending = self.workPending
+            if pending {
+                // HAND THE SLOT ON: the follow-up is this trigger's drain, so the flag stays set
+                // and a new token owns it. Authorization is re-read inside triggerDrainIfPermitted.
                 self.drainInFlight = false
                 self.activeToken = nil
+                self.workPending = false
+                self.stateLock.unlock()
+                self.triggerDrainIfPermitted()
+                return
             }
+            self.drainInFlight = false
+            self.activeToken = nil
             self.stateLock.unlock()
         }
     }

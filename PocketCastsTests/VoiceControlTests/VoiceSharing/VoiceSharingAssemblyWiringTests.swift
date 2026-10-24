@@ -440,7 +440,9 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        + "hosts=\(AssemblyIntercept.seenHosts); pass=\(firstPass) "
                        + "readyBefore=\(readyBefore) heldBefore=\(heldBefore) pinBefore=\(pinBefore) "
                        + "readyAfter=\(chain.queue.readyEntries().count) "
-                       + "pinAfter=\(pin.isCurrent))")
+                       + "pinAfter=\(pin.isCurrent) "
+                       + "idleDecision=\(chain.scheduler.lastIdleDecisionByDiagnostic.map { $0.discovery } ?? "-") "
+                       + "refused=\(String(describing: chain.scheduler.lastRefusedPassByDiagnostic)))")
         hostLock.lock()
         let epochAtObservation = epoch
         hostLock.unlock()
@@ -560,7 +562,9 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             + "enrolled=\(store.currentEffectiveEnrolled) isoBefore=\(isoBefore) "
             + "isoCalls=\(isoCalls) isoFalseAt=\(isoFalseAt ?? "-") isoTrueSeen=\(isoTrueSeen) "
             + "readyBeforePass=\(readyBeforePass) heldBeforePass=\(heldBeforePass) "
-            + "isoAtSync=\(store.currentEffectiveEnrolled && authority() == pinned)"
+            + "isoAtSync=\(store.currentEffectiveEnrolled && authority() == pinned) "
+            + "idleDecision=\(chain.scheduler.lastIdleDecisionByDiagnostic.map { $0.discovery } ?? "-") "
+            + "refused=\(String(describing: chain.scheduler.lastRefusedPassByDiagnostic))"
         XCTAssertEqual(AssemblyIntercept.requestCount, 1,
                        "the first attempt reached the wire (count last reset by \(AssemblyIntercept.resetBy ?? "?"), "
                        + "hosts=\(AssemblyIntercept.seenHosts); \(diag))")
@@ -1249,27 +1253,19 @@ private final class AssemblyIntercept: URLProtocol {
     }
 }
 
-// MARK: - A held pass refuses, and says so (spec/reviewer a857340b)
+// MARK: - The REAL trigger's follow-up handoff (reviewer 44d39ef8)
 
-/// These controls establish the scheduler's single-flight contract DETERMINISTICALLY: a pass that
-/// is genuinely still running must refuse a second one, the refusal must be distinguishable from an
-/// empty queue, and it must complete rather than wedge. The production trigger's follow-up behaviour
-/// is asserted by shape, not by claiming the hosted-app failure.
-final class VoiceSharingSchedulerSingleFlightTests: XCTestCase {
-    private final class Gate {
-        private let started = DispatchSemaphore(value: 0)
-        private let release = DispatchSemaphore(value: 0)
-        func waitForStart() -> DispatchTimeoutResult { started.wait(timeout: .now() + 10) }
-        func signalStarted() { started.signal() }
-        func waitForRelease() -> DispatchTimeoutResult { release.wait(timeout: .now() + 10) }
-        func open() { release.signal() }
-    }
-
+/// These drive `VoiceSharingUploadTrigger` itself — the production consumer — with a scheduler pass
+/// held open from the outside. The held pass is what makes "would-be immediate retries" provably
+/// happen while the owner is still running: the control holds the owner until a trigger has been
+/// fired and (for the busy case) a second trigger too, then releases and asserts the follow-up
+/// arrives WITHOUT any manual drain.
+final class VoiceSharingTriggerFollowUpTests: XCTestCase {
     private var root: URL!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vssingle-\(UUID().uuidString)")
+            .appendingPathComponent("vstrigger-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
@@ -1277,128 +1273,157 @@ final class VoiceSharingSchedulerSingleFlightTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func makeGateChain(_ gate: Gate) -> (queue: VoiceSharingUploadQueue,
-                                                scheduler: VoiceSharingUploadScheduler,
-                                                calls: () -> Int) {
+    /// A transport that HOLDS the first pass inside the upload and counts every attempt.
+    private final class HeldTransport {
+        private let lock = NSLock()
+        private let started = DispatchSemaphore(value: 0)
+        private let release = DispatchSemaphore(value: 0)
+        private var attempts = 0
+        private var holdFirst = true
+
+        func waitForFirstAttempt() -> DispatchTimeoutResult { started.wait(timeout: .now() + 10) }
+        func releaseHeldPass() { release.signal() }
+        var attemptCount: Int { lock.lock(); defer { lock.unlock() }; return attempts }
+        /// Let later passes through instantly once the held one is released.
+        func stopHolding() { lock.lock(); holdFirst = false; lock.unlock() }
+
+        func handle() -> VoiceSharingUploader.TransportResult {
+            lock.lock()
+            attempts += 1
+            let shouldHold = holdFirst
+            lock.unlock()
+            started.signal()
+            if shouldHold {
+                _ = release.wait(timeout: .now() + 10)
+            }
+            return .transportFailure
+        }
+    }
+
+    private func makeTrigger(_ transport: HeldTransport)
+        -> (queue: VoiceSharingUploadQueue, scheduler: VoiceSharingUploadScheduler,
+            trigger: VoiceSharingUploadTrigger) {
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let counter = Counter()
         let uploader = VoiceSharingUploader(
             queue: queue,
             retryPolicy: VoiceSharingRetryPolicy(
                 retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
             isAuthorized: { true },
             endpoint: { URL(string: "https://unit.test/upload") },
-            transport: { _, _, _ in
-                counter.increment()
-                gate.signalStarted()
-                // HOLD the pass here until the control opens it: this is a pass that is genuinely
-                // still in flight, not a timing assumption.
-                _ = gate.waitForRelease()
-                return .transportFailure
-            })
+            transport: { _, _, _ in transport.handle() })
         let scheduler = VoiceSharingUploadScheduler(
             queue: queue, uploader: uploader, isAuthorized: { true })
-        return (queue, scheduler, { counter.value })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+        return (queue, scheduler, trigger)
     }
 
-    /// HELD PASS ⇒ the second drain reports `.busy`, attempts nothing, and touches no entry.
-    func test_aHeldPassMakesTheSecondDrainReportBusyAndSendNothing() async throws {
-        let gate = Gate()
-        let chain = makeGateChain(gate)
-        let entry = try AudioFixture.makeReadyEntry(in: chain.queue)
+    /// NEW WORK DURING THE TRIGGER'S OWN PASS. The trigger is fired while its own drain is held, so
+    /// the event reaches the trigger's guard (not the scheduler) — the exact gap the reviewer named.
+    /// After release, the automatic follow-up must serve the work with NO manual drain.
+    func test_newWorkDuringTheTriggersOwnDrainIsServedByTheAutomaticFollowUp() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
-        let first = Task { await chain.scheduler.drainOnce() }
-        XCTAssertEqual(gate.waitForStart(), .success, "the first pass reached the transport")
-        XCTAssertEqual(chain.calls(), 1, "exactly one attempt is in flight")
+        chain.trigger.triggerDrainIfPermitted()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the first pass is in flight")
 
-        // THE SECOND DRAIN, while the first is provably still inside the transport.
-        let second = await chain.scheduler.drainOnce()
-        guard case .busy = second else {
-            return XCTFail("a second drain during a held pass must report .busy, got \(second)")
+        // WORK ARRIVES while the trigger's drain is running: this hits the trigger's own guard.
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+        chain.trigger.triggerDrainIfPermitted()
+
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        await chain.trigger.awaitCurrentDrainForTesting()
+
+        // The follow-up is started by the completion handoff; give it a chance to run and land.
+        for _ in 0..<40 where transport.attemptCount < 2 {
+            try await Task.sleep(nanoseconds: 25_000_000)
         }
-        XCTAssertEqual(chain.calls(), 1, "and it must attempt NOTHING: no duplicate upload")
-
-        gate.open()
-        let firstOutcome = await first.value
-        guard case .drained = firstOutcome else {
-            return XCTFail("the owning pass completes normally, got \(firstOutcome)")
-        }
-        XCTAssertEqual(chain.calls(), 1, "one upload, not two")
-        _ = entry
+        XCTAssertGreaterThanOrEqual(transport.attemptCount, 2,
+                                    "the work that arrived during the drain must reach the wire "
+                                    + "via the automatic follow-up, without another manual drain")
     }
 
-    /// REFUSAL IS DISTINGUISHABLE FROM EMPTINESS: an empty queue reports `.idle`, a refused pass
-    /// reports `.busy`. Callers can no longer treat both as "nothing to do".
-    func test_anEmptyQueueReportsIdleWhileARefusalReportsBusy() async throws {
-        let gate = Gate()
-        let chain = makeGateChain(gate)
-        let empty = await chain.scheduler.drainOnce()
-        guard case .idle = empty else {
-            return XCTFail("an empty queue must report .idle, got \(empty)")
-        }
-
+    /// A SCHEDULER PASS HELD FROM OUTSIDE (not by this trigger): the trigger's first attempt is
+    /// refused with `.busy`, and the follow-up must still deliver once the owner releases.
+    ///
+    /// The held work runs on its OWN plain thread, not the cooperative pool: the transport blocks
+    /// its thread, and starving the pool deadlocks this control rather than exercising the trigger.
+    func test_aBusyRefusalStillEndsInADeliveredFollowUp() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
-        let first = Task { await chain.scheduler.drainOnce() }
-        XCTAssertEqual(gate.waitForStart(), .success)
-        let refused = await chain.scheduler.drainOnce()
-        guard case .busy = refused else {
-            return XCTFail("a refusal must report .busy, got \(refused)")
+
+        // The OWNER: a pass on a dedicated thread, held inside the transport.
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let semaphore = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 15)
+            ownerHeld.signal()
         }
-        gate.open()
-        _ = await first.value
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        // The trigger fires while the owner is held: it gets `.busy` and must remember the work.
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(transport.attemptCount, 1, "the refused trigger attempted nothing itself")
+
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 15), .success, "the owner finished")
+
+        for _ in 0..<60 where transport.attemptCount < 2 {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(transport.attemptCount, 2,
+                                    "the busy refusal must be recovered by the follow-up, not dropped")
     }
 
-    /// AFTER THE OWNING PASS COMPLETES, work arriving during it is served by the NEXT pass: the
-    /// single-flight guard must not wedge the scheduler shut.
-    func test_workArrivingDuringAHeldPassIsServedByTheNextPass() async throws {
-        let gate = Gate()
-        let chain = makeGateChain(gate)
-        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+    /// AUTHORIZATION IS RE-READ AT THE FOLLOW-UP: revocation between the arrival and the follow-up
+    /// must prevent the second pass.
+    func test_theFollowUpRechecksAuthorization() async throws {
+        let transport = HeldTransport()
+        var permitted = true
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { permitted },
+            endpoint: { URL(string: "https://unit.test/upload") },
+            transport: { _, _, _ in transport.handle() })
+        let scheduler = VoiceSharingUploadScheduler(
+            queue: queue, uploader: uploader, isAuthorized: { permitted })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { permitted })
+        _ = try AudioFixture.makeReadyEntry(in: queue)
 
-        let first = Task { await chain.scheduler.drainOnce() }
-        XCTAssertEqual(gate.waitForStart(), .success, "the first pass is in flight")
-        // NEW WORK ARRIVES WHILE THE FIRST PASS IS STILL HELD.
-        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
-        XCTAssertEqual(chain.calls(), 1, "precondition: only the first attempt has started")
+        trigger.triggerDrainIfPermitted()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success)
+        _ = try AudioFixture.makeReadyEntry(in: queue)
+        trigger.triggerDrainIfPermitted()      // records pending work
+        permitted = false                      // revoked before the follow-up
 
-        gate.open()
-        _ = await first.value
-        // The scheduler is free again: a subsequent pass serves the entry that arrived during it.
-        let next = await chain.scheduler.drainOnce()
-        guard case .drained = next else {
-            return XCTFail("after the owning pass ends the scheduler must serve again, got \(next)")
-        }
-    }
-
-    /// The diagnostic NAMES the refusing instance, which is what makes a competing pass attributable
-    /// instead of assumed.
-    func test_theRefusalRecordsTheRefusingInstance() async throws {
-        let gate = Gate()
-        let chain = makeGateChain(gate)
-        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
-        XCTAssertNil(chain.scheduler.lastRefusedPassByDiagnostic, "no refusal yet")
-
-        let first = Task { await chain.scheduler.drainOnce() }
-        XCTAssertEqual(gate.waitForStart(), .success)
-        _ = await chain.scheduler.drainOnce()
-        let recorded = try XCTUnwrap(chain.scheduler.lastRefusedPassByDiagnostic)
-        XCTAssertEqual(recorded.scheduler, ObjectIdentifier(chain.scheduler),
-                       "the refusal is attributed to THIS instance")
-        gate.open()
-        _ = await first.value
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        await trigger.awaitCurrentDrainForTesting()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(transport.attemptCount, 1,
+                       "a revoked follow-up must not send")
+        XCTAssertFalse(trigger.isDrainingForTesting,
+                       "and it must not wedge the trigger's slot shut")
     }
 }
 
-/// A lock-guarded counter, so the transport closure can be called from any context.
-final class Counter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-    func increment() { lock.lock(); count += 1; lock.unlock() }
-    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
-}
-
-/// Entry construction shared by the single-flight controls: encode a real contribution and publish
-/// it, so the scheduler is driven with the same artifacts production uses.
+/// Entry construction shared by the scheduler/trigger controls: encode a real contribution and
+/// publish it, so those paths are driven with the same artifacts production uses.
 enum AudioFixture {
     static func makeReadyEntry(in queue: VoiceSharingUploadQueue) throws -> VoiceSharingUploadQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]

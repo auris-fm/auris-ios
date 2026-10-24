@@ -26,6 +26,9 @@ final class VoiceSharingUploadScheduler {
     /// DIAGNOSTIC (spec a857340b): the identity of the scheduler that most recently REFUSED a pass,
     /// so a competing pass can be attributed to a specific instance instead of assumed.
     private(set) var lastRefusedPassByDiagnostic: (scheduler: ObjectIdentifier, at: Date)?
+    /// The exact discovery result behind the most recent `.idle` return, so "nothing eligible" can
+    /// be distinguished from "held" without inference.
+    private(set) var lastIdleDecisionByDiagnostic: (discovery: String, at: Date)?
 
     private let queue: VoiceSharingUploadQueue
     private let uploader: VoiceSharingUploader
@@ -64,8 +67,14 @@ final class VoiceSharingUploadScheduler {
         guard isAuthorized() else { return .idle }
         // Neither unknown coverage nor a revocation hold may feed the scheduler: both yield
         // nothing here (the same fail-closed rule serving uses).
-        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(), !ready.isEmpty
-        else { return .idle }
+        let discovery = queue.readyEntriesReportingUnknownCoverage()
+        guard case .known(let ready) = discovery, !ready.isEmpty else {
+            // DIAGNOSTIC (reviewer 08e42a5a): `.idle` has two very different causes — an empty
+            // served set versus a held one — and inferring between them from the outside was
+            // wrong. Record what the decision actually saw.
+            lastIdleDecisionByDiagnostic = (discovery: String(describing: discovery), at: Date())
+            return .idle
+        }
 
         var results: [(entry: VoiceSharingUploadQueue.Entry, outcome: VoiceSharingUploader.Outcome)] = []
         for entry in ready.prefix(maxEntriesPerPass) {
