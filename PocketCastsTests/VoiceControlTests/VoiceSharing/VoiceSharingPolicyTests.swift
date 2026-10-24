@@ -1134,6 +1134,62 @@ final class VoiceSharingPolicyTests: XCTestCase {
         }
     }
 
+    /// Review 32d86559: the lock ORDER itself. A concurrent install and expiry must not be able to
+    /// each hold one lock and wait for the other. Deterministic construction: MAIN holds the install
+    /// barrier; thread A enters an install (under the OLD order it then blocks at the barrier still
+    /// holding the POLICY lock; under the fixed order it drops the policy lock first); thread B then
+    /// runs the expiry revoke, which needs the policy lock. Under the inversion B can NEVER proceed —
+    /// the watchdog fails the test instead of hanging the suite (the deadlock never completes, so a
+    /// generous timeout distinguishes it deterministically).
+    func test_installAndExpiryOverlapCannotDeadlockOnTheTwoLocks() throws {
+        let clock = StubMonotonicClock(time: 1_000)
+        final class SwitchBox { var value: VoiceSharingPolicy.RemoteSwitchValue = .valid(true) }
+        let box = SwitchBox()
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            readRemoteSwitch: { box.value },
+            isAccountEnrolled: { true },
+            now: { Date(timeIntervalSince1970: 5_000) },
+            lastFetchTime: { Date(timeIntervalSince1970: 5_000) })
+        let token1 = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token1)
+        // Advance past the deadline so the expiry revoke is a REAL lapse when it runs.
+        clock.advance(VoiceSharingPolicy.leaseSecondsDefault + 1)
+        let target = try XCTUnwrap(coordinator.policy.leaseExpiryTarget())
+
+        let barrier = coordinator.policy.installPublicationBarrier
+        barrier.lock() // MAIN holds the install barrier: any installer must now wait at it.
+        let release = NSCondition()
+        var installEntered = false
+        var revokeCompleted = false
+        let installer = DispatchQueue.global(qos: .userInitiated)
+        installer.async {
+            let t2 = coordinator.policy.tokenForFetchStart()
+            _ = coordinator.policy.refreshAfterActivation(
+                freshActivationSucceeded: true, fetchToken: t2)
+        }
+        // Wait until the installer is genuinely INSIDE its policy-lock region (observable because
+        // the first region completes and then the install blocks at the barrier main holds).
+        let revoker = DispatchQueue.global(qos: .userInitiated)
+        revoker.async {
+            // Give the installer a moment to reach its barrier-wait; then run the revoke.
+            Thread.sleep(forTimeInterval: 0.2)
+            _ = coordinator.policy.revokeIfLeaseExpired(
+                generation: target.generation, deadline: target.deadline)
+            release.lock(); revokeCompleted = true; release.signal(); release.unlock()
+        }
+        release.lock()
+        let deadline = Date().addingTimeInterval(3)
+        while !revokeCompleted, Date() < deadline { release.wait(until: deadline) }
+        release.unlock()
+        barrier.unlock()
+        // A revoke that can never take the policy lock means the inversion is back.
+        XCTAssertTrue(revokeCompleted,
+                      "the expiry revoke must not be starved by an install holding the policy "
+                          + "lock while waiting on the install barrier (lock inversion)")
+        _ = installEntered
+    }
+
     /// REVIEW 15a18d5d: lifting the identity fence must INITIATE the normal refresh. A fence without
     /// a fetch never installs, and production's only fetch calls lived at launch and in the developer
     /// menu — so a re-login in a long-running process stayed closed until relaunch. This drives the

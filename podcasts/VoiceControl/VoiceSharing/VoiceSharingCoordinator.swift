@@ -124,11 +124,7 @@ final class VoiceSharingCoordinator {
         /// Explicit teardown, for a handler that must remove ITSELF during fan-out (reentrant
         /// teardown): same path as deinit, safe to call from inside a handler invocation.
         func unregisterNow() { unregister() }
-        /// REENTRANCY CONTRACT, stated at registration because it is a deadlock hazard, not style:
-        /// a handler may unregister (itself or others) freely, but MUST NOT synchronously install
-        /// or refresh a lease. The gate-lost fan-out runs under the policy's install-publication
-        /// barrier; a synchronous refresh from a handler would deadlock on that nonrecursive lock.
-        /// Anything a handler needs from a refresh must be scheduled off the fan-out stack.
+
         deinit { unregister() }
     }
 
@@ -143,6 +139,11 @@ final class VoiceSharingCoordinator {
     private var gateLostHandlers: [UUID: () -> Void] = [:]
     private let gateLostHandlersLock = NSLock()
 
+    /// REENTRANCY CONTRACT, stated HERE at registration because it is a deadlock hazard, not style:
+    /// a registered handler may unregister (itself or others) freely, but MUST NOT synchronously
+    /// install or refresh a lease. The gate-lost fan-out runs under the policy's install-publication
+    /// barrier; a synchronous refresh from a handler would deadlock on that nonrecursive lock.
+    /// Anything a handler needs from a refresh must be scheduled off the fan-out stack.
     @discardableResult
     func registerGateLostHandler(_ handler: @escaping () -> Void) -> GateLostSubscription {
         let id = UUID()

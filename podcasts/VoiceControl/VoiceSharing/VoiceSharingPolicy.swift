@@ -176,9 +176,13 @@ final class VoiceSharingPolicy {
         let value = readRemoteSwitch()
         let now = clock.now()
         lock.lock()
-        // NOT `defer unlock`: the install notification must be delivered with the lock RELEASED. Its
-        // handler reads the policy back (to learn the deadline), so holding the lock across the call
-        // re-enters it. Doing exactly that deadlocked the suite — the symptom was a hang, not a failure.
+        // Pre-validate under the policy lock, then DROP it before taking the install barrier. LOCK
+        // ORDER EVERYWHERE IS: installPublicationBarrier OUTER, policy lock INNER (review 32d86559).
+        // The first cut of this edit took the barrier while holding the policy lock — the exact
+        // inverse of the expiry body (barrier, then policy lock) — a textbook inversion: a concurrent
+        // install and expiry could each hold one and wait for the other. Because the pre-validation
+        // and the publication are then two separate policy-lock regions, identity is RE-VALIDATED
+        // under the second region: a transition that lands between them must still refuse the install.
         guard pendingIdentityFence == 0,
               fetchToken.identityGeneration == identityGenerationCounter,
               generationNowAtStart == identityGenerationCounter
@@ -196,10 +200,20 @@ final class VoiceSharingPolicy {
                 // re-reads current identity so withdrawal/sign-out takes effect immediately.
                 accountEnrolled: isAccountEnrolled()
             )
+            lock.unlock()
+            installPublicationBarrier.lock()
+            lock.lock()
+            guard pendingIdentityFence == 0,
+                  fetchToken.identityGeneration == identityGenerationCounter,
+                  generationNowAtStart == identityGenerationCounter
+            else {
+                lock.unlock()
+                installPublicationBarrier.unlock()
+                return nil
+            }
             // Publication (installed + generation bump) and arming happen UNDER the install
             // barrier: no revocation fan-out may run in the gap between a fresh lease becoming
             // visible and its expiry schedule being armed, whichever caller installed it.
-            installPublicationBarrier.lock()
             installed = snapshot
             leaseGeneration += 1
             lock.unlock()
