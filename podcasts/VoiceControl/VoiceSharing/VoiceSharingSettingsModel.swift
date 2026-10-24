@@ -327,9 +327,11 @@ final class VoiceSharingSettingsModel {
     /// slow read cannot replace a newer deadline.
     private var armedForSequence = 0
 
-    /// Arms from the LATEST accepted read. Call only with `changeLock` already held or from a path
-    /// that has just accepted a sequence — it commits the scheduling under the same lock as the
-    /// sequence it belongs to (reviewer 5a4738ca).
+    /// Arms from the LATEST accepted read.
+    ///
+    /// NOT SAFE TO CALL WITH `changeLock` HELD — this method takes that lock itself and `NSLock` is
+    /// not recursive, so a caller holding it would deadlock. Every caller unlocks first and passes
+    /// the sequence it accepted (reviewer 8b902371).
     func armTimeDrivenRefresh() {
         armTimeDrivenRefresh(afterAcceptedSequence: currentSequence)
     }
