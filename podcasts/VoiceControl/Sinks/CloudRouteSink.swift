@@ -1731,13 +1731,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     // MARK: - Eager barge-in (spec e38a790a, reviewer bea7a291)
 
-    /// Claim the single execution for this utterance; true only for the first caller.
-    @MainActor
-    func claimExclusiveExecution(_ utteranceId: String?) -> Bool {
-        guard let utteranceId else { return true }
-        return interruptionState.claimExclusiveExecution(utteranceId)
-    }
-
     /// Whether this utterance's interruption was refused, so its turn must not be submitted.
     @MainActor
     func isSuppressedForTesting(_ utteranceId: String?) -> Bool {
@@ -1830,7 +1823,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return nil
         }
         FileLog.shared.addMessage(
-            "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "            + "utterance \(utteranceId)"
+            "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "
+            + "utterance \(utteranceId)"
         )
         return priorRequestId
     }

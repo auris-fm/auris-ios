@@ -51,6 +51,9 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     /// next case's park was already open and its "still in flight" premise was really "already
     /// settled" — the acknowledgement fired before the test released anything.
     private var firstTurnLatch = HoldLatch()
+    /// The ASR engine the assembly built. `onRoutingInput` is the service's REAL admission entry —
+    /// the seam a capture actually crosses — so the control drives turns through it.
+    private var asr: VoiceAsrEngine?
     private var defaultsSuite: String!
     /// Terminal signals recorded from the assembly's `@Sendable` hook, so a lock-guarded box.
     private final class TerminalRecorder: @unchecked Sendable {
@@ -132,7 +135,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
 
-        return VoiceControlAssembly().buildVoiceControlService(
+        let built = VoiceControlAssembly().buildVoiceControlService(
             audioSession: gatedSession(),
             conditionMonitor: permissiveMonitor(),
             capture: FakeAudioCapture(),
@@ -166,6 +169,10 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
                 terminals.record(input.utteranceId)
             }
         )
+        if let built {
+            asr = built.asrEngineForTesting
+        }
+        return built
     }
 
     // MARK: - Observation
@@ -203,17 +210,28 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         return service
     }
 
-    private func speak(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) {
+    /// Speak a turn through the SERVICE'S OWN ENTRY POINT.
+    ///
+    /// This used to call `handleRoutingInput` directly, which is the DISPATCH function — it skips
+    /// `enqueueRoutingInput` and therefore the serial chain and every admission-time step with it.
+    /// The control then "passed" while the production route was never exercised, and the eager
+    /// step's deletion survived: the interrupt it observed came from the direct-dispatch shortcut,
+    /// not from the path a real capture takes. Entering through the installed `onRoutingInput`
+    /// callback is the same seam `ColdAsrEligibilityProductionTests` uses, and it is the seam the
+    /// engine actually calls.
+    @discardableResult
+    private func speak(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) -> Bool {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
-        Task { @MainActor in
-            await service.handleRoutingInput(
-                IntentRoutingInput.english(
-                    transcript: transcript,
-                    selection: .wakeWord,
-                    utteranceId: utteranceId
-                )
-            )
+        let input = IntentRoutingInput.english(
+            transcript: transcript,
+            selection: .wakeWord,
+            utteranceId: utteranceId
+        )
+        guard let routing = asr?.onRoutingInput else {
+            XCTFail("the service must install onRoutingInput; without it no turn can be admitted")
+            return false
         }
+        return routing(input)
     }
 
     // MARK: - Baseline

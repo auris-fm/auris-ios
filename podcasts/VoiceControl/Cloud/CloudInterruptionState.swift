@@ -285,20 +285,6 @@ final class CloudInterruptionState: @unchecked Sendable {
 
     private var suppressedUtterances: Set<String> = []
 
-    /// Utterances whose execution has been claimed by exactly one path.
-    private var executedUtterances: Set<String> = []
-
-    /// Claim the single execution for `utteranceId`. Returns TRUE only for the first caller.
-    ///
-    /// The eager interruption path and the serial queue both want to act on the same admitted
-    /// utterance. Neither may rely on the other's state field to stay put across awaits, so the
-    /// claim is one atomic transition: one winner, and the loser dispatches nothing.
-    func claimExclusiveExecution(_ utteranceId: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard !executedUtterances.contains(utteranceId) else { return false }
-        executedUtterances.insert(utteranceId)
-        return true
-    }
 
     // MARK: - Retained-follow-up binding (PRODUCTION: the eager barge-in path)
 

@@ -798,20 +798,6 @@ class VoiceControlService: ObservableObject {
         // After a refusal the contract forbids submitting it, so this turn must not reach the
         // wire: check the suppression the refusal recorded before doing any work.
         let utteranceId = input.utteranceId
-        // ONE EXECUTION PER ADMITTED INPUT (reviewer b36c8ab1 item 2). The eager interruption
-        // retains this utterance and the acknowledgement submits it; the input already QUEUED
-        // behind the predecessor is a second owner for the same utterance. Neither may rely on the
-        // other's state field staying put across awaits, so the claim is one atomic transition:
-        // one winner, and the loser dispatches nothing.
-        let executionClaimed = await MainActor.run(body: {
-            executorForTesting.cloudRouteSinkForTesting.claimExclusiveExecution(utteranceId)
-        })
-        guard executionClaimed else {
-            FileLog.shared.addMessage(
-                "[VoicePipeline] queued input \(utteranceId ?? "-") already claimed — one execution"
-            )
-            return
-        }
         // Checked at entry AND again immediately before dispatch: the refusal terminal can land
         // while this turn is still queued or classifying, which is exactly the ordering measured
         // here (B entered, A's refusal arrived 110ms later).
