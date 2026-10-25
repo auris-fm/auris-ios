@@ -1360,13 +1360,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
 
         // The OWNER: a pass on a dedicated thread, held inside the transport.
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let semaphore = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 semaphore.signal()
             }
-            _ = semaphore.wait(timeout: .now() + 15)
+            ownerHeldSignalled = semaphore.wait(timeout: .now() + 15) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1380,6 +1381,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         transport.stopHolding()
         transport.releaseHeldPass()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 15), .success, "the owner finished")
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
 
         for _ in 0..<60 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
@@ -1397,13 +1399,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 20)
+            ownerHeldSignalled = done.wait(timeout: .now() + 20) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1420,6 +1423,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         transport.stopHolding()
         transport.releaseHeldPass()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success, "owner finished")
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         for _ in 0..<60 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
         }
@@ -1435,13 +1439,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 20)
+            ownerHeldSignalled = done.wait(timeout: .now() + 20) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1483,13 +1488,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 20)
+            ownerHeldSignalled = done.wait(timeout: .now() + 20) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1507,6 +1513,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         chain.trigger.cancelForTesting()
         releaseCallback.signal()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success, "the owner drain finishes")
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
         XCTAssertFalse(timedOut, "the fire gate must not have driven the race by timing out")
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -1539,13 +1546,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 30)
+            ownerHeldSignalled = done.wait(timeout: .now() + 30) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1564,6 +1572,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         chain.trigger.cancelForTesting()
         releaseCallback.signal()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success, "the owner drain finishes")
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
         XCTAssertFalse(timedOut, "the fire gate must not have driven the race by timing out")
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -1580,13 +1589,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 30)
+            ownerHeldSignalled = done.wait(timeout: .now() + 30) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1618,13 +1628,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 30)
+            ownerHeldSignalled = done.wait(timeout: .now() + 30) == .success
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1664,13 +1675,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         defer { chain.trigger.preReofferHookForTesting = nil }
 
         let ownerHeld = DispatchSemaphore(value: 0)
+        var ownerHeldSignalled = false
         let ownerThread = Thread {
             let done = DispatchSemaphore(value: 0)
             Task {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 30)
+            ownerHeldSignalled = done.wait(timeout: .now() + 30) == .success
             ownerHeld.signal()
         }
         ownerThread.start()

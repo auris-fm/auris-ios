@@ -90,6 +90,11 @@ final class VoiceSharingUploadTrigger {
     /// refuse the already-decided follow-up via the cancellation generation.
     var preReofferHookForTesting: (() -> Void)?
 
+    /// DETERMINISTIC RACE SEAM (reviewer b4e8d566): invoked at the very start of the drain task
+    /// body, BEFORE the pre-entry cancellation check — a control can hold the task here, stop the
+    /// trigger, and release, proving the check fires without depending on task scheduling order.
+    var preDrainGateForTesting: (() -> Void)?
+
     /// Test seam: the publication-before-registration invariant, observable.
     var hasPublishedCompletionRegistrationForTesting: Bool {
         stateLock.withLock { pendingCompletionID != nil }
@@ -185,6 +190,7 @@ final class VoiceSharingUploadTrigger {
         }
         let scheduler = self.scheduler
         let task = Task { [weak self] in
+            preDrainGateForTesting?()
             // PRE-ENTRY CANCELLATION (reviewer b8991889): a stop() before this task first
             // executes must prevent the drain from starting at all — the post-await check alone
             // was too late and could still send. stop() has already cleared the slot, so an
