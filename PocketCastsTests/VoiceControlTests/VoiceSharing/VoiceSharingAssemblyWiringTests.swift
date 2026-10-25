@@ -442,7 +442,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        + "readyAfter=\(chain.queue.readyEntries().count) "
                        + "pinAfter=\(pin.isCurrent) "
                        + "idleDecision=\(chain.scheduler.lastIdleDecisionByDiagnostic.map { $0.discovery } ?? "-") "
-                       + "refused=\(String(describing: chain.scheduler.lastRefusedPassByDiagnostic)))")
+                       + "refused=\(String(describing: chain.scheduler.lastRefusedPassByDiagnostic)) "
+                       + "queueDiag=\(chain.queue.lastDiscoveryDiagnostic ?? "-"))")
         hostLock.lock()
         let epochAtObservation = epoch
         hostLock.unlock()

@@ -313,23 +313,14 @@ final class VoiceSharingUploadQueue {
     /// entry's life — and an unreadable date is `nil`, i.e. outside the served set.
     private func isWithinAgeBoundLocked(_ entry: Entry) -> Bool {
         guard let age = markerAgeLocked(entry) else { return false }
-        // THE FUTURE-DATE GUARD APPLIES ONLY TO A PERSISTED INSTANT, NOT TO AN INSTANT THIS INSTANCE
-        // JUST WROTE (epoch investigation, probe4-wide40). `created.at` is a decimal string; when it
-        // is written by a clock that has moved backwards relative to the reader — an injected test
-        // clock, or a second instance reading a shared root — the reading age goes NEGATIVE for an
-        // entry that is genuinely brand new, and the entry disappeared from BOTH the served set and
-        // the count while `readyEntries()` still reported it. A small negative age means the two
-        // readings bracket the same instant; only a MEANINGFULLY future date is skew worth refusing.
-        // The generous tolerance keeps the skew protection (a clock jumped forward by more than this
-        // is still not fresh) while never excluding an entry whose timestamps merely disagree by
-        // rounding or by the sub-second drift of two clocks measuring the same write.
-        return age >= -Self.futureDateTolerance && age <= Self.maxEntryAge
+        // A FUTURE DATE IS NOT FRESH (spec 4ae8c740). The future-date rule is UNCHANGED: an
+        // admission instant ahead of the reading clock does not serve. A tolerance was drafted here
+        // and REJECTED — widening eligibility to paper over a clock disagreement would hide a real
+        // ordering/clocks problem rather than fix it, and it would change expiry semantics. The
+        // defect that produced the negative age is therefore addressed at its SOURCE: the reading
+        // clock is coherent with the writing clock (see `clock`), not excused after the fact.
+        return age >= 0 && age <= Self.maxEntryAge
     }
-
-    /// How far an admission instant may read in the "future" before it is treated as clock skew
-    /// rather than as the same instant seen by two clocks. Sub-second rounding and inter-process
-    /// drift live far inside this; a real skew does not.
-    static let futureDateTolerance: TimeInterval = 60
 
     /// AGE is measured from the entry's IMMUTABLE admission instant (`created.at`), which is the
     /// only timestamp that cannot be refreshed by a later write. The marker's file mtime is NOT
@@ -338,8 +329,16 @@ final class VoiceSharingUploadQueue {
     /// reviewer ffca9a27). An unreadable instant is "age unknown" — never "fresh" and never
     /// "ancient" (the old `distantPast` fallback).
     private func markerAgeLocked(_ entry: Entry) -> TimeInterval? {
-        guard let created = creationInstantLocked(in: entryDirectoryLocked(for: entry)) else { return nil }
-        return clock().timeIntervalSince(created)
+        guard let created = creationSecondsLocked(in: entryDirectoryLocked(for: entry)) else { return nil }
+        // THE AGE IS COMPUTED IN THE SAME EPOCH SPACE THE INSTANT WAS WRITTEN (spec 4ae8c740).
+        // `created.at` is stored as seconds since 1970; converting it back through
+        // `Date(timeIntervalSince1970:)` and subtracting in the 2001 reference space rounds
+        // independently on the way in and out, which can land the reconstructed instant a fraction
+        // of a microsecond AHEAD of the very reading that wrote it — a negative age for a brand-new
+        // entry, the original epoch failure (`age(-0s)`). Subtracting the stored double from the
+        // clock's own 1970 reading keeps both operands in one representation: the same instant
+        // yields exactly zero, and only a genuinely later write reads positive.
+        return clock().timeIntervalSince1970 - created
     }
 
     /// Diagnostic split of the count's exclusions. Kept because a count of 0 has three very
@@ -2359,7 +2358,13 @@ final class VoiceSharingUploadQueue {
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
                 // after an uncertain transition a marker may be visible without durable backing.
                 .filter { (try? self.confirmDurableLocked(directory: self.entryDirectoryLocked(for: $0))) != nil }
-                .filter { Date().timeIntervalSince(modificationDateLocked(of: entryDirectoryLocked(for: $0).appendingPathComponent(Self.readyMarkerName))) <= Self.maxEntryAge }
+                // ONE AGE RULE FOR THE WHOLE TYPE (reviewer ffca9a27, reconfirmed by the clock-ordering
+                // regression): the served set must use the SAME immutable `created.at` rule as
+                // `readyEntriesReportingUnknownCoverage`, not the marker's wall-clock mtime. The two
+                // disagreed — mtime is stamped from real time at publication, so under a different
+                // clock the legacy path served an entry the discovery had excluded, and the count
+                // and the served set described different disks.
+                .filter { isWithinAgeBoundLocked($0) }
                 .sorted { lhs, rhs in
                     let lDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(lhs.name))
                     let rDate = modificationDateLocked(of: rootDirectory.appendingPathComponent(rhs.name))
@@ -2570,6 +2575,13 @@ final class VoiceSharingUploadQueue {
     /// foreign object, not a large time. Size is checked from attributes BEFORE the content is
     /// loaded, so a huge file cannot be read into memory to discover it is not a timestamp.
     private func creationInstantLocked(in directory: URL) -> Date? {
+        guard let seconds = creationSecondsLocked(in: directory) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// The stored admission instant AS STORED: raw seconds since 1970, unconverted. Age arithmetic
+    /// must use this form — see `markerAgeLocked` for why the `Date` round-trip is not safe.
+    private func creationSecondsLocked(in directory: URL) -> TimeInterval? {
         let url = directory.appendingPathComponent(Self.createdName)
         guard let size = fileSizeIfRegularLocked(at: url),
             size.isRegular, size.bytes > 0, size.bytes <= Self.maxCreationInstantBytes
@@ -2580,7 +2592,7 @@ final class VoiceSharingUploadQueue {
         else { return nil }
         // BOTH representations must be present: an entry without its immutable instant cannot have
         // its lifetime bounded, so it is incomplete rather than "fresh".
-        return Date(timeIntervalSince1970: seconds)
+        return seconds
     }
 
     /// Complete-entry validation, FAIL-CLOSED, STAT-FIRST and BOUND:

@@ -2905,11 +2905,13 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_recoveryReEnforcesEntryLimitsAndRemovesExpiredEntries() throws {
         var q = makeQueue()
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
-        // Simulate an aged entry by backdating its marker beyond maxEntryAge.
+        // Simulate an aged entry by backdating its ADMISSION INSTANT beyond maxEntryAge. Age is
+        // measured from the immutable `created.at` (one age rule for the whole type), so moving the
+        // marker's mtime no longer ages anything.
         let entryDir = try soleEntryDirectory()
-        let marker = entryDir.appendingPathComponent("ready.marker")
-        let oldDate = Date().addingTimeInterval(-VoiceSharingUploadQueue.maxEntryAge - 60)
-        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: marker.path)
+        let oldInstant = Date().timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge - 60
+        try String(String(oldInstant)).write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
 
         q = makeQueue() // recovery
 
@@ -3212,19 +3214,26 @@ extension VoiceSharingRevocationRestartTests {
 }
 
 
-// MARK: - A "future" admission instant that is really the same instant (epoch investigation)
+// MARK: - The exact two-clock ordering behind the epoch failure (spec 4ae8c740)
 
-/// The served set and the legacy path must agree about the same disk. An entry whose `created.at`
-/// reads slightly AHEAD of the reader's clock (two clocks bracketing one write, or an injected test
-/// clock) previously scored a NEGATIVE age, so it vanished from `readyEntriesReportingUnknownCoverage`
-/// and from the count while `readyEntries()` still reported it — which surfaced as a full-suite
-/// failure where the scheduler saw a ready entry and then found nothing to serve.
-final class VoiceSharingAgeBoundAgreementTests: XCTestCase {
+/// SPEC-REQUESTED REGRESSION, reproducing the ORIGINAL ordering deterministically.
+///
+/// The two clock sources in the failing path:
+///   1. the WRITER's queue clock, used once at `prepare` to stamp `created.at`
+///      (`String(clock().timeIntervalSince1970)`), and
+///   2. the READER's queue clock, used at eligibility (`clock().timeIntervalSince(created)`).
+///
+/// When the reader's clock is EARLIER than the writer's by any amount, the age is negative and the
+/// entry was excluded from `readyEntriesReportingUnknownCoverage` (and from the count) while
+/// `readyEntries()` still reported it. This control pins that ordering exactly — writer ahead by
+/// 0.5s, reader behind — and asserts the CURRENT rule: a future-dated instant is NOT fresh. It fails
+/// against any tolerance that quietly makes such an entry servable.
+final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
     private var root: URL!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vsage-\(UUID().uuidString)")
+            .appendingPathComponent("vsclockorder-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
@@ -3250,52 +3259,77 @@ final class VoiceSharingAgeBoundAgreementTests: XCTestCase {
         return entry
     }
 
-    /// An admission instant a few seconds AHEAD of the reader is still a live entry: both paths must
-    /// report it, and the discovery must not exclude it for being "from the future".
-    func test_anInstantSlightlyAheadOfTheReaderIsStillServedByBothPaths() throws {
-        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let entry = try seedEntry(writer)
-        // Rewrite the immutable instant 5s AHEAD, as a fast writer clock would leave it.
-        let created = root.appendingPathComponent(entry.name, isDirectory: true)
-            .appendingPathComponent("created.at")
-        try String(Date().timeIntervalSince1970 + 5).write(
-            to: created, atomically: true, encoding: .utf8)
-
-        let reader = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(reader.readyEntries().count, 1, "the legacy path still sees it")
-        guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage must stay known for a readable entry")
+    /// THE ORIGINAL FAILING ORDERING, DETERMINISTIC: the entry is read in the SAME tick that wrote
+    /// it under a PINNED clock. The 1970-epoch round trip (`String(timeIntervalSince1970)` then
+    /// `Date(timeIntervalSince1970:)`) used to reconstruct the instant a fraction of a microsecond
+    /// ahead of the reading clock, so age came back as -0s and the entry vanished from the served
+    /// set while `readyEntries()` still reported it. The old predicate (`age >= 0` over the
+    /// reconstructed `Date`) fails this control.
+    func test_anEntryReadInTheSameTickItWasWrittenIsServed() throws {
+        // A PROVEN mis-rounding instant: for this 2001-reference reading R, the write path
+        // `String(R + 978307200)` read back through `Date(timeIntervalSince1970:)` reconstructs an
+        // internal instant 2^-22s AHEAD of R (verified against IEEE-754 double arithmetic), so the
+        // old subtraction in reference space returned a negative age. Pinned so the control is
+        // deterministic, not luck-of-the-clock.
+        let pinned = Date(timeIntervalSinceReferenceDate: 1693351696.150849)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { pinned })
+        _ = try seedEntry(queue)
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage stays known: \(queue.lastDiscoveryDiagnostic)")
         }
         XCTAssertEqual(ready.count, 1,
-                       "and the discovery must AGREE: a few seconds of clock disagreement is not "
-                       + "a reason to drop a live entry. Diag: \(reader.lastDiscoveryDiagnostic)")
+                       "the same instant written and read must not exclude the entry. "
+                       + "Diag: \(queue.lastDiscoveryDiagnostic)")
+        XCTAssertEqual(queue.readyEntries().count, 1, "and both serving paths must agree")
+        XCTAssertEqual(queue.readyCountLocked(), 1, "and the count agrees with both")
     }
 
-    /// The skew protection still holds: an instant meaningfully in the future is not fresh.
-    func test_anInstantFarInTheFutureIsNotTreatedAsFresh() throws {
-        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let entry = try seedEntry(writer)
-        let created = root.appendingPathComponent(entry.name, isDirectory: true)
-            .appendingPathComponent("created.at")
-        try String(Date().timeIntervalSince1970 + 3600).write(
-            to: created, atomically: true, encoding: .utf8)
+    /// WRITER AHEAD OF READER by half a second — the original ordering. The entry is written under a
+    /// clock the reader lags, so its age is negative: the strict rule says NOT FRESH, and this control
+    /// documents that as the intended behaviour rather than excusing it.
+    func test_aWriterClockAheadOfTheReaderDoesNotMakeAnEntryFresh() throws {
+        let base = Date()
+        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: { base })
+        _ = try seedEntry(writer)
 
-        let reader = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        // Same disk, reader half a second BEHIND the writer.
+        let reader = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: { base.addingTimeInterval(-0.5) })
+        guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage stays known: the entry is readable, merely not fresh")
+        }
+        XCTAssertTrue(ready.isEmpty,
+                      "a future-dated admission instant is NOT fresh (spec 4ae8c740): the strict "
+                      + "rule stands. Diag: \(reader.lastDiscoveryDiagnostic)")
+        XCTAssertEqual(reader.readyEntries().count, 0,
+                       "and the legacy path must agree — the disagreement WAS the defect")
+    }
+
+    /// NEAR-ZERO SKEW, reader AHEAD: the ordinary case must still serve, so the strict rule does not
+    /// regress freshness for a coherent clock.
+    func test_aReaderAheadOfTheWriterServesNormally() throws {
+        let base = Date()
+        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: { base })
+        _ = try seedEntry(writer)
+        let reader = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: { base.addingTimeInterval(0.5) })
         guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage stays known")
         }
-        XCTAssertTrue(ready.isEmpty,
-                      "an hour in the future is skew, not freshness — it must not serve")
+        XCTAssertEqual(ready.count, 1, "a coherent (reader-ahead) ordering serves normally")
+        XCTAssertEqual(reader.readyEntries().count, 1, "and both paths agree")
     }
 
-    /// The normal case is unchanged: an entry written and read by the same clock serves normally.
-    func test_anOrdinaryEntryIsServedByBothPaths() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        _ = try seedEntry(queue)
-        XCTAssertEqual(queue.readyEntries().count, 1)
-        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+    /// GENUINELY FUTURE: an hour ahead is not fresh either, and expiry semantics are untouched.
+    func test_anHourInTheFutureIsNotFresh() throws {
+        let base = Date()
+        let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: { base })
+        _ = try seedEntry(writer)
+        let reader = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: { base.addingTimeInterval(-3600) })
+        guard case .known(let ready) = reader.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage stays known")
         }
-        XCTAssertEqual(ready.count, 1)
+        XCTAssertTrue(ready.isEmpty, "an hour in the future is skew, not freshness")
     }
 }
