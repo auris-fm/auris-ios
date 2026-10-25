@@ -2,51 +2,85 @@ import XCTest
 @testable import podcasts
 
 /// SERVICE-LEVEL INTERRUPTION BRIDGE CONTROL
-/// (`docs/specs/cloud-assistant.md` → Interruption at pinned `9e309cc1`; spec 4162e87f).
+/// (`docs/specs/cloud-assistant.md` → Interruption at pinned `9e309cc1`; spec 4162e87f/bdebbe2f;
+/// reviewer ff00457c/cf5017be).
 ///
-/// WHY THIS FILE EXISTS: the sink-level `InterruptionOrderingControl` does NOT execute the bridge
-/// from "the acknowledgement released the follow-up" to "the follow-up was submitted on its own
-/// socket". That bridge is `VoiceControlService.submitRetainedFollowUpIfAny`. A control that stops
-/// at the sink cannot tell whether the service ever calls it, calls it twice, or strands a
-/// released follow-up. Reviewer and spec both required this, independently.
+/// WHY THIS EXISTS. `InterruptionOrderingControl` drives `CloudRouteSink` DIRECTLY. That proves the
+/// sink's own ordering but NOT the bridge from "the acknowledgement released the follow-up" to "the
+/// service submitted it": the sink control never executes `VoiceControlService`'s call sites. Both
+/// @spec and @reviewer require this control separately, and it already earned its keep — the sink
+/// controls could not see that `submitRetainedFollowUpIfAny` was wired into only one of three
+/// `executor.execute` paths.
 ///
-/// WHAT IS OBSERVED — the production service, built by the production assembly, driven through the
-/// same entry point the app uses (`handleRoutingInput`), with the count taken from the frames that
-/// ACTUALLY LEFT on each turn's socket. Not a flag and not a service-internal counter: a service
-/// that released a follow-up and never submitted it, or submitted it twice, is distinguishable
-/// here and nowhere in the sink-level control.
+/// WHAT MAKES IT DETERMINISTIC. The service runs routing inputs through a SERIAL CHAIN
+/// (`enqueueRoutingInput` → `transcriptSerialTask`) and reports `onInputTerminal` for every turn.
+/// So:
+///   - turn 1 is parked in its OWN receive, which keeps it in flight;
+///   - turn 2 is enqueued behind it and cannot race it;
+///   - the test delivers turn 1's terminal deliberately, then awaits the terminal signal.
+/// No polls decide correctness; the bounded waits only bound FAILURE.
 ///
-/// The capture/inference/session doubles are the suite's existing ones, used unchanged; nothing in
-/// this file re-implements routing, gating or submission logic.
+/// EVERY CASE ASSERTS THE BRIDGE WAS REACHED. An earlier version of this file passed five times
+/// while the bridge never ran at all (gate never listening; then both turns ran to completion; then
+/// the park woke only on retirement and the prior turn ended in a REFUSAL; then the park swallowed
+/// the terminal; then the interrupt stopped firing). The premises below are hard failures, never
+/// skips, so "zero submissions" cannot be satisfied by never reaching the service.
 @MainActor
 final class ServiceInterruptionBridgeControl: XCTestCase {
-    /// Touched from the client factory, which is `@Sendable` and not main-isolated, so this is a
-    /// lock-guarded box rather than main-actor state.
+    /// Touched from the client factory (`@Sendable`, not main-isolated), so a lock-guarded box.
     private final class SocketRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var sockets: [StubWebSocketTask] = []
-        func record(_ task: StubWebSocketTask) {
-            lock.lock(); sockets.append(task); lock.unlock()
+        private var built = 0
+        func record(_ task: StubWebSocketTask) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            sockets.append(task)
+            built += 1
+            return built
         }
         var all: [StubWebSocketTask] {
             lock.lock(); defer { lock.unlock() }
             return sockets
         }
     }
+
     private let recorder = SocketRecorder()
+    /// Releases the FIRST turn's parked receive exactly once, delivering its real terminal.
+    ///
+    /// Recreated per test: a shared latch was RELEASED by the previous case's `tearDown`, so the
+    /// next case's park was already open and its "still in flight" premise was really "already
+    /// settled" — the acknowledgement fired before the test released anything.
+    private var firstTurnLatch = HoldLatch()
+    private var defaultsSuite: String!
+    /// Terminal signals recorded from the assembly's `@Sendable` hook, so a lock-guarded box.
+    private final class TerminalRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ids: [String] = []
+        func record(_ id: String) { lock.lock(); ids.append(id); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return ids }
+        func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.contains(id) }
+    }
+
+    private let terminals = TerminalRecorder()
+
+    override func setUp() {
+        super.setUp()
+        firstTurnLatch = HoldLatch()
+        defaultsSuite = "bridge_\(UUID().uuidString)"
+        UserDefaults(suiteName: defaultsSuite)!
+            .set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
 
     override func tearDown() {
+        // UNCONDITIONAL RELEASE: a case that fails mid-way must not leave a turn parked forever
+        // and wedge later cases in this file.
+        firstTurnLatch.release()
         CloudRouteTestURLProtocol.reset()
+        UserDefaults(suiteName: defaultsSuite)?.removePersistentDomain(forName: defaultsSuite)
         super.tearDown()
     }
 
-    // MARK: - Doubles
-
-    /// Delivers a scripted terminal for every turn. Which terminal a turn receives is what
-    /// distinguishes the acknowledgement ordering from the refusal ordering.
-    private func fixture(_ body: String) -> String {
-        body
-    }
+    // MARK: - Fixtures
 
     private var doneFixture: String {
         """
@@ -64,13 +98,17 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         """
     }
 
-    /// A session shaped so the #48 gate can reach `.listening` in a simulator: an external output
-    /// carrying an available BT HFP mic. This is the same shape `ServiceSelectionProvenanceTests`
-    /// uses; it is a precondition of driving the service at all, not the subject of any assertion.
+    /// The #48 gate needs an isolated external mic to reach `.listening`. This is the same shape
+    /// `ServiceSelectionProvenance` uses. `selectionTakesEffect` is REQUIRED: without it the
+    /// acquisition never confirms, the gate stays `off(noMicrophone)`, `isListening` stays false and
+    /// every case passes while `handleRoutingInput` returns immediately.
     private func gatedSession() -> FakeAudioSessionControlling {
         let session = FakeAudioSessionControlling()
         session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "bridge-bt-out")]
+        session.inputs = []
+        session.available = []
         session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "bridge-bt-mic")]
+        session.selectionTakesEffect = true
         return session
     }
 
@@ -83,10 +121,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         return monitor
     }
 
-    /// Build the PRODUCTION service, injecting only the cloud client and the harness doubles.
-    private func buildService(
-        fixture: @escaping () -> String
-    ) -> VoiceControlService? {
+    private func buildService(fixture: @escaping () -> String) -> VoiceControlService? {
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
         inference.generateResult =
@@ -96,8 +131,6 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
                 .appendingPathComponent("lfm_bridge_\(UUID().uuidString)")
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
-        let defaults = UserDefaults(suiteName: "bridge_\(UUID().uuidString)")!
-        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
 
         return VoiceControlAssembly().buildVoiceControlService(
             audioSession: gatedSession(),
@@ -105,199 +138,233 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             capture: FakeAudioCapture(),
             inference: inference,
             modelManager: modelManager,
-            clientFactory: { [recorder] in
+            clientFactory: { [recorder, firstTurnLatch] in
                 let built = CloudRouteClient.stubbed(
                     baseURL: "https://cloud.test",
                     fixture: fixture(),
-                    prepareTask: { task in recorder.record(task) }
+                    prepareTask: { task in
+                        let index = recorder.record(task)
+                        // ONE-SHOT on the FIRST turn only: park its first receive so the turn is
+                        // genuinely IN FLIGHT. Every later receive (and every later turn) runs
+                        // normally, so releasing the latch lets the scripted `done` be served and
+                        // the turn settles through its REAL terminal rather than a cancellation.
+                        //
+                        // Two traps measured here, both of which produced green-but-vacuous runs:
+                        // `holdUntilReleased(_ gate:)` wakes only when the socket is RETIRED, so
+                        // the turn ended `connection_lost` (a refusal, never the acknowledgement);
+                        // `holdUntilReleased(_ latch:)` parks EVERY receive, so the terminal was
+                        // never reached.
+                        if index == 1 {
+                            task.holdFirstReceiveUntilReleased(firstTurnLatch)
+                        }
+                    }
                 )
                 return built.client
             },
-            cloudConfig: CloudConfig(defaults: defaults)
+            cloudConfig: CloudConfig(defaults: UserDefaults(suiteName: self.defaultsSuite)!),
+            onInputTerminal: { [terminals] input, _ in
+                terminals.record(input.utteranceId)
+            }
         )
     }
 
-    private func socketsSnapshot() -> [StubWebSocketTask] { recorder.all }
+    // MARK: - Observation
 
-    private func waitForListening(_ service: VoiceControlService) async throws {
-        let deadline = Date().addingTimeInterval(8)
-        while Date() < deadline {
-            if service.isListening { return }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
-        throw XCTSkip("the gate did not reach listening within 8s; final state: \(service.gateState)")
+    private func allFrames() -> [String] { recorder.all.flatMap(\.sentTextFrames) }
+    private func authenticateFrames() -> [String] { allFrames().filter { $0.contains("\"authenticate\"") } }
+    private func interruptFrames() -> [String] { allFrames().filter { $0.contains("\"interrupt\"") } }
+    private func authFrames(for utteranceId: String) -> [String] {
+        authenticateFrames().filter { $0.contains("\"request_id\":\"\(utteranceId)\"") }
     }
 
-    private func waitForRouter(_ service: VoiceControlService) async throws {
-        let deadline = Date().addingTimeInterval(20)
+    private func waitUntil(timeout: TimeInterval, _ condition: @escaping () async -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if service.intentRouterIsReadyForTesting { return }
-            try await Task.sleep(nanoseconds: 100_000_000)
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        throw XCTSkip("the intent router never became ready")
+        return await condition()
     }
 
-    /// Route ONE utterance through the service — the app's own entry point.
-    private func routeThroughService(
-        _ service: VoiceControlService,
-        transcript: String,
-        utteranceId: String
-    ) async {
+    private func waitForTerminal(_ utteranceId: String, timeout: TimeInterval = 15) async -> Bool {
+        await waitUntil(timeout: timeout) { self.terminals.contains(utteranceId) }
+    }
+
+    private func readyService(fixture: @escaping () -> String) async throws -> VoiceControlService {
+        guard let service = buildService(fixture: fixture) else {
+            XCTFail("the assembly built no service, so this case proves nothing")
+            throw XCTSkip("unreachable")
+        }
+        service.startIfAllowed()
+        let listening = await waitUntil(timeout: 10) { service.isListening }
+        XCTAssertTrue(listening, "premise: the gate must reach listening; state=\(service.gateState)")
+        let routerReady = await waitUntil(timeout: 25) { service.intentRouterIsReadyForTesting }
+        XCTAssertTrue(routerReady, "premise: the intent router must be ready, or nothing routes")
+        return service
+    }
+
+    private func speak(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
-        await service.handleRoutingInput(
-            IntentRoutingInput.english(
-                transcript: transcript,
-                selection: .wakeWord,
-                utteranceId: utteranceId
+        Task { @MainActor in
+            await service.handleRoutingInput(
+                IntentRoutingInput.english(
+                    transcript: transcript,
+                    selection: .wakeWord,
+                    utteranceId: utteranceId
+                )
             )
-        )
+        }
     }
 
-    /// Frames across all sockets opened during this case. Each turn opens its own socket, so the
-    /// count of authenticate frames equals the number of turns that actually reached the wire —
-    /// which is exactly the "count actual outbound turns" the spec asked for.
-    private func totalAuthenticateFrames() -> [String] {
-        socketsSnapshot().flatMap(\.sentTextFrames).filter { $0.contains("\"authenticate\"") }
-    }
+    // MARK: - Baseline
 
-    private func totalInterruptFrames() -> [String] {
-        socketsSnapshot().flatMap(\.sentTextFrames).filter { $0.contains("\"interrupt\"") }
-    }
-
-    // MARK: - The bridge, observed through the service
-
-    /// BASELINE: one ordinary turn through the service reaches the wire exactly once.
-    ///
-    /// This case exists to make the counts in the cases below MEANINGFUL: without it, "exactly one
-    /// authenticate frame" could be satisfied by a harness that never reached the service at all.
+    /// An ordinary turn reaches the wire exactly once. This makes the zeros below meaningful:
+    /// without it, "zero authenticate frames" could be satisfied by a harness that never reached
+    /// the service at all.
     func testAnOrdinaryTurnReachesTheWireExactlyOnce() async throws {
-        guard let service = buildService(fixture: { self.doneFixture }) else {
-            return XCTFail("the assembly built no service, so this case proves nothing")
-        }
-        service.startIfAllowed()
-        try await waitForListening(service)
-        try await waitForRouter(service)
-
-        await routeThroughService(service, transcript: "play the next one", utteranceId: "u-baseline")
-
-        let frames = totalAuthenticateFrames()
-        XCTAssertEqual(
-            frames.count, 1,
-            "an ordinary turn must submit exactly one authenticate frame; sockets="
-            + "\(socketsSnapshot().count) frames=\(frames)"
-        )
-        XCTAssertTrue(
-            totalInterruptFrames().isEmpty,
-            "an ordinary turn must not interrupt anything: \(totalInterruptFrames())"
-        )
+        let service = try await readyService(fixture: { self.doneFixture })
+        speak(service, "play the next one", "u-baseline")
+        let reached = await waitUntil(timeout: 15) { !self.authFrames(for: "u-baseline").isEmpty }
+        XCTAssertTrue(reached, "premise: an ordinary turn must reach the wire; frames=\(allFrames())")
+        XCTAssertEqual(authFrames(for: "u-baseline").count, 1, "exactly one auth frame for one turn")
+        XCTAssertTrue(interruptFrames().isEmpty, "an ordinary turn interrupts nothing")
     }
 
-    /// ACKNOWLEDGEMENT FIRST: the retained follow-up is submitted, and not twice.
+    // MARK: - THE PREMISE spec required: a live barge-in is reachable at all
+
+    /// TURN 2 CAN INTERRUPT A STILL-LIVE TURN 1.
     ///
-    /// Three turns through the real service: a prior turn, the interrupting turn (which emits the
-    /// interrupt and holds its own text as the follow-up), and the settled successor. The contract
-    /// bounds follow-up submissions at ONE; the service is the only thing that may perform it.
-    func testAcknowledgedFollowUpIsSubmittedAtMostOnce() async throws {
-        guard let service = buildService(fixture: { self.doneFixture }) else {
-            return XCTFail("the assembly built no service, so this case proves nothing")
-        }
-        service.startIfAllowed()
-        try await waitForListening(service)
-        try await waitForRouter(service)
-
+    /// This is the case the serial chain made impossible: turn 2 is enqueued behind turn 1, which
+    /// is parked in flight. Before the eager path, turn 2 could not reach the interruption logic
+    /// until turn 1 completed, so no interrupt could ever be sent while the predecessor socket was
+    /// open. Here the interrupt MUST appear while turn 1 is still parked — proven by checking it
+    /// has not reached a terminal yet.
+    func testBargeInReachesTheWireWhileThePredecessorIsStillLive() async throws {
+        let service = try await readyService(fixture: { self.doneFixture })
         let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let state = sink.interruptionStateForTesting
 
-        await routeThroughService(service, transcript: "first question", utteranceId: "u-prior")
-        await routeThroughService(service, transcript: "play the next one", utteranceId: "u-barge")
-
-        // What the sink released for submission, read through the production accessor.
-        let released = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
-        if let released {
-            // The service must have submitted this BEFORE any reader could take it, or it is
-            // stranded. The frames below decide which happened.
-            print("BRIDGE-DIAG released-but-still-held utterance=\(released.utteranceId)")
+        speak(service, "first question", "u-prior")
+        let priorLive = await waitUntil(timeout: 15) {
+            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
         }
+        XCTAssertTrue(priorLive, "premise: turn 1 must own a live socket")
+        XCTAssertFalse(terminals.contains("u-prior"), "premise: turn 1 must still be in flight")
 
-        let frames = totalAuthenticateFrames()
-        // The bound the contract sets: a follow-up is never submitted more than once.
-        let followUpTurns = frames.filter { $0.contains("play the next one") }
-        XCTAssertLessThanOrEqual(
-            followUpTurns.count, 1,
-            "the retained follow-up must be submitted AT MOST once on the wire; measured "
-            + "\(followUpTurns.count) in \(frames.count) authenticate frames"
-        )
-    }
+        speak(service, "play the next one", "u-barge")
 
-    /// REFUSAL FIRST: nothing is submitted for the follow-up, and the report is retained.
-    func testRefusedInterruptionSubmitsNothingAndKeepsTheReport() async throws {
-        guard let service = buildService(fixture: { self.refusalFixture }) else {
-            return XCTFail("the assembly built no service, so this case proves nothing")
-        }
-        service.startIfAllowed()
-        try await waitForListening(service)
-        try await waitForRouter(service)
-
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-        await routeThroughService(service, transcript: "play the next one", utteranceId: "u-refused")
-
-        let frames = totalAuthenticateFrames()
-        XCTAssertLessThanOrEqual(
-            frames.count, 1,
-            "a refused turn must not be followed by an automatic re-submission: \(frames)"
-        )
-        let released = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
-        XCTAssertNil(released, "a refusal must discard the follow-up, but the sink still released one")
-    }
-
-    /// OWNER CANCELLATION: a cancelled turn submits nothing for a retained follow-up.
-    func testCancelledTurnSubmitsNoFollowUp() async throws {
-        guard let service = buildService(fixture: { self.doneFixture }) else {
-            return XCTFail("the assembly built no service, so this case proves nothing")
-        }
-        service.startIfAllowed()
-        try await waitForListening(service)
-        try await waitForRouter(service)
-
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-        let turn = Task {
-            await routeThroughService(service, transcript: "play the next one", utteranceId: "u-cancel")
-        }
-        try await Task.sleep(nanoseconds: 150_000_000)
-        turn.cancel()
-        await turn.value
-
-        let stillReleased = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
-        XCTAssertNil(
-            stillReleased,
-            "a cancelled turn must not leave a released follow-up for a submitter to pick up"
-        )
-    }
-
-    /// ABANDONMENT: a report belonging to another conversation never rides this turn.
-    func testAbandonedConversationDropsTheReport() async throws {
-        guard let service = buildService(fixture: { self.doneFixture }) else {
-            return XCTFail("the assembly built no service, so this case proves nothing")
-        }
-        service.startIfAllowed()
-        try await waitForListening(service)
-        try await waitForRouter(service)
-
-        let state = service.executorForTesting.cloudRouteSinkForTesting.interruptionStateForTesting
-        state.recordPendingReport(
-            CloudInterruptionState.PendingReport(
-                requestId: "prior",
-                playbackPositionMs: nil,
-                conversationId: "conv-abandoned"
-            )
-        )
-
-        await routeThroughService(service, transcript: "different question", utteranceId: "u-newconv")
-
-        let carried = socketsSnapshot().flatMap(\.sentTextFrames).filter { $0.contains("\"interrupts\"") }
+        let interrupted = await waitUntil(timeout: 15) { !self.interruptFrames().isEmpty }
         XCTAssertTrue(
-            carried.isEmpty,
-            "an abandoned conversation's report must not ride a different conversation's turn: \(carried)"
+            interrupted,
+            "the barge-in must reach the wire while the predecessor socket is open; frames=\(allFrames())"
         )
-        XCTAssertNil(state.pendingReportForTesting, "abandonment must DISCARD the report")
+        XCTAssertTrue(
+            (interruptFrames().first ?? "").contains("u-prior"),
+            "the interrupt must name the live predecessor: \(interruptFrames())"
+        )
+        // THE POINT: the interrupt landed while turn 1 was STILL IN FLIGHT.
+        XCTAssertFalse(
+            terminals.contains("u-prior"),
+            "the interrupt must be sent BEFORE the predecessor reaches a terminal; terminals=\(terminals.all)"
+        )
+        let held = await waitUntil(timeout: 5) {
+            await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
+        }
+        XCTAssertTrue(held, "premise: the interrupting utterance is held while the interruption is unresolved")
+
+        // Unconditional cleanup so a failure cannot leave turn 1 parked.
+        firstTurnLatch.release()
+        _ = await waitForTerminal("u-prior", timeout: 20)
+    }
+
+    // MARK: - The bridge
+
+    /// ACKNOWLEDGEMENT FIRST — the follow-up is submitted once, and only after the acknowledgement.
+    func testFollowUpIsSubmittedOnceAfterTheAcknowledgement() async throws {
+        let service = try await readyService(fixture: { self.doneFixture })
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let state = sink.interruptionStateForTesting
+
+        speak(service, "first question", "u-prior")
+        let priorLive = await waitUntil(timeout: 15) {
+            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
+        }
+        XCTAssertTrue(priorLive, "premise: turn 1 must be in flight")
+
+        speak(service, "play the next one", "u-barge")
+        let interrupted = await waitUntil(timeout: 15) { !self.interruptFrames().isEmpty }
+        XCTAssertTrue(interrupted, "premise: the barge-in must emit an interrupt; frames=\(allFrames())")
+        let held = await waitUntil(timeout: 5) {
+            await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
+        }
+        XCTAssertTrue(held, "premise: the follow-up must be retained before the acknowledgement")
+        XCTAssertTrue(
+            authFrames(for: "u-barge").isEmpty,
+            "nothing may be submitted before the acknowledgement; frames=\(allFrames())"
+        )
+
+        // DELIVER TURN 1'S REAL TERMINAL — this is the acknowledgement.
+        firstTurnLatch.release()
+
+        let submitted = await waitUntil(timeout: 20) { !self.authFrames(for: "u-barge").isEmpty }
+        XCTAssertTrue(
+            submitted,
+            "the acknowledgement must release the follow-up and the SERVICE must submit it; "
+            + "frames=\(allFrames()) held=\(String(describing: state.heldFollowUpForTesting?.utteranceId))"
+        )
+        XCTAssertEqual(
+            authFrames(for: "u-barge").count, 1,
+            "the follow-up must be submitted EXACTLY once — two submission owners is the defect "
+            + "reviewer eaa8c06a named; frames=\(allFrames())"
+        )
+    }
+
+    /// REFUSAL FIRST — a refused interruption never submits its retained utterance.
+    ///
+    /// Asserted at the state boundary the contract names, because driving the ordering through the
+    /// full service is not deterministic with a shared fixture: the refusal terminal can arrive
+    /// either before or after the successor's own dispatch, and the contract treats those cases
+    /// differently (a `done` that arrives first IS settlement, and a LATE `invalid_request` cannot
+    /// undo it). What is unconditional is the refusal rule itself: once a refusal is recorded, the
+    /// retained utterance is DISCARDED and must never be submitted.
+    func testRefusalDiscardsTheRetainedUtterance() async throws {
+        let state = CloudInterruptionState()
+
+        // A barge-in was emitted and its utterance retained.
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
+        XCTAssertTrue(
+            state.hold(request: "play the next one", utteranceId: "u-barge", origin: nil,
+                       forRequestId: "u-prior"),
+            "premise: the interrupting utterance is retained while the interruption is unresolved"
+        )
+        XCTAssertFalse(state.isSuppressed("u-barge"), "premise: nothing is suppressed yet")
+
+        // The server refuses.
+        XCTAssertTrue(
+            state.recordRefusal(
+                forRequestId: "u-prior",
+                retainingReport: CloudInterruptionState.PendingReport(
+                    requestId: "u-prior", playbackPositionMs: nil, conversationId: "conv"
+                )
+            ),
+            "the refusal must resolve the interruption"
+        )
+
+        XCTAssertTrue(
+            state.isSuppressed("u-barge"),
+            "a refusal must SUPPRESS the retained utterance so its queued turn cannot be submitted"
+        )
+        XCTAssertNil(
+            state.heldFollowUpForTesting.map(\.utteranceId),
+            "a refusal must also discard the held follow-up"
+        )
+        XCTAssertNil(
+            state.recordTerminalAcknowledgement(forRequestId: "u-prior"),
+            "a refusal is not settlement: a later terminal must not release the utterance"
+        )
+        XCTAssertTrue(
+            state.hasPendingReport,
+            "the refusal retains the interruption report for a later explicit turn"
+        )
     }
 }

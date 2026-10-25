@@ -290,28 +290,45 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // loop through the owner-cancel path, so the `done`/`error` branches that carry the
         // interruption transitions are never reached and the acknowledgement is silently skipped.
         //
-        // The latch is one-shot and carries no value: "this turn is settled" is all a waiter needs.
+        // The latch CARRIES A BOUND RESOLUTION, not a bare boolean (reviewer eaa8c06a). A boolean
+        // let both `.done` and `.error` wake the successor, which then unconditionally proceeded to
+        // authenticate: a refusal therefore promoted an unacknowledged utterance into an ordinary
+        // turn, and so did a timeout and an undelivered send. The resolution is now explicit and
+        // only `.acknowledged` may lead to submission.
+        //
         // Bounded by the waiter's own timeout, so a server that never answers cannot wedge the
-        // sink — on expiry the waiter proceeds and says so, rather than waiting forever.
+        // sink. One-shot: the ticket has exactly one winner, so a terminal landing at the same
+        // instant as the timer cannot double-resume.
+        private var resolution: InterruptionResolution?
 
-        private var acknowledgementArrived = false
+        /// How this turn resolved for an interruption waiter.
+        enum InterruptionResolution: Equatable {
+            /// A `done` arrived — even a `completed` one. This is the ONLY outcome that may submit
+            /// the held follow-up.
+            case acknowledged
+            /// An `error` terminal: the server refused the interruption. Nothing may be submitted.
+            case refused
+            /// No resolution: the bound expired, or the send never reached the server. Nothing may
+            /// be submitted, and the held input must NOT be promoted to an ordinary turn.
+            case failed
+        }
+
         private var acknowledgementTicket: AcknowledgementTicket?
 
-        /// Park until this turn's terminal arrives, or the bound expires.
+        /// Park until this turn's interruption resolves, or the bound expires.
         ///
-        /// Returns true if the terminal arrived. A false result must be REPORTED, never treated as
-        /// success: it means the interruption was not acknowledged in time. Deliberately a single
-        /// one-shot continuation rather than a task group racing a sleep — a group that resumed a
-        /// parked waiter after the timeout branch had already won would resume a continuation whose
-        /// task had been cancelled, which is undefined. The ticket pattern here has exactly one
-        /// winner.
-        func awaitAcknowledgement(timeout: TimeInterval) async -> Bool {
+        /// The result must be acted on, not treated as success: `.refused` and `.failed` both
+        /// forbid submission. Deliberately a single one-shot continuation rather than a task group
+        /// racing a sleep — a group that resumed a parked waiter after the timeout branch had
+        /// already won would resume a continuation whose task had been cancelled, which is
+        /// undefined. The ticket pattern here has exactly one winner.
+        func awaitAcknowledgement(timeout: TimeInterval) async -> InterruptionResolution {
             let ticket = AcknowledgementTicket()
-            let arrived: Bool = await withCheckedContinuation { continuation in
+            return await withCheckedContinuation { continuation in
                 lock.lock()
-                if acknowledgementArrived {
+                if let resolution {
                     lock.unlock()
-                    continuation.resume(returning: true)
+                    continuation.resume(returning: resolution)
                     return
                 }
                 ticket.continuation = continuation
@@ -322,43 +339,42 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 ticket.timer = Task { [weak self] in
                     try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     guard !Task.isCancelled else { return }
-                    _ = self?.settleAcknowledgement(arrived: false)
+                    _ = self?.settleAcknowledgement(.failed)
                 }
             }
-            return arrived
         }
 
         /// One-shot settlement of the acknowledgement wait. Returns the value the waiter was
         /// resumed with, or nil when another path already settled it.
         @discardableResult
-        private func settleAcknowledgement(arrived: Bool) -> Bool? {
+        private func settleAcknowledgement(_ outcome: InterruptionResolution) -> InterruptionResolution? {
             lock.lock()
-            guard let ticket = acknowledgementTicket else {
+            // FIRST settlement wins, and it is recorded even with nobody waiting, so a waiter that
+            // parks later reads it immediately.
+            guard resolution == nil else {
                 lock.unlock()
                 return nil
             }
+            resolution = outcome
+            let ticket = acknowledgementTicket
             acknowledgementTicket = nil
-            if arrived { acknowledgementArrived = true }
             lock.unlock()
-            ticket.timer?.cancel()
-            ticket.continuation?.resume(returning: arrived)
-            ticket.continuation = nil
-            return arrived
+            ticket?.timer?.cancel()
+            ticket?.continuation?.resume(returning: outcome)
+            ticket?.continuation = nil
+            return outcome
         }
 
-        /// The terminal landed. Idempotent: a late second terminal settles nothing.
-        func markAcknowledgement() {
-            _ = settleAcknowledgement(arrived: true)
-            // Nothing waiting: record arrival so a waiter that parks later sees it immediately.
-            lock.lock()
-            acknowledgementArrived = true
-            lock.unlock()
+        /// The turn settled with a terminal. `.acknowledged` for `done` (even `completed`),
+        /// `.refused` for an `error`. Idempotent: a late second terminal settles nothing.
+        func markAcknowledgement(_ outcome: InterruptionResolution) {
+            _ = settleAcknowledgement(outcome)
         }
     }
 
 
     private final class AcknowledgementTicket: @unchecked Sendable {
-        var continuation: CheckedContinuation<Bool, Never>?
+        var continuation: CheckedContinuation<CloudTurnToken.InterruptionResolution, Never>?
         var timer: Task<Void, Never>?
     }
 
@@ -843,50 +859,40 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Ordering is load-bearing and deliberate: the claim + send happen BEFORE `cancel()` below.
         // Cancelling first would retire the socket registration the frame needs (and could race
         // the server's own terminal), turning every barge-in into a lost interrupt.
-        let priorRequestId = activeResultSocket?.requestId
-        let priorSocket = activeResultSocket
-        let priorWasLive = (activeTurn.map { !$0.isCancelled }) ?? false
-        // The turn THIS emission interrupts, if any. A refusal later in this turn's `error` branch
-        // must be attributed to it — naming the failing turn instead produces a report the server
-        // cannot apply, and (worse) overwrites a report that named the right turn.
-        var interruptedRequestIdForThisTurn: String?
-        if let priorRequestId, priorWasLive,
+        // THE EAGER PATH MAY HAVE ALREADY RUN (spec e38a790a / reviewer bea7a291). The service
+        // calls `emitBargeIn` at input admission, AHEAD of its serial chain, because a barge-in
+        // must reach the wire while the predecessor socket is still open — and the serial chain
+        // otherwise delays this turn until that socket has closed. Here we only ADOPT that
+        // emission; emitting a second time is impossible anyway (`claimInterruptEmission` is one
+        // shot), but asking the state rather than re-claiming keeps the reason explicit.
+        // A FOLLOW-UP SUBMISSION IS NOT A NEW BARGE-IN. When this utterance is the retained
+        // follow-up being submitted after its acknowledgement, the interruption already happened:
+        // claiming another one would interrupt whatever is now live and hold this same utterance
+        // AGAIN, which is how one utterance became two submissions (reviewer eaa8c06a, observed on
+        // the wire as u-barge authenticating as its own turn and again as the follow-up).
+        //
+        // The binding tells us which turn this utterance interrupted. The submission is the
+        // NORMAL dispatch of that utterance, so this turn proceeds as an ordinary turn carrying
+        // no interruption of its own.
+        let isRetainedFollowUpSubmission = interruptedRequestIdForUtterance(utteranceId) != nil
+        var interruptedRequestIdForThisTurn: String? = nil
+        if !isRetainedFollowUpSubmission,
+           let priorRequestId = activeResultSocket?.requestId,
+           (activeTurn.map { !$0.isCancelled }) ?? false,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
-            // Hold the interrupting utterance for THAT turn: it is the follow-up the contract
-            // requires to survive until the prior turn reaches a terminal acknowledgement.
             interruptionState.hold(
                 request: request,
                 utteranceId: utteranceId,
                 origin: origin,
                 forRequestId: priorRequestId
             )
-            if let priorSocket, let client = resultSendClient {
-                // AWAITED, because delivery IS the interruption: a fire-and-forget send could be
-                // scheduled after this turn retires the registration, which is how an interrupt
-                // becomes a silent no-op. Position is omitted until one is actually measured.
-                let report = await client.sendInterrupt(
-                    requestId: priorRequestId,
-                    playbackPositionMs: nil,
-                    via: priorSocket
-                )
-                // THE SEND RESULT IS CONSULTED, not discarded (reviewer ff00457c item 1). An
-                // `.undelivered` interrupt never reached the server, so no acknowledgement can
-                // ever arrive for it: the held follow-up would strand, and the successor below
-                // would wait on a terminal that will never come. Drop the hold and continue as an
-                // ordinary new turn.
-                if report == .undelivered {
-                    interruptedRequestIdForThisTurn = nil
-                    interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
-                }
-            } else {
-                // No transport to interrupt: the interruption never reached the server, so the
-                // follow-up must not be treated as held for an acknowledgement. Release it now and
-                // let this turn proceed as an ordinary new turn.
+            if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
                 interruptedRequestIdForThisTurn = nil
-                interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
             }
+        }
 
+        if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
             // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
             // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
             // terminal to resolve the hold, and the `cancel()` below would otherwise end its
@@ -900,21 +906,60 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // A turn that cannot answer must not wedge the successor: the wait is BOUNDED, and its
             // expiry is acted on — the hold is dropped, since no terminal is coming to resolve it,
             // and this turn proceeds as an ordinary new turn rather than pretending it settled.
+            // STOP LOCAL OUTPUT IMMEDIATELY, BEFORE THE WAIT (reviewer eaa8c06a item 3).
+            //
+            // The contract's barge-in rule is "the client IMMEDIATELY stops local output and clears
+            // buffered answer audio while retaining captured user input" (cloud-assistant.md →
+            // Interruption). The stop used to live in the supersede block BELOW this wait, so the
+            // answer kept playing for the whole acknowledgement wait — up to the full bound — which
+            // is the exact overlap the rule exists to prevent. Stopping only the OUTPUT keeps the
+            // receiver alive for the terminal this wait is waiting for; those are different
+            // concerns and are now ordered accordingly.
+            let bargeInStopEpoch = interruptedRequestIdForThisTurn != nil
+                ? audioPlayer.cancel()
+                : nil
+
             if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
-                let acknowledged = await priorToken.awaitAcknowledgement(
+                let resolution = await priorToken.awaitAcknowledgement(
                     timeout: Self.interruptionAcknowledgementTimeout
                 )
-                if !acknowledged {
+                switch resolution {
+                case .acknowledged:
+                    // The ONLY outcome that may submit. The follow-up was already released by the
+                    // terminal branch; this turn proceeds.
+                    break
+                case .refused:
                     FileLog.shared.addMessage(
-                        "[VoicePipeline] interruption NOT acknowledged within "
-                        + "\(Self.interruptionAcknowledgementTimeout)s for turn "
-                        + "\(interruptedRequestIdForThisTurn ?? "nil") — held follow-up dropped, "
-                        + "successor proceeds as an ordinary turn"
+                        "[VoicePipeline] interruption REFUSED for turn "
+                        + "\(interruptedRequestIdForThisTurn ?? "nil") — retained utterance "
+                        + "DISCARDED and suppressed; it must never be submitted"
                     )
-                    interruptionState.releaseUnsentHold(
+                    // SUPPRESS, not merely release: a refusal is a server answer, and the contract
+                    // says never to treat it as settlement or submit the held utterance. This
+                    // utterance's turn is already queued, so releasing alone let it reach the wire.
+                    interruptionState.suppressHeldFollowUp(
                         forRequestId: interruptedRequestIdForThisTurn ?? ""
                     )
                     interruptedRequestIdForThisTurn = nil
+                case .failed:
+                    // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
+                    // must END LOCALLY. It must NOT be promoted to an ordinary turn — the user's
+                    // utterance was an interruption of a turn whose fate is now unknown, and
+                    // submitting it would assert a settlement that never happened.
+                    FileLog.shared.addMessage(
+                        "[VoicePipeline] interruption NOT acknowledged for turn "
+                        + "\(interruptedRequestIdForThisTurn ?? "nil") after "
+                        + "\(Self.interruptionAcknowledgementTimeout)s — held follow-up dropped, "
+                        + "nothing submitted, local generic failure"
+                    )
+                    interruptionState.suppressHeldFollowUp(
+                        forRequestId: interruptedRequestIdForThisTurn ?? ""
+                    )
+                    interruptedRequestIdForThisTurn = nil
+                    if let bargeInStopEpoch {
+                        _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                    }
+                    return CloudRouteResult(response: .silent, outcome: .refused)
                 }
             }
         }
@@ -1165,7 +1210,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // successor that interrupted this turn is parked on this latch, and the whole
                     // point of the latch is that the terminal ARRIVED; whether this turn then
                     // reports completion is a separate question it answers for itself.
-                    turnToken.markAcknowledgement()
+                    //
+                    // `.acknowledged`, not `.refused`: a `done` is the acknowledgement even when it
+                    // carries `outcome: completed`, which the contract is explicit about
+                    // ("do not wait for a second terminal or reopen the closed socket").
+                    turnToken.markAcknowledgement(.acknowledged)
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     guard !turnToken.isCancelled else { break turnLoop }
                     // INTERRUPTION, ACKNOWLEDGEMENT-FIRST ORDERING (cloud-assistant.md →
@@ -1231,8 +1280,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     break turnLoop
                 case let .error(_, code, _):
                     // A terminal — refused or failed — settles the latch too: a waiter must not be
-                    // left parked because the answer was an error rather than a `done`.
-                    turnToken.markAcknowledgement()
+                    // left parked because the answer was an error rather than a `done`. It settles
+                    // as `.refused`, so a successor DISCARDS the held follow-up instead of
+                    // submitting an utterance the server never acknowledged (reviewer eaa8c06a).
+                    turnToken.markAcknowledgement(.refused)
                     // A cancelled owner (cloud-token supersession OR the caller's own
                     // Task.cancel) classifies as an incomplete turn via the owner-cancel path
                     // below — never as a connection failure it did not observe.
@@ -1676,6 +1727,105 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 + "held follow-up discarded, pending report retained"
             )
         }
+    }
+
+    // MARK: - Eager barge-in (spec e38a790a, reviewer bea7a291)
+
+    /// Whether this utterance's interruption was refused, so its turn must not be submitted.
+    @MainActor
+    func isSuppressedForTesting(_ utteranceId: String?) -> Bool {
+        guard let utteranceId else { return false }
+        return interruptionState.isSuppressed(utteranceId)
+    }
+
+    /// Which interrupted turn, if any, this utterance is the retained follow-up for.
+    ///
+    /// Synchronous so the eager path can decide without awaiting. Nil when this utterance is not
+    /// holding a follow-up (the ordinary case).
+    nonisolated func interruptedRequestIdForUtterance(_ utteranceId: String?) -> String? {
+        guard let utteranceId else { return nil }
+        return interruptionState.interruptedRequestId(forHeldUtterance: utteranceId)
+    }
+
+    /// Send the `interrupt` frame on the prior turn's still-open socket, if there is one.
+    ///
+    /// Extracted so the eager path and the dispatch path share ONE implementation. Returns the
+    /// send report; `.undelivered` means no acknowledgement can ever arrive and the caller must
+    /// drop the hold rather than wait.
+    @discardableResult
+    private func sendInterruptOnPriorSocket(
+        forRequestId priorRequestId: String
+    ) async -> CloudRouteClient.AppOperationResultSendReport? {
+        guard let priorSocket = activeResultSocket, let client = resultSendClient else {
+            // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
+            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+            return .undelivered
+        }
+        // AWAITED, because delivery IS the interruption: a fire-and-forget send could be scheduled
+        // after this turn retires the registration, which is how an interrupt becomes a silent
+        // no-op. Position is omitted until one is actually measured.
+        let report = await client.sendInterrupt(
+            requestId: priorRequestId,
+            playbackPositionMs: nil,
+            via: priorSocket
+        )
+        if report == .undelivered {
+            // The frame never reached the server, so no terminal is coming to resolve the hold.
+            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+        }
+        return report
+    }
+
+    /// THE EAGER BARGE-IN STEP. Called by the service at INPUT ADMISSION, ahead of its serial
+    /// routing chain.
+    ///
+    /// WHY IT MUST BE EAGER (spec e38a790a, reviewer bea7a291): the contract requires the interrupt
+    /// while the prior socket remains open (`9e309cc1` → Interruption). Routing inputs run through
+    /// a serial chain, so this turn's dispatch cannot run until the predecessor has finished — by
+    /// which time its socket is closed and the interrupt is useless or refused. The interruption
+    /// must therefore be triggered at admission, while the predecessor is still live. Only the
+    /// INTERRUPTION steps move here: classification and execution stay serial, and the retained
+    /// follow-up is still submitted only by the acknowledgement, through normal admission checks.
+    ///
+    /// Returns the turn this utterance interrupted, so the caller can pass it through; nil means
+    /// "not a barge-in" (no live predecessor, or already claimed). Idempotent and safe to call from
+    /// concurrent inputs: `claimInterruptEmission` admits exactly one claimant per predecessor, and
+    /// `hold` refuses a second hold for a different turn.
+    @discardableResult
+    @MainActor
+    func emitBargeIn(
+        request: String,
+        utteranceId: String?,
+        origin: Int?
+    ) async -> String? {
+        guard let utteranceId else { return nil }
+        // Already claimed for THIS utterance (the eager call already ran): report the same binding.
+        if let existing = interruptedRequestIdForUtterance(utteranceId) { return existing }
+        guard let priorRequestId = activeResultSocket?.requestId,
+              (activeTurn.map { !$0.isCancelled }) ?? false,
+              interruptionState.claimInterruptEmission(forRequestId: priorRequestId) else {
+            return nil
+        }
+        guard interruptionState.hold(
+            request: request,
+            utteranceId: utteranceId,
+            origin: origin,
+            forRequestId: priorRequestId
+        ) else {
+            // A different turn is already holding a follow-up: the contract allows exactly one
+            // retained follow-up, so this utterance must not displace it.
+            return nil
+        }
+        // STOP LOCAL OUTPUT IMMEDIATELY — before the send, and long before any wait. The contract
+        // says the client stops output and clears buffered answer audio immediately on barge-in.
+        _ = audioPlayer.cancel()
+        if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
+            return nil
+        }
+        FileLog.shared.addMessage(
+            "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "            + "utterance \(utteranceId)"
+        )
+        return priorRequestId
     }
 
     /// Take the follow-up released by an interruption acknowledgement. Read-and-clear, so the

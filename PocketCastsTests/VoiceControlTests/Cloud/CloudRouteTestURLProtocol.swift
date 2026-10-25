@@ -654,6 +654,19 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     }
     private var holdLatch: HoldLatch?
 
+    /// Holds ONLY the FIRST receive until explicit release; every later receive proceeds, so the
+    /// scripted events (including the terminal `done`) are served once the test lets go.
+    ///
+    /// Needed because `holdUntilReleased(_ latch:)` parks EVERY receive: fine for "prove retirement
+    /// wakes a parked transport", wrong for "keep this turn in flight, then let it settle
+    /// normally", where the turn would never reach its terminal and a control about what happens
+    /// AFTER the terminal could never run.
+    func holdFirstReceiveUntilReleased(_ latch: HoldLatch) {
+        self.firstReceiveHold = latch
+    }
+    private var firstReceiveHold: HoldLatch?
+    private var firstReceiveHeld = false
+
     /// ARMED AT CREATION, not at the claim boundary. An earlier design armed it from the sink's
     /// `effectEntered` hook, but measurement showed the transport has already served its frames
     /// by then (`pendingArmed=false` on every serve), so the park never intercepted a receive and
@@ -718,6 +731,9 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
             // (`CloudRouteClient.onFrameReceived`) rather than by reaching another `receive()`.
             declaredParkDidPark = true
             await park.wait(untilRetired: { self.isCancelledSocket })
+        } else if let latch = firstReceiveHold, !firstReceiveHeld {
+            firstReceiveHeld = true
+            await latch.waitUntilReleased()
         } else if let holdLatch {
             // Cancellation-INSENSITIVE park: only explicit release wakes this receive.
             await holdLatch.waitUntilReleased()

@@ -178,6 +178,11 @@ final class CloudInterruptionState: @unchecked Sendable {
             || interruptSentForRequestId == requestId
         guard isInterruption else { return false }
         resolved.insert(requestId)
+        // REFUSAL DISCARDS THE UTTERANCE: mark it suppressed so its already-enqueued turn cannot
+        // reach the wire. The contract forbids submitting it after a refusal.
+        if let held, held.interruptedRequestId == requestId {
+            suppressedUtterances.insert(held.utteranceId)
+        }
         held = nil
         if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
         if let report = retainingReport {
@@ -255,6 +260,42 @@ final class CloudInterruptionState: @unchecked Sendable {
         guard held?.interruptedRequestId == requestId else { return }
         held = nil
         if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
+    }
+
+    /// The interruption was REFUSED: the retained utterance must be DISCARDED, never submitted.
+    ///
+    /// Distinct from `releaseUnsentHold` (which means "the interrupt never reached the server"):
+    /// here the server did answer, and its answer was refuse. The contract is explicit — "never
+    /// treat refusal as settlement or automatically submit the held utterance" — so the utterance
+    /// is marked as suppressed. Its already-enqueued turn must not reach the wire.
+    func suppressHeldFollowUp(forRequestId requestId: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let held, held.interruptedRequestId == requestId else { return }
+        // Remember the UTTERANCE, not just the turn: its queued dispatch asks this before sending.
+        suppressedUtterances.insert(held.utteranceId)
+        self.held = nil
+        if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
+    }
+
+    /// Whether this utterance's interruption was refused, so it must not be submitted.
+    func isSuppressed(_ utteranceId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return suppressedUtterances.contains(utteranceId)
+    }
+
+    private var suppressedUtterances: Set<String> = []
+
+    // MARK: - Retained-follow-up binding (PRODUCTION: the eager barge-in path)
+
+    /// The turn this utterance is the retained follow-up FOR, or nil.
+    ///
+    /// Used by the eager interruption path to recognise its own earlier emission without awaiting:
+    /// an utterance that already holds a follow-up must adopt that binding rather than claim a
+    /// second interruption.
+    func interruptedRequestId(forHeldUtterance utteranceId: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let held, held.utteranceId == utteranceId else { return nil }
+        return held.interruptedRequestId
     }
 
     // MARK: - Test seams (no production caller)

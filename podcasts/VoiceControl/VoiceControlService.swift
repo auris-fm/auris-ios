@@ -513,6 +513,21 @@ class VoiceControlService: ObservableObject {
                         Task { @MainActor in notifyFinished(input) }
                     }
                 }
+                // EAGER BARGE-IN, AHEAD OF THE SERIAL QUEUE (spec e38a790a, reviewer bea7a291).
+                //
+                // The contract requires the `interrupt` frame "while the prior socket remains
+                // open" (`9e309cc1` → Interruption). This turn's DISPATCH cannot run until
+                // `previous` finishes, and by then the predecessor's socket is closed — so routing
+                // this turn first makes barge-in unreachable in production. The interruption steps
+                // therefore run HERE, at admission, while the predecessor is still live: stop local
+                // output, send at most one interrupt, retain the complete utterance. Only the
+                // INTERRUPTION moves ahead of the queue; classification and execution below stay
+                // serial, and the retained follow-up is submitted only after the acknowledgement.
+                //
+                // Fired from the chain's own task so the capture/ordering guarantees above are
+                // unchanged. Echo rejection and gate ownership were already applied at admission.
+                await self?.emitEagerBargeInIfNeeded(for: input)
+
                 await previous?.value
                 guard !Task.isCancelled else { return }
                 guard let self else { return }
@@ -556,6 +571,24 @@ class VoiceControlService: ObservableObject {
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
             return true
+    }
+
+    /// Trigger the sink's eager barge-in for this input, unless it is not a barge-in.
+    ///
+    /// Deliberately narrow: it only asks the sink to interrupt the live predecessor and retain this
+    /// utterance. It does not classify, execute, or submit anything — those stay on the serial
+    /// chain. An input that is not interrupting a live turn costs one state check.
+    private func emitEagerBargeInIfNeeded(for input: IntentRoutingInput) async {
+        guard input.utteranceId != nil else { return }
+        // Only an input that will actually be routed can barge in; a blank or wake-only capture is
+        // a session start, not speech over an answer.
+        if case .route = RouteInputEligibilityPolicy.decide(transcript: input.routerTranscript) {
+            await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
+                request: input.routerTranscript,
+                utteranceId: input.utteranceId,
+                origin: nil
+            )
+        }
     }
 
     /// Wires the ASR/router callbacks (the pre-existing registration block, now a named step).
@@ -728,6 +761,22 @@ class VoiceControlService: ObservableObject {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return }
+        // A REFUSED INTERRUPTION SUPPRESSES ITS UTTERANCE (cloud-assistant.md → Interruption).
+        // The barge-in was emitted eagerly at admission, so its turn is already queued here.
+        // After a refusal the contract forbids submitting it, so this turn must not reach the
+        // wire: check the suppression the refusal recorded before doing any work.
+        let utteranceId = input.utteranceId
+        // Checked at entry AND again immediately before dispatch: the refusal terminal can land
+        // while this turn is still queued or classifying, which is exactly the ordering measured
+        // here (B entered, A's refusal arrived 110ms later).
+        if await MainActor.run(body: {
+            executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(utteranceId)
+        }) {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] suppressed utterance \(utteranceId) — its interruption was refused"
+            )
+            return
+        }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
 
@@ -813,6 +862,17 @@ class VoiceControlService: ObservableObject {
             // ever consulting the reservation.
             guard !gracePeriodSignal.isRetiredTurn(input.utteranceId) else {
                 FileLog.shared.addMessage("[VoicePipeline] intent refused (admission retired) ← '\(transcript)'")
+                return
+            }
+            // RE-CHECK SUPPRESSION IMMEDIATELY BEFORE DISPATCH: a refusal that landed while this
+            // turn was queued or classifying must still stop it from reaching the wire.
+            if await MainActor.run(body: {
+                executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(input.utteranceId)
+            }) {
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] suppressed at dispatch \(input.utteranceId ?? "-") — "
+                    + "its interruption was refused"
+                )
                 return
             }
             let response = await executor.execute(intent, preparedObserver: preparedObserver)
