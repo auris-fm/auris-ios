@@ -601,7 +601,15 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
 
     // MARK: - PRODUCTION-PATH refusal (reviewer c38ff4ba item 2)
 
-    /// A REFUSED INTERRUPTIONS ENDS THE TURN LOCALLY, THROUGH THE SERVICE.
+    /// A REFUSED INTERRUPTION NEVER AUTHENTICATES THE UTTERANCE — via the ERROR-EVENT path.
+    ///
+    /// SCOPE, MEASURED (and disclosed rather than overclaimed): the refusal here arrives as an
+    /// `error` event on the PRIOR turn's socket, so it takes the `.error` branch. That branch
+    /// already ended the turn correctly, and a mutant restoring the `.refused` LATCH fall-through
+    /// SURVIVES this test. The latch branch is covered by
+    /// `InterruptionOrderingControl.testRefusalFirstDiscardsAndSubmitsNothing`, which does reach it
+    /// (confirmed by that branch's own log line) and which kills the mutant. Two refusal orderings,
+    /// two controls — neither claims the other's evidence.
     ///
     /// The state-level control could not catch the fall-through: it asserted a transition, not what
     /// the turn then does. Here the refusal is served as the fixture and the assertion is on the
@@ -631,11 +639,38 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         // bounded but generous, and the refused turn's own settlement (the 10s acknowledgement
         // deadline does not apply to a refusal) is awaited first, so a slow settle cannot be
         // mistaken for "never authenticated".
-        let settling = await waitUntil(timeout: 8) {
-            self.terminals.contains("u-prior") || self.terminals.contains("u-barge")
-        }
+        // AWAIT A's REFUSAL SPECIFICALLY (reviewer 79614a4f item 2). Accepting A OR B's terminal
+        // let B's early hand-off terminal satisfy the wait, which does not establish that A ever
+        // processed the refusal — the whole thing being tested. A must reach its own terminal.
         XCTAssertTrue(
-            settling, "premise: the refused interruption must reach a terminal; terminals=\(terminals.all)"
+            recorder.all.contains { $0.sentInterrupt },
+            "premise: the interrupt must be on A before we wait for A's refusal; "
+            + "frames=\(allFrames())"
+        )
+        let aSettled = await waitUntil(timeout: 8) { self.terminals.contains("u-prior") }
+        XCTAssertTrue(
+            aSettled,
+            "A must process the refusal and reach its OWN terminal; terminals=\(terminals.all)"
+        )
+        // B is DISPOSED — it reports a terminal, but that terminal is the suppression outcome, not
+        // a routed/completed turn. Asserting "no terminal at all" conflated disposal with silence
+        // (measured: B reports `dropped`); what the contract forbids is B being SUBMITTED.
+        // B RETIRES AT HAND-OFF, BEFORE CLASSIFICATION. The eager path already took B's execution
+        // when the refusal had not yet arrived, so B's queued link ends `handedOffToFollowUpSubmission`
+        // — the designed ownership transfer, not a submission. The forbidden outcome is `.routed`:
+        // that would mean B was classified and dispatched as an ordinary turn, which is exactly the
+        // fall-through this control exists to forbid.
+        let bOutcomes = terminals.outcomes(for: "u-barge")
+        XCTAssertFalse(
+            bOutcomes.contains(.routed),
+            "B must NEVER be routed after a refused interruption; measured outcomes=\(bOutcomes)"
+        )
+        XCTAssertTrue(
+            bOutcomes.allSatisfy {
+                $0 == .dropped || $0 == .handedOffToFollowUpSubmission
+            },
+            "every B link must end as a disposal or a hand-off, never a routed turn; "
+            + "measured outcomes=\(bOutcomes)"
         )
         let authenticated = self.recorder.all.contains {
             $0.sentTextFrames.contains { $0.contains("u-barge") }

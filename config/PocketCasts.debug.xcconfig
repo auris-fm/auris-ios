@@ -7,10 +7,12 @@ APP_DISPLAY_NAME = Auris Debug
 
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
-// -D STAGING (review 4371027569): the retired StagingDebug configuration got this flag from
-// PocketCasts.staging.xcconfig; without it a staging-scheme Debug build compiles
-// ServerSyncManager.production() == true and syncs against the production Pocket Casts hosts,
-// and CrashLoggingDataProvider reports the wrong build type. Debug is the staging build.
+// -D STAGING (review 4371027569): Debug IS the staging build, so it must carry the STAGING
+// semantics the retired StagingDebug configuration used to supply. Without it a Debug build
+// compiles ServerSyncManager.production() == true and syncs against the production Pocket Casts
+// hosts, and CrashLoggingDataProvider reports the wrong build type. (The separate
+// PocketCasts.staging.xcconfig that used to provide this has been removed as a superseded
+// duplicate — its bundle id, gateway and flags all live here.)
 OTHER_SWIFT_FLAGS = -D STAGING -D DEBUG
 
 // Debug builds hit the staging gateway directly (owner request, task58 thread
