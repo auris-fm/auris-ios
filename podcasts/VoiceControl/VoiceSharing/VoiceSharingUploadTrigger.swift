@@ -38,6 +38,11 @@ final class VoiceSharingUploadTrigger {
     /// Set when the current drain was refused, so its continuation re-offers rather than counting
     /// as a completed pass.
     private var drainWasRefused = false
+    /// CANCELLATION GENERATION (reviewer b8991889): bumped by every stop/cancel. A follow-up
+    /// re-offer is admitted only if the generation that produced it is still current, checked
+    /// ATOMICALLY WITH SLOT ADMISSION — so a stop landing between a completion and its re-offer
+    /// cannot let the already-decided follow-up open a new era.
+    private var stopGeneration = 0
 
     init(
         scheduler: VoiceSharingUploadScheduler,
@@ -80,6 +85,11 @@ final class VoiceSharingUploadTrigger {
         await task?.value
     }
 
+    /// DETERMINISTIC RACE SEAM (reviewer b8991889 #2): invoked by the completion callback after
+    /// the slot cleared but BEFORE its re-offer admission — the exact window where a stop() must
+    /// refuse the already-decided follow-up via the cancellation generation.
+    var preReofferHookForTesting: (() -> Void)?
+
     /// Test seam: the publication-before-registration invariant, observable.
     var hasPublishedCompletionRegistrationForTesting: Bool {
         stateLock.withLock { pendingCompletionID != nil }
@@ -105,6 +115,7 @@ final class VoiceSharingUploadTrigger {
     /// Test seam exposing the production cancellation semantics directly.
     func cancelForTesting() {
         stateLock.lock()
+        stopGeneration += 1
         let completionID = pendingCompletionID
         pendingCompletionID = nil
         workPending = false
@@ -120,12 +131,23 @@ final class VoiceSharingUploadTrigger {
     /// The guarded entry a lifecycle event reaches. Also callable directly (background task
     /// expiration, push-to-sync) with the SAME gates — there is no unguarded path.
     func triggerDrainIfPermitted() {
+        triggerDrainIfPermitted(matchingGeneration: nil)
+    }
+
+    /// The completion-path re-offer. `producingGeneration` is the cancellation generation read
+    /// under the SAME lock hold that cleared the slot; if a stop has bumped the generation since,
+    /// the already-decided follow-up is refused here, atomically with slot admission.
+    private func triggerDrainIfPermitted(matchingGeneration: Int?) {
         // Gate 1: compiled-off surface ⇒ literal no-op. This is what keeps the feature
         // unreachable in shipped builds regardless of policy or network state.
         guard surfaceEnabled() else { return }
         // Gate 2: live collection policy.
         guard isAuthorized() else { return }
         stateLock.lock()
+        if let produced = matchingGeneration, stopGeneration != produced {
+            stateLock.unlock()
+            return
+        }
         guard !drainInFlight else {
             // A DRAIN IS ALREADY RUNNING: record that work arrived, and let its COMPLETION re-offer.
             // Dropping the event here (the previous behaviour) meant new work waited for the next
@@ -163,6 +185,11 @@ final class VoiceSharingUploadTrigger {
         }
         let scheduler = self.scheduler
         let task = Task { [weak self] in
+            // PRE-ENTRY CANCELLATION (reviewer b8991889): a stop() before this task first
+            // executes must prevent the drain from starting at all — the post-await check alone
+            // was too late and could still send. stop() has already cleared the slot, so an
+            // early return here leaves no bookkeeping behind.
+            if Task.isCancelled { return }
             let outcome = await scheduler.drainOnce()
             guard let self else { return }
             guard !Task.isCancelled else {
@@ -217,12 +244,15 @@ final class VoiceSharingUploadTrigger {
                 return
             }
             self.pendingCompletionID = nil
+            let generation = self.stopGeneration
             self.drainInFlight = false
             self.activeToken = nil
             self.workPending = false
             self.stateLock.unlock()
-            // Re-offer through the SAME gates: authorization and cancellation are re-read.
-            self.triggerDrainIfPermitted()
+            // Re-offer through the SAME gates, gated on the generation read atomically with the
+            // slot clearing: a stop in this window refuses the follow-up.
+            preReofferHookForTesting?()
+            self.triggerDrainIfPermitted(matchingGeneration: generation)
         }
         stateLock.lock()
         let eraAlive = activeToken == token
@@ -255,6 +285,7 @@ final class VoiceSharingUploadTrigger {
             return
         }
         let pending = workPending
+        let generation = stopGeneration
         drainInFlight = false
         activeToken = nil
         workPending = false
@@ -262,7 +293,7 @@ final class VoiceSharingUploadTrigger {
         drainTaskStorage = nil
         stateLock.unlock()
         if pending || refused {
-            triggerDrainIfPermitted()
+            triggerDrainIfPermitted(matchingGeneration: generation)
         }
     }
 

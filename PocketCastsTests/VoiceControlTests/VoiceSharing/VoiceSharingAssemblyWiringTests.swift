@@ -1471,9 +1471,14 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
 
         let callbackAboutToFire = DispatchSemaphore(value: 0)
         let releaseCallback = DispatchSemaphore(value: 0)
+        // The gate must not silently continue: a timeout is recorded and asserted.
+        var gateTimedOut = false
+        let gateLock = NSLock()
         chain.scheduler.ownerCompletionFireGateForTesting = {
             callbackAboutToFire.signal()
-            _ = releaseCallback.wait(timeout: .now() + 20)
+            if releaseCallback.wait(timeout: .now() + 20) == .timedOut {
+                gateLock.lock(); gateTimedOut = true; gateLock.unlock()
+            }
         }
         defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
 
@@ -1494,18 +1499,114 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         try await Task.sleep(nanoseconds: 150_000_000) // let the refusal register
         transport.stopHolding()
         transport.releaseHeldPass()
-        // The owner finishes and reaches the fire gate: the callback is ABOUT to be taken.
-        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        // ORDER (reviewer b8991889): wait for the CALLBACK to be taken first (ownerHeld can only
+        // fire AFTER the gate releases, since the owner's defer is blocked in the gate), then
+        // cancel inside the window, then release.
         XCTAssertEqual(callbackAboutToFire.wait(timeout: .now() + 20), .success,
                        "the barrier proves the callback is taken, not guessed")
-        // Cancel INSIDE the taken-callback window.
         chain.trigger.cancelForTesting()
         releaseCallback.signal()
-        for _ in 0..<80 where transport.attemptCount < 1 { break }
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success, "the owner drain finishes")
+        gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
+        XCTAssertFalse(timedOut, "the fire gate must not have driven the race by timing out")
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(transport.attemptCount, 1,
                        "the stale callback must not re-offer after cancellation")
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
+    }
+
+    /// STOP BETWEEN COMPLETION AND RE-OFFER (reviewer b8991889 #2): the completion callback
+    /// clears the slot under the lock, unlocks, THEN re-offers. A stop in that window must
+    /// refuse the follow-up via the cancellation generation read atomically with slot clearing.
+    /// The fire gate holds the callback BEFORE it runs; we stop the trigger while it is held
+    /// (bumping the generation), then release: the callback's era check makes it a no-op, and
+    /// even a callback that passed its era check would be refused at re-offer admission.
+    func test_aStopBetweenCompletionAndItsReofferRefusesTheFollowUp() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let callbackAboutToFire = DispatchSemaphore(value: 0)
+        let releaseCallback = DispatchSemaphore(value: 0)
+        var gateTimedOut = false
+        let gateLock = NSLock()
+        chain.scheduler.ownerCompletionFireGateForTesting = {
+            callbackAboutToFire.signal()
+            if releaseCallback.wait(timeout: .now() + 30) == .timedOut {
+                gateLock.lock(); gateTimedOut = true; gateLock.unlock()
+            }
+        }
+        defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 30)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        // Refused arrival: the trigger registers for the owner's completion with workPending set
+        // (a second arrival coalesces into the same era).
+        chain.trigger.triggerDrainIfPermitted()
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        // The callback is TAKEN (gate), then we stop INSIDE the completion window.
+        XCTAssertEqual(callbackAboutToFire.wait(timeout: .now() + 30), .success)
+        chain.trigger.cancelForTesting()
+        releaseCallback.signal()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success, "the owner drain finishes")
+        gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
+        XCTAssertFalse(timedOut, "the fire gate must not have driven the race by timing out")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(transport.attemptCount, 1,
+                       "the follow-up decided by the completed era must be refused after stop")
+        XCTAssertFalse(chain.trigger.isDrainingForTesting, "and no new era may open")
+    }
+
+    /// A callback whose drain was SUPERSEDED must not clobber the newer state (reviewer 4377e2bd):
+    /// after a cancellation, a fresh era must work independently of the old registration.
+    func test_aSupersededCallbacksFiringDoesNotClobberTheNewerDrain() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 30)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        // First arrival: refused, registers for owner completion.
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        // Cancel ends the first era; its registration becomes inert. Release the owner, then a
+        // fresh arrival must deliver normally despite the old registration having fired or not.
+        chain.trigger.cancelForTesting()
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        chain.trigger.triggerDrainIfPermitted()
+        for _ in 0..<120 where transport.attemptCount < 2 {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertEqual(transport.attemptCount, 2,
+                       "a fresh era after cancellation delivers normally (old registration inert)")
     }
 
     /// PUBLICATION PRECEDES REGISTRATION (reviewer 2a570a0b #1): by the time the busy refusal has
@@ -1523,7 +1624,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 20)
+            _ = done.wait(timeout: .now() + 30)
             ownerHeld.signal()
         }
         ownerThread.start()
@@ -1535,19 +1636,32 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                       "the registration identity is visible the moment the refusal returned")
         transport.stopHolding()
         transport.releaseHeldPass()
-        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
-        for _ in 0..<80 where transport.attemptCount < 2 {
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        for _ in 0..<120 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
         }
         XCTAssertGreaterThanOrEqual(transport.attemptCount, 2, "and the wakeup is not lost")
     }
 
-    /// A callback whose drain was SUPERSEDED must not clobber the newer state (reviewer 4377e2bd):
-    /// a second trigger arrival after the first was refused must survive the first callback.
-    func test_aSupersededCallbacksFiringDoesNotClobberTheNewerDrain() async throws {
+    /// THE EXACT RE-OFFER WINDOW (reviewer b8991889 #2, isolated): the callback runs with a live
+    /// era, clears the slot, and is paused immediately before re-offer admission. A stop() inside
+    /// that window bumps the generation, and the already-decided follow-up must be refused.
+    func test_aStopInTheReofferWindowRefusesTheAlreadyDecidedFollowUp() async throws {
         let transport = HeldTransport()
         let chain = makeTrigger(transport)
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let reofferWindowEntered = DispatchSemaphore(value: 0)
+        let closeReofferWindow = DispatchSemaphore(value: 0)
+        var hookTimedOut = false
+        let hookLock = NSLock()
+        chain.trigger.preReofferHookForTesting = {
+            reofferWindowEntered.signal()
+            if closeReofferWindow.wait(timeout: .now() + 30) == .timedOut {
+                hookLock.lock(); hookTimedOut = true; hookLock.unlock()
+            }
+        }
+        defer { chain.trigger.preReofferHookForTesting = nil }
 
         let ownerHeld = DispatchSemaphore(value: 0)
         let ownerThread = Thread {
@@ -1556,28 +1670,44 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 _ = await chain.scheduler.drainOnce()
                 done.signal()
             }
-            _ = done.wait(timeout: .now() + 20)
+            _ = done.wait(timeout: .now() + 30)
             ownerHeld.signal()
         }
         ownerThread.start()
         XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
 
-        // First arrival: refused, registers for owner completion.
         chain.trigger.triggerDrainIfPermitted()
-        try await Task.sleep(nanoseconds: 100_000_000)
-        // Second arrival while the first waits: coalesced into workPending of the SAME era, so
-        // exercise the superseded path directly is not reachable from outside; instead cancel and
-        // re-trigger: the new era must work independently of the old registration.
-        chain.trigger.cancelForTesting()
+        try await Task.sleep(nanoseconds: 150_000_000)
         transport.stopHolding()
         transport.releaseHeldPass()
-        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        // The callback runs with a LIVE era and pauses in the re-offer window.
+        XCTAssertEqual(reofferWindowEntered.wait(timeout: .now() + 30), .success)
+        chain.trigger.cancelForTesting()  // bump the generation inside the window
+        closeReofferWindow.signal()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        hookLock.lock(); let timedOut = hookTimedOut; hookLock.unlock()
+        XCTAssertFalse(timedOut, "the window must not have been driven by timeout")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(transport.attemptCount, 1,
+                       "the follow-up decided before the stop must be refused")
+        XCTAssertFalse(chain.trigger.isDrainingForTesting, "and no new era opens")
+    }
+
+    /// STOP BEFORE THE TASK BODY STARTS (reviewer b8991889 #1): a cancelled task must not enter
+    /// drainOnce at all — the pre-entry check, not the post-await one, prevents the send.
+    func test_aStopBeforeTheTaskBodyStartsPreventsTheDrain() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
         chain.trigger.triggerDrainIfPermitted()
-        for _ in 0..<80 where transport.attemptCount < 2 {
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        XCTAssertEqual(transport.attemptCount, 2,
-                       "a fresh era after cancellation delivers normally (old registration inert)")
+        // Cancel immediately; the task body may not have been scheduled yet, so only a PRE-entry
+        // check can prevent the drain.
+        chain.trigger.cancelForTesting()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(transport.attemptCount, 0,
+                       "a cancelled trigger must never reach the transport")
+        XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
     }
 
     /// AUTHORIZATION IS RE-READ AT THE FOLLOW-UP: revocation between the arrival and the follow-up
