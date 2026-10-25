@@ -2069,6 +2069,54 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         }
     }
 
+    /// AN ORDINARY TURN THAT SETTLES WITH BUFFERED AUDIO BINDS OWNERSHIP, AND A SUCCESSOR'S STOP
+    /// CREATES ITS REPORT — executed through the real turn lifecycle, not by poking state.
+    ///
+    /// The state-only controls this replaces asserted the read-and-clear helpers directly, so the
+    /// production sequence (done -> audio still playing -> successor stops it -> report) was never
+    /// executed. Here turn A runs to `done` with audio payloads still outstanding, and the binding
+    /// is asserted as a consequence of that turn.
+    func testAnOrdinaryTurnWithBufferedAudioBindsPlaybackOwnershipAtDone() async throws {
+        // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
+        // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
+        // nothing (measured — the first version of this control failed for exactly that reason and
+        // was reporting on the silent-consume case, not the buffered-playback one).
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let turn = Task {
+            await sink.routeToCloud(
+                request: "x", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: nil, utteranceId: "u-settled"
+            )
+        }
+        _ = await turn.value
+
+        // THE PRODUCTION CONSEQUENCE: `done` with audio still outstanding binds the owner. An
+        // ordinary turn has NO interruption id, which is why gating the binding on one left this
+        // case with no producer at all.
+        let bound = await MainActor.run {
+            sink.interruptionStateForTesting.bufferedPlaybackOwnerRequestIdForTesting
+        }
+        XCTAssertEqual(
+            bound, "u-settled",
+            "a turn that settles with buffered audio must BIND ownership at done, so a later stop "
+            + "has a producer for its report"
+        )
+        let owesReport = await MainActor.run {
+            sink.interruptionStateForTesting.hasPendingReport
+        }
+        XCTAssertFalse(owesReport, "nothing is owed yet: the user has not stopped hearing it")
+    }
+
 }
 
 
@@ -5214,4 +5262,7 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
     func downloadStats() -> VoiceResponse { .silent }
     func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
     func timeSinceLastListen() -> VoiceResponse { .silent }
+
+    // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
+
 }

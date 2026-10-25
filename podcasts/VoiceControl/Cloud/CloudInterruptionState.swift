@@ -356,6 +356,13 @@ final class CloudInterruptionState: @unchecked Sendable {
         return current
     }
 
+    /// The request id of the bound buffered-playback owner, if any. Read-only, for controls that
+    /// must show the binding is a CONSEQUENCE of a real settled turn.
+    var bufferedPlaybackOwnerRequestIdForTesting: String? {
+        lock.lock(); defer { lock.unlock() }
+        return bufferedPlaybackOwner?.requestId
+    }
+
     /// Drop the binding without producing a report: the audio drained on its own, so the user
     /// heard the answer and nothing is owed.
     ///
