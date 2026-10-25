@@ -133,6 +133,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// selection is a new user act, and create-then-resume is the safe direction — resuming
     /// a conversation nobody opened would attach an utterance to someone else's history.
     private let conversationSelectionProvider: () -> CloudConversationSelection
+    /// Cross-turn interruption state: the retained follow-up and the pending report.
+    private let interruptionState: CloudInterruptionState
+
+    /// The turn socket currently open, so an ordering control can establish that a PRIOR turn is
+    /// genuinely in flight before it starts a successor. Without this the interruption path never
+    /// runs in a test and a control about interruption ordering passes vacuously.
+    @MainActor
+    var activeResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
     /// The origin the turn runs under, so a resume cannot cross an ended window.
 
     /// ONE pre-effect hold, used ONLY by controls to strike cancellation deterministically between
@@ -287,6 +295,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
+        // Interruption state (cloud-assistant.md → Interruption, spec c5fe3416): the retained
+        // follow-up and the pending report, held ACROSS turn boundaries. A default instance keeps
+        // direct-constructed test sinks working; production passes the service's one instance so
+        // two turns of the same app session share it.
+        interruptionState: CloudInterruptionState = CloudInterruptionState(),
         // Grace contract (token ownership holds): from the ADMITTED DISPATCH through done and the
         // actual drain/stop, the turn's window expiry is SUSPENDED and resumes EXACTLY ONCE when
         // the last hold releases. Identity is bound at acquisition (live generation only); release
@@ -310,6 +323,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.isConfigured = isConfigured
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
+        self.interruptionState = interruptionState
 
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
@@ -724,6 +738,53 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             onGracePlaybackHoldEnd?(predecessor)
         }
 
+        // INTERRUPT THE OPEN PRIOR SOCKET (cloud-assistant.md → Interruption, spec c5fe3416).
+        //
+        // Barge-in means the user spoke over an answer. That is a DIFFERENT act from a local
+        // supersede: it must tell the SERVER to stop generating and settle the turn as
+        // `interrupted`, on the prior turn's still-open socket, BEFORE that turn's terminal. The
+        // server ignores a post-terminal interrupt, so this is a one-shot send with no retry —
+        // `claimInterruptEmission` makes "one shot" a property of the state rather than of caller
+        // discipline, and a claim made after the terminal returns false.
+        //
+        // Ordering is load-bearing and deliberate: the claim + send happen BEFORE `cancel()` below.
+        // Cancelling first would retire the socket registration the frame needs (and could race
+        // the server's own terminal), turning every barge-in into a lost interrupt.
+        let priorRequestId = activeResultSocket?.requestId
+        let priorSocket = activeResultSocket
+        let priorWasLive = (activeTurn.map { !$0.isCancelled }) ?? false
+        // The turn THIS emission interrupts, if any. A refusal later in this turn's `error` branch
+        // must be attributed to it — naming the failing turn instead produces a report the server
+        // cannot apply, and (worse) overwrites a report that named the right turn.
+        var interruptedRequestIdForThisTurn: String?
+        if let priorRequestId, priorWasLive,
+           interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
+            interruptedRequestIdForThisTurn = priorRequestId
+            // Hold the interrupting utterance for THAT turn: it is the follow-up the contract
+            // requires to survive until the prior turn reaches a terminal acknowledgement.
+            interruptionState.hold(
+                request: request,
+                utteranceId: utteranceId,
+                origin: origin,
+                forRequestId: priorRequestId
+            )
+            if let priorSocket, let client = resultSendClient {
+                // AWAITED, because delivery IS the interruption: a fire-and-forget send could be
+                // scheduled after this turn retires the registration, which is how an interrupt
+                // becomes a silent no-op. Position is omitted until one is actually measured.
+                _ = await client.sendInterrupt(
+                    requestId: priorRequestId,
+                    playbackPositionMs: nil,
+                    via: priorSocket
+                )
+            } else {
+                // No transport to interrupt: the interruption never reached the server, so the
+                // follow-up must not be treated as held for an acknowledgement. Release it now and
+                // let this turn proceed as an ordinary new turn.
+                interruptionState.releaseUnsentHold(request: request)
+            }
+        }
+
         // Supersede any in-flight turn (double wake / barge-in) before touching
         // shared per-turn state. Only a turn that will actually run supersedes.
         let turnToken = CloudTurnToken()
@@ -803,6 +864,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             recentConversation: recentConversationProvider(),
             conversation: conversation
         )
+        // This turn's wire identity, used by the interruption state to bind an acknowledgement or a
+        // refusal to the follow-up it resolves.
+        let turnRequestId = turn.requestId
         // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
         // could re-drive it, and that retention IS what made replay possible: a completed or
         // possibly-submitted request left on the books is exactly what a replay path would find.
@@ -839,12 +903,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
 
+        // The pending interruption report rides THIS turn's authentication frame
+        // (cloud-assistant.md → Interruption, spec c5fe3416): taken once, so a turn attaches it a
+        // single time. Taken here — at the turn's own wire construction — rather than earlier, so a
+        // report cannot be consumed by a turn that never reaches the socket.
+        let pendingInterruptReport = interruptionState.takePendingReport()
         let routed = client.routeWithResultSocket(
             request: request,
             context: routeContext,
             turn: turn,
             sourceTranscript: sourceTranscript,
-            sourceLanguage: sourceLanguage
+            sourceLanguage: sourceLanguage,
+            pendingInterruptReport: pendingInterruptReport
         )
         // The turn's own result socket: sends bind to THIS registration, so a superseded turn's
         // late results can never ride a successor's socket.
@@ -937,6 +1007,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // action guard above; earlyClose classification follows below).
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     guard !turnToken.isCancelled else { break turnLoop }
+                    // INTERRUPTION, ACKNOWLEDGEMENT-FIRST ORDERING (cloud-assistant.md →
+                    // Interruption, spec c5fe3416): this `done` — even with `outcome: completed` —
+                    // IS the acknowledgement the retained follow-up was waiting for. The contract
+                    // forbids waiting for a second terminal or reopening the socket, so this is
+                    // settled here: record the pending report for the NEXT turn, and release the
+                    // held follow-up for submission on its own new socket. Both are idempotent;
+                    // the release returns non-nil exactly once, so two terminals cannot submit it
+                    // twice.
+                    recordInterruptionAcknowledgement(requestId: turnRequestId)
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
@@ -971,6 +1050,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // Task.cancel) classifies as an incomplete turn via the owner-cancel path
                     // below — never as a connection failure it did not observe.
                     guard !turnToken.isCancelled && !Task.isCancelled else { break turnLoop }
+                    // INTERRUPTION, REFUSAL-FIRST ORDERING (cloud-assistant.md → Interruption,
+                    // spec c5fe3416): a refusal before any terminal acknowledgement DISCARDS the
+                    // retained follow-up and retains the pending interruption report for a later
+                    // explicit user request. Never treat refusal as settlement, and never submit
+                    // the held utterance — so this is the one path that drops it.
+                    recordInterruptionRefusal(
+                        requestId: turnRequestId,
+                        interruptedRequestId: interruptedRequestIdForThisTurn,
+                        code: code
+                    )
                     // GRACE STOP ORDER: release waits for the ACTUAL stop this cancel requested
                     // (identity-bound). On a timeout the confirmed stop notification itself
                     // releases via the deferral record — never an unconfirmed resume.
@@ -1337,6 +1426,79 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// Reports an outcome through the turn's bound transport, keyed to the server-issued identity.
+    // MARK: - Interruption state transitions
+    //
+    // These are the two orderings of `cloud-assistant.md` → Interruption, and each is a single
+    // call so the sink cannot half-apply one. `CloudInterruptionState` owns the compare-and-set
+    // that makes each transition happen exactly once even if two terminals race.
+
+    /// The prior turn reached its terminal: release the held follow-up for submission on its own
+    /// socket, and retain the pending interruption report for the next turn.
+    ///
+    /// `done` counts as acknowledgement even with `outcome: completed` — the contract forbids
+    /// waiting for a second terminal — so this is called from the `done` branch only.
+    private func recordInterruptionAcknowledgement(requestId: String) {
+        let released = interruptionState.recordTerminalAcknowledgement(forRequestId: requestId)
+        if let released {
+            // The report names the INTERRUPTED turn, which is the turn whose held follow-up this
+            // acknowledgement resolves — not the turn that happened to complete. Recording the
+            // completing turn's id here was a real bug the ordering controls caught: the report
+            // then travelled to the following turn describing a turn nobody interrupted.
+            if let interruptedRequestId = released.interruptedRequestId {
+                interruptionState.recordPendingReport(
+                    CloudInterruptionState.PendingReport(
+                        requestId: interruptedRequestId,
+                        playbackPositionMs: nil
+                    )
+                )
+            }
+            pendingFollowUpSubmission = released
+            FileLog.shared.addMessage(
+                "[VoicePipeline] interruption acknowledged for turn \(requestId) — follow-up "
+                + "\(released.utteranceId) released for submission"
+            )
+        }
+    }
+
+    /// The prior turn was REFUSED before any terminal: discard the held follow-up, keep the report.
+    private func recordInterruptionRefusal(
+        requestId: String,
+        interruptedRequestId: String?,
+        code: String
+    ) {
+        // The refusal discards the held follow-up and retains a report naming the INTERRUPTED turn.
+        // The server applies the report to already-settled history, so it must name a turn the
+        // server knows we interrupted — which is the interrupted turn, not the refused one.
+        let discarded = interruptionState.recordRefusal(
+            forRequestId: interruptedRequestId ?? requestId,
+            retainingReport: CloudInterruptionState.PendingReport(
+                requestId: interruptedRequestId ?? requestId,
+                playbackPositionMs: nil
+            )
+        )
+        if discarded {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] interruption refused for turn \(requestId) (code=\(code)) — "
+                + "held follow-up discarded, pending report retained"
+            )
+        }
+    }
+
+    /// Take the follow-up released by an interruption acknowledgement. Read-and-clear, so the
+    /// submitter submits it exactly once.
+    @MainActor
+    func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp? {
+        let released = pendingFollowUpSubmission
+        pendingFollowUpSubmission = nil
+        return released
+    }
+
+    /// Take the pending interruption report for the next turn's authentication frame.
+    @MainActor
+    func takePendingInterruptionReport() -> CloudInterruptionState.PendingReport? {
+        interruptionState.takePendingReport()
+    }
+
     /// The consumer surface also fires (generic, transport-less contexts).
     private func reportResult(
         _ result: OperationResult,
@@ -1443,6 +1605,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
     private var activeResultSocket: AppOperationResultSocket?
+    /// The follow-up released by an interruption acknowledgement, waiting to be submitted on its
+    /// own socket. Read-and-clear by the submitter so it is submitted exactly once.
+    @MainActor private(set) var pendingFollowUpSubmission: CloudInterruptionState.ReleasedFollowUp?
 
     /// Exactly-once records for server-identified operations (wire contract rev da327e624).
     /// Nil = this sink has no journal (assembly wires the durable store).

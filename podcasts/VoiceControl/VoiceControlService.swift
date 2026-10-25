@@ -692,6 +692,32 @@ class VoiceControlService: ObservableObject {
     /// against the wrong turn.
     typealias ParsedIntentObserver = @MainActor (any VoiceIntent) -> Void
 
+    /// Submit the follow-up an interruption acknowledgement released
+    /// (`cloud-assistant.md` → Interruption, spec c5fe3416).
+    ///
+    /// The contract's rule is precise and this follows it literally: after the prior turn's
+    /// terminal acknowledgment the retained utterance is submitted ONCE, on its OWN socket, as a
+    /// new turn. It is not submitted inline from inside the settling turn (that would ride the old
+    /// socket, which the contract forbids), and it is never retried — the acknowledgement is the
+    /// only trigger, and `takeReleasedInterruptionFollowUp` hands it out exactly once.
+    ///
+    /// The utterance keeps its own admitted identity and origin from when the user spoke it, so
+    /// admission, conversation continuation and rendering all treat it as the user's real
+    /// utterance rather than a synthetic one.
+    private func submitRetainedFollowUpIfAny() async {
+        // The sink's read-and-clear is main-actor isolated (its state is the sink's), so the take
+        // hops there rather than reading across the actor.
+        let released = await MainActor.run { executor.takeReleasedInterruptionFollowUp() }
+        guard let released else { return }
+        FileLog.shared.addMessage(
+            "[VoicePipeline] submitting retained follow-up \(released.utteranceId) on its own socket"
+        )
+        await handleRoutingInput(
+            .english(transcript: released.request, utteranceId: released.utteranceId),
+            origin: released.origin
+        )
+    }
+
     func handleRoutingInput(
         _ input: IntentRoutingInput,
         origin: Int? = nil,
@@ -790,6 +816,13 @@ class VoiceControlService: ObservableObject {
                 return
             }
             let response = await executor.execute(intent, preparedObserver: preparedObserver)
+            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
+            // When the turn that just settled was interrupted, the interrupting utterance was held
+            // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
+            // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary
+            // capture path so it is admitted, routed and rendered like any other utterance. It is
+            // never submitted inline from inside this turn, and never retried.
+            await submitRetainedFollowUpIfAny()
             // Do not reset the window unconditionally here. A cloud route's
             // completion is the executor's to attribute — it already does so
             // against the generation the route was issued under

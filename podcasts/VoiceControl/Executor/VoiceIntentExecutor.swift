@@ -131,6 +131,20 @@ class VoiceIntentExecutor {
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
     /// transition is atomic with the manager's origin clear (reviewer a2723c92).
+    /// The follow-up an interruption acknowledgement released, waiting to be submitted on its own
+    /// socket (cloud-assistant.md → Interruption, spec c5fe3416). Read-and-clear: the submitter
+    /// takes it once, so a follow-up can never be submitted twice.
+    @MainActor
+    func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp? {
+        (cloudRouteSink as? CloudRouteSink)?.takeReleasedInterruptionFollowUp()
+    }
+
+    /// The pending interruption report for the next turn's authentication frame. Taken once.
+    @MainActor
+    func takePendingInterruptionReport() -> CloudInterruptionState.PendingReport? {
+        (cloudRouteSink as? CloudRouteSink)?.takePendingInterruptionReport()
+    }
+
     @MainActor
     func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
         (cloudRouteSink as? CloudRouteSink)?.retireRetainedDispatchesIfWindowChanged(to: origin)

@@ -121,7 +121,11 @@ final class CloudRouteClient {
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
         sourceTranscript: String? = nil,
-        sourceLanguage: String? = nil
+        sourceLanguage: String? = nil,
+        // The pending interruption report for this turn's AUTHENTICATION frame
+        // (cloud-assistant.md → Interruption): the server applies it to already-settled history
+        // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
         let lifetime = TurnSocketLifetime()
@@ -145,7 +149,8 @@ final class CloudRouteClient {
             resultSocket: socket,
             lifetime: lifetime,
             sourceTranscript: sourceTranscript,
-            sourceLanguage: sourceLanguage
+            sourceLanguage: sourceLanguage,
+            pendingInterruptReport: pendingInterruptReport
         )
         return (stream, socket)
     }
@@ -249,11 +254,12 @@ final class CloudRouteClient {
         resultSocket: AppOperationResultSocket?,
         lifetime: TurnSocketLifetime? = nil,
         sourceTranscript: String? = nil,
-        sourceLanguage: String? = nil
+        sourceLanguage: String? = nil,
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport)
             }
             continuation.onTermination = { [lifetime] reason in
                 task.cancel()
@@ -403,6 +409,48 @@ final class CloudRouteClient {
         return await Self.dispatch(frame, on: boundTask, requestId: socket.requestId)
     }
 
+    /// Sends the `interrupt` control frame on the PRIOR turn's still-open socket
+    /// (`docs/specs/cloud-assistant.md` → Interruption, spec ruling c5fe3416).
+    ///
+    /// The ordering is not negotiable and is not retried: the server acts on an interrupt only
+    /// while the named turn is live, and IGNORES one that arrives after that turn's terminal. So a
+    /// send that loses the race is gone — there is no queue and no second attempt, which is why the
+    /// caller claims the one shot (`CloudInterruptionState.claimInterruptEmission`) before reaching
+    /// here.
+    ///
+    /// `playbackPositionMs` is deliberately optional: the contract calls it untrusted reported
+    /// progress, so an unmeasured position is OMITTED rather than sent as zero.
+    func sendInterrupt(
+        requestId: String,
+        playbackPositionMs: Int64?,
+        via socket: AppOperationResultSocket
+    ) async -> AppOperationResultSendReport {
+        liveSocketsLock.lock()
+        let entry = liveSockets[socket.requestId]
+        let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
+        liveSocketsLock.unlock()
+        guard let boundTask else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] interrupt undelivered: registration retired for turn \(socket.requestId)"
+            )
+            return .undelivered
+        }
+        var json: [String: Any] = ["type": "interrupt", "request_id": requestId]
+        if let playbackPositionMs { json["playback_position_ms"] = playbackPositionMs }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: json)
+            guard let text = String(data: data, encoding: .utf8) else { return .undelivered }
+            try await boundTask.send(.string(text))
+            FileLog.shared.addMessage(
+                "[CloudRoute] interrupt sent for turn \(requestId) positionMs=\(playbackPositionMs.map(String.init) ?? "omitted")"
+            )
+            return .submitted
+        } catch {
+            FileLog.shared.addMessage("[CloudRoute] interrupt send failed for turn \(requestId): \(error)")
+            return .undelivered
+        }
+    }
+
     private static func dispatch(_ frame: AppOperationResultFrame, on socketTask: WebSocketTasking, requestId: String) async -> AppOperationResultSendReport {
         let json = frame.jsonFrame()
         do {
@@ -446,7 +494,8 @@ final class CloudRouteClient {
         resultSocket: AppOperationResultSocket?,
         lifetime: TurnSocketLifetime? = nil,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
@@ -548,10 +597,28 @@ final class CloudRouteClient {
         // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
         // producer is separate work; until then, automatic retry of a turn is not available.
 
+        // PENDING INTERRUPTION REPORT ON THE AUTH FRAME (cloud-assistant.md → Interruption, spec
+        // c5fe3416): the contract says to report the interruption in the NEXT turn's
+        // authentication frame, and the server applies it to already-settled history BEFORE
+        // assembling model input. It rides here, not the turn body, because `CloudRouteRequestBuilder`
+        // is shared with the envelope path and history correction is an authentication-time
+        // concern. `playback_position_ms` is omitted when unmeasured — the contract makes it
+        // optional and untrusted reported progress, so it is never invented.
+        let finalAuthFrame: [String: Any] = {
+            guard let pendingInterruptReport else { return authFrame }
+            var frame = authFrame
+            var report: [String: Any] = ["request_id": pendingInterruptReport.requestId]
+            if let position = pendingInterruptReport.playbackPositionMs {
+                report["playback_position_ms"] = position
+            }
+            frame["interrupts"] = report
+            return frame
+        }()
+
         do {
             // Send authentication frame. The task's text message is a String,
             // so the frame is serialized to JSON text here.
-            let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
+            let authJSON = try JSONSerialization.data(withJSONObject: finalAuthFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
                 FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
                 continuation.yield(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
