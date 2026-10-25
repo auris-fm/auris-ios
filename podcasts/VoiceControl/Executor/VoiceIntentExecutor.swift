@@ -232,6 +232,13 @@ class VoiceIntentExecutor {
             // start the owner's turn even if it reaches the sink.
             let ownership = cloudRouteSink.beginDispatch(utteranceId: cr.utteranceId, origin: cr.generation)
             let ownsEffects = ownership.ownsDispatch
+            // OBSERVABLE DISPATCH OWNERSHIP (nil in production). "Submitted exactly once" is not a
+            // property the outbound frame count can attribute: it cannot say WHICH of two candidate
+            // dispatches won, or whether the loser was refused or never ran. This reports the
+            // executor's own admission decision so a control can assert both sides.
+            VoiceControlTestObservers.dispatchOwnership?(
+                "\(cr.utteranceId ?? "-"):\(ownsEffects ? "owner" : "duplicate")"
+            )
             let result = await cloudRouteSink.routeToCloud(
                 request: cr.request,
                 tier: cr.tier,

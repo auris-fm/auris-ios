@@ -74,11 +74,17 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     }
 
     private let terminals = TerminalRecorder()
+    /// Bridge takes, recorded by the service via `onFollowUpTakenForTesting`.
+    private let bridgeTakes = TerminalRecorder()
+    /// Dispatch ownership decisions, recorded by the executor: "utterance:owner|duplicate".
+    private let dispatches = TerminalRecorder()
     /// Records that the bridge actually ran, with the utterance it carried.
     private let bridgeEntries = TerminalRecorder()
 
     override func setUp() {
         super.setUp()
+        VoiceControlTestObservers.dispatchOwnership = { [dispatches] value in dispatches.record(value, .routed) }
+        VoiceControlTestObservers.followUpTaken = { [bridgeTakes] value in bridgeTakes.record(value, .routed) }
         firstTurnLatch = HoldLatch()
         defaultsSuite = "bridge_\(UUID().uuidString)"
         UserDefaults(suiteName: defaultsSuite)!
@@ -86,6 +92,8 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     }
 
     override func tearDown() {
+        VoiceControlTestObservers.dispatchOwnership = nil
+        VoiceControlTestObservers.followUpTaken = nil
         // UNCONDITIONAL RELEASE: a case that fails mid-way must not leave a turn parked forever
         // and wedge later cases in this file.
         firstTurnLatch.release()
@@ -362,32 +370,49 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "A's queued link must reach a terminal after the acknowledgement; terminals=\(self.terminals.all)"
         )
 
-        // B HAS EXACTLY ONE LINK, AND IT IS OBSERVABLE. The earlier version of this case assumed
-        // a second one (a recursive bridge dispatch alongside the queued turn) and asserted its
-        // existence — which failed. Tracing showed the truth: `emitBargeIn` runs at B's ADMISSION
-        // and retains the utterance there; A then settles; B's single queued link dispatches as
-        // `isRetainedFollowUpSubmission`, so it carries no interruption of its own and submits once.
-        // There is no third task, and asserting one was the reviewer's point about the snapshot
-        // outrunning the work, not about a second owner existing.
-        // B's link settles AFTER A's, so it must be awaited: stopping at A's terminal would be the
-        // same premature snapshot the reviewer flagged.
-        let bSettled = await waitUntil(timeout: 20) { !self.terminals.outcomes(for: "u-barge").isEmpty }
+        // THE BRIDGE, OBSERVED DIRECTLY. The reviewer's point stands: `onInputTerminal` fires in
+        // the ENQUEUE task's defer, so a recursive `handleRoutingInput` from the bridge produces no
+        // second terminal entry — a count of terminals cannot show whether the bridge ran. These
+        // read the bridge's own take instead.
         XCTAssertTrue(
-            bSettled,
-            "B's queued link must reach a terminal; all=\(terminals.all)"
+            bridgeTakes.contains("u-barge@origin2"),
+            "the acknowledgement must release B TO THE SERVICE BRIDGE; measured takes="
+            + "\(bridgeTakes.all)"
         )
-        let bOutcomes = terminals.outcomes(for: "u-barge")
         XCTAssertEqual(
-            bOutcomes, [.routed],
-            "B's link must settle as exactly one ROUTED dispatch (one link, one submission); "
-            + "measured=\(bOutcomes) all=\(terminals.all)"
+            bridgeTakes.all.filter { $0.hasPrefix("u-barge@") }.count, 1,
+            "exactly one bridge take for one acknowledgement — a second take would be a second "
+            + "owner; measured=\(bridgeTakes.all)"
         )
 
-        // THE REAL CLAIM: one submission, counted after every link has settled.
+        // B'S DISPATCHES, BOTH OF THEM. Two candidate owners exist: the bridge's recursive
+        // dispatch and B's own queued link. Exactly one may reach the wire. This is measured from
+        // the executor's own ownership decision, which is where "one submission" is actually
+        // decided — the outbound count alone would not say WHICH dispatch won.
+        let bridgeOwned = await waitUntil(timeout: 20) { self.dispatches.all.contains("u-barge:owner") }
+        XCTAssertTrue(
+            bridgeOwned,
+            "one dispatch of B must own the submission; measured=\(self.dispatches.all)"
+        )
+        let duplicates = await waitUntil(timeout: 20) {
+            self.dispatches.all.contains("u-barge:duplicate")
+        }
+        XCTAssertTrue(
+            duplicates,
+            "B's OTHER dispatch (its queued link) must be observed as a DUPLICATE rather than "
+            + "vanish — it is the second owner the review named, and the executor's admission dedup "
+            + "is what currently makes submission single; measured=\(self.dispatches.all)"
+        )
+        XCTAssertEqual(
+            dispatches.all.filter { $0 == "u-barge:owner" }.count, 1,
+            "exactly one owning dispatch; measured=\(dispatches.all)"
+        )
+
+        // THE OUTBOUND CLAIM, counted after both terminals and both dispatches.
         XCTAssertEqual(
             authFrames(for: "u-barge").count, 1,
-            "the follow-up must be submitted EXACTLY once; two submission owners is the defect "
-            + "reviewer eaa8c06a named; frames=\(allFrames()) outcomes=\(bOutcomes)"
+            "the follow-up must be submitted EXACTLY once; frames=\(allFrames()) "
+            + "dispatches=\(dispatches.all)"
         )
         XCTAssertEqual(
             interruptFrames().count, 1,

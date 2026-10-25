@@ -773,6 +773,11 @@ class VoiceControlService: ObservableObject {
         // The sink's read-and-clear is main-actor isolated (its state is the sink's), so the take
         // hops there rather than reading across the actor.
         let released = await MainActor.run { executor.takeReleasedInterruptionFollowUp() }
+        if let released {
+            VoiceControlTestObservers.followUpTaken?(
+                "\(released.utteranceId)@origin\(released.origin.map(String.init) ?? "n")"
+            )
+        }
         guard let released else { return }
         FileLog.shared.addMessage(
             "[VoicePipeline] submitting retained follow-up \(released.utteranceId) on its own socket"
