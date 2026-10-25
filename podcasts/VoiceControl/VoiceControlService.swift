@@ -410,6 +410,9 @@ class VoiceControlService: ObservableObject {
     /// TEST-ONLY: barrier between the grace reads and lock acquisition. Nil in production.
     var captureBeforeAcquisitionBarrierForTesting: (() -> Void)?
 
+    /// TEST-ONLY: barrier between the capture's return and the nil-capture guard. Nil in production.
+    var enqueueAfterCaptureForTesting: (() -> Void)?
+
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
         origin: Int? = nil,
@@ -423,6 +426,11 @@ class VoiceControlService: ObservableObject {
             // callback, never after the queue wait — and the lock then guards only the
             // listening check, epoch and chain.
             let capture = self.captureRoutingOrigin(utteranceId: input.utteranceId)
+            // TEST-ONLY (review ece440bc): fires AFTER the capture returns and BEFORE the
+            // nil-capture guard — the exact stop/restart window the guard owns. A control parks
+            // the enqueue here and restarts the service, so the guard's refusal is exercised
+            // against a lock-time listening check the restart has made true. Nil in production.
+            enqueueAfterCaptureForTesting?()
             // REVIEW 47328768: a nil capture means the turn was ALREADY not listening at capture
             // time. Refuse immediately: falling through to the lock-time `isListening` check lets
             // a stop/restart between the two checks pass a callback whose origin reads never ran,

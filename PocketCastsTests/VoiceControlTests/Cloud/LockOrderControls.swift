@@ -73,10 +73,18 @@ final class LockOrderControls: XCTestCase {
         service.captureBeforeAcquisitionBarrierForTesting = nil
     }
 
-    /// STOPPED-CAPTURE CHARACTERIZATION (review e89e00ec/7443c3ea): documents that a capture taken
-    /// while stopped returns nil. This is a characterization of the capture operation, NOT proof of
-    /// the enqueue refusal — the refusal itself is the `guard let capture else { return false }`
-    /// guard in `enqueueRoutingInput`, verified by source review and the automated review.
+    /// STOPPED-CAPTURE REFUSAL, through the REAL enqueue entry (review 47328768/ece440bc):
+    /// drives `asrEngine.onRoutingInput` — the callback the ASR engine actually invokes — so the
+    /// control exercises `enqueueRoutingInput`'s `guard let capture else { return false }` guard,
+    /// not the capture operation in isolation. The stop/restart race is deterministic: the
+    /// service is stopped when the callback's capture runs (so the capture is nil), the
+    /// post-capture barrier parks the enqueue BETWEEN the capture's return and the guard, and
+    /// while it is parked the gate conditions flip to restart the service — making the LOCK-TIME
+    /// `isListening` recheck the enqueue would fall through to read TRUE. With the guard present
+    /// the enqueue refuses on the nil capture (returns false). Deleting the guard falls through
+    /// to that true recheck, the late callback whose origin reads ran while stopped is admitted,
+    /// and the control fails. No restart-timing luck is involved: the restart completes BEFORE
+    /// the parked enqueue reaches the guard.
     @MainActor
     func testAStopRestartBetweenCaptureAndLockCheckRefusesTheLateCallback() async throws {
         let session = FakeAudioSessionControlling()
@@ -92,33 +100,60 @@ final class LockOrderControls: XCTestCase {
             .buildVoiceControlService(audioSession: session, conditionMonitor: conditionMonitor, capture: SucceedingCapture())!
         service.startIfAllowed()
         await waitUntilListening(timeout: 5) { service.isListening }
-        XCTAssertTrue(service.isListening, "the control requires a listening service")
+        XCTAssertTrue(service.isListening, "premise: the control needs a listening service")
 
-        // THE RACE, deterministic: stop() lands, the capture runs (returns nil — not listening at
-        // capture time), then the restart makes the lock-time isListening TRUE again. The enqueue
-        // path must refuse on the nil capture instead of falling through to the restart-made-true
-        // lock-time check.
+        // The restart mechanism is proven BEFORE it is needed: the gate republishes .listening
+        // when the monitored context flips, and `start(in:)` runs against the SucceedingCapture.
         service.stop()
-        let nilCapture = service.captureRoutingOrigin(utteranceId: "utterance-stop-restart")
-        XCTAssertNil(nilCapture,
-                     "a capture taken while stopped is nil — enqueue must refuse it rather than "
-                         + "fall through to a restart-made-true lock-time check")
-        // The restart half of the race: attempt to relisten (best effort — the simulator's
-        // acquisition cycle does not always re-confirm after a release). Whether or not the
-        // restart lands, the refusal the guard provides is already proven: the capture was nil
-        // at stop-time, and enqueue refuses nil captures BEFORE any lock-time listening check,
-        // so a restart landing between the two checks cannot admit this late callback.
-        for _ in 0..<3 {
-            service.startIfAllowed()
-            let deadline = Date().addingTimeInterval(2)
-            while !service.isListening && Date() < deadline {
-                try? await Task.sleep(nanoseconds: 20_000_000)
-            }
-            if service.isListening { break }
+        conditionMonitor.context = .none
+        conditionMonitor.context = .appInForeground
+        let proofDeadline = Date().addingTimeInterval(5)
+        while !service.isListening && Date() < proofDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        // The nil capture is the discriminating fact: the guard refuses regardless of what the
-        // later lock-time isListening reads.
-        XCTAssertTrue(nilCapture == nil, "the stopped-time capture is nil")
+        XCTAssertTrue(service.isListening, "premise: the context flip must deterministically restart the service")
+        service.stop()
+
+        // Park the REAL enqueue AFTER the capture returns (nil — the service is stopped) and
+        // BEFORE the nil-capture guard, holding no lock.
+        let parked = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        service.enqueueAfterCaptureForTesting = {
+            parked.signal()
+            _ = release.wait(timeout: .now() + 10)
+        }
+
+        let input = IntentRoutingInput(
+            sourceTranscript: "late turn", sourceLanguage: nil,
+            routerTranscript: "late turn", translationKind: .none, selection: nil,
+            utteranceId: "utterance-stop-restart")
+        let enqueueResult = Task.detached { () -> Bool in
+            // The REAL entry the ASR engine invokes (off-main, as in production).
+            service.asrEngineForTesting.onRoutingInput?(input) ?? false
+        }
+
+        // Bounded wait for the park without blocking main.
+        let isParked = await Task.detached { parked.wait(timeout: .now() + 5) == .success }.value
+        XCTAssertTrue(isParked, "the late callback's enqueue must park between the capture and the guard")
+
+        // THE RESTART, while the enqueue is parked between its capture and its guard: the
+        // lock-time listening recheck the guard protects against will read TRUE.
+        conditionMonitor.context = .none
+        conditionMonitor.context = .appInForeground
+        let restartDeadline = Date().addingTimeInterval(5)
+        while !service.isListening && Date() < restartDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(service.isListening, "the deterministic restart must land while the late callback is parked")
+
+        // Release: the guard must refuse on the nil capture regardless of the restart-made-true
+        // lock-time listening state.
+        release.signal()
+        service.enqueueAfterCaptureForTesting = nil
+        let refused = await enqueueResult.value
+        XCTAssertFalse(refused,
+                       "a late callback whose origin reads ran while stopped must be refused by the "
+                           + "nil-capture guard even though the restart made the lock-time listening check true")
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {
