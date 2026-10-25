@@ -125,7 +125,8 @@ final class CloudRouteClient {
         // The pending interruption report for this turn's AUTHENTICATION frame
         // (cloud-assistant.md → Interruption): the server applies it to already-settled history
         // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
-        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
         let lifetime = TurnSocketLifetime()
@@ -150,7 +151,8 @@ final class CloudRouteClient {
             lifetime: lifetime,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
-            pendingInterruptReport: pendingInterruptReport
+            pendingInterruptReport: pendingInterruptReport,
+            onReportAttached: onReportAttached
         )
         return (stream, socket)
     }
@@ -255,11 +257,12 @@ final class CloudRouteClient {
         lifetime: TurnSocketLifetime? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
-        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onReportAttached: onReportAttached)
             }
             continuation.onTermination = { [lifetime] reason in
                 task.cancel()
@@ -495,7 +498,8 @@ final class CloudRouteClient {
         lifetime: TurnSocketLifetime? = nil,
         sourceTranscript: String?,
         sourceLanguage: String?,
-        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) async -> Bool {
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
@@ -635,6 +639,15 @@ final class CloudRouteClient {
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
             try await wsTask.send(.string(authText))
+
+            // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
+            // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before
+            // this point, so the correction survives for the next attempt instead of being
+            // destroyed by the attempt that failed. `confirmReportAttached` is identity-checked, so
+            // a newer report recorded meanwhile is not lost by this late confirmation.
+            if let pendingInterruptReport {
+                await onReportAttached?(pendingInterruptReport.requestId)
+            }
 
             // Written by the receive loop and read by the timeout task, so the
             // flag is lock-protected rather than a plain `Bool` shared across

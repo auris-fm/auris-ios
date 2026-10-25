@@ -139,71 +139,102 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
 
     // MARK: - The state machine under test (unit level)
 
-    /// Both transitions are compare-and-set, so a racing pair of terminals resolves the follow-up
-    /// exactly once. This is the property the ordering controls below depend on.
-    func testAcknowledgementReleasesTheFollowUpExactlyOnce() {
+    /// THE BINDING (reviewer ff00457c item 2): a terminal for a turn OTHER than the interrupted one
+    /// must not release the follow-up. The earlier version released whenever anything was held, so
+    /// an unrelated turn's success authorised a follow-up the user had addressed elsewhere.
+    func testATerminalForAnUnrelatedTurnReleasesNothing() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
         XCTAssertTrue(state.hold(request: "next one", utteranceId: "u-2", origin: 1, forRequestId: "turn-A"))
 
-        let first = state.recordTerminalAcknowledgement(forRequestId: "turn-A")
-        XCTAssertEqual(first?.request, "next one", "the acknowledgement must release the held follow-up")
-        XCTAssertEqual(first?.utteranceId, "u-2")
-        let second = state.recordTerminalAcknowledgement(forRequestId: "turn-A")
-        XCTAssertNil(second, "a second terminal must not release the same follow-up again")
-
-        // A REPEATED INTERRUPT SEND must be refused too. Zeroing the in-flight marker on every
-        // terminal would let a second interrupt be sent for a turn whose terminal already landed —
-        // the server ignores those, so the claim would be a lie about an effect that cannot happen.
-        // The first version of this control missed that: a mutant that kept the marker alive
-        // (and so re-opened the send) survived, which is why this case is here.
-        XCTAssertFalse(state.hasOpenInterrupt(forRequestId: "turn-A"), "premise: the interrupt is closed")
-        XCTAssertFalse(
-            state.claimInterruptEmission(forRequestId: "turn-A"),
-            "a post-terminal interrupt claim must be refused, but the state allowed it"
+        XCTAssertNil(
+            state.recordTerminalAcknowledgement(forRequestId: "turn-B"),
+            "turn B's terminal must not release the follow-up held for turn A"
         )
-    }
-
-    /// Refusal-first: the follow-up is DISCARDED and cannot be submitted even if an
-    /// acknowledgement arrives afterwards (the contract says a late terminal cannot resurrect it).
-    func testRefusalDiscardsTheFollowUpAndRetainsTheReport() {
-        let state = CloudInterruptionState()
-        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertTrue(state.hold(request: "next one", utteranceId: "u-2", origin: 1, forRequestId: "turn-A"))
-
-        XCTAssertTrue(
-            state.recordRefusal(
-                forRequestId: "turn-A",
-                retainingReport: .init(requestId: "turn-A", playbackPositionMs: nil)
-            ),
-            "the refusal must be the transition that discarded the follow-up"
-        )
-        XCTAssertNil(state.heldFollowUpForTesting, "the follow-up must be discarded, not kept")
         XCTAssertEqual(
-            state.pendingReportForTesting?.requestId, "turn-A",
-            "the pending interruption report is retained for a later explicit user request"
+            state.heldFollowUpForTesting?.utteranceId, "u-2",
+            "the follow-up must still be held for A after B settled"
         )
+
+        // And A's own terminal does release it, exactly once.
+        let released = state.recordTerminalAcknowledgement(forRequestId: "turn-A")
+        XCTAssertEqual(released?.interruptedRequestId, "turn-A")
         XCTAssertNil(
             state.recordTerminalAcknowledgement(forRequestId: "turn-A"),
-            "a terminal after a refusal must not resurrect the discarded follow-up"
+            "a second terminal for A must not release the same follow-up again"
         )
     }
 
-    /// The interrupt is one-shot: a second claim for the same turn is refused, and a claim after a
-    /// terminal is refused too (the server ignores post-terminal interrupts, so sending would be a
-    /// lie about what the server will act on).
-    func testInterruptEmissionIsOneShotAndClosedByTerminal() {
+    /// SEQUENTIAL INTERRUPTIONS (reviewer item 3): resolving one must not lock out the next.
+    func testACompletedInterruptionDoesNotBlockTheNextOne() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertFalse(state.claimInterruptEmission(forRequestId: "turn-A"), "one shot only")
+        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, forRequestId: "turn-A"))
+        XCTAssertNotNil(state.recordTerminalAcknowledgement(forRequestId: "turn-A"))
 
-        let other = CloudInterruptionState()
-        XCTAssertTrue(other.claimInterruptEmission(forRequestId: "turn-A"))
-        _ = other.recordTerminalAcknowledgement(forRequestId: "turn-A")
-        XCTAssertFalse(
-            other.claimInterruptEmission(forRequestId: "turn-A"),
-            "a claim after the terminal must be refused — the server would ignore the frame"
+        // A NEW interruption, after the first resolved: this is the case a single "released" slot
+        // made permanently impossible.
+        XCTAssertTrue(
+            state.claimInterruptEmission(forRequestId: "turn-B"),
+            "a later turn must still be interruptible after an earlier interruption resolved"
         )
+        XCTAssertTrue(state.hold(request: "b-follow", utteranceId: "u-b", origin: 1, forRequestId: "turn-B"))
+        XCTAssertNotNil(state.recordTerminalAcknowledgement(forRequestId: "turn-B"))
+
+        // And a THIRD, after a refusal in between.
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-C"))
+        XCTAssertTrue(state.hold(request: "c-follow", utteranceId: "u-c", origin: 1, forRequestId: "turn-C"))
+        XCTAssertTrue(
+            state.recordRefusal(
+                forRequestId: "turn-C",
+                retainingReport: .init(requestId: "turn-C", playbackPositionMs: nil)
+            )
+        )
+        XCTAssertTrue(
+            state.claimInterruptEmission(forRequestId: "turn-D"),
+            "a refusal must not lock out later interruptions either"
+        )
+    }
+
+    /// A refusal for an unrelated turn must not overwrite the pending report with its own id.
+    func testRefusalForAnUnrelatedTurnRetainsNothingAndKeepsTheRealReport() {
+        let state = CloudInterruptionState()
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
+        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, forRequestId: "turn-A"))
+
+        XCTAssertFalse(
+            state.recordRefusal(
+                forRequestId: "turn-B",
+                retainingReport: .init(requestId: "turn-B", playbackPositionMs: nil)
+            ),
+            "a refusal for a turn that was never interrupted is not an interruption refusal"
+        )
+        XCTAssertEqual(
+            state.pendingReportForTesting?.requestId, nil,
+            "no report may be invented for an unrelated refusal"
+        )
+    }
+
+    /// REPORT DURABILITY (reviewer item 4): taking the report does NOT consume it; only an
+    /// explicit confirmation after the frame actually left does. A failed connection therefore
+    /// cannot destroy the correction.
+    func testTakingTheReportDoesNotConsumeItUntilTheFrameLeft() {
+        let state = CloudInterruptionState()
+        state.recordPendingReport(.init(requestId: "turn-A", playbackPositionMs: nil, conversationId: "conv"))
+
+        let taken = state.takePendingReport()
+        XCTAssertEqual(taken?.requestId, "turn-A", "premise: a report is available")
+        XCTAssertTrue(
+            state.hasPendingReport,
+            "a taken report must SURVIVE a failed attempt so a later turn can still carry it"
+        )
+
+        // A confirmation for a DIFFERENT turn must not clear it (identity-checked).
+        state.confirmReportAttached(requestId: "some-other-turn")
+        XCTAssertTrue(state.hasPendingReport, "a confirmation for another turn must not consume it")
+
+        state.confirmReportAttached(requestId: "turn-A")
+        XCTAssertFalse(state.hasPendingReport, "the confirmation for the carried report consumes it")
     }
 
     // MARK: - Ordering 1: acknowledgement first
@@ -216,11 +247,14 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     func testAcknowledgementFirstSubmitsTheFollowUpOnceOnItsOwnSocket() async {
         let state = CloudInterruptionState()
         // Arm the interruption as the production emit point would: one shot claimed, follow-up held.
-        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertTrue(state.hold(request: "play the next one", utteranceId: "u-followup", origin: Self.origin, forRequestId: "turn-A"))
+        // The sink's `done` for turn B is B's terminal. With the request binding in place, that
+        // terminal resolves only a follow-up held FOR B — which is what the production emit point
+        // records (it holds the interrupting utterance against the turn it interrupted).
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-turn-b"))
+        XCTAssertTrue(state.hold(request: "play the next one", utteranceId: "u-followup", origin: Self.origin, forRequestId: "u-turn-b"))
 
-        // Turn B runs on its own socket and reaches `done` — the acknowledgement for turn A's
-        // interrupt is handled by the sink's `done` branch.
+        // Turn B runs on its own socket and reaches `done` — the acknowledgement for the turn it
+        // interrupted, handled by the sink's `done` branch.
         let sink = makeSink(state: state) { self.doneFixture }
         let result = await sink.routeToCloud(
             request: "what about the second one",
@@ -298,14 +332,18 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         XCTAssertNil(released, "a refusal must DISCARD the follow-up; nothing may be submitted for it")
         XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be gone after a refusal")
 
-        // RETAIN: the report survives for the next turn, naming the INTERRUPTED turn.
-        let reportAfter = state.pendingReportForTesting
+        // RETAIN: the report survives for the next turn, naming the INTERRUPTED turn. It is read
+        // from the frames the successor actually carried, because the report is ATTACHED to that
+        // turn's authentication frame — that is the contract's mechanism, and asserting the
+        // in-memory value alone would not prove it reached the wire.
+        let successorFrames = capturedTask?.sentTextFrames ?? []
+        let namingInterruptedTurn = successorFrames.filter {
+            $0.contains("\"interrupts\"") && $0.contains(priorRequestId ?? "<nil>")
+        }
         XCTAssertEqual(
-            reportAfter?.requestId, priorRequestId,
-            "the pending interruption report must be retained after a refusal; measured "
-            + "report=\(String(describing: reportAfter)) "
-            + "hasOpenInterrupt=\(state.hasOpenInterrupt) "
-            + "frames=\(capturedTask?.sentTextFrames ?? [])"
+            namingInterruptedTurn.count, 1,
+            "the pending interruption report must be retained and carried, naming the INTERRUPTED "
+            + "turn \(priorRequestId ?? "<nil>"); measured frames=\(successorFrames)"
         )
 
         // SUBMISSION COUNT: the refused turn submits only its own authenticate frame — no extra
@@ -327,7 +365,74 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await prior.value
     }
 
-    // MARK: - The report on the next turn's auth frame
+    // MARK: - The successor must not overtake the acknowledgement (reviewer ff00457c item 1)
+
+    /// THE ORDERING THAT WAS BROKEN: turn B must send ZERO authenticate frames while turn A is
+    /// still unresolved, and exactly one carrying B's input after A's terminal.
+    ///
+    /// The earlier implementation cancelled A and dialled B immediately, so A's `done` never
+    /// reached the branch that records the acknowledgement — the release could be skipped entirely.
+    /// This control observes the wire, not the intent: it reads A's socket and B's socket
+    /// separately, because `capturedTask` rebinds to the newest one.
+    func testSuccessorSendsNothingUntilTheInterruptedTurnSettles() async {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        let sink = makeSink(state: state, gate: gate) { self.doneFixture }
+
+        // Turn A: in flight, parked on the gate so it cannot settle on its own.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        let appeared = await waitUntil(timeout: 5) {
+            await MainActor.run { sink.activeResultSocketForTesting != nil }
+        }
+        XCTAssertTrue(appeared, "premise: turn A must own a live socket")
+        let priorTask = capturedTask
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        XCTAssertNotNil(priorRequestId, "premise: turn A's request id is known")
+
+        // Turn B starts and must NOT reach the wire: A is unresolved, so B's interrupt has not
+        // been acknowledged. B parks in the successor wait.
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+
+        // Let B make as much progress as it can. If the wait is missing, B's auth frame lands here.
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        let successorTaskBefore = capturedTask
+        let framesBefore = successorTaskBefore?.sentTextFrames ?? []
+        XCTAssertTrue(
+            priorTask?.sentTextFrames.contains { $0.contains("\"interrupt\"") } ?? false,
+            "premise: the interrupt must have been sent on A's socket; A frames="
+            + "\(priorTask?.sentTextFrames ?? [])"
+        )
+        XCTAssertFalse(
+            framesBefore.contains { $0.contains("\"authenticate\"") },
+            "turn B must send NOTHING before A's terminal; measured B frames=\(framesBefore)"
+        )
+
+        // Release A. Its `done` is the acknowledgement, and B may now go on the wire.
+        gate.release()
+        _ = await prior.value
+        _ = await successor.value
+
+        let successorTaskAfter = capturedTask
+        let framesAfter = successorTaskAfter?.sentTextFrames ?? []
+        let successorAuth = framesAfter.filter { $0.contains("\"authenticate\"") }
+        XCTAssertEqual(
+            successorAuth.count, 1,
+            "after A's terminal, B must submit exactly one authenticate frame; measured \(framesAfter)"
+        )
+    }
+
+
 
     /// The pending report rides the NEXT turn's authentication frame, where the server applies it
     /// before model input — and it is attached exactly once.
@@ -423,6 +528,62 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             secondFrames.contains { $0.contains("\"interrupts\"") },
             "the same correction must not be re-sent on a later turn: \(secondFrames)"
         )
+    }
+    // MARK: - Non-interrupted supersession must not regress
+
+    /// DOUBLE WAKE, NOT A BARGE-IN: a second turn starts while the first is still open, with NO
+    /// interruption state armed. The acknowledgement wait must be skipped entirely (nothing was
+    /// interrupted, so nothing is owed), and the successor must still reach the wire promptly.
+    ///
+    /// This control exists because the interruption fix changes the supersede ordering — the wait
+    /// sits between the interrupt send and `cancel()`. If the guard were written carelessly (for
+    /// example "always wait for the prior turn's terminal"), an ordinary double wake would block on
+    /// a turn nobody interrupted, regressing the commonest path.
+    func testDoubleWakeWithoutInterruptionStillSupersedesPromptly() async {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        let sink = makeSink(state: state, gate: gate) { self.doneFixture }
+
+        let first = Task {
+            await sink.routeToCloud(
+                request: "first wake", tier: .free, context: self.sampleContext(),
+                origin: Self.origin, selection: .followUp, utteranceId: "u-first"
+            )
+        }
+        let appeared = await waitUntil(timeout: 5) {
+            await MainActor.run { sink.activeResultSocketForTesting != nil }
+        }
+        XCTAssertTrue(appeared, "premise: the first turn must own a live socket")
+        let firstTask = capturedTask
+
+        let started = Date()
+        let second = Task {
+            await sink.routeToCloud(
+                request: "second wake", tier: .free, context: self.sampleContext(),
+                origin: Self.origin, selection: .followUp, utteranceId: "u-second"
+            )
+        }
+        let reached = await waitUntil(timeout: 5) {
+            (self.capturedTask?.sentTextFrames ?? []).contains { $0.contains("\"authenticate\"") }
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertTrue(
+            reached,
+            "a double wake must not wait for the prior turn's terminal when nothing was interrupted"
+        )
+        XCTAssertLessThan(
+            elapsed, 3,
+            "the successor must not sit on the interruption wait in the non-interrupted path; "
+            + "elapsed \(elapsed)s"
+        )
+        XCTAssertFalse(
+            (firstTask?.sentTextFrames ?? []).contains { $0.contains("\"interrupt\"") },
+            "a plain double wake must not emit an interrupt frame"
+        )
+
+        gate.release()
+        _ = await first.value
+        _ = await second.value
     }
 }
 

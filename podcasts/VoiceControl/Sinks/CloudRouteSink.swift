@@ -136,6 +136,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Cross-turn interruption state: the retained follow-up and the pending report.
     private let interruptionState: CloudInterruptionState
 
+    /// How long a successor waits for the interrupted turn's terminal before giving up on the
+    /// acknowledgement: long enough for a normal settle, short enough that a dead turn cannot wedge
+    /// the sink. On expiry the hold is dropped and the expiry is logged, never assumed away.
+    static let interruptionAcknowledgementTimeout: TimeInterval = 10
+
     /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
     /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
     /// conversation), so this is the id the retained report must carry.
@@ -146,6 +151,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// runs in a test and a control about interruption ordering passes vacuously.
     @MainActor
     var activeResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
+
+    /// The interruption state this sink carries, so a service-level control can observe the
+    /// cross-turn state the production service actually uses rather than assuming its contents.
+    @MainActor
+    var interruptionStateForTesting: CloudInterruptionState { interruptionState }
     /// The origin the turn runs under, so a resume cannot cross an ended window.
 
     /// ONE pre-effect hold, used ONLY by controls to strike cancellation deterministically between
@@ -272,6 +282,84 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             cancelled = true
             lock.unlock()
         }
+
+        // MARK: - Interruption acknowledgement latch
+        //
+        // When a successor interrupts this turn, it must NOT proceed until this turn's terminal
+        // has actually arrived (reviewer ff00457c item 1). Cancelling immediately ends the receive
+        // loop through the owner-cancel path, so the `done`/`error` branches that carry the
+        // interruption transitions are never reached and the acknowledgement is silently skipped.
+        //
+        // The latch is one-shot and carries no value: "this turn is settled" is all a waiter needs.
+        // Bounded by the waiter's own timeout, so a server that never answers cannot wedge the
+        // sink — on expiry the waiter proceeds and says so, rather than waiting forever.
+
+        private var acknowledgementArrived = false
+        private var acknowledgementTicket: AcknowledgementTicket?
+
+        /// Park until this turn's terminal arrives, or the bound expires.
+        ///
+        /// Returns true if the terminal arrived. A false result must be REPORTED, never treated as
+        /// success: it means the interruption was not acknowledged in time. Deliberately a single
+        /// one-shot continuation rather than a task group racing a sleep — a group that resumed a
+        /// parked waiter after the timeout branch had already won would resume a continuation whose
+        /// task had been cancelled, which is undefined. The ticket pattern here has exactly one
+        /// winner.
+        func awaitAcknowledgement(timeout: TimeInterval) async -> Bool {
+            let ticket = AcknowledgementTicket()
+            let arrived: Bool = await withCheckedContinuation { continuation in
+                lock.lock()
+                if acknowledgementArrived {
+                    lock.unlock()
+                    continuation.resume(returning: true)
+                    return
+                }
+                ticket.continuation = continuation
+                acknowledgementTicket = ticket
+                lock.unlock()
+                // Arm the bound OUTSIDE the lock; the timer resumes through the same one-shot
+                // transition, so a terminal landing at the same instant cannot double-resume.
+                ticket.timer = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    _ = self?.settleAcknowledgement(arrived: false)
+                }
+            }
+            return arrived
+        }
+
+        /// One-shot settlement of the acknowledgement wait. Returns the value the waiter was
+        /// resumed with, or nil when another path already settled it.
+        @discardableResult
+        private func settleAcknowledgement(arrived: Bool) -> Bool? {
+            lock.lock()
+            guard let ticket = acknowledgementTicket else {
+                lock.unlock()
+                return nil
+            }
+            acknowledgementTicket = nil
+            if arrived { acknowledgementArrived = true }
+            lock.unlock()
+            ticket.timer?.cancel()
+            ticket.continuation?.resume(returning: arrived)
+            ticket.continuation = nil
+            return arrived
+        }
+
+        /// The terminal landed. Idempotent: a late second terminal settles nothing.
+        func markAcknowledgement() {
+            _ = settleAcknowledgement(arrived: true)
+            // Nothing waiting: record arrival so a waiter that parks later sees it immediately.
+            lock.lock()
+            acknowledgementArrived = true
+            lock.unlock()
+        }
+    }
+
+
+    private final class AcknowledgementTicket: @unchecked Sendable {
+        var continuation: CheckedContinuation<Bool, Never>?
+        var timer: Task<Void, Never>?
     }
 
     // `nonisolated`: the sink conforms to `CloudAudioPlayer.Delegate`, which is
@@ -777,16 +865,57 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // AWAITED, because delivery IS the interruption: a fire-and-forget send could be
                 // scheduled after this turn retires the registration, which is how an interrupt
                 // becomes a silent no-op. Position is omitted until one is actually measured.
-                _ = await client.sendInterrupt(
+                let report = await client.sendInterrupt(
                     requestId: priorRequestId,
                     playbackPositionMs: nil,
                     via: priorSocket
                 )
+                // THE SEND RESULT IS CONSULTED, not discarded (reviewer ff00457c item 1). An
+                // `.undelivered` interrupt never reached the server, so no acknowledgement can
+                // ever arrive for it: the held follow-up would strand, and the successor below
+                // would wait on a terminal that will never come. Drop the hold and continue as an
+                // ordinary new turn.
+                if report == .undelivered {
+                    interruptedRequestIdForThisTurn = nil
+                    interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+                }
             } else {
                 // No transport to interrupt: the interruption never reached the server, so the
                 // follow-up must not be treated as held for an acknowledgement. Release it now and
                 // let this turn proceed as an ordinary new turn.
-                interruptionState.releaseUnsentHold(request: request)
+                interruptedRequestIdForThisTurn = nil
+                interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+            }
+
+            // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
+            // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
+            // terminal to resolve the hold, and the `cancel()` below would otherwise end its
+            // receive loop through the owner-cancel path — skipping the very branch that records
+            // the acknowledgement, so the acknowledgement would silently never happen.
+            //
+            // Two things are kept SEPARATE on purpose: playback quiescence (the stop requested
+            // below) and the prior TRANSPORT's lifetime (this wait). Waiting for the terminal does
+            // not reintroduce the audio overlap the quiescence wait exists to prevent.
+            //
+            // A turn that cannot answer must not wedge the successor: the wait is BOUNDED, and its
+            // expiry is acted on — the hold is dropped, since no terminal is coming to resolve it,
+            // and this turn proceeds as an ordinary new turn rather than pretending it settled.
+            if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
+                let acknowledged = await priorToken.awaitAcknowledgement(
+                    timeout: Self.interruptionAcknowledgementTimeout
+                )
+                if !acknowledged {
+                    FileLog.shared.addMessage(
+                        "[VoicePipeline] interruption NOT acknowledged within "
+                        + "\(Self.interruptionAcknowledgementTimeout)s for turn "
+                        + "\(interruptedRequestIdForThisTurn ?? "nil") — held follow-up dropped, "
+                        + "successor proceeds as an ordinary turn"
+                    )
+                    interruptionState.releaseUnsentHold(
+                        forRequestId: interruptedRequestIdForThisTurn ?? ""
+                    )
+                    interruptedRequestIdForThisTurn = nil
+                }
             }
         }
 
@@ -936,7 +1065,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             turn: turn,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
-            pendingInterruptReport: pendingInterruptReport
+            pendingInterruptReport: pendingInterruptReport,
+            // Confirm the report only once it actually left: a failed connection or token fetch
+            // must not destroy a correction the user still owes the server.
+            onReportAttached: { [weak self] requestId in
+                await MainActor.run { self?.interruptionState.confirmReportAttached(requestId: requestId) }
+            }
         )
         // The turn's own result socket: sends bind to THIS registration, so a superseded turn's
         // late results can never ride a successor's socket.
@@ -1027,6 +1161,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // Buffered-`done` admission check: a cancelled owner must not report a
                     // completed result for an event drained after cancellation (mirrors the
                     // action guard above; earlyClose classification follows below).
+                    // THE TERMINAL LANDED — signal before any cancellation guard below. A
+                    // successor that interrupted this turn is parked on this latch, and the whole
+                    // point of the latch is that the terminal ARRIVED; whether this turn then
+                    // reports completion is a separate question it answers for itself.
+                    turnToken.markAcknowledgement()
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     guard !turnToken.isCancelled else { break turnLoop }
                     // INTERRUPTION, ACKNOWLEDGEMENT-FIRST ORDERING (cloud-assistant.md →
@@ -1067,10 +1206,33 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     } else {
                         restoreTransientAudioState()
                     }
+                    // BUFFERED PLAYBACK AFTER `done` (`cloud-assistant.md` → Interruption:
+                    // "Buffered audio may still play after `done` closes the socket. Report that
+                    // interruption in the next turn's authentication frame instead"). The socket
+                    // is closed but the user is still HEARING the answer, so the fact that only
+                    // part of it was heard is still owed to the server — and there is no
+                    // interruption left to report it, because the turn already settled.
+                    //
+                    // Recorded here, at the terminal, because this is the only point that knows
+                    // both that the turn settled and that audio remains: `needsDeferral` is that
+                    // measurement. A report that named a turn whose audio had already drained
+                    // would tell the server the user heard less than they did.
+                    if needsDeferral, let interrupted = interruptedRequestIdForThisTurn {
+                        interruptionState.recordPendingReport(
+                            CloudInterruptionState.PendingReport(
+                                requestId: interrupted,
+                                playbackPositionMs: nil,
+                                conversationId: turnConversationId
+                            )
+                        )
+                    }
                     turnResult = .completed
                     turnResponse = .silent
                     break turnLoop
                 case let .error(_, code, _):
+                    // A terminal — refused or failed — settles the latch too: a waiter must not be
+                    // left parked because the answer was an error rather than a `done`.
+                    turnToken.markAcknowledgement()
                     // A cancelled owner (cloud-token supersession OR the caller's own
                     // Task.cancel) classifies as an incomplete turn via the owner-cancel path
                     // below — never as a connection failure it did not observe.
@@ -1469,17 +1631,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // acknowledgement resolves — not the turn that happened to complete. Recording the
             // completing turn's id here was a real bug the ordering controls caught: the report
             // then travelled to the following turn describing a turn nobody interrupted.
-            if let interruptedRequestId = released.interruptedRequestId {
-                interruptionState.recordPendingReport(
-                    CloudInterruptionState.PendingReport(
-                        requestId: interruptedRequestId,
-                        playbackPositionMs: nil,
-                        // The conversation this turn runs in IS the interrupted turn's
-                        // conversation: a barge-in continues the same conversation.
-                        conversationId: conversationId
-                    )
+            interruptionState.recordPendingReport(
+                CloudInterruptionState.PendingReport(
+                    requestId: released.interruptedRequestId,
+                    playbackPositionMs: nil,
+                    // The conversation this turn runs in IS the interrupted turn's conversation:
+                    // a barge-in continues the same conversation.
+                    conversationId: conversationId
                 )
-            }
+            )
             pendingFollowUpSubmission = released
             FileLog.shared.addMessage(
                 "[VoicePipeline] interruption acknowledged for turn \(requestId) — follow-up "
