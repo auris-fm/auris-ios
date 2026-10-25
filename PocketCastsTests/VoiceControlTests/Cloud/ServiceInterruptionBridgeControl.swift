@@ -58,13 +58,24 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     /// Terminal signals recorded from the assembly's `@Sendable` hook, so a lock-guarded box.
     private final class TerminalRecorder: @unchecked Sendable {
         private let lock = NSLock()
-        private var ids: [String] = []
-        func record(_ id: String) { lock.lock(); ids.append(id); lock.unlock() }
-        var all: [String] { lock.lock(); defer { lock.unlock() }; return ids }
-        func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.contains(id) }
+        private var entries: [(id: String, outcome: VoiceControlService.InputTerminalOutcome)] = []
+        func record(_ id: String, _ outcome: VoiceControlService.InputTerminalOutcome) {
+            lock.lock(); entries.append((id, outcome)); lock.unlock()
+        }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return entries.map(\.id) }
+        /// HOW EACH LINK ENDED, per utterance. Two tasks can carry the same utterance id (the
+        /// queued link and the bridge's recursive dispatch), so a count of ids alone cannot say
+        /// whether both settled — the dispositions can.
+        func outcomes(for id: String) -> [VoiceControlService.InputTerminalOutcome] {
+            lock.lock(); defer { lock.unlock() }
+            return entries.filter { $0.id == id }.map(\.outcome)
+        }
+        func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return entries.contains { $0.id == id } }
     }
 
     private let terminals = TerminalRecorder()
+    /// Records that the bridge actually ran, with the utterance it carried.
+    private let bridgeEntries = TerminalRecorder()
 
     override func setUp() {
         super.setUp()
@@ -165,8 +176,8 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
                 return built.client
             },
             cloudConfig: CloudConfig(defaults: UserDefaults(suiteName: self.defaultsSuite)!),
-            onInputTerminal: { [terminals] input, _ in
-                terminals.record(input.utteranceId)
+            onInputTerminal: { [terminals] input, outcome in
+                terminals.record(input.utteranceId, outcome)
             }
         )
         if let built {
@@ -311,6 +322,12 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     // MARK: - The bridge
 
     /// ACKNOWLEDGEMENT FIRST — the follow-up is submitted once, and only after the acknowledgement.
+    ///
+    /// The earlier version of this case returned as soon as the FIRST successor auth appeared. That
+    /// snapshot cannot distinguish "exactly once" from "the first of two": A's recursive bridge and
+    /// B's own queued link are both still in flight at that moment, and a second submission would
+    /// land after the test had already finished looking. So this case now waits for BOTH links to
+    /// reach their terminal, asserts how each ended, and only then counts outbound frames.
     func testFollowUpIsSubmittedOnceAfterTheAcknowledgement() async throws {
         let service = try await readyService(fixture: { self.doneFixture })
         let sink = service.executorForTesting.cloudRouteSinkForTesting
@@ -337,16 +354,44 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         // DELIVER TURN 1'S REAL TERMINAL — this is the acknowledgement.
         firstTurnLatch.release()
 
-        let submitted = await waitUntil(timeout: 20) { !self.authFrames(for: "u-barge").isEmpty }
+        // A's link settles FIRST, and it is what triggers the bridge. Awaiting it separately keeps
+        // the two links' dispositions distinguishable in the failure message.
+        let priorSettled = await waitUntil(timeout: 20) { self.terminals.contains("u-prior") }
         XCTAssertTrue(
-            submitted,
-            "the acknowledgement must release the follow-up and the SERVICE must submit it; "
-            + "frames=\(allFrames()) held=\(String(describing: state.heldFollowUpForTesting?.utteranceId))"
+            priorSettled,
+            "A's queued link must reach a terminal after the acknowledgement; terminals=\(self.terminals.all)"
         )
+
+        // B HAS EXACTLY ONE LINK, AND IT IS OBSERVABLE. The earlier version of this case assumed
+        // a second one (a recursive bridge dispatch alongside the queued turn) and asserted its
+        // existence — which failed. Tracing showed the truth: `emitBargeIn` runs at B's ADMISSION
+        // and retains the utterance there; A then settles; B's single queued link dispatches as
+        // `isRetainedFollowUpSubmission`, so it carries no interruption of its own and submits once.
+        // There is no third task, and asserting one was the reviewer's point about the snapshot
+        // outrunning the work, not about a second owner existing.
+        // B's link settles AFTER A's, so it must be awaited: stopping at A's terminal would be the
+        // same premature snapshot the reviewer flagged.
+        let bSettled = await waitUntil(timeout: 20) { !self.terminals.outcomes(for: "u-barge").isEmpty }
+        XCTAssertTrue(
+            bSettled,
+            "B's queued link must reach a terminal; all=\(terminals.all)"
+        )
+        let bOutcomes = terminals.outcomes(for: "u-barge")
+        XCTAssertEqual(
+            bOutcomes, [.routed],
+            "B's link must settle as exactly one ROUTED dispatch (one link, one submission); "
+            + "measured=\(bOutcomes) all=\(terminals.all)"
+        )
+
+        // THE REAL CLAIM: one submission, counted after every link has settled.
         XCTAssertEqual(
             authFrames(for: "u-barge").count, 1,
-            "the follow-up must be submitted EXACTLY once — two submission owners is the defect "
-            + "reviewer eaa8c06a named; frames=\(allFrames())"
+            "the follow-up must be submitted EXACTLY once; two submission owners is the defect "
+            + "reviewer eaa8c06a named; frames=\(allFrames()) outcomes=\(bOutcomes)"
+        )
+        XCTAssertEqual(
+            interruptFrames().count, 1,
+            "exactly one interrupt for one barge-in; frames=\(allFrames())"
         )
     }
 
