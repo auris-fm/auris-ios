@@ -235,6 +235,9 @@ class IOSAudioRouteMonitor: ObservableObject {
         self.gracePeriodSignal = gracePeriodSignal
         self.audioSession = audioSession
         refreshRoute()
+        #if DEBUG && targetEnvironment(simulator)
+        discoverSimulatorInputIfHidden()
+        #endif
         NotificationCenter.default
             .publisher(for: AVAudioSession.routeChangeNotification)
             .sink { [weak self] notification in
@@ -317,6 +320,29 @@ class IOSAudioRouteMonitor: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] MicExposure: \(previousExposure) → \(micExposure) (output: \(output), input: \(input.map { "\($0)" } ?? "nil"))")
         }
     }
+
+    #if DEBUG && targetEnvironment(simulator)
+    /// SIMULATOR-ONLY route discovery (owner: "the app on simulator doesn't open mic"): a fresh
+    /// simulator session reports NO `currentRoute` inputs until a record-capable category is
+    /// configured and the session is activated, even though `availableInputs` already lists the
+    /// built-in mic (probe simmic-probe2: before=[] available=[MicrophoneBuiltIn] → after
+    /// configure+activate current=[MicrophoneBuiltIn]). The gate would therefore refuse with
+    /// `.noMicrophone` forever. Configure the input-capable session once and re-read; device and
+    /// release builds never run this. A denied permission surfaces through the normal capture
+    /// path instead.
+    private func discoverSimulatorInputIfHidden() {
+        guard micExposure == .noMic, !audioSession.availableInputs.isEmpty else { return }
+        do {
+            try audioSession.configureInputCapableSession()
+            try audioSession.setSessionActive(true)
+        } catch {
+            FileLog.shared.addMessage("[VoicePipeline] simulator input discovery failed: \(error)")
+            return
+        }
+        refreshRoute()
+        FileLog.shared.addMessage("[VoicePipeline] simulator input discovery: exposure now \(micExposure)")
+    }
+    #endif
 
     /// Attempt to acquire an external microphone without listening.
     ///
