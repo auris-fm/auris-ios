@@ -1460,6 +1460,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         transport.stopHolding()
         transport.releaseHeldPass()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(transport.attemptCount, 1,
                        "a cancelled trigger must not run its follow-up")
@@ -1485,7 +1486,10 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 gateLock.lock(); gateTimedOut = true; gateLock.unlock()
             }
         }
-        defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
+        defer {
+            releaseCallback.signal() // unblock a still-held gate before joining
+            chain.scheduler.ownerCompletionFireGateForTesting = nil
+        }
 
         let ownerHeld = DispatchSemaphore(value: 0)
         var ownerHeldSignalled = false
@@ -1543,7 +1547,10 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 gateLock.lock(); gateTimedOut = true; gateLock.unlock()
             }
         }
-        defer { chain.scheduler.ownerCompletionFireGateForTesting = nil }
+        defer {
+            releaseCallback.signal() // unblock a still-held gate before joining
+            chain.scheduler.ownerCompletionFireGateForTesting = nil
+        }
 
         let ownerHeld = DispatchSemaphore(value: 0)
         var ownerHeldSignalled = false
@@ -1611,6 +1618,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         transport.stopHolding()
         transport.releaseHeldPass()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         chain.trigger.triggerDrainIfPermitted()
         for _ in 0..<120 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
@@ -1648,6 +1656,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         transport.stopHolding()
         transport.releaseHeldPass()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         for _ in 0..<120 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
         }
@@ -1672,7 +1681,10 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 hookLock.lock(); hookTimedOut = true; hookLock.unlock()
             }
         }
-        defer { chain.trigger.preReofferHookForTesting = nil }
+        defer {
+            closeReofferWindow.signal() // unblock a still-held gate before joining
+            chain.trigger.preReofferHookForTesting = nil
+        }
 
         let ownerHeld = DispatchSemaphore(value: 0)
         var ownerHeldSignalled = false
@@ -1697,6 +1709,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         chain.trigger.cancelForTesting()  // bump the generation inside the window
         closeReofferWindow.signal()
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
+        XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         hookLock.lock(); let timedOut = hookTimedOut; hookLock.unlock()
         XCTAssertFalse(timedOut, "the window must not have been driven by timeout")
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -1712,11 +1725,32 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         let chain = makeTrigger(transport)
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
 
+        let bodyEntered = DispatchSemaphore(value: 0)
+        let releaseBody = DispatchSemaphore(value: 0)
+        var gateTimedOut = false
+        let gateLock = NSLock()
+        chain.trigger.preDrainGateForTesting = {
+            bodyEntered.signal()
+            if releaseBody.wait(timeout: .now() + 30) == .timedOut {
+                gateLock.lock(); gateTimedOut = true; gateLock.unlock()
+            }
+        }
+        defer {
+            // UNCONDITIONAL RELEASE before joining: a failing assertion above must not hang the
+            // worker thread in the gate.
+            releaseBody.signal()
+            chain.trigger.preDrainGateForTesting = nil
+        }
+
         chain.trigger.triggerDrainIfPermitted()
-        // Cancel immediately; the task body may not have been scheduled yet, so only a PRE-entry
-        // check can prevent the drain.
+        // The task body is HELD before its cancellation check: the stop cannot race the check.
+        XCTAssertEqual(bodyEntered.wait(timeout: .now() + 30), .success,
+                       "the barrier proves the body is held before the check")
         chain.trigger.cancelForTesting()
-        try await Task.sleep(nanoseconds: 400_000_000)
+        releaseBody.signal()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
+        XCTAssertFalse(timedOut, "the gate must not have driven the race by timing out")
         XCTAssertEqual(transport.attemptCount, 0,
                        "a cancelled trigger must never reach the transport")
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
