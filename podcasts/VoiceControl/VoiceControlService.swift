@@ -849,6 +849,9 @@ class VoiceControlService: ObservableObject {
                     return
                 }
                 let response = await executor.execute(intent, preparedObserver: preparedObserver)
+                // Same bridge on every executor path: an interruption resolved by THIS turn must
+                // reach its follow-up whichever intent produced it.
+                await submitRetainedFollowUpIfAny()
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
@@ -963,6 +966,9 @@ class VoiceControlService: ObservableObject {
                     ),
                     preparedObserver: preparedObserver
                 )
+                // The escalation path resolves interruptions too: a barge-in that itself
+                // escalates must still submit its follow-up once acknowledged.
+                await submitRetainedFollowUpIfAny()
                 audioRenderer.render(response)
                 return
             }
