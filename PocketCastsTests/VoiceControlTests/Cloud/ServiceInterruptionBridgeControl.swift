@@ -385,27 +385,33 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             + "owner; measured=\(bridgeTakes.all)"
         )
 
-        // B'S DISPATCHES, BOTH OF THEM. Two candidate owners exist: the bridge's recursive
-        // dispatch and B's own queued link. Exactly one may reach the wire. This is measured from
-        // the executor's own ownership decision, which is where "one submission" is actually
-        // decided — the outbound count alone would not say WHICH dispatch won.
+        // ONE EXECUTION PATH, EXPLICITLY CHOSEN (reviewer ca629c34). The bridge owns B once it has
+        // taken it; B's queued link must be RETIRED before classification, so no second dispatch is
+        // even ATTEMPTED. Pinning "the duplicate is observed" would enshrine dedup as the mechanism;
+        // the requirement is that ownership was transferred, and dedup never had to fire.
         let bridgeOwned = await waitUntil(timeout: 20) { self.dispatches.all.contains("u-barge:owner") }
         XCTAssertTrue(
             bridgeOwned,
-            "one dispatch of B must own the submission; measured=\(self.dispatches.all)"
-        )
-        let duplicates = await waitUntil(timeout: 20) {
-            self.dispatches.all.contains("u-barge:duplicate")
-        }
-        XCTAssertTrue(
-            duplicates,
-            "B's OTHER dispatch (its queued link) must be observed as a DUPLICATE rather than "
-            + "vanish — it is the second owner the review named, and the executor's admission dedup "
-            + "is what currently makes submission single; measured=\(self.dispatches.all)"
+            "the bridge must be the owning dispatch for B; measured=\(self.dispatches.all)"
         )
         XCTAssertEqual(
             dispatches.all.filter { $0 == "u-barge:owner" }.count, 1,
             "exactly one owning dispatch; measured=\(dispatches.all)"
+        )
+        XCTAssertFalse(
+            dispatches.all.contains("u-barge:duplicate"),
+            "B's queued link must be RETIRED at hand-off, so no second dispatch is attempted at "
+            + "all — a duplicate here would mean single submission still rests on admission dedup "
+            + "rather than on an explicit transfer; measured=\(dispatches.all)"
+        )
+        // Only the QUEUED link has a terminal: the bridge dispatches through `handleRoutingInput`
+        // directly, which never enters the enqueue task whose `defer` reports one. So the queued
+        // link's single terminal is the whole record of its fate — and it must be the hand-off,
+        // not a route and not a drop.
+        XCTAssertEqual(
+            terminals.outcomes(for: "u-barge"), [.handedOffToFollowUpSubmission],
+            "the queued link must end as an explicit hand-off BEFORE classification; a .routed "
+            + "here would mean it still executed; measured=\(terminals.outcomes(for: "u-barge"))"
         )
 
         // THE OUTBOUND CLAIM, counted after both terminals and both dispatches.

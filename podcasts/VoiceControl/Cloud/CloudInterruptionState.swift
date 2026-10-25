@@ -55,6 +55,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         let request: String
         let utteranceId: String
         let origin: Int?
+        /// The selection this capture was ADMITTED under, carried so the follow-up submitter
+        /// dispatches the same complete input rather than reconstructing one with a live default
+        /// (reviewer ca629c34 / b36c8ab1: preserve provenance across the hand-off).
+        let selection: CloudConversationSelection?
         /// The INTERRUPTED turn this follow-up was addressed to — the subject of the pending
         /// report and, with the release, the whole authority to submit.
         let interruptedRequestId: String
@@ -62,6 +66,7 @@ final class CloudInterruptionState: @unchecked Sendable {
 
     private struct HeldFollowUp {
         let request: String
+        let selection: CloudConversationSelection?
         let utteranceId: String
         let origin: Int?
         /// The turn this utterance interrupts. Bound at hold time; a terminal for any other turn
@@ -124,6 +129,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         request: String,
         utteranceId: String,
         origin: Int?,
+        selection: CloudConversationSelection? = nil,
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -131,6 +137,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         if let held, held.interruptedRequestId != interruptedRequestId { return false }
         held = HeldFollowUp(
             request: request,
+            selection: selection,
             utteranceId: utteranceId,
             origin: origin,
             interruptedRequestId: interruptedRequestId
@@ -157,6 +164,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             request: held.request,
             utteranceId: held.utteranceId,
             origin: held.origin,
+            selection: held.selection,
             interruptedRequestId: requestId
         )
     }

@@ -1796,11 +1796,27 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func emitBargeIn(
         request: String,
         utteranceId: String?,
-        origin: Int?
+        origin: Int?,
+        selection: CloudConversationSelection? = nil
     ) async -> String? {
         guard let utteranceId else { return nil }
-        // Already claimed for THIS utterance (the eager call already ran): report the same binding.
-        if let existing = interruptedRequestIdForUtterance(utteranceId) { return existing }
+        // A PRE-EXISTING BINDING IS NOT RETENTION (regression caught by the
+        // ServiceSelectionProvenance queued-input controls). `interruptedRequestIdForUtterance` is
+        // keyed by utterance id, and two DISTINCT turns may legitimately reuse one. Returning the
+        // old binding made the second turn believe it had been retained by an interruption that had
+        // already resolved, so it handed its execution to a bridge that would never submit it and
+        // the turn was silently lost. Retention for this call therefore means exactly one thing:
+        // the claim below, made against a LIVE predecessor.
+        //
+        // A genuine second eager call for the SAME capture cannot reach here — the eager step runs
+        // once per admission — so nothing is lost by not short-circuiting on the stored binding.
+        // A TURN CANNOT INTERRUPT ITSELF. If the live predecessor carries the SAME identity as the
+        // incoming capture, this is not a barge-in: it is the same admitted utterance (a repeated
+        // dispatch, or a follow-up reconstructed from the same capture) meeting its own turn. The
+        // ServiceSelectionProvenance queued-input controls drive exactly this shape, and treating it
+        // as a barge-in made the successor hand its execution to a bridge that would never submit
+        // it, silently losing the turn.
+        guard activeResultSocket?.requestId != utteranceId else { return nil }
         guard let priorRequestId = activeResultSocket?.requestId,
               (activeTurn.map { !$0.isCancelled }) ?? false,
               interruptionState.claimInterruptEmission(forRequestId: priorRequestId) else {
@@ -1810,6 +1826,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             request: request,
             utteranceId: utteranceId,
             origin: origin,
+            selection: selection,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one

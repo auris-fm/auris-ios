@@ -145,7 +145,12 @@ class VoiceControlService: ObservableObject {
     /// can await settlement instead of polling for an absence: `.routed` when routing was attempted,
     /// `.cancelled`/`.refused` when the barrier stopped the chain, `.dropped` when the staleness guard
     /// (or a cancelled task) discarded it before reaching the barrier.
-    enum InputTerminalOutcome: Sendable { case routed, barrierCancelled, barrierRefused, dropped }
+    enum InputTerminalOutcome: Sendable {
+        case routed, barrierCancelled, barrierRefused, dropped
+        /// This link handed its utterance to the interruption's follow-up submitter, which is now
+        /// the single execution path for it. The link ended deliberately, before classification.
+        case handedOffToFollowUpSubmission
+    }
     /// Reports how a queued input's task TERMINATED — on EVERY exit, including a refusal or a
     /// cancellation. This is the TERMINAL ACKNOWLEDGEMENT: the input returned, which is not the same
     /// as an action having run. Distinct from `onInputRoutingFinished`, which reports that routing was
@@ -534,12 +539,28 @@ class VoiceControlService: ObservableObject {
                 // that is then rejected. The same check that gates the dispatch therefore gates
                 // the eager step, using the SAME window identity captured at admission.
                 let stillOwnedForEagerEffect = self?.isCaptureStillCurrent(epoch: epoch) ?? false
+                var retainedByInterruption = false
                 if stillOwnedForEagerEffect {
-                    await self?.emitEagerBargeInIfNeeded(
+                    retainedByInterruption = await self?.emitEagerBargeInIfNeeded(
                         for: input,
                         origin: capturedOrigin,
                         selection: capturedSelection
-                    )
+                    ) ?? false
+                }
+                // EXPLICIT OWNERSHIP TRANSFER (reviewer ca629c34). If the eager step retained this
+                // utterance for an interruption, the FOLLOW-UP SUBMITTER is the one execution path
+                // for it: it submits the same complete admitted input, with its provenance, once
+                // the predecessor settles. This queued link must therefore end HERE — before
+                // classification, not merely lose a race at dispatch time.
+                //
+                // Leaving it to run and be refused downstream is what the previous revision did:
+                // the executor's admission dedup caught the second owner, so the wire saw one
+                // submission, but two executions were still attempted and single submission was a
+                // property of dedup rather than of ownership. Retiring the link here makes the
+                // transfer explicit and removes the duplicate attempt entirely.
+                if retainedByInterruption {
+                    terminal = .handedOffToFollowUpSubmission
+                    return
                 }
 
                 await previous?.value
@@ -606,21 +627,28 @@ class VoiceControlService: ObservableObject {
     ///
     /// Carries the admitted provenance (reviewer b36c8ab1 item 3): the interruption belongs to the
     /// window that accepted the capture, not to whichever window is live when the step runs.
+    /// Run the interruption steps for an input that may barge in. Returns whether the input was
+    /// RETAINED for follow-up submission, which transfers its execution to the bridge.
     private func emitEagerBargeInIfNeeded(
         for input: IntentRoutingInput,
         origin: Int?,
         selection: CloudConversationSelection?
-    ) async {
-        guard input.utteranceId != nil else { return }
+    ) async -> Bool {
+        guard input.utteranceId != nil else { return false }
         // Only an input that will actually be routed can barge in; a blank or wake-only capture is
         // a session start, not speech over an answer.
-        if case .route = RouteInputEligibilityPolicy.decide(transcript: input.routerTranscript) {
-            await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
-                request: input.routerTranscript,
-                utteranceId: input.utteranceId,
-                origin: origin
-            )
-        }
+        guard case .route = RouteInputEligibilityPolicy.decide(transcript: input.routerTranscript)
+        else { return false }
+        // The retained record carries the COMPLETE admitted input — including the selection this
+        // capture was admitted under — because the follow-up submitter reconstructs its submission
+        // from it, not from whatever is live later (reviewer ca629c34: preserve provenance).
+        let interrupted = await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
+            request: input.routerTranscript,
+            utteranceId: input.utteranceId,
+            origin: origin,
+            selection: selection ?? input.selection
+        )
+        return interrupted != nil
     }
 
     /// Wires the ASR/router callbacks (the pre-existing registration block, now a named step).
@@ -782,9 +810,16 @@ class VoiceControlService: ObservableObject {
         FileLog.shared.addMessage(
             "[VoicePipeline] submitting retained follow-up \(released.utteranceId) on its own socket"
         )
+        // THE COMPLETE ADMITTED INPUT, with the provenance it was admitted under — not a
+        // reconstructed turn with a live default selection (reviewer ca629c34).
         await handleRoutingInput(
-            .english(transcript: released.request, utteranceId: released.utteranceId),
-            origin: released.origin
+            .english(
+                transcript: released.request,
+                selection: released.selection,
+                utteranceId: released.utteranceId
+            ),
+            origin: released.origin,
+            selection: released.selection
         )
     }
 
