@@ -7,11 +7,11 @@ import XCTest
 /// The control parks the off-main capture INSIDE the operation, after its grace reads and before its
 /// lock acquisition (via the production-adjacent test barrier), runs the REAL `stop()` on main —
 /// which acquires `transcriptLock` there — then releases the park and requires BOTH sides to finish
-/// within bounded waits. Under the PRE-FIX ordering (grace reads made while holding
-/// `transcriptLock`) no barrier sits between reads and lock, so the park is never reached and the
-/// `isParked` assertion fails. That mutation was run OUT-OF-TREE when the ordering fix landed; the
-/// RED receipt is preserved at handoff and is not re-runnable through this file's committed
-/// controls, which exercise only the fixed ordering.
+/// within bounded waits. The lock-reorder mutation (grace reads moved back INSIDE
+/// `transcriptLock`, the post-reads barrier with them) parks the capture HOLDING the lock, so
+/// main `stop()` blocks and the 3s bound fails — that mutation is run IN-TREE against these
+/// committed controls (receipt: lockreorder-mutant1, stop() blocked 10.05s); the earlier
+/// out-of-tree RED receipt from the ordering handoff is retained alongside it.
 final class LockOrderControls: XCTestCase {
     @MainActor
     func testCaptureParkedAfterItsReadsCompletesAfterMainStopsWithoutDeadlock() async throws {
@@ -115,26 +115,44 @@ final class LockOrderControls: XCTestCase {
         service.stop()
 
         // Park the REAL enqueue AFTER the capture returns (nil — the service is stopped) and
-        // BEFORE the nil-capture guard, holding no lock.
+        // BEFORE the nil-capture guard, holding no lock. The park result is RECORDED, not
+        // discarded: a timeout means the capture never reached the barrier and every later
+        // assertion would be vacuous, so it is asserted before the restart.
         let parked = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
-        service.enqueueAfterCaptureForTesting = {
+        service.enqueueAfterCaptureForTesting = { [weak service] in
             parked.signal()
             _ = release.wait(timeout: .now() + 10)
+        }
+        // UNCONDITIONAL CLEANUP: the gate is released, the seam cleared and the service stopped
+        // on EVERY exit path, so a failed assertion cannot leave a parked enqueue or a listening
+        // service behind for subsequent tests.
+        defer {
+            release.signal()
+            service.enqueueAfterCaptureForTesting = nil
+            service.stop()
         }
 
         let input = IntentRoutingInput(
             sourceTranscript: "late turn", sourceLanguage: nil,
             routerTranscript: "late turn", translationKind: .none, selection: nil,
             utteranceId: "utterance-stop-restart")
-        let enqueueResult = Task.detached { () -> Bool in
-            // The REAL entry the ASR engine invokes (off-main, as in production).
-            service.asrEngineForTesting.onRoutingInput?(input) ?? false
+        // The enqueue's completion is observed through a semaphore + lock-protected box with a
+        // BOUNDED wait: awaiting the detached task directly would hang this control if the
+        // enqueue wedged, and an unbounded hang is not a failure signal.
+        let resultBox = ResultBox()
+        let enqueueDone = DispatchSemaphore(value: 0)
+        Task.detached {
+            let refused = service.asrEngineForTesting.onRoutingInput?(input) ?? false // real entry
+            resultBox.store(refused)
+            enqueueDone.signal()
         }
 
-        // Bounded wait for the park without blocking main.
-        let isParked = await Task.detached { parked.wait(timeout: .now() + 5) == .success }.value
-        XCTAssertTrue(isParked, "the late callback's enqueue must park between the capture and the guard")
+        let parkedOutcome = await Task.detached { parked.wait(timeout: .now() + 5) }.value
+        XCTAssertEqual(parkedOutcome, .success,
+                       "the late callback's enqueue must park between the capture and the guard "
+                           + "within the bound; a timeout means the control's window never opened")
+        guard parkedOutcome == .success else { return }
 
         // THE RESTART, while the enqueue is parked between its capture and its guard: the
         // lock-time listening recheck the guard protects against will read TRUE.
@@ -146,14 +164,28 @@ final class LockOrderControls: XCTestCase {
         }
         XCTAssertTrue(service.isListening, "the deterministic restart must land while the late callback is parked")
 
-        // Release: the guard must refuse on the nil capture regardless of the restart-made-true
-        // lock-time listening state.
+        // RELEASE the gate BEFORE the bounded completion wait (the defer is cleanup for failure
+        // paths only): the guard must refuse on the nil capture regardless of the
+        // restart-made-true lock-time listening state, and the refusal must arrive through the
+        // released gate, not the gate's own 10s timeout.
         release.signal()
-        service.enqueueAfterCaptureForTesting = nil
-        let refused = await enqueueResult.value
+        let doneOutcome = await Task.detached { enqueueDone.wait(timeout: .now() + 10) }.value
+        XCTAssertEqual(doneOutcome, .success,
+                       "the enqueue must complete within the bound after release; a hang here is a defect")
+        XCTAssertTrue(resultBox.stored, "premise: the enqueue returned a verdict")
+        let refused = resultBox.value ?? true
         XCTAssertFalse(refused,
                        "a late callback whose origin reads ran while stopped must be refused by the "
                            + "nil-capture guard even though the restart made the lock-time listening check true")
+    }
+
+    /// Lock-protected one-shot result box for the bounded-completion observation.
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedValue: Bool?
+        var stored: Bool { lock.lock(); defer { lock.unlock() }; return storedValue != nil }
+        var value: Bool? { lock.lock(); defer { lock.unlock() }; return storedValue }
+        func store(_ v: Bool) { lock.lock(); storedValue = v; lock.unlock() }
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {
