@@ -1487,7 +1487,9 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
             }
         }
         defer {
-            releaseCallback.signal() // unblock a still-held gate before joining
+            // Signals a still-held gate so a failing assertion cannot hang the worker; joining is
+            // by bounded waits in the test body.
+            releaseCallback.signal()
             chain.scheduler.ownerCompletionFireGateForTesting = nil
         }
 
@@ -1548,7 +1550,9 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
             }
         }
         defer {
-            releaseCallback.signal() // unblock a still-held gate before joining
+            // Signals a still-held gate so a failing assertion cannot hang the worker; joining is
+            // by bounded waits in the test body.
+            releaseCallback.signal()
             chain.scheduler.ownerCompletionFireGateForTesting = nil
         }
 
@@ -1682,7 +1686,9 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
             }
         }
         defer {
-            closeReofferWindow.signal() // unblock a still-held gate before joining
+            // Signals a still-held gate so a failing assertion cannot hang the worker; joining is
+            // by bounded waits in the test body.
+            closeReofferWindow.signal()
             chain.trigger.preReofferHookForTesting = nil
         }
 
@@ -1735,9 +1741,9 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                 gateLock.lock(); gateTimedOut = true; gateLock.unlock()
             }
         }
+        // Gates only SIGNAL here; the worker itself is JOINED below by awaiting the captured
+        // task, so a failure cannot leave either side hanging.
         defer {
-            // UNCONDITIONAL RELEASE before joining: a failing assertion above must not hang the
-            // worker thread in the gate.
             releaseBody.signal()
             chain.trigger.preDrainGateForTesting = nil
         }
@@ -1746,9 +1752,25 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         // The task body is HELD before its cancellation check: the stop cannot race the check.
         XCTAssertEqual(bodyEntered.wait(timeout: .now() + 30), .success,
                        "the barrier proves the body is held before the check")
+        // Capture the live handle BEFORE cancellation (which clears the storage), so completion
+        // of the released body can be observed rather than assumed from a sleep.
+        let capturedTask = chain.trigger.drainTaskForTesting
         chain.trigger.cancelForTesting()
         releaseBody.signal()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // BOUNDED COMPLETION PROOF (reviewer f39bc70d): the released body must actually finish —
+        // zero attempts plus a cleared slot are otherwise observable before it even resumes.
+        if let capturedTask {
+            let finished = await withTaskGroup(of: Bool.self) { group in
+                group.addTask { _ = await capturedTask.value; return true }
+                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
+                let first = await group.next()!
+                group.cancelAll()
+                return first
+            }
+            XCTAssertTrue(finished, "the released drain task must complete, not hang")
+        } else {
+            XCTFail("no live drain task was captured to prove completion")
+        }
         gateLock.lock(); let timedOut = gateTimedOut; gateLock.unlock()
         XCTAssertFalse(timedOut, "the gate must not have driven the race by timing out")
         XCTAssertEqual(transport.attemptCount, 0,

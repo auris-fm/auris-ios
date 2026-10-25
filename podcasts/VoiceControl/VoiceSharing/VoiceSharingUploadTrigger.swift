@@ -95,6 +95,12 @@ final class VoiceSharingUploadTrigger {
     /// trigger, and release, proving the check fires without depending on task scheduling order.
     var preDrainGateForTesting: (() -> Void)?
 
+    /// Test seam: the live drain task handle, so a control can observe BOUNDED task completion
+    /// after releasing a gate (capturing BEFORE cancellation, which clears the storage).
+    var drainTaskForTesting: Task<Void, Never>? {
+        stateLock.withLock { drainTaskStorage }
+    }
+
     /// Test seam: the publication-before-registration invariant, observable.
     var hasPublishedCompletionRegistrationForTesting: Bool {
         stateLock.withLock { pendingCompletionID != nil }
