@@ -381,6 +381,14 @@ final class CloudRouteClient {
         }
     }
 
+    /// TEST SEAM: retire a turn's socket registration EXACTLY as a consumer close would, so a
+    /// control can produce the `.undelivered` branch through the production send path instead of
+    /// calling state transitions directly. Identity-checked in `retireSocket`, so it cannot retire
+    /// a different turn's registration.
+    func retireSocketRegistrationForTesting(requestId: String, identity: UUID) {
+        retireSocket(requestId: requestId, identity: identity)
+    }
+
     /// What a result send established — LOCAL SUBMISSION KNOWLEDGE ONLY. `submitted` means the
     /// frame was handed to the socket without error; it is NOT a server receipt, and a send may
     /// transmit and still lose the connection after. `undelivered` means no live socket existed

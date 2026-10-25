@@ -198,6 +198,14 @@ enum AudioSessionError: Error {
 class IOSAudioRouteMonitor: ObservableObject {
     @Published var currentRoute: AudioRoute = .unknown
     @Published var micExposure: MicExposure = .noMic
+    /// Whether ANY external microphone is available to capture from right now.
+    ///
+    /// The Debug-simulator diagnostic exception must apply ONLY when this is false. Reading it
+    /// from the session keeps the exception pinned to "the simulator genuinely has no external
+    /// route" rather than "the gate happens to be off".
+    var hasExternalMicrophoneCandidate: Bool {
+        audioSession.availableInputs.contains { isExternalInput($0.portType) }
+    }
 
     private let gracePeriodSignal: GracePeriodSignal
     private let audioSession: AudioSessionControlling
@@ -516,7 +524,7 @@ class IOSAudioRouteMonitor: ObservableObject {
         }
     }
 
-    private func isExternalInput(_ portType: AVAudioSession.Port) -> Bool {
+    func isExternalInput(_ portType: AVAudioSession.Port) -> Bool {
         switch portType {
         case .headsetMic, .bluetoothHFP, .bluetoothLE:
             return true

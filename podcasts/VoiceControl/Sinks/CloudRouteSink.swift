@@ -54,6 +54,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// observe it on (reviewer c38ff4ba item 2).
     @MainActor var hasPendingInterruptionReportForTesting: Bool { interruptionState.hasPendingReport }
 
+    /// The client that owns this sink's socket registrations. Exposed so a control can retire one
+    /// through the production retirement path and observe a genuinely `.undelivered` send.
+    @MainActor var resultClientForTesting: CloudRouteClient? { resultSendClient }
+
     /// The selection the last turn arrived with, so a caller-level case can assert that the
     /// service derived it from the turn's own provenance rather than from live window state.
     /// Necessary because the two are indistinguishable from inside the sink when grace is active.

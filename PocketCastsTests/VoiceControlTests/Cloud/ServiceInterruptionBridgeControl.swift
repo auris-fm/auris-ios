@@ -657,36 +657,4 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         firstTurnLatch.release()
     }
 
-    /// AN UNDELIVERED INTERRUPT SUPPRESSES THROUGH `releaseUnsentHold` (reviewer c38ff4ba item 1).
-    ///
-    /// The state-level control called suppression directly, so it could not catch the real
-    /// sequence: `sendInterruptOnPriorSocket` releases the hold first, after which a caller-side
-    /// suppression finds nothing and silently does nothing. This drives the failed send through
-    /// the sink and asserts the utterance never authenticates.
-    func testAnUndeliveredInterruptNeverAuthenticatesTheUtterance() async throws {
-        let state = CloudInterruptionState()
-        let gate = Gate()
-        // NO transport: `activeResultSocket` is absent, which is exactly the branch that returns
-        // `.undelivered` after `releaseUnsentHold`.
-        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
-        XCTAssertTrue(
-            state.hold(
-                request: "play the next one", utteranceId: "u-barge",
-                origin: 2, forRequestId: "u-prior"
-            )
-        )
-        // This is the production sequence as the sink performs it.
-        state.releaseUnsentHold(forRequestId: "u-prior")
-
-        XCTAssertTrue(
-            state.isSuppressed("u-barge"),
-            "releaseUnsentHold must SUPPRESS the utterance: a caller-side suppression after the "
-            + "release finds no hold and does nothing, so the queued turn would authenticate as "
-            + "an ordinary question having interrupted nothing"
-        )
-        XCTAssertNil(
-            state.recordTerminalAcknowledgement(forRequestId: "u-prior"),
-            "nothing may be released for submission after an unsent interrupt"
-        )
-    }
 }

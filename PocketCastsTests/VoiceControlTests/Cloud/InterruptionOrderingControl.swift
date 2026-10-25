@@ -598,6 +598,82 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await first.value
         _ = await second.value
     }
+    /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE — driven through the sink.
+    ///
+    /// Supersedes a state-only test whose name claimed a boundary it never executed (reviewer
+    /// 79614a4f item 1). The `.undelivered` case is produced the way production produces it: the
+    /// prior turn's socket registration is RETIRED, so `sendInterruptOnPriorSocket` finds no bound
+    /// task and reports undelivered after `releaseUnsentHold`. The assertion is on the wire.
+    func testAnUndeliveredInterruptNeverAuthenticatesItsUtterance() async {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        let sink = makeSink(state: state, gate: gate) { self.doneFixture }
+
+        // PRIOR TURN genuinely in flight, then its transport retired so the interrupt cannot be
+        // delivered while `activeTurn`/`activeResultSocket` still look live to the sink.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question",
+                tier: .free,
+                context: self.sampleContext(),
+                origin: Self.origin,
+                selection: .followUp,
+                utteranceId: "u-turn-a"
+            )
+        }
+        let appeared = await waitUntil(timeout: 5) {
+            await MainActor.run { sink.activeResultSocketForTesting != nil }
+        }
+        XCTAssertTrue(appeared, "premise: the prior turn must own a socket before we retire it")
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        guard let priorRequestId else {
+            XCTFail("premise: the prior turn must own a live socket")
+            return
+        }
+        // RETIRE THE REGISTRATION the way a consumer close does, leaving the sink's turn state
+        // untouched: precisely the state in which a send comes back `.undelivered`.
+        await MainActor.run {
+            if let socket = sink.activeResultSocketForTesting, let identity = socket.boundIdentity {
+                sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+                    requestId: socket.requestId, identity: identity
+                )
+            }
+        }
+
+        let emitted = await sink.emitBargeIn(
+            request: "play the next one",
+            utteranceId: "u-barge",
+            origin: Self.origin,
+            selection: CloudConversationSelection.followUp
+        )
+        XCTAssertNil(emitted, "an undelivered interrupt cannot retain a follow-up for submission")
+
+        // THE WIRE ASSERTION: the interrupting utterance never reached any socket.
+        let frames = capturedTask?.sentTextFrames ?? []
+        XCTAssertFalse(
+            frames.contains { $0.contains("u-barge") },
+            "the utterance may never authenticate after an unsent interrupt: \(frames)"
+        )
+        XCTAssertNil(
+            state.recordTerminalAcknowledgement(forRequestId: priorRequestId),
+            "nothing may be released for submission after an unsent interrupt"
+        )
+        // THE DECISIVE ASSERTION, and the one that makes this control non-vacuous: the utterance
+        // must be SUPPRESSED, because its queued turn is already on the serial chain and will ask
+        // this before dispatching. Holding the follow-up is not enough — the hold was released by
+        // the failed send, so the queued turn's only protection is suppression. Without this the
+        // no-suppression mutant survives (measured), i.e. the control would pass while the real
+        // defect — an utterance submitted as an ordinary turn after an interrupt that never
+        // reached the server — went unnoticed.
+        XCTAssertTrue(
+            state.isSuppressed("u-barge"),
+            "an unsent interrupt must SUPPRESS its utterance: the failed send already released "
+            + "the hold, so the queued turn would otherwise authenticate as an ordinary question"
+        )
+        gate.release()
+        _ = await prior.value
+    }
+
 }
 
 // MARK: - Doubles
@@ -621,4 +697,5 @@ private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
 
 private final class InterruptAnalytics: AnalyticsService, @unchecked Sendable {
     func track(_ event: String, properties: [String: Any]) {}
+
 }

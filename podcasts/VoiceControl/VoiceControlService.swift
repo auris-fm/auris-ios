@@ -333,6 +333,7 @@ class VoiceControlService: ObservableObject {
 
         // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
         // 30s timer starts or expires (CombineLatest4 alone never saw that change).
+        let externalMicAvailable = routeMonitor.hasExternalMicrophoneCandidate
         Publishers.CombineLatest(
             Publishers.CombineLatest4(
                 conditionMonitor.$setup,
@@ -351,7 +352,12 @@ class VoiceControlService: ObservableObject {
                 conflicts: conflicts,
                 context: context,
                 micExposure: exposure,
-                gracePeriodActive: graceActive
+                gracePeriodActive: graceActive,
+                // Debug simulator only; `false` everywhere else by construction.
+                admitsBuiltInMicForSimulatorDiagnostic: DiagnosticMicOverride.isActive,
+                // Only ever consulted when the diagnostic is active; a real external microphone
+                // always keeps the original requirement.
+                hasExternalMicrophoneCandidate: externalMicAvailable
             )
         }
         .sink { [weak self] gate in
@@ -362,6 +368,16 @@ class VoiceControlService: ObservableObject {
 
             if gateDescription(previous) != gateDescription(gate.state) {
                 FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+            }
+            // LABEL THE DIAGNOSTIC PATH (owner requirement): a simulator session that only reached
+            // listening because the built-in microphone was admitted must never be mistaken for a
+            // real isolated-microphone capture when reading logs.
+            if DiagnosticMicOverride.isActive, gate.state.isListening, gate.posture.micExposure == .exposed {
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
+                    + "microphone. The route is genuinely Exposed; this exception exists so the "
+                    + "simulator can exercise capture. Device and Release are unaffected."
+                )
             }
 
             let wasCapturing = self.isListening
