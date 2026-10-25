@@ -17,7 +17,13 @@ final class VoiceSharingUploadTrigger {
     private let scheduler: VoiceSharingUploadScheduler
     private let surfaceEnabled: () -> Bool
     private let isAuthorized: () -> Bool
-    private var drainTask: Task<Void, Never>?
+    /// The live drain task. ALL reads and writes go through `stateLock` (reviewer 4377e2bd): a
+    /// fast completion/re-offer re-assigns this handle while a test await or deinit may read it.
+    private var drainTaskStorage: Task<Void, Never>?
+    private var drainTask: Task<Void, Never>? {
+        get { stateLock.withLock { drainTaskStorage } }
+        set { stateLock.withLock { drainTaskStorage = newValue } }
+    }
     /// Guards the in-flight bookkeeping only; never held across upload or credential work.
     private let stateLock = NSLock()
     private var drainInFlight = false
@@ -50,14 +56,21 @@ final class VoiceSharingUploadTrigger {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        // CANCELLATION IS HONOURED (reviewer 44d39ef8): a cancelled drain must not start a
-        // follow-up, so the slot is cleared and any pending work is discarded with the object.
-        drainTask?.cancel()
+        // TEARDOWN UNDER ONE HOLD (reviewer 4377e2bd): the live registration is REMOVED from the
+        // scheduler (so a completion can never fire into a dying object), the slot and pending
+        // work are dropped, and the drain task is cancelled. The drain task body captures only
+        // weak self plus the scheduler, so it cannot retain the trigger across an await.
         stateLock.lock()
+        let completionID = pendingCompletionID
+        pendingCompletionID = nil
+        let task = drainTaskStorage
+        drainTaskStorage = nil
         drainInFlight = false
         activeToken = nil
         workPending = false
         stateLock.unlock()
+        if let completionID { scheduler.cancelOwnerCompletion(completionID) }
+        task?.cancel()
     }
 
     /// Test seam: await the current drain (used by controls that must observe the FOLLOW-UP pass
@@ -76,6 +89,15 @@ final class VoiceSharingUploadTrigger {
     /// CANCELLATION, exercised while the trigger is still alive (reviewer 280f4c52): drop any
     /// pending completion registration, clear the slot, and refuse further work until cancelled
     /// tasks have drained. A cancelled trigger must neither send nor keep waking up.
+    /// PRODUCTION CANCELLATION (reviewer 4377e2bd/9d33f359): the app calls this when the feature's
+    /// preconditions vanish in a way that must stop all trigger activity — e.g. the surface is
+    /// compiled off in a future build, or the owning coordinator tears down. Same semantics as the
+    /// test seam: drop the registration, clear the slot, cancel the task.
+    func stop() {
+        cancelForTesting()
+    }
+
+    /// Test seam exposing the production cancellation semantics directly.
     func cancelForTesting() {
         stateLock.lock()
         let completionID = pendingCompletionID
@@ -83,7 +105,8 @@ final class VoiceSharingUploadTrigger {
         workPending = false
         drainInFlight = false
         activeToken = nil
-        let task = drainTask
+        let task = drainTaskStorage
+        drainTaskStorage = nil
         stateLock.unlock()
         if let completionID { scheduler.cancelOwnerCompletion(completionID) }
         task?.cancel()
@@ -140,15 +163,27 @@ final class VoiceSharingUploadTrigger {
     }
 
     /// A refused pass: wait for the OWNER to finish, then re-offer once. Never recurses by itself.
+    ///
+    /// PUBLICATION IS TOKEN-VALIDATED (reviewer 4377e2bd): the callback captures the drain's token
+    /// and re-checks it under the lock before touching ANY state, so a stale callback (one whose
+    /// drain was already superseded or cancelled) changes nothing. The registration ID is
+    /// published under the same lock, and a cancellation that ran before publication still wins —
+    /// the ID is checked against `activeToken`'s era, and a registration left over after the slot
+    /// cleared is dropped here.
     private func finishRefusedDrain(token: UUID) {
         guard !Task.isCancelled else {
             finishDrain(token: token, refused: false)
             return
         }
-        let registration = scheduler.registerOwnerCompletion { [weak self] in
+        // The callback validates BOTH the era token AND its own registration identity, so the ID
+        // must exist before the closure is built.
+        let registrationID = UUID()
+        let registration = scheduler.registerOwnerCompletion(id: registrationID) { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
-            guard self.activeToken == token else {
+            // THE TOKEN IS THE ERA: only the callback of the drain that still owns the slot may
+            // act. Superseded, completed, or cancelled drains are no-ops.
+            guard self.activeToken == token, self.pendingCompletionID == registrationID else {
                 self.stateLock.unlock()
                 return
             }
@@ -161,14 +196,22 @@ final class VoiceSharingUploadTrigger {
             self.triggerDrainIfPermitted()
         }
         stateLock.lock()
+        if activeToken != token {
+            // Cancellation (or a newer drain) already ended this era while we registered: the
+            // registration must not linger in the scheduler.
+            stateLock.unlock()
+            scheduler.cancelOwnerCompletion(registrationID)
+            return
+        }
         if registration.assumedOwnership {
             // The owner finished between the refusal and now: run immediately instead of waiting
             // for a callback that will never come.
             stateLock.unlock()
+            scheduler.cancelOwnerCompletion(registrationID)
             finishDrain(token: token, refused: true)
             return
         }
-        pendingCompletionID = registration.id
+        pendingCompletionID = registrationID
         stateLock.unlock()
     }
 

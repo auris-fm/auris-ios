@@ -50,14 +50,13 @@ final class VoiceSharingUploadScheduler {
 
     private var ownerCompletionWaiters: [UUID: () -> Void] = [:]
 
-    func registerOwnerCompletion(_ body: @escaping () -> Void) -> OwnerCompletion {
+    func registerOwnerCompletion(id: UUID = UUID(), _ body: @escaping () -> Void) -> OwnerCompletion {
         passLock.lock()
         if !passInFlight {
             // Free right now: the caller may simply run rather than wait for someone else.
             passLock.unlock()
-            return OwnerCompletion(assumedOwnership: true, id: UUID())
+            return OwnerCompletion(assumedOwnership: true, id: id)
         }
-        let id = UUID()
         ownerCompletionWaiters[id] = body
         passLock.unlock()
         return OwnerCompletion(assumedOwnership: false, id: id)

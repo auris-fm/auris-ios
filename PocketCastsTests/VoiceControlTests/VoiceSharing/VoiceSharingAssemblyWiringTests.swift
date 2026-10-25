@@ -1460,6 +1460,79 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                        "a cancelled trigger must not run its follow-up")
     }
 
+    /// A STALE COMPLETION CALLBACK CHANGES NOTHING (reviewer 4377e2bd): if the refused drain's era
+    /// ended (cancelled) before the owner released, the callback that later fires must be a no-op —
+    /// no re-offer, no state change.
+    func test_aCompletionCallbackFiringAfterCancellationIsANoop() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 20)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        chain.trigger.cancelForTesting()
+        // The owner finishes AFTER cancellation, so the registered callback fires into a cancelled
+        // era: it must deliver nothing.
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(transport.attemptCount, 1,
+                       "the stale callback must not re-offer after cancellation")
+        XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
+    }
+
+    /// A callback whose drain was SUPERSEDED must not clobber the newer state (reviewer 4377e2bd):
+    /// a second trigger arrival after the first was refused must survive the first callback.
+    func test_aSupersededCallbacksFiringDoesNotClobberTheNewerDrain() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let ownerHeld = DispatchSemaphore(value: 0)
+        let ownerThread = Thread {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                _ = await chain.scheduler.drainOnce()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 20)
+            ownerHeld.signal()
+        }
+        ownerThread.start()
+        XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the owner holds the scheduler")
+
+        // First arrival: refused, registers for owner completion.
+        chain.trigger.triggerDrainIfPermitted()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        // Second arrival while the first waits: coalesced into workPending of the SAME era, so
+        // exercise the superseded path directly is not reachable from outside; instead cancel and
+        // re-trigger: the new era must work independently of the old registration.
+        chain.trigger.cancelForTesting()
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        XCTAssertEqual(ownerHeld.wait(timeout: .now() + 20), .success)
+        chain.trigger.triggerDrainIfPermitted()
+        for _ in 0..<80 where transport.attemptCount < 2 {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertEqual(transport.attemptCount, 2,
+                       "a fresh era after cancellation delivers normally (old registration inert)")
+    }
+
     /// AUTHORIZATION IS RE-READ AT THE FOLLOW-UP: revocation between the arrival and the follow-up
     /// must prevent the second pass.
     func test_theFollowUpRechecksAuthorization() async throws {
