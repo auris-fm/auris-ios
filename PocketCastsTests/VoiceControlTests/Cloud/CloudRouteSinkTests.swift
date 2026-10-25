@@ -3104,7 +3104,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await Task.sleep(nanoseconds: 150_000_000)
         await MainActor.run { box.deliverOldest() }
         let bResult = await fast.value
-        print("DIAG2 pending=\(await MainActor.run { box.pendingCount() }) confirmed=\(await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }) cancels=\(await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 })")
         XCTAssertEqual(bResult.outcome, .completed, "B completes after E1 quiescence")
         // Withheld confirmations exist (E2 among them — B's own drain may also be captured);
         // E2 is definitely not confirmed yet. Bounded wait: notification capture hops to main,

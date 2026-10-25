@@ -299,7 +299,19 @@ final class CloudInterruptionState: @unchecked Sendable {
     /// path: the hold is dropped, not re-armed.
     func releaseUnsentHold(forRequestId requestId: String) {
         lock.lock(); defer { lock.unlock() }
-        guard held?.interruptedRequestId == requestId else { return }
+        guard let current = held, current.interruptedRequestId == requestId else { return }
+        // AN UNSENT INTERRUPT MUST ALSO SUPPRESS (reviewer c38ff4ba item 1).
+        //
+        // Releasing only the HOLD left the utterance free: its turn is already queued behind the
+        // predecessor, so it went on to authenticate as an ordinary question — asserting a
+        // settlement for an interruption the server never heard about. Suppression is rechecked
+        // immediately before dispatch, so recording it here is what actually stops that turn.
+        //
+        // This belongs in the state transition rather than at each caller: `releaseUnsentHold` is
+        // reached from `sendInterruptOnPriorSocket` (both the no-transport and the undelivered
+        // cases), so a caller-side suppression added afterwards would find the hold already gone
+        // and do nothing — which is exactly the defect this replaces.
+        suppressedUtterances.insert(current.utteranceId)
         held = nil
         if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
     }
@@ -346,8 +358,15 @@ final class CloudInterruptionState: @unchecked Sendable {
 
     /// Drop the binding without producing a report: the audio drained on its own, so the user
     /// heard the answer and nothing is owed.
-    func clearBufferedPlaybackOwner() {
+    ///
+    /// OWNER-SCOPED (reviewer c38ff4ba item 4). An unscoped clear lets a *superseded* turn's drain
+    /// notification erase the binding of the turn that replaced it, after which a genuine
+    /// interruption of that successor's playback would have no record and owe no report. Passing
+    /// the owner keeps the clear aligned with the same identity rule the drain release uses.
+    func clearBufferedPlaybackOwner(ifOwnedBy owner: AnyObject? = nil) {
         lock.lock(); defer { lock.unlock() }
+        guard let current = bufferedPlaybackOwner else { return }
+        if let owner, current.owner !== owner { return }
         bufferedPlaybackOwner = nil
     }
 

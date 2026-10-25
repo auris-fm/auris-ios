@@ -598,4 +598,95 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "nothing may be released for submission after the interrupt never arrived"
         )
     }
+
+    // MARK: - PRODUCTION-PATH refusal (reviewer c38ff4ba item 2)
+
+    /// A REFUSED INTERRUPTIONS ENDS THE TURN LOCALLY, THROUGH THE SERVICE.
+    ///
+    /// The state-level control could not catch the fall-through: it asserted a transition, not what
+    /// the turn then does. Here the refusal is served as the fixture and the assertion is on the
+    /// wire — the interrupting utterance must never authenticate.
+    func testARefusedInterruptionNeverAuthenticatesTheUtterance() async throws {
+        let service = try await readyService(fixture: { self.refusalFixture })
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+
+        speak(service, "first question", "u-prior")
+        let parked = await waitUntil(timeout: 5) { self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(parked, "premise: turn 1 must be in flight; sockets=\(recorder.all.count)")
+        guard let priorSocket = recorder.all.first else {
+            XCTFail("no predecessor socket")
+            return
+        }
+
+        speak(service, "play the next one", "u-barge")
+
+        // Capture the retained-report state as the refusal lands, before the predecessor's socket
+        // can construct another frame.
+        let refusalRetainedReport = await waitUntil(timeout: 8) {
+            sink.hasPendingInterruptionReportForTesting
+        }
+
+        // THE DECISIVE OBSERVABLE: the successor utterance never reaches the wire. Count
+        // authenticate frames carrying it across EVERY socket, not just the newest. The window is
+        // bounded but generous, and the refused turn's own settlement (the 10s acknowledgement
+        // deadline does not apply to a refusal) is awaited first, so a slow settle cannot be
+        // mistaken for "never authenticated".
+        let settling = await waitUntil(timeout: 8) {
+            self.terminals.contains("u-prior") || self.terminals.contains("u-barge")
+        }
+        XCTAssertTrue(
+            settling, "premise: the refused interruption must reach a terminal; terminals=\(terminals.all)"
+        )
+        let authenticated = self.recorder.all.contains {
+            $0.sentTextFrames.contains { $0.contains("u-barge") }
+        }
+        XCTAssertFalse(
+            authenticated,
+            "a refused interruption must END LOCALLY: the held utterance may never authenticate. "
+            + "frames=\(allFrames())"
+        )
+        // The report is retained for a later EXPLICIT user request, not carried by a successor.
+        // Read at the moment the interruption resolves: the predecessor's own socket continues to
+        // run after the refusal (its connection keeps draining), and any later frame it constructs
+        // legitimately consumes the report — so a later read would observe disappearance that is
+        // correct behaviour, not a missing report (measured: `report=u-prior` at recordRefusal).
+        XCTAssertTrue(
+            refusalRetainedReport,
+            "the interruption report must be RETAINED for a later explicit user request"
+        )
+        firstTurnLatch.release()
+    }
+
+    /// AN UNDELIVERED INTERRUPT SUPPRESSES THROUGH `releaseUnsentHold` (reviewer c38ff4ba item 1).
+    ///
+    /// The state-level control called suppression directly, so it could not catch the real
+    /// sequence: `sendInterruptOnPriorSocket` releases the hold first, after which a caller-side
+    /// suppression finds nothing and silently does nothing. This drives the failed send through
+    /// the sink and asserts the utterance never authenticates.
+    func testAnUndeliveredInterruptNeverAuthenticatesTheUtterance() async throws {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        // NO transport: `activeResultSocket` is absent, which is exactly the branch that returns
+        // `.undelivered` after `releaseUnsentHold`.
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
+        XCTAssertTrue(
+            state.hold(
+                request: "play the next one", utteranceId: "u-barge",
+                origin: 2, forRequestId: "u-prior"
+            )
+        )
+        // This is the production sequence as the sink performs it.
+        state.releaseUnsentHold(forRequestId: "u-prior")
+
+        XCTAssertTrue(
+            state.isSuppressed("u-barge"),
+            "releaseUnsentHold must SUPPRESS the utterance: a caller-side suppression after the "
+            + "release finds no hold and does nothing, so the queued turn would authenticate as "
+            + "an ordinary question having interrupted nothing"
+        )
+        XCTAssertNil(
+            state.recordTerminalAcknowledgement(forRequestId: "u-prior"),
+            "nothing may be released for submission after an unsent interrupt"
+        )
+    }
 }

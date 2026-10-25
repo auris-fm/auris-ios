@@ -45,6 +45,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// URL a routed turn is refused before reaching the transport. An own defaults suite keeps this
     /// from affecting other cases, and teardown restores it.
     private var suiteName: String!
+    /// Every service this class starts, stopped in tearDown. See the note there.
+    private static var startedServices: [VoiceControlService] = []
 
     override func setUp() {
         super.setUp()
@@ -54,8 +56,25 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     }
 
     override func tearDown() {
+        // STOP EVERY SERVICE THIS CLASS STARTED (diagnosis of the intermittent families).
+        //
+        // 21 cases start a service and only one ever stopped it, so each case left a live
+        // `VoiceControlService` with its ASR callbacks, mic gate and serial chain still running.
+        // Those survivors keep producing `onInputRoutingFinished` callbacks into closures that
+        // capture the FINISHED case's stream, and they compete for the audio session. That is a
+        // load-dependent, isolation-passing failure by construction: alone, nothing else is
+        // running and the assert sees its own event; under load, a leaked service's callback or
+        // the extra work delays the terminal past the 10s bound.
+        for service in Self.startedServices { service.stop() }
+        Self.startedServices.removeAll()
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         super.tearDown()
+    }
+
+    /// Start a service and register it for teardown. Use instead of a bare `startIfAllowed()`.
+    private func startTracked(_ service: VoiceControlService) {
+        service.startIfAllowed()
+        Self.startedServices.append(service)
     }
     /// Main's #48 gate reaches `.listening` only on an EXTERNAL microphone. The simulator has no
     /// external input route, so every provenance case supplies the same fake session shape the
@@ -99,7 +118,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
         service.gracePeriodSignalForTesting.onWakeWordDetected()
@@ -140,7 +159,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         XCTAssertGreaterThan(capture.startCount, 0, "the real start path did not begin capture")
         try await waitForRouter(service: service)
@@ -242,7 +261,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -292,7 +311,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -347,7 +366,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
@@ -374,7 +393,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
 
         let manager = service.liveOriginManagerForTesting
@@ -466,7 +485,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -598,7 +617,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "construction performs NO eager router load — the model is paid at first arm"
         )
 
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForRouter(service: service)
 
         XCTAssertGreaterThanOrEqual(
@@ -660,7 +679,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -755,7 +774,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -829,7 +848,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -918,7 +937,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -1055,7 +1074,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         let sink = service.executorForTesting.cloudRouteSinkForTesting
         try await waitForRouter(service: service)
@@ -1145,7 +1164,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -1256,7 +1275,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(
@@ -1408,7 +1427,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -1510,7 +1529,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
@@ -1652,7 +1671,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
         XCTAssertFalse(fixtureConfig.baseUrl.isEmpty, "baseUrl must be non-empty")
@@ -1856,7 +1875,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -2024,7 +2043,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         try await waitForListening(service: service)
         try await waitForRouter(service: service)
 
@@ -2140,7 +2159,7 @@ extension ServiceSelectionProvenanceTests {
             XCTFail("the assembly built no service — the manifest/assets are the blocker")
             return
         }
-        service.startIfAllowed()
+        startTracked(service)
         let expectation = expectation(description: "gate settles")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { expectation.fulfill() }
         wait(for: [expectation], timeout: 5)

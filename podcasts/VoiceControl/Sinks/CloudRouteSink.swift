@@ -49,6 +49,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// must be too. A test awaits it through `MainActor.run`.
     var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
 
+    /// Whether an interruption report awaits a later EXPLICIT user request. A refusal retains the
+    /// report but submits nothing, so the turn ends locally and there is no successor frame to
+    /// observe it on (reviewer c38ff4ba item 2).
+    @MainActor var hasPendingInterruptionReportForTesting: Bool { interruptionState.hasPendingReport }
+
     /// The selection the last turn arrived with, so a caller-level case can assert that the
     /// service derived it from the turn's own provenance rather than from live window state.
     /// Necessary because the two are indistinguishable from inside the sink when grace is active.
@@ -941,6 +946,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         forRequestId: interruptedRequestIdForThisTurn ?? ""
                     )
                     interruptedRequestIdForThisTurn = nil
+                    // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
+                    // made THIS turn continue into its own dispatch, authenticating the very
+                    // utterance the refusal discarded. A refusal is a server answer about the
+                    // interruption; it is not settlement and it authorizes nothing, so nothing may
+                    // be submitted for it — including this turn's own successor frame.
+                    if let bargeInStopEpoch {
+                        _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                    }
+                    return CloudRouteResult(response: .silent, outcome: .refused)
                 case .failed:
                     // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
                     // must END LOCALLY. It must NOT be promoted to an ordinary turn — the user's
@@ -1847,7 +1861,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         selection: CloudConversationSelection? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
-        translationKind: TranslationKind? = nil
+        translationKind: TranslationKind? = nil,
+        validatingEpoch: UInt64? = nil,
+        isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
         guard let utteranceId else { return nil }
         // A PRE-EXISTING BINDING IS NOT RETENTION (regression caught by the
@@ -1886,15 +1902,25 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // retained follow-up, so this utterance must not displace it.
             return nil
         }
-        // OWNERSHIP IS REVALIDATED AT THE EFFECT BOUNDARY (reviewer b36c8ab1 item 3 / ca629c34).
-        // The caller's epoch check ran BEFORE the main-actor hop into this function, and awaits sit
-        // between that check and the send. A window that retired in between would otherwise have
-        // the send issued anyway — stopping a predecessor and interrupting a turn on behalf of a
-        // capture the service has already rejected. Re-reading live state HERE, immediately before
-        // the frame leaves, is the only point where the check matches the effect it guards.
-        guard activeResultSocket?.requestId == priorRequestId,
-              (activeTurn.map { !$0.isCancelled }) ?? false else {
-            interruptionState.suppressHeldFollowUp(forRequestId: priorRequestId)
+        // THE INPUT'S OWN WINDOW IS REVALIDATED AT THE EFFECT BOUNDARY (reviewer c38ff4ba item 3).
+        //
+        // The caller checked `epoch` BEFORE the main-actor hop into this function, and awaits sit
+        // between that check and the send. Testing the PRIOR socket/token here would answer a
+        // different question — "is the turn being interrupted still live?" — and would let a stale
+        // capture interrupt a perfectly valid turn: a service stop/restart in that window ends
+        // THIS input's capture while the predecessor remains live. The only correct question at
+        // the effect boundary is whether the window that admitted this input is still current,
+        // asked of the service, immediately before the frame leaves.
+        if let validatingEpoch, let isEpochStillCurrent, !isEpochStillCurrent(validatingEpoch) {
+            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+            FileLog.shared.addMessage(
+                "[VoicePipeline] capture window ended before the interrupt send for turn "
+                + "\(priorRequestId) — utterance \(utteranceId) suppressed, nothing interrupted"
+            )
+            return nil
+        }
+        guard activeResultSocket?.requestId == priorRequestId else {
+            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
             FileLog.shared.addMessage(
                 "[VoicePipeline] interruption ownership lost before the send for turn "
                 + "\(priorRequestId) — utterance \(utteranceId) suppressed, nothing interrupted"
@@ -1911,7 +1937,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // an interruption of a turn the server never heard about. The user asked to interrupt;
             // the answer is still playing; sending that utterance as a plain question asserts a
             // settlement that does not exist. Suppress it exactly as a refusal does, and end.
-            interruptionState.suppressHeldFollowUp(forRequestId: priorRequestId)
+            // The suppression already happened inside `releaseUnsentHold` — doing it here would
+            // find no held utterance and silently do nothing (reviewer c38ff4ba item 1).
             FileLog.shared.addMessage(
                 "[VoicePipeline] interrupt UNDELIVERED for turn \(priorRequestId) — retained "
                 + "utterance \(utteranceId) suppressed; it must never be submitted"
@@ -2198,6 +2225,12 @@ extension CloudRouteSink {
             return
         }
         restoreHeldForPlayerDrain = nil
+        // THE PRODUCTION DRAIN PATH (reviewer c38ff4ba item 4). Until now nothing in production
+        // ever cleared the buffered-playback binding: a test called it directly, so the "audio
+        // drained on its own owes nothing" claim had no production witness. The confirmed drain
+        // IS that moment — the turn has finished and its output quiesced — so a later successor
+        // must not find a stale binding and report an interruption of audio nobody stopped.
+        interruptionState.clearBufferedPlaybackOwner(ifOwnedBy: deferred.owner)
         restoreTransientAudioState()
     }
 }

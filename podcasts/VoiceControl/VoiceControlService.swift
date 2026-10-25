@@ -544,7 +544,8 @@ class VoiceControlService: ObservableObject {
                     retainedByInterruption = await self?.emitEagerBargeInIfNeeded(
                         for: input,
                         origin: capturedOrigin,
-                        selection: capturedSelection
+                        selection: capturedSelection,
+                        epoch: epoch
                     ) ?? false
                 }
                 // EXPLICIT OWNERSHIP TRANSFER (reviewer ca629c34). If the eager step retained this
@@ -632,7 +633,8 @@ class VoiceControlService: ObservableObject {
     private func emitEagerBargeInIfNeeded(
         for input: IntentRoutingInput,
         origin: Int?,
-        selection: CloudConversationSelection?
+        selection: CloudConversationSelection?,
+        epoch: UInt64
     ) async -> Bool {
         guard input.utteranceId != nil else { return false }
         // Only an input that will actually be routed can barge in; a blank or wake-only capture is
@@ -649,7 +651,13 @@ class VoiceControlService: ObservableObject {
             selection: selection ?? input.selection,
             sourceTranscript: input.sourceTranscript,
             sourceLanguage: input.sourceLanguage,
-            translationKind: input.translationKind
+            translationKind: input.translationKind,
+            // The window this capture was ADMITTED under, carried to the effect boundary
+            // (reviewer c38ff4ba item 3). A service stop/restart between the caller's check and
+            // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
+            // capture whose window has already ended.
+            validatingEpoch: epoch,
+            isEpochStillCurrent: { [weak self] epoch in self?.isCaptureStillCurrent(epoch: epoch) ?? false }
         )
         return interrupted != nil
     }

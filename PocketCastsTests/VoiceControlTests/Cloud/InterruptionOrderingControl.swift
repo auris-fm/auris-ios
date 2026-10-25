@@ -332,34 +332,47 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         XCTAssertNil(released, "a refusal must DISCARD the follow-up; nothing may be submitted for it")
         XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be gone after a refusal")
 
-        // RETAIN: the report survives for the next turn, naming the INTERRUPTED turn. It is read
-        // from the frames the successor actually carried, because the report is ATTACHED to that
-        // turn's authentication frame — that is the contract's mechanism, and asserting the
-        // in-memory value alone would not prove it reached the wire.
+        // RETAIN — BUT NOT ON A SUCCESSOR AUTHENTICATION (reviewer c38ff4ba item 2, spec 9e309cc1
+        // line 334). The contract says: "If an interrupt is refused before any terminal
+        // acknowledgement, discard the retained next utterance and report local generic failure;
+        // terminate the old transport and retain the pending interruption report for a later
+        // EXPLICIT USER REQUEST." A refusal therefore ends the turn locally — it does not
+        // authenticate, so no successor frame exists to carry the report, and asserting one would
+        // have required the very fall-through this control exists to forbid.
         let successorFrames = capturedTask?.sentTextFrames ?? []
-        let namingInterruptedTurn = successorFrames.filter {
-            $0.contains("\"interrupts\"") && $0.contains(priorRequestId ?? "<nil>")
-        }
         XCTAssertEqual(
-            namingInterruptedTurn.count, 1,
-            "the pending interruption report must be retained and carried, naming the INTERRUPTED "
-            + "turn \(priorRequestId ?? "<nil>"); measured frames=\(successorFrames)"
+            successorFrames, [],
+            "a refused interruption must END LOCALLY: no authenticate frame, no report on the "
+            + "wire. Measured frames=\(successorFrames)"
+        )
+        XCTAssertTrue(
+            state.hasPendingReport,
+            "the interruption report must be RETAINED for a later explicit user request"
         )
 
-        // SUBMISSION COUNT: the refused turn submits only its own authenticate frame — no extra
-        // submission was made on its behalf.
-        let frames = capturedTask?.sentTextFrames ?? []
+        // The report is retained IN MEMORY, naming the interrupted turn, ready for that later turn.
+        let retainedReport = state.pendingReportForTesting
+        XCTAssertEqual(
+            retainedReport?.requestId, priorRequestId,
+            "the retained report must name the INTERRUPTED turn"
+        )
+
         let priorFrames = priorTask?.sentTextFrames ?? []
         XCTAssertTrue(
             priorFrames.contains { $0.contains("\"interrupt\"") && $0.contains(priorRequestId ?? "<nil>") },
             "premise: the interrupt frame must have ridden the PRIOR turn's socket; "
             + "prior frames=\(priorFrames)"
         )
+        // BOUNDED PREMISE WAIT, not an instantaneous read. Retirement is performed by the
+        // successor's supersede, which races this turn's own return; sampling `isCancelledSocket`
+        // once made the premise fail on green code whenever the supersede landed a moment later —
+        // the intermittent failure this control showed under load and never in isolation. Waiting
+        // asserts the same fact without depending on winning a race.
+        let retired = await waitUntil(timeout: 5) { priorTask?.isCancelledSocket ?? false }
         XCTAssertTrue(
-            priorTask?.isCancelledSocket ?? false,
+            retired,
             "premise: the prior socket must have been retired by the supersede"
         )
-        XCTAssertEqual(frames.count, 1, "a refusal must not cause any additional submission: \(frames)")
 
         gate.release()
         _ = await prior.value
