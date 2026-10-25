@@ -1767,6 +1767,18 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertFalse(finished, "a task held in an unreleased gate has NOT completed")
         XCTAssertLessThan(elapsed, 5,
                           "the helper must return within its bound, measured (took \(elapsed)s)")
+
+        // CLEAN EXIT (reviewer 61efc007): the timeout answer alone leaves the stalled task alive
+        // to wander into the transport and queue after teardown. Cancel BEFORE releasing the
+        // gate, release every external hold, then prove bounded completion of the captured task.
+        chain.trigger.cancelForTesting()
+        transport.stopHolding()
+        transport.releaseHeldPass()
+        releaseBody.signal()
+        XCTAssertTrue(Self.awaitBoundedCompletion(of: stalled!, within: 10),
+                      "the stalled task must complete once cancelled, un-gated, and holds released")
+        XCTAssertEqual(transport.attemptCount, 0,
+                       "and it must have exited without ever reaching the transport")
     }
 
     /// STOP BEFORE THE TASK BODY STARTS (reviewer b8991889 #1): a cancelled task must not enter
