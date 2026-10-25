@@ -120,9 +120,13 @@ final class LockOrderControls: XCTestCase {
         // assertion would be vacuous, so it is asserted before the restart.
         let parked = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        let gateOutcomes = GateOutcomes()
         service.enqueueAfterCaptureForTesting = { [weak service] in
             parked.signal()
-            _ = release.wait(timeout: .now() + 10)
+            // The gate's own wait outcome is RECORDED and asserted after completion: a timeout
+            // here would mean the enqueue proceeded on its own clock, not the test's release —
+            // the false-green window this control must not have.
+            gateOutcomes.recordRelease(release.wait(timeout: .now() + 10))
         }
         // UNCONDITIONAL CLEANUP: the gate is released, the seam cleared and the service stopped
         // on EVERY exit path, so a failed assertion cannot leave a parked enqueue or a listening
@@ -173,6 +177,11 @@ final class LockOrderControls: XCTestCase {
         XCTAssertEqual(doneOutcome, .success,
                        "the enqueue must complete within the bound after release; a hang here is a defect")
         XCTAssertTrue(resultBox.stored, "premise: the enqueue returned a verdict")
+        // The gate must have stayed CLOSED until the test's explicit release: a timeout outcome
+        // means the green verdict arrived through the gate's own clock, not the controlled race.
+        XCTAssertEqual(gateOutcomes.recordedRelease, .success,
+                       "the parked enqueue must be released by the test's signal, not by the "
+                           + "gate's own timeout — a timeout makes the refusal verdict uninterpretable")
         let refused = resultBox.value ?? true
         XCTAssertFalse(refused,
                        "a late callback whose origin reads ran while stopped must be refused by the "
@@ -186,6 +195,14 @@ final class LockOrderControls: XCTestCase {
         var stored: Bool { lock.lock(); defer { lock.unlock() }; return storedValue != nil }
         var value: Bool? { lock.lock(); defer { lock.unlock() }; return storedValue }
         func store(_ v: Bool) { lock.lock(); storedValue = v; lock.unlock() }
+    }
+
+    /// Lock-protected record of the test gate's own wait outcome (review 50e0f8db).
+    private final class GateOutcomes: @unchecked Sendable {
+        private let lock = NSLock()
+        private var releaseOutcome: DispatchTimeoutResult?
+        var recordedRelease: DispatchTimeoutResult? { lock.lock(); defer { lock.unlock() }; return releaseOutcome }
+        func recordRelease(_ r: DispatchTimeoutResult) { lock.lock(); releaseOutcome = r; lock.unlock() }
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {
