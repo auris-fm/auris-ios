@@ -232,49 +232,62 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
 
     // MARK: - THE PREMISE spec required: a live barge-in is reachable at all
 
-    /// TURN 2 CAN INTERRUPT A STILL-LIVE TURN 1.
+    /// TURN 2 CAN INTERRUPT A STILL-LIVE TURN 1 — asserted on the TRANSPORT's own boundaries.
     ///
-    /// This is the case the serial chain made impossible: turn 2 is enqueued behind turn 1, which
-    /// is parked in flight. Before the eager path, turn 2 could not reach the interruption logic
-    /// until turn 1 completed, so no interrupt could ever be sent while the predecessor socket was
-    /// open. Here the interrupt MUST appear while turn 1 is still parked — proven by checking it
-    /// has not reached a terminal yet.
+    /// The serial chain makes this the whole question: a successor cannot run until its
+    /// predecessor completes, so without the eager admission step no interrupt can ever be sent
+    /// while the predecessor socket is open. Every claim below is read from the transport, not
+    /// inferred from elapsed time:
+    ///   - `receiveEntered` — the predecessor's receiver is live;
+    ///   - `terminalWithheld` — its scripted terminal is PARKED, so the turn is genuinely in flight;
+    ///   - `sentInterrupt` — the interrupt left on THAT socket.
+    /// The bounded premise wait FAILS if the predecessor is not parked; it never waits out an
+    /// acknowledgement timeout and calls the result live.
     func testBargeInReachesTheWireWhileThePredecessorIsStillLive() async throws {
         let service = try await readyService(fixture: { self.doneFixture })
         let sink = service.executorForTesting.cloudRouteSinkForTesting
-        let state = sink.interruptionStateForTesting
 
         speak(service, "first question", "u-prior")
-        let priorLive = await waitUntil(timeout: 15) {
-            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
+        // BOUNDED PREMISE WAIT: fail if turn 1 never parks. A timeout here is a premise failure,
+        // not evidence of a live predecessor.
+        let priorSockets = await waitUntil(timeout: 5) { self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(
+            priorSockets,
+            "premise: turn 1's receive must be parked with its terminal WITHHELD; "
+            + "sockets=\(recorder.all.count) entered=\(recorder.all.first?.receiveEntered ?? false) "
+            + "withheld=\(recorder.all.first?.terminalWithheld ?? false) frames=\(allFrames())"
+        )
+        guard let priorSocket = recorder.all.first else {
+            XCTFail("no predecessor socket was built")
+            return
         }
-        XCTAssertTrue(priorLive, "premise: turn 1 must own a live socket")
-        XCTAssertFalse(terminals.contains("u-prior"), "premise: turn 1 must still be in flight")
+        XCTAssertTrue(priorSocket.receiveEntered, "premise: the predecessor receiver is consuming")
+        XCTAssertFalse(
+            terminals.contains("u-prior"),
+            "premise: turn 1 must NOT have reached a terminal; terminals=\(terminals.all)"
+        )
 
         speak(service, "play the next one", "u-barge")
 
-        let interrupted = await waitUntil(timeout: 15) { !self.interruptFrames().isEmpty }
+        let interrupted = await waitUntil(timeout: 5) { priorSocket.sentInterrupt }
         XCTAssertTrue(
             interrupted,
-            "the barge-in must reach the wire while the predecessor socket is open; frames=\(allFrames())"
+            "the interrupt must leave on the PREDECESSOR socket while its terminal is withheld; "
+            + "frames=\(priorSocket.sentTextFrames)"
         )
         XCTAssertTrue(
-            (interruptFrames().first ?? "").contains("u-prior"),
-            "the interrupt must name the live predecessor: \(interruptFrames())"
+            (priorSocket.sentTextFrames.first { $0.contains("\"interrupt\"") } ?? "").contains("u-prior"),
+            "the interrupt must name the live predecessor: \(priorSocket.sentTextFrames)"
         )
-        // THE POINT: the interrupt landed while turn 1 was STILL IN FLIGHT.
-        XCTAssertFalse(
-            terminals.contains("u-prior"),
-            "the interrupt must be sent BEFORE the predecessor reaches a terminal; terminals=\(terminals.all)"
+        // THE POINT, read from the transport: still withheld, so still in flight.
+        XCTAssertTrue(
+            priorSocket.terminalWithheld && !priorSocket.terminalReleased,
+            "the interrupt must be sent BEFORE the predecessor's terminal is released"
         )
-        let held = await waitUntil(timeout: 5) {
-            await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
-        }
-        XCTAssertTrue(held, "premise: the interrupting utterance is held while the interruption is unresolved")
 
-        // Unconditional cleanup so a failure cannot leave turn 1 parked.
         firstTurnLatch.release()
-        _ = await waitForTerminal("u-prior", timeout: 20)
+        let released = await waitUntil(timeout: 5) { priorSocket.terminalReleased }
+        XCTAssertTrue(released, "premise: the terminal must be released deliberately, not by expiry")
     }
 
     // MARK: - The bridge

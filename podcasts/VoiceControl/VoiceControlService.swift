@@ -526,7 +526,21 @@ class VoiceControlService: ObservableObject {
                 //
                 // Fired from the chain's own task so the capture/ordering guarantees above are
                 // unchanged. Echo rejection and gate ownership were already applied at admission.
-                await self?.emitEagerBargeInIfNeeded(for: input)
+                // REVALIDATE BEFORE ANY EAGER EFFECT (reviewer b36c8ab1 item 3). The eager
+                // interruption stops playback and sends on the live predecessor's socket — real,
+                // externally visible effects. The staleness guard below only runs AFTER the queue
+                // wait, so a service that stopped, restarted, or retired this capture in between
+                // would have already stopped the user's audio and interrupted a turn for an input
+                // that is then rejected. The same check that gates the dispatch therefore gates
+                // the eager step, using the SAME window identity captured at admission.
+                let stillOwnedForEagerEffect = self?.isCaptureStillCurrent(epoch: epoch) ?? false
+                if stillOwnedForEagerEffect {
+                    await self?.emitEagerBargeInIfNeeded(
+                        for: input,
+                        origin: capturedOrigin,
+                        selection: capturedSelection
+                    )
+                }
 
                 await previous?.value
                 guard !Task.isCancelled else { return }
@@ -578,7 +592,25 @@ class VoiceControlService: ObservableObject {
     /// Deliberately narrow: it only asks the sink to interrupt the live predecessor and retain this
     /// utterance. It does not classify, execute, or submit anything — those stay on the serial
     /// chain. An input that is not interrupting a live turn costs one state check.
-    private func emitEagerBargeInIfNeeded(for input: IntentRoutingInput) async {
+    /// Whether the capture that admitted this turn is still current.
+    ///
+    /// Deliberately the SAME test the dispatch uses after the queue wait, factored out so the eager
+    /// step cannot drift from it. A turn whose window has ended must produce no effects at all.
+    private func isCaptureStillCurrent(epoch: UInt64) -> Bool {
+        transcriptLock.lock()
+        defer { transcriptLock.unlock() }
+        return isListening && transcriptEpoch == epoch
+    }
+
+    /// Trigger the sink's eager barge-in for this input.
+    ///
+    /// Carries the admitted provenance (reviewer b36c8ab1 item 3): the interruption belongs to the
+    /// window that accepted the capture, not to whichever window is live when the step runs.
+    private func emitEagerBargeInIfNeeded(
+        for input: IntentRoutingInput,
+        origin: Int?,
+        selection: CloudConversationSelection?
+    ) async {
         guard input.utteranceId != nil else { return }
         // Only an input that will actually be routed can barge in; a blank or wake-only capture is
         // a session start, not speech over an answer.
@@ -586,7 +618,7 @@ class VoiceControlService: ObservableObject {
             await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
                 request: input.routerTranscript,
                 utteranceId: input.utteranceId,
-                origin: nil
+                origin: origin
             )
         }
     }
@@ -766,6 +798,20 @@ class VoiceControlService: ObservableObject {
         // After a refusal the contract forbids submitting it, so this turn must not reach the
         // wire: check the suppression the refusal recorded before doing any work.
         let utteranceId = input.utteranceId
+        // ONE EXECUTION PER ADMITTED INPUT (reviewer b36c8ab1 item 2). The eager interruption
+        // retains this utterance and the acknowledgement submits it; the input already QUEUED
+        // behind the predecessor is a second owner for the same utterance. Neither may rely on the
+        // other's state field staying put across awaits, so the claim is one atomic transition:
+        // one winner, and the loser dispatches nothing.
+        let executionClaimed = await MainActor.run(body: {
+            executorForTesting.cloudRouteSinkForTesting.claimExclusiveExecution(utteranceId)
+        })
+        guard executionClaimed else {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] queued input \(utteranceId ?? "-") already claimed — one execution"
+            )
+            return
+        }
         // Checked at entry AND again immediately before dispatch: the refusal terminal can land
         // while this turn is still queued or classifying, which is exactly the ordering measured
         // here (B entered, A's refusal arrived 110ms later).

@@ -654,6 +654,23 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     }
     private var holdLatch: HoldLatch?
 
+    // MARK: - Explicit transport signals (spec dd2071d3)
+
+    /// OBSERVABLE BOUNDARIES, not inferred ones. A control that infers "the predecessor was parked"
+    /// from elapsed time or from a latch expiring cannot distinguish a live predecessor from a
+    /// finished one — which is exactly how this file's sibling control passed while proving
+    /// nothing. These record the transport's own crossings so a case can assert them directly.
+
+    /// The first `receive()` was entered — the receiver is genuinely live and consuming.
+    private(set) var receiveEntered = false
+    /// The scripted terminal (`done`/`error`) has been WITHHELD: the receive that would serve it is
+    /// parked. This is the state a barge-in must be able to interrupt.
+    private(set) var terminalWithheld = false
+    /// True when an `interrupt` frame left on THIS socket.
+    var sentInterrupt: Bool { sentTextFrames.contains { $0.contains("\"interrupt\"") } }
+    /// Set when the terminal has been released and served.
+    private(set) var terminalReleased = false
+
     /// Holds ONLY the FIRST receive until explicit release; every later receive proceeds, so the
     /// scripted events (including the terminal `done`) are served once the test lets go.
     ///
@@ -717,6 +734,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     private var allReceiveHold: HoldLatch?
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
+        receiveEntered = true
         // Parked receives must WAKE on socket cancellation: a retired socket cannot keep the
         // producer busy-waiting or holding a closed connection concept open.
         if pendingArmedReceiveHold {
@@ -733,7 +751,9 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
             await park.wait(untilRetired: { self.isCancelledSocket })
         } else if let latch = firstReceiveHold, !firstReceiveHeld {
             firstReceiveHeld = true
+            terminalWithheld = true
             await latch.waitUntilReleased()
+            terminalReleased = true
         } else if let holdLatch {
             // Cancellation-INSENSITIVE park: only explicit release wakes this receive.
             await holdLatch.waitUntilReleased()
