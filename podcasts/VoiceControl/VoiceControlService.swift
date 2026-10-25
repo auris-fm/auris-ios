@@ -646,7 +646,10 @@ class VoiceControlService: ObservableObject {
             request: input.routerTranscript,
             utteranceId: input.utteranceId,
             origin: origin,
-            selection: selection ?? input.selection
+            selection: selection ?? input.selection,
+            sourceTranscript: input.sourceTranscript,
+            sourceLanguage: input.sourceLanguage,
+            translationKind: input.translationKind
         )
         return interrupted != nil
     }
@@ -813,8 +816,11 @@ class VoiceControlService: ObservableObject {
         // THE COMPLETE ADMITTED INPUT, with the provenance it was admitted under — not a
         // reconstructed turn with a live default selection (reviewer ca629c34).
         await handleRoutingInput(
-            .english(
-                transcript: released.request,
+            IntentRoutingInput(
+                sourceTranscript: released.sourceTranscript,
+                sourceLanguage: released.sourceLanguage,
+                routerTranscript: released.request,
+                translationKind: released.translationKind ?? .none,
                 selection: released.selection,
                 utteranceId: released.utteranceId
             ),

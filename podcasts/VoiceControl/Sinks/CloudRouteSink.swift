@@ -982,6 +982,28 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Sequential turns (no playback predecessor, or nothing pending) retire nothing: an
         // extra stop request would only shift confirmed-stop identities under existing deferral
         // records.
+        // THE INTERRUPTION POINT FOR SETTLED PLAYBACK (reviewer eaa8c06a item 4).
+        //
+        // If the predecessor settled with audio still outstanding, THIS successor stopping it is
+        // the moment the user stopped hearing the answer — the fact the contract owes the server.
+        // The predecessor could not know it at its own `done`, which is why the binding was
+        // recorded there and the report is created here.
+        if let playbackPredecessor, audioPlayer.hasOutstandingOutput,
+           let interruptedPlayback = interruptionState.takeBufferedPlayback(
+               ifOwnedBy: playbackPredecessor
+           ) {
+            interruptionState.recordPendingReport(
+                CloudInterruptionState.PendingReport(
+                    requestId: interruptedPlayback.requestId,
+                    playbackPositionMs: interruptedPlayback.playbackPositionMs,
+                    conversationId: interruptedPlayback.conversationId
+                )
+            )
+            FileLog.shared.addMessage(
+                "[VoicePipeline] buffered playback of turn \(interruptedPlayback.requestId) "
+                + "interrupted by a successor — report queued for the next authentication frame"
+            )
+        }
         if let playbackPredecessor, audioPlayer.hasOutstandingOutput {
             // CLEANUP BEFORE THE FIRST AWAIT (review 05d27ddb): this turn already acquired its
             // token, playback ownership, and the admitted hold. A return from INSIDE this block
@@ -1266,14 +1288,39 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // both that the turn settled and that audio remains: `needsDeferral` is that
                     // measurement. A report that named a turn whose audio had already drained
                     // would tell the server the user heard less than they did.
-                    if needsDeferral, let interrupted = interruptedRequestIdForThisTurn {
-                        interruptionState.recordPendingReport(
-                            CloudInterruptionState.PendingReport(
-                                requestId: interrupted,
+                    if needsDeferral {
+                        // BIND THE REPORT'S PRODUCER TO THIS TURN (reviewer eaa8c06a item 4).
+                        //
+                        // The report is owed when the user stops hearing THIS turn's audio short
+                        // of its end. That cannot be known at `done`: `done` only says the server
+                        // finished sending and audio remains, not whether the user ever
+                        // interrupts the remainder. Recording the report HERE claimed an
+                        // interruption that may never happen, and gating on
+                        // `interruptedRequestIdForThisTurn` skipped the case entirely — an
+                        // ordinary turn that settled with buffered audio had no id, so no report
+                        // producer existed at all when a later turn DID interrupt its playback.
+                        //
+                        // So bind the OWNERSHIP now and create the report at the interruption,
+                        // where the fact is actually established.
+                        interruptionState.recordBufferedPlaybackOwner(
+                            CloudInterruptionState.BufferedPlayback(
+                                requestId: turnRequestId,
                                 playbackPositionMs: nil,
-                                conversationId: turnConversationId
+                                conversationId: turnConversationId,
+                                owner: turnToken
                             )
                         )
+                        // The turn that interrupted it, if any, is still owed a report immediately:
+                        // its interruption was already acknowledged at the socket.
+                        if let interrupted = interruptedRequestIdForThisTurn {
+                            interruptionState.recordPendingReport(
+                                CloudInterruptionState.PendingReport(
+                                    requestId: interrupted,
+                                    playbackPositionMs: nil,
+                                    conversationId: turnConversationId
+                                )
+                            )
+                        }
                     }
                     turnResult = .completed
                     turnResponse = .silent
@@ -1797,7 +1844,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         request: String,
         utteranceId: String?,
         origin: Int?,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
+        translationKind: TranslationKind? = nil
     ) async -> String? {
         guard let utteranceId else { return nil }
         // A PRE-EXISTING BINDING IS NOT RETENTION (regression caught by the
@@ -1827,16 +1877,45 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             utteranceId: utteranceId,
             origin: origin,
             selection: selection,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage,
+            translationKind: translationKind,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one
             // retained follow-up, so this utterance must not displace it.
             return nil
         }
+        // OWNERSHIP IS REVALIDATED AT THE EFFECT BOUNDARY (reviewer b36c8ab1 item 3 / ca629c34).
+        // The caller's epoch check ran BEFORE the main-actor hop into this function, and awaits sit
+        // between that check and the send. A window that retired in between would otherwise have
+        // the send issued anyway — stopping a predecessor and interrupting a turn on behalf of a
+        // capture the service has already rejected. Re-reading live state HERE, immediately before
+        // the frame leaves, is the only point where the check matches the effect it guards.
+        guard activeResultSocket?.requestId == priorRequestId,
+              (activeTurn.map { !$0.isCancelled }) ?? false else {
+            interruptionState.suppressHeldFollowUp(forRequestId: priorRequestId)
+            FileLog.shared.addMessage(
+                "[VoicePipeline] interruption ownership lost before the send for turn "
+                + "\(priorRequestId) — utterance \(utteranceId) suppressed, nothing interrupted"
+            )
+            return nil
+        }
         // STOP LOCAL OUTPUT IMMEDIATELY — before the send, and long before any wait. The contract
         // says the client stops output and clears buffered answer audio immediately on barge-in.
         _ = audioPlayer.cancel()
         if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
+            // UNDELIVERED IS NOT "NO INTERRUPTION HAPPENED" (reviewer eaa8c06a item 1). Returning
+            // here without suppressing left the input queued with nothing to stop it, so it
+            // proceeded as an ordinary turn — authenticating and submitting an utterance that was
+            // an interruption of a turn the server never heard about. The user asked to interrupt;
+            // the answer is still playing; sending that utterance as a plain question asserts a
+            // settlement that does not exist. Suppress it exactly as a refusal does, and end.
+            interruptionState.suppressHeldFollowUp(forRequestId: priorRequestId)
+            FileLog.shared.addMessage(
+                "[VoicePipeline] interrupt UNDELIVERED for turn \(priorRequestId) — retained "
+                + "utterance \(utteranceId) suppressed; it must never be submitted"
+            )
             return nil
         }
         FileLog.shared.addMessage(

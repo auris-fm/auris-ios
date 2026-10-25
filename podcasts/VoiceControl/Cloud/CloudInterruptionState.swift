@@ -51,6 +51,20 @@ final class CloudInterruptionState: @unchecked Sendable {
     }
 
     /// A follow-up released for submission.
+    /// A settled turn whose audio was still playing when its socket closed.
+    ///
+    /// The interruption contract owes the server the fact that the user heard only part of the
+    /// answer. That becomes true only if a LATER turn actually stops the playback, so the turn
+    /// that owns the buffered audio is recorded here and the report is created at the stop.
+    struct BufferedPlayback {
+        let requestId: String
+        let playbackPositionMs: Int64?
+        let conversationId: String?
+        /// Identity of the token whose audio is outstanding, so a report is only produced for the
+        /// playback that was actually interrupted.
+        let owner: AnyObject
+    }
+
     struct ReleasedFollowUp: Equatable {
         let request: String
         let utteranceId: String
@@ -59,6 +73,14 @@ final class CloudInterruptionState: @unchecked Sendable {
         /// dispatches the same complete input rather than reconstructing one with a live default
         /// (reviewer ca629c34 / b36c8ab1: preserve provenance across the hand-off).
         let selection: CloudConversationSelection?
+        /// The ORIGINAL capture's source transcript and language. Selection alone does not
+        /// establish complete-input preservation (reviewer b8af462e): the follow-up must dispatch
+        /// the input that was admitted, including what was recognized and in which language.
+        let sourceTranscript: String?
+        let sourceLanguage: String?
+        /// How the recognized text was produced (native / platform / backend translation), so the
+        /// follow-up dispatches under the same translation regime it was admitted with.
+        let translationKind: TranslationKind?
         /// The INTERRUPTED turn this follow-up was addressed to — the subject of the pending
         /// report and, with the release, the whole authority to submit.
         let interruptedRequestId: String
@@ -67,6 +89,9 @@ final class CloudInterruptionState: @unchecked Sendable {
     private struct HeldFollowUp {
         let request: String
         let selection: CloudConversationSelection?
+        let sourceTranscript: String?
+        let sourceLanguage: String?
+        let translationKind: TranslationKind?
         let utteranceId: String
         let origin: Int?
         /// The turn this utterance interrupts. Bound at hold time; a terminal for any other turn
@@ -130,6 +155,9 @@ final class CloudInterruptionState: @unchecked Sendable {
         utteranceId: String,
         origin: Int?,
         selection: CloudConversationSelection? = nil,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
+        translationKind: TranslationKind? = nil,
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -138,6 +166,9 @@ final class CloudInterruptionState: @unchecked Sendable {
         held = HeldFollowUp(
             request: request,
             selection: selection,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage,
+            translationKind: translationKind,
             utteranceId: utteranceId,
             origin: origin,
             interruptedRequestId: interruptedRequestId
@@ -165,6 +196,9 @@ final class CloudInterruptionState: @unchecked Sendable {
             utteranceId: held.utteranceId,
             origin: held.origin,
             selection: held.selection,
+            sourceTranscript: held.sourceTranscript,
+            sourceLanguage: held.sourceLanguage,
+            translationKind: held.translationKind,
             interruptedRequestId: requestId
         )
     }
@@ -292,6 +326,30 @@ final class CloudInterruptionState: @unchecked Sendable {
     }
 
     private var suppressedUtterances: Set<String> = []
+
+    private var bufferedPlaybackOwner: BufferedPlayback?
+
+    /// Bind the report's producer to a turn that settled with audio still outstanding.
+    func recordBufferedPlaybackOwner(_ playback: BufferedPlayback) {
+        lock.lock(); defer { lock.unlock() }
+        bufferedPlaybackOwner = playback
+    }
+
+    /// The playback a successor is about to stop. Read-and-clear, so one interruption cannot
+    /// produce two reports.
+    func takeBufferedPlayback(ifOwnedBy owner: AnyObject) -> BufferedPlayback? {
+        lock.lock(); defer { lock.unlock() }
+        guard let current = bufferedPlaybackOwner, current.owner === owner else { return nil }
+        bufferedPlaybackOwner = nil
+        return current
+    }
+
+    /// Drop the binding without producing a report: the audio drained on its own, so the user
+    /// heard the answer and nothing is owed.
+    func clearBufferedPlaybackOwner() {
+        lock.lock(); defer { lock.unlock() }
+        bufferedPlaybackOwner = nil
+    }
 
 
     // MARK: - Retained-follow-up binding (PRODUCTION: the eager barge-in path)

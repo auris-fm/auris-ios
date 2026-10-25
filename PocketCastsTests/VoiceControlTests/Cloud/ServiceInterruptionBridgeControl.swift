@@ -474,4 +474,128 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "the refusal retains the interruption report for a later explicit turn"
         )
     }
+
+    // MARK: - Buffered playback after `done` (reviewer eaa8c06a item 4)
+
+    /// AN ORDINARY TURN THAT SETTLES WITH BUFFERED AUDIO OWES A REPORT ONLY IF INTERRUPTED.
+    ///
+    /// The report could not be recorded at `done`: `done` says the server finished sending and
+    /// audio remains, not that the user ever stops the remainder. And gating it on an
+    /// interruption id skipped this case entirely, because an ordinary turn has none — so when a
+    /// later turn DID interrupt its playback there was no producer. The turn now binds ownership
+    /// at `done` and the successor's stop creates the report.
+    func testBufferedPlaybackInterruptedByASuccessorProducesItsReport() async {
+        let state = CloudInterruptionState()
+        let owner = NSObject()
+
+        // Turn A settled `done` with audio outstanding: it binds, and owes nothing YET.
+        state.recordBufferedPlaybackOwner(
+            CloudInterruptionState.BufferedPlayback(
+                requestId: "u-settled",
+                playbackPositionMs: 4200,
+                conversationId: "conv-1",
+                owner: owner
+            )
+        )
+        XCTAssertFalse(
+            state.hasPendingReport,
+            "an uninterrupted settle owes NO report — the user has not stopped hearing it yet"
+        )
+
+        // A DIFFERENT token stopping the audio is not this playback: no report.
+        XCTAssertNil(
+            state.takeBufferedPlayback(ifOwnedBy: NSObject()),
+            "a stop by anything other than the owning token must not claim this playback"
+        )
+        XCTAssertFalse(state.hasPendingReport, "still nothing owed")
+
+        // THE OWNER STOPPED SHORT: the report is created exactly here.
+        let interrupted = state.takeBufferedPlayback(ifOwnedBy: owner)
+        XCTAssertEqual(interrupted?.requestId, "u-settled")
+        XCTAssertEqual(interrupted?.playbackPositionMs, 4200)
+        XCTAssertEqual(interrupted?.conversationId, "conv-1", "the report must name ITS conversation")
+
+        // Read-and-clear: one interruption cannot produce two reports.
+        XCTAssertNil(
+            state.takeBufferedPlayback(ifOwnedBy: owner),
+            "the binding is consumed by the first interruption"
+        )
+    }
+
+    /// AUDIO THAT DRAINS ON ITS OWN OWES NOTHING.
+    func testBufferedPlaybackThatDrainsProducesNoReport() async {
+        let state = CloudInterruptionState()
+        let owner = NSObject()
+        state.recordBufferedPlaybackOwner(
+            CloudInterruptionState.BufferedPlayback(
+                requestId: "u-drained", playbackPositionMs: nil,
+                conversationId: "conv-1", owner: owner
+            )
+        )
+        state.clearBufferedPlaybackOwner()
+        XCTAssertNil(state.takeBufferedPlayback(ifOwnedBy: owner), "a drained answer owes nothing")
+        XCTAssertFalse(state.hasPendingReport)
+    }
+
+    // MARK: - Retained input preserves the COMPLETE admitted capture (reviewer b8af462e)
+
+    /// Selection alone does not establish complete-input preservation, so the retained record
+    /// carries the original source transcript, language and translation regime — and the release
+    /// hands all of them back, not just the request text.
+    func testRetainedFollowUpPreservesTheOriginalSourceMetadata() async {
+        let state = CloudInterruptionState()
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
+        XCTAssertTrue(
+            state.hold(
+                request: "spiel die naechste folge",
+                utteranceId: "u-follow",
+                origin: 7,
+                selection: .followUp,
+                sourceTranscript: "spiel die naechste folge",
+                sourceLanguage: "de",
+                translationKind: .platform,
+                forRequestId: "u-prior"
+            )
+        )
+        let released = state.recordTerminalAcknowledgement(forRequestId: "u-prior")
+        XCTAssertEqual(released?.utteranceId, "u-follow")
+        XCTAssertEqual(released?.origin, 7)
+        XCTAssertEqual(released?.selection, .followUp)
+        XCTAssertEqual(released?.sourceTranscript, "spiel die naechste folge")
+        XCTAssertEqual(released?.sourceLanguage, "de", "the language must survive the hand-off")
+        XCTAssertEqual(
+            released?.translationKind, .platform,
+            "the translation regime must survive the hand-off"
+        )
+    }
+
+    /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE (reviewer eaa8c06a item 1).
+    ///
+    /// The eager path used to return nil here without suppressing, which left the input queued
+    /// with nothing stopping it: it went on to authenticate as an ordinary question, asserting a
+    /// settlement that never happened. Suppression is the observable that prevents that, and it is
+    /// keyed on the utterance, which is what the queued dispatch asks before sending.
+    func testAnUndeliveredInterruptSuppressesItsUtterance() async {
+        let state = CloudInterruptionState()
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
+        XCTAssertTrue(
+            state.hold(
+                request: "play the next one", utteranceId: "u-barge",
+                origin: 2, forRequestId: "u-prior"
+            )
+        )
+        XCTAssertFalse(state.isSuppressed("u-barge"), "precondition: not suppressed before the send")
+
+        // The send came back undelivered — the same suppression a refusal applies.
+        state.suppressHeldFollowUp(forRequestId: "u-prior")
+        XCTAssertTrue(
+            state.isSuppressed("u-barge"),
+            "an undelivered interrupt must suppress the utterance, or it is submitted as an "
+            + "ordinary turn having interrupted nothing"
+        )
+        XCTAssertNil(
+            state.recordTerminalAcknowledgement(forRequestId: "u-prior"),
+            "nothing may be released for submission after the interrupt never arrived"
+        )
+    }
 }
