@@ -223,7 +223,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     /// text, terminal, verdict) to a dedicated file in the app container, which the external runner
     /// reads. It never logs general traffic and never reads a credential.
     ///
-    ///   xcrun simctl launch <device> fm.auris.debug --scratch-acceptance <nonce>
+    ///   xcrun simctl launch <device> fm.auris --scratch-acceptance <nonce>
     static let scratchAcceptanceArgument = "--scratch-acceptance"
     static let scratchAcceptanceExportName = "scratch-acceptance-export.json"
 

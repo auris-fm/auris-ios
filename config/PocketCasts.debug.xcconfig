@@ -1,12 +1,17 @@
 #include "PocketCasts.base.xcconfig"
 
-// The hosted unit tests install the app built from this configuration onto a shared
-// simulator, so its launcher name is distinct from the staging install the owner tests with.
+// The staging/debug install IS this configuration now (Debug bakes the staging gateway and
+// carries the STAGING semantics — see below), so its launcher name is deliberately distinct
+// from the base app the hosted unit tests install alongside it.
 APP_DISPLAY_NAME = Auris Debug
 
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
-OTHER_SWIFT_FLAGS = -D DEBUG
+// -D STAGING (review 4371027569): the retired StagingDebug configuration got this flag from
+// PocketCasts.staging.xcconfig; without it a staging-scheme Debug build compiles
+// ServerSyncManager.production() == true and syncs against the production Pocket Casts hosts,
+// and CrashLoggingDataProvider reports the wrong build type. Debug is the staging build.
+OTHER_SWIFT_FLAGS = -D STAGING -D DEBUG
 
 // Debug builds hit the staging gateway directly (owner request, task58 thread
 // 04dd0df2 item 1): no separate staging configuration needed for testing. The
