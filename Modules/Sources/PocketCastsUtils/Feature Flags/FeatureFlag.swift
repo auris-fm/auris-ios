@@ -343,7 +343,14 @@ public enum FeatureFlag: String, CaseIterable {
         case .cloudContextPrefetch:
             false
         case .cloudEdgeTokens:
+            #if DEBUG && targetEnvironment(simulator)
+            // Simulator-gated debug bypass (task58, owner 04dd0df2): Debug
+            // simulator builds may exercise the assistant without flipping the
+            // default for device or release builds.
+            true
+            #else
             false
+            #endif
         case .libroFm:
             false
         case .encourageAccountCreation:
