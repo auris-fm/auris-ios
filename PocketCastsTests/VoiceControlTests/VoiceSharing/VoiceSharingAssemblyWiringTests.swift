@@ -1724,6 +1724,51 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and no new era opens")
     }
 
+    /// A completion signal observed with a genuine bounded wait: the side task signals when the
+    /// observed task finishes, and the caller's `wait` bound is the ONLY thing that ends the wait.
+    /// No task-group scope, so a stuck await cannot outlive the bound structurally.
+    nonisolated static func awaitBoundedCompletion(of task: Task<Void, Never>,
+                                                   within seconds: Int) -> Bool {
+        let completed = DispatchSemaphore(value: 0)
+        Task {
+            _ = await task.value
+            completed.signal()
+        }
+        return completed.wait(timeout: .now() + TimeInterval(seconds)) == .success
+    }
+
+    /// THE HELPER ITSELF IS UNDER TEST (reviewer 86d0b6db): a permanently stalled task (its body
+    /// held in a gate that is never released until cleanup) must make the bounded helper return
+    /// FALSE within its bound — measured, not assumed.
+    func test_theBoundedCompletionHelperReturnsFalseForAStalledTaskWithinItsBound() async throws {
+        let transport = HeldTransport()
+        let chain = makeTrigger(transport)
+        _ = try AudioFixture.makeReadyEntry(in: chain.queue)
+
+        let bodyEntered = DispatchSemaphore(value: 0)
+        let releaseBody = DispatchSemaphore(value: 0)
+        chain.trigger.preDrainGateForTesting = {
+            bodyEntered.signal()
+            _ = releaseBody.wait(timeout: .now() + 30)
+        }
+        defer {
+            releaseBody.signal()
+            chain.trigger.preDrainGateForTesting = nil
+        }
+
+        chain.trigger.triggerDrainIfPermitted()
+        XCTAssertEqual(bodyEntered.wait(timeout: .now() + 30), .success)
+        let stalled = chain.trigger.drainTaskForTesting
+        XCTAssertNotNil(stalled, "precondition: a live stalled task to observe")
+
+        let start = Date()
+        let finished = Self.awaitBoundedCompletion(of: stalled!, within: 2)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertFalse(finished, "a task held in an unreleased gate has NOT completed")
+        XCTAssertLessThan(elapsed, 5,
+                          "the helper must return within its bound, measured (took \(elapsed)s)")
+    }
+
     /// STOP BEFORE THE TASK BODY STARTS (reviewer b8991889 #1): a cancelled task must not enter
     /// drainOnce at all — the pre-entry check, not the post-await one, prevents the send.
     func test_aStopBeforeTheTaskBodyStartsPreventsTheDrain() async throws {
@@ -1757,16 +1802,12 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         let capturedTask = chain.trigger.drainTaskForTesting
         chain.trigger.cancelForTesting()
         releaseBody.signal()
-        // BOUNDED COMPLETION PROOF (reviewer f39bc70d): the released body must actually finish —
-        // zero attempts plus a cleared slot are otherwise observable before it even resumes.
+        // BOUNDED COMPLETION PROOF (reviewer f39bc70d/86d0b6db): the released body must actually
+        // finish. The wait is a semaphore on a completion signal — it does NOT structurally join
+        // a hung await the way a task group's scope would, so even a stalled task cannot hang the
+        // test past the bound.
         if let capturedTask {
-            let finished = await withTaskGroup(of: Bool.self) { group in
-                group.addTask { _ = await capturedTask.value; return true }
-                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000); return false }
-                let first = await group.next()!
-                group.cancelAll()
-                return first
-            }
+            let finished = Self.awaitBoundedCompletion(of: capturedTask, within: 10)
             XCTAssertTrue(finished, "the released drain task must complete, not hang")
         } else {
             XCTFail("no live drain task was captured to prove completion")
