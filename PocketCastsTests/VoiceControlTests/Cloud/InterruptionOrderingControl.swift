@@ -366,6 +366,40 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         XCTAssertFalse(state.hasPendingReport, "the report must be consumed by the turn that carried it")
     }
 
+    /// CONVERSATION ABANDONMENT DISCARDS THE REPORT (`cloud-assistant.md` → Interruption).
+    ///
+    /// The report corrects ONE conversation's settled history. Carrying it into a different
+    /// conversation would ask the server to annotate turns it never settled. So a turn that
+    /// carries a DIFFERENT conversation id must drop it rather than attach it.
+    ///
+    /// This is the requirement a first pass at the contract check found unimplemented: the state
+    /// held no conversation identity, so no turn could ever tell that the conversation had changed.
+    func testReportIsDiscardedWhenTheConversationChanges() async {
+        let state = CloudInterruptionState()
+        state.recordPendingReport(.init(requestId: "turn-A", playbackPositionMs: nil, conversationId: "conv-old"))
+        XCTAssertEqual(
+            state.pendingReportConversationId, "conv-old",
+            "premise: the report names the conversation it belongs to"
+        )
+
+        // A turn that runs in a DIFFERENT conversation: `prepare` mints a fresh conversation id.
+        let sink = makeSink(state: state) { self.doneFixture }
+        _ = await sink.routeToCloud(
+            request: "different conversation", tier: .free, context: sampleContext(),
+            origin: Self.origin, selection: .wakeWord, utteranceId: "u-other"
+        )
+
+        let frames = capturedTask?.sentTextFrames ?? []
+        XCTAssertFalse(
+            frames.contains { $0.contains("\"interrupts\"") },
+            "a report must NOT travel into a different conversation: \(frames)"
+        )
+        XCTAssertNil(
+            state.pendingReportForTesting,
+            "abandoning the conversation must DISCARD the report, not keep it for a later turn"
+        )
+    }
+
     /// A report is carried ONCE: the following turn must not re-send the same correction.
     func testReportIsNotReSentOnASubsequentTurn() async {
         let state = CloudInterruptionState()

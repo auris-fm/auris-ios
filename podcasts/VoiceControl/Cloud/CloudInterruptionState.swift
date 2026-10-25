@@ -36,6 +36,9 @@ final class CloudInterruptionState: @unchecked Sendable {
     struct PendingReport: Equatable {
         let requestId: String
         let playbackPositionMs: Int64?
+        /// The conversation whose settled history this report corrects. A report is only valid
+        /// inside ITS conversation; abandoning that conversation discards it.
+        var conversationId: String?
     }
 
     /// A follow-up released for submission, with the identity the fence was won under.
@@ -175,6 +178,23 @@ final class CloudInterruptionState: @unchecked Sendable {
     }
 
     // MARK: - The pending report
+
+    /// ABANDONING THE CONVERSATION DISCARDS THE REPORT (`cloud-assistant.md` → Interruption:
+    /// "Abandoning that conversation discards the report; retained history still cannot claim the
+    /// generated answer was heard"). The report annotates one conversation's prior history, so
+    /// carrying it into a DIFFERENT conversation would tell the server to correct turns it never
+    /// settled. A conversation change is exactly that abandonment.
+    func discardPendingReport() {
+        lock.lock(); defer { lock.unlock() }
+        pendingReport = nil
+    }
+
+    /// The conversation the pending report belongs to, if any. Read WITHOUT consuming, so a turn
+    /// can decide whether this is the same conversation before it takes the report.
+    var pendingReportConversationId: String? {
+        lock.lock(); defer { lock.unlock() }
+        return pendingReport?.conversationId
+    }
 
     /// Take the report for the next turn's authentication frame.
     ///

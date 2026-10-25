@@ -136,6 +136,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Cross-turn interruption state: the retained follow-up and the pending report.
     private let interruptionState: CloudInterruptionState
 
+    /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
+    /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
+    /// conversation), so this is the id the retained report must carry.
+    @MainActor private var lastAdmittedConversationId: String?
+
     /// The turn socket currently open, so an ordering control can establish that a PRIOR turn is
     /// genuinely in flight before it starts a successor. Without this the interruption path never
     /// runs in a test and a control about interruption ordering passes vacuously.
@@ -867,6 +872,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // This turn's wire identity, used by the interruption state to bind an acknowledgement or a
         // refusal to the follow-up it resolves.
         let turnRequestId = turn.requestId
+        // The conversation this turn carries, used to stamp an interruption report so the report
+        // can be discarded if the user abandons that conversation.
+        let turnConversationId = conversation.conversationId
+        lastAdmittedConversationId = turnConversationId
         // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
         // could re-drive it, and that retention IS what made replay possible: a completed or
         // possibly-submitted request left on the books is exactly what a replay path would find.
@@ -907,6 +916,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // (cloud-assistant.md → Interruption, spec c5fe3416): taken once, so a turn attaches it a
         // single time. Taken here — at the turn's own wire construction — rather than earlier, so a
         // report cannot be consumed by a turn that never reaches the socket.
+        // ABANDONMENT CHECK FIRST (`cloud-assistant.md` → Interruption: abandoning the
+        // conversation discards the report). A report describes ONE conversation's settled
+        // history; attaching it to a turn that opened or switched to a DIFFERENT conversation
+        // would ask the server to correct turns it never settled. Detected here, at the wire
+        // construction for this turn, using the conversation id this turn will actually carry.
+        if let carriedConversationId = interruptionState.pendingReportConversationId,
+           carriedConversationId != conversation.conversationId {
+            interruptionState.discardPendingReport()
+            FileLog.shared.addMessage(
+                "[VoicePipeline] pending interruption report discarded — conversation changed "
+                + "from \(carriedConversationId) to \(conversation.conversationId)"
+            )
+        }
         let pendingInterruptReport = interruptionState.takePendingReport()
         let routed = client.routeWithResultSocket(
             request: request,
@@ -1015,7 +1037,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // held follow-up for submission on its own new socket. Both are idempotent;
                     // the release returns non-nil exactly once, so two terminals cannot submit it
                     // twice.
-                    recordInterruptionAcknowledgement(requestId: turnRequestId)
+                    recordInterruptionAcknowledgement(
+                        requestId: turnRequestId,
+                        conversationId: turnConversationId
+                    )
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
@@ -1437,7 +1462,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// `done` counts as acknowledgement even with `outcome: completed` — the contract forbids
     /// waiting for a second terminal — so this is called from the `done` branch only.
-    private func recordInterruptionAcknowledgement(requestId: String) {
+    private func recordInterruptionAcknowledgement(requestId: String, conversationId: String) {
         let released = interruptionState.recordTerminalAcknowledgement(forRequestId: requestId)
         if let released {
             // The report names the INTERRUPTED turn, which is the turn whose held follow-up this
@@ -1448,7 +1473,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 interruptionState.recordPendingReport(
                     CloudInterruptionState.PendingReport(
                         requestId: interruptedRequestId,
-                        playbackPositionMs: nil
+                        playbackPositionMs: nil,
+                        // The conversation this turn runs in IS the interrupted turn's
+                        // conversation: a barge-in continues the same conversation.
+                        conversationId: conversationId
                     )
                 )
             }
@@ -1469,11 +1497,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The refusal discards the held follow-up and retains a report naming the INTERRUPTED turn.
         // The server applies the report to already-settled history, so it must name a turn the
         // server knows we interrupted — which is the interrupted turn, not the refused one.
+        let reportConversationId = lastAdmittedConversationId
         let discarded = interruptionState.recordRefusal(
             forRequestId: interruptedRequestId ?? requestId,
             retainingReport: CloudInterruptionState.PendingReport(
                 requestId: interruptedRequestId ?? requestId,
-                playbackPositionMs: nil
+                playbackPositionMs: nil,
+                // Refusals are recorded from the failing turn's own scope, which does not know the
+                // interrupted turn's conversation; the report is conversation-scoped, so the
+                // caller stamps it (a nil stamp simply cannot be discard-checked, which is the
+                // conservative outcome: the report is carried, never silently dropped).
+                conversationId: reportConversationId
             )
         )
         if discarded {
