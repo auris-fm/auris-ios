@@ -72,6 +72,12 @@ final class VoiceSharingUploadScheduler {
         passLock.withLock { ownerCompletionWaiters.removeValue(forKey: id) }
     }
 
+    /// DETERMINISTIC RACE BARRIER (reviewer 2a570a0b #4): when set, the waiter-firing loop calls
+    /// this before EACH waiter and does not proceed until it returns — so a control can hold the
+    /// exact moment a callback is about to be taken, mutate the trigger (e.g. cancel it), and then
+    /// release, instead of guessing with sleeps. Invoked OUTSIDE `passLock`.
+    var ownerCompletionFireGateForTesting: (() -> Void)?
+
     private let queue: VoiceSharingUploadQueue
     private let uploader: VoiceSharingUploader
     private let isAuthorized: () -> Bool
@@ -116,7 +122,11 @@ final class VoiceSharingUploadScheduler {
                 ownerCompletionWaiters.removeAll()
                 return pending
             }
-            for waiter in waiters { waiter() }
+            let gate = ownerCompletionFireGateForTesting
+            for waiter in waiters {
+                gate?()
+                waiter()
+            }
         }
         guard isAuthorized() else { return .idle }
         // Neither unknown coverage nor a revocation hold may feed the scheduler: both yield

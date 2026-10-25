@@ -80,6 +80,11 @@ final class VoiceSharingUploadTrigger {
         await task?.value
     }
 
+    /// Test seam: the publication-before-registration invariant, observable.
+    var hasPublishedCompletionRegistrationForTesting: Bool {
+        stateLock.withLock { pendingCompletionID != nil }
+    }
+
     /// Test seam: whether a drain currently owns the slot.
     var isDrainingForTesting: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -147,9 +152,19 @@ final class VoiceSharingUploadTrigger {
     /// what re-offers. `Task.isCancelled` is checked at every transition so a cancelled trigger
     /// neither sends nor keeps a registration.
     private func startDrain(token: UUID) {
-        drainTask = Task { [weak self, scheduler] in
-            guard let self, !Task.isCancelled else { return }
+        // TOKEN-BOUND PUBLICATION (reviewer 2a570a0b #3): the handle is stored under the lock and
+        // only while this token still owns the slot, so a stale task's delayed setter cannot
+        // overwrite a successor's handle. The task body promotes self only AFTER the await, so
+        // nothing strong is retained across `drainOnce` (reviewer 2a570a0b #2).
+        stateLock.lock()
+        guard activeToken == token else {
+            stateLock.unlock()
+            return
+        }
+        let scheduler = self.scheduler
+        let task = Task { [weak self] in
             let outcome = await scheduler.drainOnce()
+            guard let self else { return }
             guard !Task.isCancelled else {
                 self.finishDrain(token: token, refused: false)
                 return
@@ -160,6 +175,8 @@ final class VoiceSharingUploadTrigger {
             }
             self.finishDrain(token: token, refused: false)
         }
+        drainTaskStorage = task
+        stateLock.unlock()
     }
 
     /// A refused pass: wait for the OWNER to finish, then re-offer once. Never recurses by itself.
@@ -175,15 +192,27 @@ final class VoiceSharingUploadTrigger {
             finishDrain(token: token, refused: false)
             return
         }
-        // The callback validates BOTH the era token AND its own registration identity, so the ID
-        // must exist before the closure is built.
+        // NO LOST WAKEUP (reviewer 2a570a0b #1): the callback is made live BEFORE it can fire.
+        // Publication happens first (ID stored under the lock, era re-validated), and only then is
+        // the callback registered — so the scheduler can never invoke a callback whose identity is
+        // not yet visible. The callback validates on the ERA TOKEN alone, so even an
+        // already-consumed-or-cancelling window degrades to a correct no-op or a correct re-offer,
+        // never to a stuck slot.
         let registrationID = UUID()
+        stateLock.lock()
+        guard activeToken == token else {
+            stateLock.unlock()
+            return
+        }
+        pendingCompletionID = registrationID
+        stateLock.unlock()
+
         let registration = scheduler.registerOwnerCompletion(id: registrationID) { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
             // THE TOKEN IS THE ERA: only the callback of the drain that still owns the slot may
             // act. Superseded, completed, or cancelled drains are no-ops.
-            guard self.activeToken == token, self.pendingCompletionID == registrationID else {
+            guard self.activeToken == token else {
                 self.stateLock.unlock()
                 return
             }
@@ -196,23 +225,26 @@ final class VoiceSharingUploadTrigger {
             self.triggerDrainIfPermitted()
         }
         stateLock.lock()
-        if activeToken != token {
-            // Cancellation (or a newer drain) already ended this era while we registered: the
-            // registration must not linger in the scheduler.
-            stateLock.unlock()
+        let eraAlive = activeToken == token
+        stateLock.unlock()
+        if !eraAlive {
+            // Cancellation (or a newer drain) ended this era while we registered: the registration
+            // must not linger in the scheduler.
             scheduler.cancelOwnerCompletion(registrationID)
+            stateLock.lock()
+            if pendingCompletionID == registrationID { pendingCompletionID = nil }
+            stateLock.unlock()
             return
         }
         if registration.assumedOwnership {
             // The owner finished between the refusal and now: run immediately instead of waiting
             // for a callback that will never come.
-            stateLock.unlock()
             scheduler.cancelOwnerCompletion(registrationID)
+            stateLock.lock()
+            if pendingCompletionID == registrationID { pendingCompletionID = nil }
+            stateLock.unlock()
             finishDrain(token: token, refused: true)
-            return
         }
-        pendingCompletionID = registrationID
-        stateLock.unlock()
     }
 
     /// Completes the slot for the drain holding `token`, and re-offers once if work is pending.
@@ -226,6 +258,8 @@ final class VoiceSharingUploadTrigger {
         drainInFlight = false
         activeToken = nil
         workPending = false
+        // Only the finishing era releases its own handle; a successor's stays.
+        drainTaskStorage = nil
         stateLock.unlock()
         if pending || refused {
             triggerDrainIfPermitted()
