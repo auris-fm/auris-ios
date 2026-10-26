@@ -5,7 +5,7 @@ set -euo pipefail
 # fixture-driven device test exists). Reports wake-to-ASR stage timings from
 # the `voice_recognition_latency` event.
 #
-# Requirements: Xcode 16+, the "Pocket Casts Staging" scheme, bundled wake-word
+# Requirements: Xcode 16+, the pocketcasts scheme (Debug), bundled wake-word
 # manifest (auris_eval.json) + .ort models, and the FunctionGemma release.
 #
 # TODO(voice): add a fixture-driven RecognitionLatencyDeviceTests class that
@@ -17,9 +17,10 @@ DEVICE=${1:-"iPhone 17 Pro"}
 
 xcodebuild test \
   -project podcasts.xcodeproj \
-  -scheme "Pocket Casts Staging" \
+  -scheme pocketcasts \
+  -configuration Debug \
   -destination "platform=iOS Simulator,name=$DEVICE" \
   -derivedDataPath /tmp/auris-dd \
-  -only-testing:PocketCastsTests/VoiceControlIntegrationTests/WakeWordPipelineTests
+  -only-testing:PocketCastsTests/WakeWordPipelineTests
 
 echo "Latency verification complete. Inspect the xcresult for stage timings."
