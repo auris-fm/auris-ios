@@ -376,7 +376,8 @@ class VoiceControlService: ObservableObject {
             // LABEL THE DIAGNOSTIC PATH (owner requirement): a simulator session that only reached
             // listening because the built-in microphone was admitted must never be mistaken for a
             // real isolated-microphone capture when reading logs.
-            if DiagnosticMicOverride.isActive, gate.state.isListening, gate.posture.micExposure == .exposed {
+            if DiagnosticMicOverride.isActive, gate.state.isListening,
+               gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
                 FileLog.shared.addMessage(
                     "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
                     + "microphone. The route is genuinely Exposed; this exception exists so the "
@@ -396,6 +397,15 @@ class VoiceControlService: ObservableObject {
                 // cancellation check would clear the selection and drop capture.
                 if !self.isAcquiring {
                     self.cancelAcquisition()
+                }
+                // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
+                // BEFORE any acquisition can run, so the session would never be made
+                // input-capable and the built-in mic would have no usable route. Arm the
+                // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
+                // marks the task so the resulting exposure flip cannot cancel it.
+                if DiagnosticMicOverride.isActive,
+                   gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
+                    self.considerAcquisition(for: gate.posture)
                 }
                 self.start(in: mode)
             }

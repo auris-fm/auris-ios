@@ -357,7 +357,23 @@ class IOSAudioRouteMonitor: ObservableObject {
 
         // Only an external output can carry an external microphone. A built-in
         // speaker/earpiece route has nothing to acquire, so do not touch the session.
-        guard hasExternalOutputHint(currentRoute.output) else { return .notApplicable }
+        guard hasExternalOutputHint(currentRoute.output) else {
+            // DIAGNOSTIC (Debug simulator only): there is no external route here, so the normal
+            // path can never open an input and the whole capture path goes unexercised on a
+            // simulator. Open the session input-capable so the BUILT-IN microphone can deliver
+            // samples. The real classification is untouched — `micExposure` still reads
+            // `.exposed`; only the acquisition decision differs, and only under the compile-time
+            // constants in `DiagnosticMicOverride`.
+            // `.noMic` TOO: a fresh simulator session reports NO input port at all until the
+            // session is configured input-capable, so requiring `.exposed` here made the
+            // diagnostic unreachable in the actual app (measured: the live simulator logs
+            // `off(noMicrophone)`, never `exposed`). `.isolated` is still refused — a real
+            // external microphone must never be traded for the built-in one.
+            guard DiagnosticMicOverride.isActive,
+                  micExposure == .exposed || micExposure == .noMic
+            else { return .notApplicable }
+            return await acquireBuiltInInputForDiagnostic(isPlaybackActive: isPlaybackActive)
+        }
         if micExposure == .isolated {
             return acquiredResult(activatedByAcquisition: false, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
         }
@@ -446,6 +462,62 @@ class IOSAudioRouteMonitor: ObservableObject {
         refreshRoute()
         if Task.isCancelled { return .cancelled }
         return .selectionFailed
+    }
+
+    /// DIAGNOSTIC ONLY (Debug simulator): make the session input-capable so the built-in
+    /// microphone can be captured. Mirrors the normal path's configure/activate bookkeeping so
+    /// release-on-failure still undoes exactly what was opened, and reports `.acquired` only when
+    /// a built-in input is actually present in the live route.
+    ///
+    /// This is not a relaxation of the requirement: it is never reached on device or in Release
+    /// (both `DiagnosticMicOverride` constants are compile-time), it does not alter
+    /// `micExposure`, and it cannot select an external input.
+    @MainActor
+    private func acquireBuiltInInputForDiagnostic(isPlaybackActive: @escaping () -> Bool) async -> RouteAcquisitionResult {
+        FileLog.shared.addMessage("[VoicePipeline] acquisition: \(DiagnosticMicOverride.logLabel) — opening built-in input")
+        let sessionAlreadyInUse = audioSession.isActive || isPlaybackActive()
+        var activatedByAcquisition = false
+
+        do {
+            try audioSession.configureInputCapableSession()
+        } catch {
+            FileLog.shared.addMessage("[VoicePipeline] acquisition: diagnostic configure failed — \(error)")
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            refreshRoute()
+            return .sessionUnavailable
+        }
+
+        if audioSession.currentInputs.isEmpty, audioSession.availableInputs.isEmpty {
+            do {
+                try audioSession.setSessionActive(true)
+                activatedByAcquisition = !sessionAlreadyInUse
+            } catch {
+                FileLog.shared.addMessage("[VoicePipeline] acquisition: diagnostic activate failed — \(error)")
+                releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+                refreshRoute()
+                return .sessionUnavailable
+            }
+        }
+
+        refreshRoute()
+        if Task.isCancelled {
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            return .cancelled
+        }
+
+        let hasBuiltIn = audioSession.currentInputs.contains { $0.portType == .builtInMic }
+            || audioSession.availableInputs.contains { $0.portType == .builtInMic }
+        guard hasBuiltIn else {
+            // No built-in microphone either: this is a genuinely mic-less device, and the
+            // diagnostic must not invent one.
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            refreshRoute()
+            return .noCandidate
+        }
+
+        // Deliberately does NOT select a preferred input: on the built-in route there is nothing
+        // to select, and the diagnostic must not touch input selection at all.
+        return acquiredResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
     }
 
     /// Bounded wait for the live route to confirm an external input. Re-reads
