@@ -6,21 +6,23 @@ import XCTest
 /// The owner's requirement was not "the flag exists" but that the exception is NARROW and that the
 /// real classification survives. These controls test exactly that, and they are written so each one
 /// has a mutant that would survive if the guard were removed.
-/// WHY THE END-TO-END CONTROL IS WRITTEN THE WAY IT IS (see the note at the bottom on the
-/// diagnostic's original, half-finished state).
+/// SCOPE OF EVIDENCE — three distinct things, kept apart deliberately:
 ///
-/// The override completes only HALF of the owner's requirement. With a built-in-only route the
-/// gate now reaches `.listening` — verified by `testDiagnosticAdmitsBuiltInMicWhenNoExternalExists`
-/// and by a real service run that logged `MicExposure: noMic -> exposed` then
-/// `Gate: -> listening`. But `IOSAudioRouteMonitor.acquireExternalInput` still returns
-/// `.notApplicable` when no external OUTPUT could carry an external microphone, and
-/// `VoiceControlService` treats `.notApplicable` as a silent no-op — so capture never starts and
-/// no samples are received.
-///
-/// A test asserting sample delivery was written and REMOVED: it hangs the suite (the run times out
-/// and reports 0 tests executed) rather than failing. Making the diagnostic actually deliver
-/// samples requires widening acquisition for the simulator case — a separate, deliberate change,
-/// not something to smuggle in under a gate-permission approval.
+/// 1. SOURCE REVIEW: the exception is restricted by two compile-time constants (Debug +
+///    simulator), the microphone classifier is untouched, and every other gate check still runs
+///    ahead of it.
+/// 2. FAKE-CAPTURE TEST EVIDENCE (the controls in this file): the gate admits a built-in-only
+///    route, the session is configured input-capable, and injected samples reach the routing
+///    callback. These prove the WIRING. They cannot prove the simulator device or the real wake
+///    detector delivered anything — the samples are injected and wake detection is simulated.
+/// 3. ACTUAL-APP EVIDENCE (observed on simulator 928D99F3 with this build, quoted verbatim):
+///      MicExposure: noMic -> exposed (output: builtInSpeaker, input: builtInMic)
+///      Gate: off(noMicrophone) -> listening(wakeWord)
+///      Audio engine started (input: <AVAudioFormat: 1 ch, 48000 Hz, Float32> -> 16000.0Hz)
+///      First buffer: 1600 samples, min=-0.007902 max=0.006273
+///    "Audio engine started" alone is NOT sample evidence — it is emitted at startup. The
+///    `First buffer` line is emitted from the native capture callback on a real received buffer,
+///    with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
 final class DiagnosticMicOverrideControl: XCTestCase {
     /// Bounded poll, so a premise that never becomes true FAILS instead of hanging the suite.
     private func awaitTrue(timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) async -> Bool {
