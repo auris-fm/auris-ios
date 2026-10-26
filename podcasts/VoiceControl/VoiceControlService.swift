@@ -1290,6 +1290,21 @@ class VoiceControlService: ObservableObject {
         }
     }
 
+    /// TEST-ONLY: await the in-flight acquisition task's actual completion.
+    ///
+    /// Teardown needs a real join, not a timer. An acquisition task touches the single
+    /// process-wide `AVAudioSession`, so one still running after a control finishes perturbs the
+    /// NEXT control — measured as an interruption case failing only in the combined run. A sleep
+    /// is a guess about how long that takes; awaiting the task is the fact. Returns nil when
+    /// nothing was in flight, which is the ordinary case.
+    @discardableResult
+    func awaitAcquisitionCleanupForTesting() async -> Bool {
+        guard let task = acquisitionTask else { return false }
+        task.cancel()
+        await task.value
+        return true
+    }
+
     private func cancelAcquisition() {
         acquisitionGeneration &+= 1
         acquisitionTask?.cancel()

@@ -40,16 +40,34 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     private static var startedServices: [VoiceControlService] = []
 
     override func tearDown() {
-        // `stop()` alone can leave an ACQUISITION task in flight. Those tasks touch the one
-        // process-wide `AVAudioSession`, so a still-running one perturbs whatever test runs next
-        // — measured as an interruption test failing only in the combined run while passing alone.
-        // Cancel deterministically and let the tasks unwind before the next case starts.
-        for service in Self.startedServices { service.stop() }
+        // A REAL JOIN, NOT A TIMER (reviewer e8327339). `stop()` alone can leave an acquisition
+        // task in flight; those tasks touch the one process-wide `AVAudioSession`, so one still
+        // running perturbs whatever control executes next — measured as an interruption case
+        // failing only in the combined run. An earlier version waited on an ignored 0.5s timer,
+        // which is a guess about duration; awaiting the task is the actual completion.
+        let services = Self.startedServices
         Self.startedServices.removeAll()
-        let settled = XCTestExpectation(description: "service cleanup settled")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settled.fulfill() }
-        _ = XCTWaiter.wait(for: [settled], timeout: 2.0)
         super.tearDown()
+        for service in services {
+            joinAcquisitionCleanup(service)
+        }
+    }
+
+    /// Stop a service and JOIN its acquisition task. The join runs on the MAIN actor and is
+    /// driven by draining the main run loop — never by blocking a thread, because the acquisition
+    /// task is main-actor bound and a `DispatchSemaphore.wait` on main would deadlock against it
+    /// (measured: a 32s suite instead of a few seconds).
+    private func joinAcquisitionCleanup(_ service: VoiceControlService) {
+        var done = false
+        Task { @MainActor in
+            service.stop()
+            _ = await service.awaitAcquisitionCleanupForTesting()
+            done = true
+        }
+        let deadline = Date().addingTimeInterval(10) // hang guard only; the join ends on completion
+        while !done, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
     }
 
     /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
