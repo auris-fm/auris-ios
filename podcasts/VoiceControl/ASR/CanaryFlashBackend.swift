@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsUtils
+import SherpaOnnxC  // sherpa-onnx C API (was bridged via the removed app bridging header)
 
 /// sherpa-onnx `SherpaOnnxOfflineRecognizer` backend running NVIDIA Canary Flash 180m
 /// (en/de/es/fr) for the de/es/fr cohort. Runs the native **translate** task

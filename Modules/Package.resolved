@@ -1,5 +1,5 @@
 {
-  "originHash": "7772afb3d35af053a0a051f3c283ca6769d72cd737802755c9d567b6d50ad9d9",
+  "originHash": "a6f61e86ce416d837c660669c06da508eda33c8ac695aa4ffd722843053fdca0",
   "pins": [
     {
       "identity": "abseil-cpp-binary",
@@ -263,15 +263,6 @@
       }
     },
     {
-      "identity": "swift-syntax",
-      "kind": "remoteSourceControl",
-      "location": "https://github.com/swiftlang/swift-syntax.git",
-      "state": {
-        "revision": "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
-        "version": "603.0.2"
-      }
-    },
-    {
       "identity": "swiftsoup",
       "kind": "remoteSourceControl",
       "location": "https://github.com/scinfu/SwiftSoup.git",
@@ -343,6 +334,5 @@
         "version": "0.2.0"
       }
     }
-  ],
-  "version": 3
+  ]
 }

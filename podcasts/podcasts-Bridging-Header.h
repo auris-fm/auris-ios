@@ -1,11 +1,8 @@
 //
 //  Use this file to import your target's public headers that you would like to expose to Swift.
 //
+//  Auris-only native bridges. Everything else the app used to bridge here now
+//  lives in SwiftPM targets (SJUtils, MNAVChapters, VoiceBoostN, AEXML).
+//
 
-#import "SJCommonUtils.h"
-#import "SJMediaMetadataHelper.h"
-#import "MNAVChapterReader.h"
-#include "VoiceBoostN.h"
-#include "VoiceControl/WakeWord/WakeWordDetector.h"
 #import "VoiceControl/IntentRouter/Native/LlmBridge.h"
-@import SherpaOnnxC;  // sherpa-onnx C API (SenseVoice + Canary Flash backends)

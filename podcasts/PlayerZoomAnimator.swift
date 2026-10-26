@@ -160,7 +160,7 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
         // morph; the same value drives the panel's corner animation below. The
         // corners are squared again once the player settles (see the completion
         // block) so it covers the whole screen with no edge gaps.
-        let finalCornerRadius = toVC.roundCornersForPlayerTransition()
+        let finalCorners = toVC.roundCornersForPlayerTransition()
 
         // Panel starts as glass (matching the tab accessory) and the
         // full-player color overlay fades in over the transition so the pill
@@ -169,7 +169,7 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
         // so use its `backgroundColor` as the source of the full color.
         let fullPlayerColor = toVC.nowPlayingItem.view.backgroundColor
             ?? PlayerColorHelper.playerBackgroundColor01()
-        let panel = makePanel(frame: miniFrame, cornerRadius: miniCornerRadius)
+        let panel = makePanel(frame: miniFrame, corners: .corners(radius: .fixed(miniCornerRadius)))
         container.addSubview(panel)
 
         let colorOverlay = addColorOverlay(to: panel, color: fullPlayerColor, alpha: 0)
@@ -216,7 +216,7 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
             options: [.curveEaseInOut]
         ) {
             panel.frame = container.bounds
-            panel.layer.cornerRadius = finalCornerRadius
+            panel.cornerConfiguration = finalCorners.configuration
             toView.frame = CGRect(x: 0, y: 0, width: finalFrame.width, height: finalFrame.height)
             floating?.frame = destArtFrame
             floating?.layer.cornerRadius = toArtwork.layer.cornerRadius
@@ -290,14 +290,15 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
         let miniFrame = mini.convert(mini.bounds, to: container)
         let miniCornerRadius = miniPillCornerRadius(for: miniFrame)
         let destArtFrame = miniArtwork.convert(miniArtwork.bounds, to: container)
-        // The full-player artwork only lives on the Now Playing tab — on the
+        // The full-player artwork only lives on the Now Playing tab (unless
+        // the tabs are next to it on a large screen) — on the
         // other tabs `nowPlayingItem` is scrolled horizontally off-screen
         // inside `mainScrollView`, so morphing an artwork view back to the
         // mini player would slide it across the screen from nowhere visible.
         // Skip the morph entirely in that case and let the mini snapshot's
         // own artwork appear in place instead. Video podcasts also skip the
         // morph because `episodeImage` is hidden behind the floating video.
-        let shouldMorphArtwork = fromVC.tabsView.currentTab == 0 && !isVideoShown
+        let shouldMorphArtwork = fromVC.isNowPlayingVisible && !isVideoShown
         let sourceArtFrame = container.convert(fromArtwork.convert(fromArtwork.bounds, to: fromView), from: fromView)
         let sourceArtCornerRadius = fromArtwork.layer.cornerRadius
         let isMiniInline = mini.traitCollection.tabAccessoryEnvironment == .inline
@@ -311,14 +312,14 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
         // display radius so the panel can morph its corners to match, then drop
         // fromView's own clipping — the panel handles the single outer clip
         // during the descent.
-        let finalCornerRadius = fromVC.roundCornersForPlayerTransition()
+        let finalCorners = fromVC.roundCornersForPlayerTransition()
         fromView.clipsToBounds = false
 
         let fullPlayerColor = fromVC.nowPlayingItem.view.backgroundColor
             ?? PlayerColorHelper.playerBackgroundColor01()
         let panel = makePanel(
             frame: CGRect(x: 0, y: dragOffset, width: container.bounds.width, height: container.bounds.height),
-            cornerRadius: finalCornerRadius
+            corners: finalCorners.configuration
         )
         container.insertSubview(panel, belowSubview: fromView)
 
@@ -372,7 +373,7 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
             options: [.curveEaseInOut]
         ) {
             panel.frame = miniFrame
-            panel.layer.cornerRadius = miniCornerRadius
+            panel.cornerConfiguration = .corners(radius: .fixed(miniCornerRadius))
             fromView.frame = CGRect(x: -miniFrame.minX, y: 0, width: finalFrame.width, height: finalFrame.height)
             if let floating {
                 floating.frame = destArtFrame
@@ -397,10 +398,10 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
 
     // MARK: - Builders
 
-    private func makePanel(frame: CGRect, cornerRadius: CGFloat) -> UIView {
+    private func makePanel(frame: CGRect, corners: UICornerConfiguration) -> UIView {
         let panel = UIView(frame: frame)
         panel.backgroundColor = .clear
-        panel.layer.cornerRadius = cornerRadius
+        panel.cornerConfiguration = corners
         panel.layer.cornerCurve = .continuous
         panel.layer.masksToBounds = true
         panel.clipsToBounds = true
@@ -488,10 +489,30 @@ final class PlayerZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning 
 // MARK: - Helpers on the player view controllers
 
 @available(iOS 26, *)
+struct DisplayCornerRadii: Equatable {
+    let topLeft: CGFloat
+    let topRight: CGFloat
+    let bottomLeft: CGFloat
+    let bottomRight: CGFloat
+
+    var configuration: UICornerConfiguration {
+        .corners(
+            topLeftRadius: .fixed(topLeft),
+            topRightRadius: .fixed(topRight),
+            bottomLeftRadius: .fixed(bottomLeft),
+            bottomRightRadius: .fixed(bottomRight)
+        )
+    }
+
+    static func uniform(_ radius: CGFloat) -> DisplayCornerRadii {
+        DisplayCornerRadii(topLeft: radius, topRight: radius, bottomLeft: radius, bottomRight: radius)
+    }
+}
+
+@available(iOS 26, *)
 extension PlayerContainerViewController {
     private struct ScreenCornerRadiusCacheKey: Equatable {
         let bounds: CGRect
-        let userInterfaceIdiom: UIUserInterfaceIdiom
         let horizontalSizeClass: UIUserInterfaceSizeClass
         let verticalSizeClass: UIUserInterfaceSizeClass
         let displayScale: CGFloat
@@ -499,25 +520,24 @@ extension PlayerContainerViewController {
         @MainActor
         init(window: UIWindow) {
             bounds = window.bounds
-            userInterfaceIdiom = window.traitCollection.userInterfaceIdiom
             horizontalSizeClass = window.traitCollection.horizontalSizeClass
             verticalSizeClass = window.traitCollection.verticalSizeClass
             displayScale = window.traitCollection.displayScale
         }
     }
 
-    private static var screenCornerRadiusCache: [ObjectIdentifier: (key: ScreenCornerRadiusCacheKey, radius: CGFloat)] = [:]
+    private static var screenCornerRadiiCache: [ObjectIdentifier: (key: ScreenCornerRadiusCacheKey, radii: DisplayCornerRadii)] = [:]
 
-    /// Rounds the player's corners to the device's display radius for the zoom
-    /// transition and the interactive drag-dismiss. Returns the radius so the
-    /// transition's morph panel can animate to the same value.
+    /// Rounds the player's corners to the device's display corners for the zoom
+    /// transition and the interactive drag-dismiss. Returns the radii so the
+    /// transition's morph panel can animate to the same values.
     @discardableResult
-    func roundCornersForPlayerTransition() -> CGFloat {
-        let radius = Self.screenCornerRadius(for: view)
-        view.layer.cornerRadius = radius
+    func roundCornersForPlayerTransition() -> DisplayCornerRadii {
+        let radii = Self.screenCornerRadii(for: view)
+        view.cornerConfiguration = radii.configuration
         view.layer.cornerCurve = .continuous
         view.clipsToBounds = true
-        return radius
+        return radii
     }
 
     /// Squares the player's corners once it's settled full-screen so it covers
@@ -526,21 +546,21 @@ extension PlayerContainerViewController {
     /// thin gaps at the edges because a layer corner can't match the hardware
     /// mask precisely.
     func resetCornersAfterPlayerTransition() {
-        view.layer.cornerRadius = 0
+        view.cornerConfiguration = .corners(radius: .fixed(0))
     }
 
-    /// The device's display corner radius (≈55 on modern iPhones, 30 on iPad,
-    /// 0 on square-cornered devices), or the window's own radius when the app is
-    /// resized on iPad. No public API exposes it directly, so measure it with
+    /// The device's display corner radii (≈55 on modern iPhones, 30 on iPad,
+    /// 0 on square-cornered devices), or the window's own radii when the app is
+    /// resized on iPad. No public API exposes them directly, so measure them with
     /// the iOS 26 container-concentric API on a throwaway full-window probe: a
-    /// window-filling view reports its concentric corner radius as the display
-    /// radius. Falls back to an iPhone-scale value if there's no window yet.
-    static func screenCornerRadius(for view: UIView) -> CGFloat {
-        guard let host = view.window else { return 55 }
+    /// window-filling view reports its concentric corner radii as the display
+    /// radii. Falls back to an iPhone-scale value if there's no window yet.
+    static func screenCornerRadii(for view: UIView) -> DisplayCornerRadii {
+        guard let host = view.window else { return .uniform(55) }
         let cacheKey = ScreenCornerRadiusCacheKey(window: host)
         let cacheIdentifier = ObjectIdentifier(host)
-        if let cached = screenCornerRadiusCache[cacheIdentifier], cached.key == cacheKey {
-            return cached.radius
+        if let cached = screenCornerRadiiCache[cacheIdentifier], cached.key == cacheKey {
+            return cached.radii
         }
         let probe = UIView(frame: host.bounds)
         probe.cornerConfiguration = .corners(radius: .containerConcentric())
@@ -549,10 +569,15 @@ extension PlayerContainerViewController {
         probe.isAccessibilityElement = false
         probe.accessibilityElementsHidden = true
         probe.layoutIfNeeded()
-        let radius = probe.effectiveRadius(corner: .allCorners)
+        let radii = DisplayCornerRadii(
+            topLeft: probe.effectiveRadius(corner: .topLeft),
+            topRight: probe.effectiveRadius(corner: .topRight),
+            bottomLeft: probe.effectiveRadius(corner: .bottomLeft),
+            bottomRight: probe.effectiveRadius(corner: .bottomRight)
+        )
         probe.removeFromSuperview()
-        screenCornerRadiusCache[cacheIdentifier] = (key: cacheKey, radius: radius)
-        return radius
+        screenCornerRadiiCache[cacheIdentifier] = (key: cacheKey, radii: radii)
+        return radii
     }
 
     /// Toggles the player header (close button, up next, tabs row) so the
@@ -560,12 +585,16 @@ extension PlayerContainerViewController {
     /// header's frame.
     fileprivate func setPlayerHeaderHidden(_ hidden: Bool, animated: Bool, delay: TimeInterval = 0) {
         let target: CGFloat = hidden ? 0 : 1
+        var headerViews: [UIView] = [headerView]
+        if #available(iOS 27.1, *) {
+            headerViews += largeScreenHeaderViews
+        }
         guard animated else {
-            headerView.alpha = target
+            headerViews.forEach { $0.alpha = target }
             return
         }
         UIView.animate(withDuration: 0.25, delay: delay, options: [.curveEaseInOut]) {
-            self.headerView.alpha = target
+            headerViews.forEach { $0.alpha = target }
         }
     }
 }

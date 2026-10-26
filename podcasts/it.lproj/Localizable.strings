@@ -37,6 +37,8 @@
     <string>Chiudi</string>
     <key>accessibility_episode_playback</key>
     <string>Riproduzione episodio</string>
+    <key>accessibility_follow_podcast</key>
+    <string>Segui %1$@</string>
     <key>accessibility_hide_filter_details</key>
     <string>Tocca per nascondere i dettagli del filtro</string>
     <key>accessibility_hint_player_navigate_to_podcast_label</key>
@@ -73,6 +75,8 @@
     <string>Tocca per visualizzare o configurare l'account</string>
     <key>accessibility_sort_and_options</key>
     <string>Ordinamento e opzioni</string>
+    <key>accessibility_unfollow_podcast</key>
+    <string>Smetti di seguire %1$@</string>
     <key>account</key>
     <string>Account</string>
     <key>account_change_email</key>
@@ -754,6 +758,8 @@ Puoi disconnetterti in qualsiasi momento da Impostazioni.</string>
     <string>TV e film</string>
     <key>discover_change_region</key>
     <string>Modifica regione, al momento è %1$@</string>
+    <key>discover_clear_category</key>
+    <string>Cancella la categoria</string>
     <key>discover_episode_fail_to_load</key>
     <string>Impossibile caricare l'episodio</string>
     <key>discover_featured</key>
@@ -1181,12 +1187,6 @@ che hai ascoltato è stato
     <string>Avvia la riproduzione casuale dei brani in coda</string>
     <key>feature_marketing_watch_playback</key>
     <string>App per Wear OS ed Apple Watch</string>
-    <key>feature_tour_end_tour</key>
-    <string>Fine tour</string>
-    <key>feature_tour_new</key>
-    <string>NUOVO</string>
-    <key>feature_tour_step_format</key>
-    <string>%1$@ di %2$@</string>
     <key>feedback_continue_with_mail</key>
     <string>Apri l'app di posta predefinita</string>
     <key>feedback_mail_not_configured_msg</key>
@@ -1349,6 +1349,8 @@ che hai ascoltato è stato
     <string>Crea cartella</string>
     <key>folder_create_new</key>
     <string>Crea nuova cartella</string>
+    <key>folder_create_skip</key>
+    <string>Salta</string>
     <key>folder_delete</key>
     <string>Elimina cartella</string>
     <key>folder_delete_prompt_msg</key>
@@ -1968,6 +1970,10 @@ AGGIORNAMENTI</string>
     <string>Riproduci casualmente gli episodi con Pocket Casts Plus e molto altro ancora</string>
     <key>paywall_dynamic_headline_watch</key>
     <string>Ascolta dal tuo orologio con Pocket Casts Plus e molto altro ancora</string>
+    <key>pcasts_import_message</key>
+    <string>Questa azione sostituirà i podcast e le impostazioni con il contenuto di questo file e Pocket Casts verrà chiuso.</string>
+    <key>pcasts_import_title</key>
+    <string>Importa podcast e impostazioni</string>
     <key>phone</key>
     <string>Telefono</string>
     <key>play</key>
@@ -2185,8 +2191,12 @@ Questa sì che è dedizione!</string>
     <string>Questo episodio non può essere riprodotto.</string>
     <key>player_error_internet_connection</key>
     <string>Controlla la tua connessione a Internet e riprova.</string>
+    <key>player_error_not_enough_storage</key>
+    <string>Lo spazio di archiviazione del tuo dispositivo è esaurito. Libera spazio e riprova.</string>
     <key>player_error_short_no_connection</key>
     <string>Sei offline</string>
+    <key>player_error_short_not_enough_storage</key>
+    <string>Spazio di archiviazione del dispositivo esaurito</string>
     <key>player_error_short_playback_error</key>
     <string>Riproduzione non riuscita, riprova</string>
     <key>player_increment_time</key>
@@ -2215,6 +2225,10 @@ Questa sì che è dedizione!</string>
     <string>Errore di riproduzione</string>
     <key>player_user_episode_upload_error</key>
     <string>Errore di caricamento</string>
+    <key>player_video_exit_full_screen</key>
+    <string>Esci da modalità schermo interno</string>
+    <key>player_video_full_screen</key>
+    <string>Schermo intero</string>
     <key>playlist_add_to_title</key>
     <string>Aggiungi a "%@"</string>
     <key>playlist_create_no_episodes_description</key>
@@ -2259,8 +2273,10 @@ Prova a modificare le regole o salva questa playlist per episodi futuri che potr
     <string>Sfoglia i podcast</string>
     <key>playlist_manual_create_error_message</key>
     <string>Si è verificato un errore durante la creazione della playlist.</string>
+    <key>playlist_manual_empty_state_subtitle</key>
+    <string>Scegli gli episodi dai podcast che segui. In alternativa, scorri verso sinistra su qualsiasi episodio per aggiungerlo mentre procedi.</string>
     <key>playlist_manual_empty_state_subtitle_no_podcasts</key>
-    <string>Scorri verso sinistra su un episodio per aggiungerlo alla tua playlist.</string>
+    <string>Trova un podcast che ti piace, quindi scorri verso sinistra su qualsiasi episodio per aggiungerlo.</string>
     <key>playlist_manual_empty_state_title</key>
     <string>Inizia a creare la tua playlist</string>
     <key>playlist_manual_empty_state_title_no_podcasts</key>
@@ -2286,7 +2302,7 @@ Prova a modificare le regole o salva questa playlist per episodi futuri che potr
     <key>playlist_play_all_sheet_button_title</key>
     <string>Sostituisci e riproduci</string>
     <key>playlist_play_all_sheet_description</key>
-    <string>Riproducendo questo brano, sostituirai la tua attuale coda Successivo.</string>
+    <string>La riproduzione di questo elemento sostituirà l'attuale Successivo. Salva come playlist per mantenerlo.</string>
     <key>playlist_play_all_sheet_title</key>
     <string>Sostituire la tua coda Successivo?</string>
     <key>playlist_play_all_sheet_toggle</key>
@@ -2317,12 +2333,6 @@ Prova a modificare le regole o salva questa playlist per episodi futuri che potr
     <string>Tutti i podcast che segui</string>
     <key>playlist_smart_rule_save_button</key>
     <string>Salva regola intelligente</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_off</key>
-    <string>Gli episodi preferiti possono comunque apparire se corrispondono alle altre regole che hai impostato.</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_on</key>
-    <string>Includi solo gli episodi preferiti che corrispondono alle altre regole che hai impostato.</string>
-    <key>playlist_smart_rule_starred_header_title</key>
-    <string>Episodi preferiti</string>
     <key>playlist_smart_rules_title</key>
     <string>Regole intelligenti</string>
     <key>playlists</key>
@@ -3295,6 +3305,10 @@ Questo è un pass per ospiti %1$@ per Pocket Casts Plus, il mio podcast player p
     <string>VoceBoostN</string>
     <key>settings_general_voice_boost_n_subtitle</key>
     <string>Usa Aumenta il volume aggiornato con livelli vocali più coerenti.</string>
+    <key>settings_general_whats_new_unread_dot</key>
+    <string>Mostra puntino "non letto"</string>
+    <key>settings_general_whats_new_unread_dot_subtitle</key>
+    <string>Mostra un puntino "non letto" su Profilo quando ci sono nuovi messaggi in Novità.</string>
     <key>settings_global_settings</key>
     <string>Impostazioni globali</string>
     <key>settings_headphone_controls</key>
@@ -4058,6 +4072,8 @@ Tocca il pulsante in basso per accedere nuovamente al tuo account Pocket Casts.<
     <string>Media</string>
     <key>tv_player_trim_silence_mild</key>
     <string>Moderato</string>
+    <key>tv_player_trim_silence_off</key>
+    <string>Disattivato</string>
     <key>tv_player_trim_silence_set</key>
     <string>Elimina i silenzi: %1$@</string>
     <key>tv_player_volume_boost</key>
@@ -4272,6 +4288,8 @@ Tocca il pulsante in basso per accedere nuovamente al tuo account Pocket Casts.<
     <string>Riproduci facilmente un episodio casuale senza cambiare l'ordine della coda.</string>
     <key>up_next_shuffle_announcement_title</key>
     <string>Introduzione a Shuffle</string>
+    <key>up_next_shuffle_button</key>
+    <string>Mischia</string>
     <key>up_next_shuffle_toast_message</key>
     <string>Riproduzione casuale attiva. Riproduce gli episodi in ordine casuale.</string>
     <key>up_next_sort_duration_tooltip_body</key>
@@ -4375,7 +4393,7 @@ Questa app soddisfa le esigenze di ogni utente, Che si cerchi un approccio plug 
     <key>wait_for_wifi</key>
     <string>In attesa del WiFi</string>
     <key>watch</key>
-    <string>Guarda</string>
+    <string>Orologio</string>
     <key>watch_buffering</key>
     <string>Buffering in corso...</string>
     <key>watch_chapter_next</key>
@@ -4444,6 +4462,24 @@ In ogni caso, avrai fatto la scelta giusta. 🙂</string>
     <string>Novità</string>
     <key>whats_new_blog_more_link_text</key>
     <string>Leggi di più su questo aggiornamento sul nostro blog</string>
+    <key>whats_new_category_announcement</key>
+    <string>Annuncio</string>
+    <key>whats_new_category_known_issue</key>
+    <string>Problema noto</string>
+    <key>whats_new_category_new_feature</key>
+    <string>Nuova funzionalità</string>
+    <key>whats_new_category_research</key>
+    <string>Ricerca degli utenti</string>
+    <key>whats_new_category_tip</key>
+    <string>Trucchi e suggerimenti</string>
+    <key>whats_new_feed_empty_description</key>
+    <string>Qui verranno mostrate nuove funzionalità, suggerimenti e annunci.</string>
+    <key>whats_new_feed_empty_title</key>
+    <string>Ancora nessun messaggio</string>
+    <key>whats_new_feed_read_all</key>
+    <string>Leggi tutto</string>
+    <key>whats_new_feed_unable_to_load</key>
+    <string>Impossibile caricare le novità</string>
     <key>whats_new_in_version</key>
     <string>Novità in %1$@</string>
     <key>whats_new_page_one_7_20</key>
@@ -4458,6 +4494,8 @@ Grazie per il supporto, la tua schermata Home non è mai apparsa più bella.</st
 Ciò significa che puoi stare più tranquillo sapendo che il duro lavoro che hai dedicato alla sistemazione della pagina dei tuoi podcast viene sincronizzato con il tuo account.</string>
     <key>whats_new_page_two_title_7_20</key>
     <string>Sincronizzazione della griglia della home</string>
+    <key>whats_new_poll_answered</key>
+    <string>Grazie per la risposta.</string>
     <key>widgets_app_icon_description</key>
     <string>Avvio rapido di Pocket Casts</string>
     <key>widgets_app_icon_name</key>

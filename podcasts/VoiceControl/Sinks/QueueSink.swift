@@ -6,7 +6,7 @@ class QueueSink: VoiceQueueSink {
     private let dataManager: DataManager
     private let templates = SpokenTemplateResolver()
 
-    init(playbackManager: PlaybackManager, dataManager: DataManager = .sharedManager) {
+    init(playbackManager: PlaybackManager, dataManager: DataManager = .shared) {
         self.playbackManager = playbackManager
         self.dataManager = dataManager
     }
