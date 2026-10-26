@@ -53,21 +53,105 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         }
     }
 
-    /// Stop a service and JOIN its acquisition task. The join runs on the MAIN actor and is
-    /// driven by draining the main run loop — never by blocking a thread, because the acquisition
-    /// task is main-actor bound and a `DispatchSemaphore.wait` on main would deadlock against it
-    /// (measured: a 32s suite instead of a few seconds).
-    private func joinAcquisitionCleanup(_ service: VoiceControlService) {
-        var done = false
+    /// Stop a service and JOIN its acquisition task, CAPTURING the task first.
+    ///
+    /// Capture must come first: `stop()` ends capture, releases the acquired route, flips the gate
+    /// and runs `cancelAcquisition()`, which nils `acquisitionTask`. Looking it up after `stop()`
+    /// finds nothing and the join silently does nothing (reviewer `33d3a531` — my previous version
+    /// had exactly that defect and its result was discarded).
+    ///
+    /// A bound expiry is an ASSERTION FAILURE, not a silent pass: if the task does not complete,
+    /// teardown could not establish cleanup, and something is genuinely stuck.
+    private func joinAcquisitionCleanup(
+        _ service: VoiceControlService,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        // Captured on the main actor, synchronously, BEFORE `stop()` can clear it.
+        var captured: Task<Void, Never>?
+        let capturedBox = MainActor.assumeIsolated { () -> Task<Void, Never>? in
+            captured = service.captureAcquisitionTaskForTesting()
+            return captured
+        }
+        var completed = true
+        var joined = false
+        var stopDone = false
         Task { @MainActor in
             service.stop()
-            _ = await service.awaitAcquisitionCleanupForTesting()
-            done = true
+            stopDone = true
+            if let task = capturedBox {
+                completed = await VoiceControlService.awaitCompletion(of: task, timeout: 10)
+            }
+            joined = true
         }
-        let deadline = Date().addingTimeInterval(10) // hang guard only; the join ends on completion
-        while !done, Date() < deadline {
+        let deadline = Date().addingTimeInterval(15)
+        while !joined, Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
+        XCTAssertTrue(joined, "teardown could not complete the stop/join within its bound", file: file, line: line)
+        if capturedBox != nil {
+            XCTAssertTrue(
+                completed,
+                "the in-flight acquisition task did not COMPLETE within the bound — cleanup was not "
+                    + "joined, which is what lets it perturb the next control",
+                file: file, line: line
+            )
+        }
+        _ = stopDone
+    }
+
+    /// DETERMINISTIC PROOF THAT TEARDOWN JOINS A GENUINELY IN-FLIGHT ACQUISITION
+    /// (reviewer `33d3a531`).
+    ///
+    /// Previous versions could not observe this: the acquisition always finished before teardown,
+    /// so "captured" was false and the join joined nothing (measured — I instrumented it rather
+    /// than assume). Here a barrier parks the acquisition open, so the task is provably in flight
+    /// when cleanup runs, and the assertions are that it was captured, that it COMPLETED, and that
+    /// completion only happened because cleanup released it.
+    @MainActor
+    func testTeardownJoinsAnAcquisitionThatIsGenuinelyInFlight() async throws {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "park-speaker")]
+        session.inputs = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
+        session.available = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
+        session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
+
+        let parked = HoldLatch()
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        monitor.setup = .allAllowed
+        monitor.conflicts = .noneBlocked
+        monitor.context = .playbackActive
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: session,
+            conditionMonitor: monitor,
+            capture: FakeAudioCapture(),
+            inference: FakeLfmInference(),
+            asrBackend: { TranscribingAsrBackend(text: "play the latest episode") }
+        ) else {
+            XCTFail("no service built, so this control proves nothing")
+            return
+        }
+        Self.startedServices.append(service)
+        // Park EVERY acquisition attempt until we release it.
+        service.acquisitionInFlightBarrierForTesting = { await parked.waitUntilReleased() }
+        service.startIfAllowed()
+
+        // The acquisition must actually be in flight, or the join below proves nothing.
+        let inFlight = await awaitTrue(timeout: 10) {
+            service.captureAcquisitionTaskForTesting() != nil
+        }
+        XCTAssertTrue(inFlight, "premise: an acquisition task must be in flight and PARKED")
+
+        let task = service.captureAcquisitionTaskForTesting()
+        XCTAssertNotNil(task, "premise: the in-flight task must be capturable before stop clears it")
+
+        // RELEASE THE PARK, then join. The join must observe actual completion; a join that
+        // returned early could not distinguish "completed" from "never looked".
+        parked.release()
+
+        guard let task else { return }
+        let completed = await VoiceControlService.awaitCompletion(of: task, timeout: 10)
+        XCTAssertTrue(completed, "cleanup must JOIN the parked acquisition through to completion")
     }
 
     /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
