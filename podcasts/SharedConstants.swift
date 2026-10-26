@@ -1,3 +1,5 @@
+import Foundation
+
 enum SharedConstants {
     enum GroupUserDefaults {
         public static let groupContainerId = "group.fm.auris"
@@ -8,6 +10,10 @@ enum SharedConstants {
         public static let topFilterItems = "topFilterItems"
         public static let isPlaying = "isPlaying"
         public static let appIcon = "appIcon"
+
+        public static var defaults: UserDefaults {
+            UserDefaults(suiteName: groupContainerId) ?? .standard
+        }
     }
 
     enum PlaybackEffects {

@@ -60,10 +60,6 @@ public class TimeFormatter {
         localizedFormatter(style: .full, allowedUnits: [.hour, .minute])
     }()
 
-    private lazy var minutesHoursFormatterMedium: DateComponentsFormatter = {
-        localizedFormatter(style: .short, allowedUnits: [.hour, .minute])
-    }()
-
     public func playTimeFormat(time: TimeInterval, showSeconds: Bool = true) -> String {
         if time.isNaN || !time.isFinite { return "0:00" }
 
@@ -123,7 +119,11 @@ public class TimeFormatter {
         return appleFormatterMinutes.string(from: time) ?? ""
     }
 
-    private lazy var relativeFormatter = RelativeDateTimeFormatter()
+    private lazy var relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        return formatter
+    }()
 
     public func appleStyleElapsedString(date: Date) -> String {
         relativeFormatter.localizedString(for: date, relativeTo: Date())
@@ -149,15 +149,6 @@ public class TimeFormatter {
 
     public class func currentUTCTimeInMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
-    }
-
-    private func createUsFormatter(allowedUnits: NSCalendar.Unit) -> DateComponentsFormatter {
-        let formatter = DateComponentsFormatter()
-        formatter.unitsStyle = .abbreviated
-        formatter.allowedUnits = allowedUnits
-        formatter.zeroFormattingBehavior = [.dropAll]
-
-        return formatter
     }
 
     private func localizedFormatter(style: DateComponentsFormatter.UnitsStyle, allowedUnits: NSCalendar.Unit) -> DateComponentsFormatter {

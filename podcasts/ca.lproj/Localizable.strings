@@ -37,6 +37,8 @@
     <string>Descarta</string>
     <key>accessibility_episode_playback</key>
     <string>Reproducció de l'episodi</string>
+    <key>accessibility_follow_podcast</key>
+    <string>Segueix %1$@</string>
     <key>accessibility_hide_filter_details</key>
     <string>Toca per a amagar la informació del filtre</string>
     <key>accessibility_hint_player_navigate_to_podcast_label</key>
@@ -73,6 +75,8 @@
     <string>Prem per a veure o configurar el compte</string>
     <key>accessibility_sort_and_options</key>
     <string>Ordre i opcions</string>
+    <key>accessibility_unfollow_podcast</key>
+    <string>Deixa de seguir %1$@</string>
     <key>account</key>
     <string>Compte</string>
     <key>account_change_email</key>
@@ -754,6 +758,8 @@ Pots desconnectar-te en qualsevol moment des d'Ajustos.</string>
     <string>Cine i televisió</string>
     <key>discover_change_region</key>
     <string>Canvia la regió. Actualment %1$@</string>
+    <key>discover_clear_category</key>
+    <string>Treu la categoria</string>
     <key>discover_episode_fail_to_load</key>
     <string>No s'ha pogut carregar l'episodi</string>
     <key>discover_featured</key>
@@ -1177,12 +1183,6 @@ Ens veiem el 2024!</string>
     <string>Posa en mode aleatori la teva cua</string>
     <key>feature_marketing_watch_playback</key>
     <string>Apps per a Wear OS i Apple Watch</string>
-    <key>feature_tour_end_tour</key>
-    <string>Acaba la guia</string>
-    <key>feature_tour_new</key>
-    <string>NOU</string>
-    <key>feature_tour_step_format</key>
-    <string>%1$@ de %2$@</string>
     <key>feedback_continue_with_mail</key>
     <string>Obre l'aplicació de correu predeterminat</string>
     <key>feedback_mail_not_configured_msg</key>
@@ -1345,6 +1345,8 @@ Ens veiem el 2024!</string>
     <string>Crea una carpeta</string>
     <key>folder_create_new</key>
     <string>Crea una carpeta nova</string>
+    <key>folder_create_skip</key>
+    <string>Omet</string>
     <key>folder_delete</key>
     <string>Esborra la carpeta</string>
     <key>folder_delete_prompt_msg</key>
@@ -1962,6 +1964,10 @@ ACTUALITZACIONS</string>
     <string>Barreja els teus episodis amb Pocket Casts Plus, i més</string>
     <key>paywall_dynamic_headline_watch</key>
     <string>Escolta des del teu rellotge amb Pocket Casts Plus, i més</string>
+    <key>pcasts_import_message</key>
+    <string>Això substituirà els teus pòdcasts i la configuració pel contingut d'aquest fitxer, i Pocket Casts es tancarà.</string>
+    <key>pcasts_import_title</key>
+    <string>Importa pòdcasts i configuració</string>
     <key>phone</key>
     <string>Telèfon</string>
     <key>play</key>
@@ -2179,8 +2185,12 @@ Això sí que és compromís!</string>
     <string>Aquest episodi no es pot reproduir.</string>
     <key>player_error_internet_connection</key>
     <string>Comprova la teva connexió a Internet i torna-ho a intentar.</string>
+    <key>player_error_not_enough_storage</key>
+    <string>El dispositiu no té espai d'emmagatzematge. Allibera espai i torna-ho a provar.</string>
     <key>player_error_short_no_connection</key>
     <string>Estàs desconectat</string>
+    <key>player_error_short_not_enough_storage</key>
+    <string>L'emmagatzematge del dispositiu és ple</string>
     <key>player_error_short_playback_error</key>
     <string>La reproducció ha fallat. Torna-ho a provar</string>
     <key>player_increment_time</key>
@@ -2209,6 +2219,10 @@ Això sí que és compromís!</string>
     <string>Error de reproducció</string>
     <key>player_user_episode_upload_error</key>
     <string>Error a la càrrega</string>
+    <key>player_video_exit_full_screen</key>
+    <string>Surt de la pantalla completa</string>
+    <key>player_video_full_screen</key>
+    <string>Pantalla completa</string>
     <key>playlist_add_to_title</key>
     <string>Afegeix a "%@"</string>
     <key>playlist_create_no_episodes_description</key>
@@ -2253,8 +2267,10 @@ Prova d'ajustar les regles, o desa aquesta llista de reproducció per a futurs e
     <string>Navega pels pòdcasts</string>
     <key>playlist_manual_create_error_message</key>
     <string>Alguna cosa ha anat malament mentre es creava la teva llista de reproducció.</string>
+    <key>playlist_manual_empty_state_subtitle</key>
+    <string>Tria episodis dels pòdcasts que segueixes. O llisca cap a l'esquerra sobre qualsevol episodi per afegir-lo sobre la marxa.</string>
     <key>playlist_manual_empty_state_subtitle_no_podcasts</key>
-    <string>Llisca cap a l’esquerra en un episodi per a afegir-lo a la teva llista de reproducció.</string>
+    <string>Cerca un pòdcast que t'agradi i llisca cap a l'esquerra sobre qualsevol episodi per afegir-lo.</string>
     <key>playlist_manual_empty_state_title</key>
     <string>Comença a crear la teva llista de reproducció</string>
     <key>playlist_manual_empty_state_title_no_podcasts</key>
@@ -2280,7 +2296,7 @@ Prova d'ajustar les regles, o desa aquesta llista de reproducció per a futurs e
     <key>playlist_play_all_sheet_button_title</key>
     <string>Substitueix i reprodueix</string>
     <key>playlist_play_all_sheet_description</key>
-    <string>Reproduir això substituirà la cua actual de «Tot seguit».</string>
+    <string>Reproduir això substituirà la cua actual de «Tot seguit». Desa-ho com a llista de reproducció per conservar-ho.</string>
     <key>playlist_play_all_sheet_title</key>
     <string>Substituir «Tot seguit»?</string>
     <key>playlist_play_all_sheet_toggle</key>
@@ -2311,12 +2327,6 @@ Prova d'ajustar les regles, o desa aquesta llista de reproducció per a futurs e
     <string>Tots els pòdcasts que segueixes</string>
     <key>playlist_smart_rule_save_button</key>
     <string>Desa la regla intel·ligent</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_off</key>
-    <string>Els episodis destacats poden seguir apareixent si coincideixen amb altres regles.</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_on</key>
-    <string>Només inclou episodis destacats que coincideixin amb les teves altres regles.</string>
-    <key>playlist_smart_rule_starred_header_title</key>
-    <string>Episodis destacats</string>
     <key>playlist_smart_rules_title</key>
     <string>Regles intel·ligents</string>
     <key>playlists</key>
@@ -3288,6 +3298,10 @@ Aquí tens una invitació de  %1$@ per a Pocket Casts Plus, el meu reproductor d
     <string>VoiceBoostN</string>
     <key>settings_general_voice_boost_n_subtitle</key>
     <string>Utilitza l'eina d'apujar el volum actualitzat amb nivells de veu més consistents.</string>
+    <key>settings_general_whats_new_unread_dot</key>
+    <string>Marca els missatges nous amb un punt</string>
+    <key>settings_general_whats_new_unread_dot_subtitle</key>
+    <string>Mostra un punt a Perfil quan hi hagi missatges nous a «Novetats».</string>
     <key>settings_global_settings</key>
     <string>Configuració general</string>
     <key>settings_headphone_controls</key>
@@ -4266,6 +4280,8 @@ Prem el botó de sota per a tornar a iniciar sessió al teu compte de Pocket Cas
     <string>Reprodueix fàcilment un episodi aleatori sense canviar l'ordre de la cua.</string>
     <key>up_next_shuffle_announcement_title</key>
     <string>Presentem la reproducció aleatòria</string>
+    <key>up_next_shuffle_button</key>
+    <string>Reprodueix aleatòriament</string>
     <key>up_next_shuffle_toast_message</key>
     <string>Shuffle està activat. Els episodis es reproduiran en ordre aleatori.</string>
     <key>up_next_sort_duration_tooltip_body</key>
@@ -4438,6 +4454,24 @@ Sincerament, totes dues són bones decisions. 🙂</string>
     <string>Novetats</string>
     <key>whats_new_blog_more_link_text</key>
     <string>Per a tenir més informació sobre aquesta actualització, consulta el nostre blog</string>
+    <key>whats_new_category_announcement</key>
+    <string>Anunci</string>
+    <key>whats_new_category_known_issue</key>
+    <string>Problema conegut</string>
+    <key>whats_new_category_new_feature</key>
+    <string>Funció nova</string>
+    <key>whats_new_category_research</key>
+    <string>Recerca d'usuaris</string>
+    <key>whats_new_category_tip</key>
+    <string>Consells i trucs</string>
+    <key>whats_new_feed_empty_description</key>
+    <string>Aquí apareixeran les funcions noves, els consells i els anuncis.</string>
+    <key>whats_new_feed_empty_title</key>
+    <string>Encara no hi ha missatges</string>
+    <key>whats_new_feed_read_all</key>
+    <string>Marca-ho tot com a llegit</string>
+    <key>whats_new_feed_unable_to_load</key>
+    <string>No s'ha pogut carregar «Novetats»</string>
     <key>whats_new_in_version</key>
     <string>Què hi ha de nou a %1$@</string>
     <key>whats_new_page_one_7_20</key>
@@ -4452,6 +4486,8 @@ Gràcies al teu suport, la teva pantalla d'inici té un aspecte fantàstic!</str
 Amb aquesta funció, la feina que has fet per a organitzar la teva pàgina de pòdcasts se sincronitza amb el teu compte, així que et pots relaxar.</string>
     <key>whats_new_page_two_title_7_20</key>
     <string>Sincronització de la pantalla d'inici</string>
+    <key>whats_new_poll_answered</key>
+    <string>Gràcies per respondre.</string>
     <key>widgets_app_icon_description</key>
     <string>Inicia ràpidament Pocket Casts</string>
     <key>widgets_app_icon_name</key>

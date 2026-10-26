@@ -9,6 +9,31 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
     private let playbackManager: TranscriptPlaybackManaging
     let analyticsSource: AnalyticsSource
 
+    /// The player background. When it's set
+    /// before the view loads, the overlay covers the top of the transcript with a copy of it
+    /// instead of a solid color, so it blends in with the rest of the player.
+    weak var largeScreenBackground: PlayerArtworkBackgroundView?
+
+    private lazy var largeScreenBackgroundCopy: PlayerArtworkBackgroundView = {
+        let copy = PlayerArtworkBackgroundView()
+        copy.translatesAutoresizingMaskIntoConstraints = false
+        return copy
+    }()
+
+    private lazy var largeScreenBackgroundContainer: UIView = {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.clipsToBounds = true
+        container.layer.mask = largeScreenBackgroundMask
+        return container
+    }()
+
+    private lazy var largeScreenBackgroundMask: CAGradientLayer = {
+        let mask = CAGradientLayer()
+        mask.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        return mask
+    }()
+
     private lazy var stackView: UIStackView = {
         let stackView = UIStackView()
         stackView.translatesAutoresizingMaskIntoConstraints = false
@@ -62,8 +87,13 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
     private lazy var scrollView: UIScrollView = {
         let view = UIScrollView()
         view.translatesAutoresizingMaskIntoConstraints = false
+        view.contentInsetAdjustmentBehavior = .never
         return view
     }()
+
+    private static let badgeTopMargin: CGFloat = 56
+
+    private var badgeTopConstraint: NSLayoutConstraint?
 
     private lazy var paywallButton: UIButton = {
         var config = UIButton.Configuration.filled()
@@ -169,7 +199,7 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
     }
 
     private func setupView() {
-        view.backgroundColor = showFromEpisode ? .clear : backgroundColor
+        view.backgroundColor = showFromEpisode || largeScreenBackground != nil ? .clear : backgroundColor
 
         view.addSubview(blurEffectView)
         view.addSubview(topGradient)
@@ -178,6 +208,17 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
         topSolidView.backgroundColor = showFromEpisode ? ThemeColor.primaryUi01() : PlayerColorHelper.playerBackgroundColor01()
         topSolidView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(topSolidView)
+
+        if let largeScreenBackground {
+            topSolidView.isHidden = true
+            topGradient.isHidden = true
+            view.clipsToBounds = true
+            largeScreenBackground.addCopy(largeScreenBackgroundCopy)
+            largeScreenBackgroundContainer.addSubview(largeScreenBackgroundCopy)
+            view.addSubview(largeScreenBackgroundContainer)
+            largeScreenBackgroundContainer.anchorToAllSidesOf(view: view)
+            scrollView.delegate = self
+        }
 
         if showFromEpisode {
             let overlay = UIView()
@@ -200,7 +241,10 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
 
         let readableContentGuideMargin = 12.0
         let topMargin = showFromEpisode ? 24.0 : 0.0
-        let paywallButtonBottomMargin: CGFloat = showFromEpisode && view.safeAreaInsets.bottom == 0 ? -readableContentGuideMargin : 0.0
+        let paywallButtonBottomMargin: CGFloat = showFromEpisode ? -readableContentGuideMargin : 0.0
+
+        let badgeTopConstraint = badge.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: Self.badgeTopMargin + view.safeAreaInsets.top)
+        self.badgeTopConstraint = badgeTopConstraint
 
         NSLayoutConstraint.activate(
             [
@@ -217,8 +261,8 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
                 scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
                 scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                badge.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-                badge.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 56),
+                badge.centerXAnchor.constraint(equalTo: titleLabel.centerXAnchor),
+                badgeTopConstraint,
                 titleLabel.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 24),
                 titleLabel.leadingAnchor.constraint(equalTo: view.readableContentGuide.leadingAnchor, constant: readableContentGuideMargin),
                 titleLabel.trailingAnchor.constraint(equalTo: view.readableContentGuide.trailingAnchor, constant: -readableContentGuideMargin),
@@ -244,14 +288,55 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
         )
     }
 
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        badgeTopConstraint?.constant = Self.badgeTopMargin + view.safeAreaInsets.top
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
 
         // Inset bottom of scroll content by button height + spacing
         let buttonHeight = paywallButton.frame.height
         let spacing: CGFloat = 10 // padding above + below button
-        scrollView.contentInset.bottom = buttonHeight + spacing
-        scrollView.verticalScrollIndicatorInsets.bottom = buttonHeight + spacing
+        let bottomInset = buttonHeight + spacing + view.safeAreaInsets.bottom
+        scrollView.contentInset.bottom = bottomInset
+        scrollView.verticalScrollIndicatorInsets.bottom = bottomInset
+
+        updateLargeScreenBackgroundCopy()
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+
+        guard let largeScreenBackground, parent != nil, view.superview != nil else { return }
+
+        NSLayoutConstraint.activate([
+            largeScreenBackgroundCopy.leadingAnchor.constraint(equalTo: largeScreenBackground.leadingAnchor),
+            largeScreenBackgroundCopy.topAnchor.constraint(equalTo: largeScreenBackground.topAnchor),
+            largeScreenBackgroundCopy.widthAnchor.constraint(equalTo: largeScreenBackground.widthAnchor),
+            largeScreenBackgroundCopy.heightAnchor.constraint(equalTo: largeScreenBackground.heightAnchor)
+        ])
+    }
+
+    /// Fades the copy out under the description like the solid color and its gradient do.
+    private func updateLargeScreenBackgroundCopy() {
+        guard largeScreenBackground != nil else { return }
+
+        scrollView.layoutIfNeeded()
+        let bounds = largeScreenBackgroundContainer.bounds
+        let descriptionFrame = view.convert(descriptionLabel.bounds, from: descriptionLabel)
+        guard bounds.height > 0 else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        largeScreenBackgroundMask.frame = bounds
+        largeScreenBackgroundMask.locations = [
+            0,
+            NSNumber(value: descriptionFrame.minY / bounds.height),
+            NSNumber(value: (descriptionFrame.maxY + 50) / bounds.height)
+        ]
+        CATransaction.commit()
     }
 
     @objc private func closeTapped() {
@@ -261,9 +346,9 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
     @objc private func paywallButtonTapped() {
         track(event: .transcriptGeneratedPaywallSubscribeTapped)
         if analyticsSource == .player {
-            NavigationManager.sharedManager.showUpsellView(from: self, source: .generatedTranscripts)
+            NavigationManager.shared.showUpsellView(from: self, source: .generatedTranscripts)
         } else {
-            let controller = OnboardingFlow.shared.begin(flow: .plusUpsell, source: .generatedTranscripts, context: [:])
+            let controller = OnboardingFlow.shared.begin(flow: .plusUpsell, source: .generatedTranscripts, context: [:], traitCollection: traitCollection)
             self.parent?.present(controller, animated: true, completion: nil)
         }
     }
@@ -282,5 +367,11 @@ class GeneratedTranscriptsPremiumOverlay: UIViewController, AnalyticsSourceProvi
             return
         }
         Analytics.track(event, properties: ["episode_uuid": episodeUUID, "podcast_uuid": podcastUUID, "source": analyticsSource.rawValue])
+    }
+}
+
+extension GeneratedTranscriptsPremiumOverlay: UIScrollViewDelegate {
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateLargeScreenBackgroundCopy()
     }
 }

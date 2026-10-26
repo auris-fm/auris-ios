@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsUtils
+import SherpaOnnxC  // sherpa-onnx C API (was bridged via the removed app bridging header)
 
 /// sherpa-onnx `SherpaOnnxOfflineRecognizer` backend running SenseVoice-Small (int8).
 /// CTC, non-autoregressive, native text output with built-in language identification

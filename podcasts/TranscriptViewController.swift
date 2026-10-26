@@ -70,13 +70,22 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
     private var bannerLabelLeadingConstraint: NSLayoutConstraint?
     private var bannerLabelTrailingConstraint: NSLayoutConstraint?
 
-    private var shouldShowPremiumView: Bool {
+    /// Whether generated transcripts show the Plus paywall instead of their text.
+    static var generatedTranscriptsRequirePlus: Bool {
         return FeatureFlag.generatedTranscripts.enabled &&
         (!SubscriptionHelper.hasActiveSubscription() || !SyncManager.isUserLoggedIn())
     }
 
+    private var shouldShowPremiumView: Bool {
+        Self.generatedTranscriptsRequirePlus
+    }
+
     var showGeneratedTranscriptsPremiumOverlay: (() -> Void)?
     var playButtonTapped: ((Bool) -> Void)?
+
+    /// Set before the view loads when the transcript is a tab of the large screen player, which
+    /// has nothing to close. Its buttons float over the bottom of the transcript instead.
+    var isPlayerTab = false
 
     private var showFromEpisode: Bool {
         analyticsSource == .episode
@@ -168,8 +177,10 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         let topMargin = showFromEpisode ? 8.0 : 0.0
 
         if FeatureFlag.generatedTranscripts.enabled, value {
-            transcriptViewTopConstraint?.constant = 80.0 + topMargin
-            topGradientTopConstraint?.constant = 100.0 + topMargin
+            // A tab has no row of buttons above the banner.
+            let bannerTop = isPlayerTab ? -44.0 : 0.0
+            transcriptViewTopConstraint?.constant = 104.0 + topMargin + bannerTop
+            topGradientTopConstraint?.constant = 124.0 + topMargin + bannerTop
             topGradientHeightConstraint?.constant = 30.0
         } else {
             transcriptViewTopConstraint?.constant = 0.0 + topMargin
@@ -206,12 +217,13 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         }
 
         view.addSubview(transcriptView)
+        view.keyboardLayoutGuide.usesBottomSafeArea = showFromEpisode
         let transcriptViewTopConstraint = transcriptView.topAnchor.constraint(equalTo: view.topAnchor)
         self.transcriptViewTopConstraint = transcriptViewTopConstraint
         NSLayoutConstraint.activate(
             [
                 transcriptViewTopConstraint,
-                transcriptView.bottomAnchor.constraint(equalTo: showFromEpisode ? view.safeAreaLayoutGuide.bottomAnchor : view.bottomAnchor),
+                transcriptView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
                 transcriptView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 transcriptView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
             ]
@@ -271,20 +283,24 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         view.addSubview(hiddenTextView)
 
         #if DEBUG
-        let overlay = FingerprintDebugOverlay()
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(overlay)
-        NSLayoutConstraint.activate([
-            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            overlay.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            overlay.heightAnchor.constraint(equalToConstant: 16)
-        ])
-        debugOverlay = overlay
+        if FeatureFlag.transcriptDebugOverlay.enabled {
+            let overlay = FingerprintDebugOverlay()
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(overlay)
+            NSLayoutConstraint.activate([
+                overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+                overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                overlay.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+                overlay.heightAnchor.constraint(equalToConstant: 16)
+            ])
+            debugOverlay = overlay
+        }
         #endif
 
-        stackView.addArrangedSubview(closeButton)
-        stackView.addArrangedSubview(UIView())
+        if !isPlayerTab {
+            stackView.addArrangedSubview(closeButton)
+            stackView.addArrangedSubview(UIView())
+        }
 
         shareButton.isHidden = !FeatureFlag.shareTranscripts.enabled
         stackView.addArrangedSubview(shareButton)
@@ -297,11 +313,18 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         view.addSubview(stackView)
         stackView.translatesAutoresizingMaskIntoConstraints = false
         let topMargin = showFromEpisode ? 8.0 : 0.0
-        NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: topMargin),
-            stackView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            stackView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16)
-        ])
+        if isPlayerTab {
+            NSLayoutConstraint.activate([
+                stackView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -Sizes.floatingButtonsBottomMargin),
+                stackView.trailingAnchor.constraint(equalTo: view.readableContentGuide.trailingAnchor, constant: -Sizes.textMargin)
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                stackView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: topMargin),
+                stackView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+                stackView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16)
+            ])
+        }
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -315,7 +338,9 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
             bannerView.isHidden = true
             NSLayoutConstraint.activate(
                 [
-                    bannerView.topAnchor.constraint(equalTo: stackView.bottomAnchor),
+                    isPlayerTab
+                        ? bannerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: topMargin)
+                        : bannerView.topAnchor.constraint(equalTo: stackView.bottomAnchor),
                     bannerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                     bannerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                     bannerView.heightAnchor.constraint(equalToConstant: Sizes.topGradientHeight)
@@ -535,7 +560,11 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
     }()
 
     var bottomContainerInset: CGFloat {
-        0.7 * Sizes.bottomGradientHeight
+        // A tab's transcript ends above the buttons floating over it.
+        if isPlayerTab {
+            return view.safeAreaInsets.bottom + Sizes.floatingButtonsBottomMargin + stackView.bounds.height + Sizes.floatingButtonsMargin
+        }
+        return 0.7 * Sizes.bottomGradientHeight
     }
 
     override func willBeAddedToPlayer() {
@@ -544,13 +573,15 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         addObservers()
         transcriptView.delegate = self
 #if DEBUG
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.debugOverlay?.update()
+        if FeatureFlag.transcriptDebugOverlay.enabled {
+            let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.debugOverlay?.update()
+                }
             }
+            RunLoop.main.add(timer, forMode: .common)
+            debugTimer = timer
         }
-        RunLoop.main.add(timer, forMode: .common)
-        debugTimer = timer
 #endif
     }
 
@@ -579,16 +610,17 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         let primaryColor =  showFromEpisode ? ThemeColor.primaryUi01() : PlayerColorHelper.playerBackgroundColor01()
         let secondaryColor =  showFromEpisode ? ThemeColor.primaryText01() : ThemeColor.playerContrast02()
         let activityIndicatorViewColor: UIColor = showFromEpisode ? ThemeColor.primaryIcon02() : ThemeColor.playerContrast02()
-        let activityIndicatorViewStyle: UIScrollView.IndicatorStyle = showFromEpisode ? (Theme.sharedTheme.activeTheme.isDark ? .white : .black) : .white
+        let activityIndicatorViewStyle: UIScrollView.IndicatorStyle = showFromEpisode ? (Theme.shared.activeTheme.isDark ? .white : .black) : .white
 
-        view.backgroundColor = primaryColor
-        transcriptView.backgroundColor =  primaryColor
+        let backgroundColor = usesLargeScreenStyle ? .clear : primaryColor
+        view.backgroundColor = backgroundColor
+        transcriptView.backgroundColor = backgroundColor
         transcriptView.textColor = secondaryColor
         transcriptView.indicatorStyle = activityIndicatorViewStyle
         activityIndicatorView.color = activityIndicatorViewColor
         updateGradientColors()
         if FeatureFlag.generatedTranscripts.enabled {
-            bannerView.backgroundColor = primaryColor
+            bannerView.backgroundColor = backgroundColor
         }
     }
 
@@ -596,6 +628,46 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         let gradientColor = showFromEpisode ? ThemeColor.primaryUi01() : Colors.gradientColor
         topGradient.updateColors(firstColor: gradientColor, secondColor: gradientColor.withAlphaComponent(0))
         bottomGradient.updateColors(firstColor: gradientColor.withAlphaComponent(0), secondColor: gradientColor)
+        if usesLargeScreenStyle {
+            topGradient.isHidden = true
+            bottomGradient.isHidden = true
+        }
+    }
+
+    private lazy var textFadeMask: CAGradientLayer = {
+        let mask = CAGradientLayer()
+        mask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor]
+        return mask
+    }()
+
+    /// Over the large screen player background, the text fades out where the (hidden) gradients
+    /// are with a mask instead, so it doesn't need a solid background.
+    private func updateTextFadeMask() {
+        let height = transcriptView.bounds.height
+        guard usesLargeScreenStyle, height > 0 else { return }
+
+        let topFade = max(0, topGradient.frame.maxY - transcriptView.frame.minY)
+        // A tab's transcript fades out under the buttons floating over it.
+        let bottomFadeEnd = (isPlayerTab ? stackView.frame.maxY : bottomGradient.frame.maxY) - transcriptView.frame.minY
+        let bottomFadeStart = isPlayerTab
+            ? stackView.frame.minY - Sizes.floatingButtonsMargin - transcriptView.frame.minY
+            : bottomFadeEnd - bottomGradient.frame.height
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textFadeMask.frame = transcriptView.bounds
+        textFadeMask.locations = [
+            0,
+            NSNumber(value: min(topFade / height, 0.5)),
+            NSNumber(value: min(max(bottomFadeStart / height, 0.5), 1)),
+            NSNumber(value: min(max(bottomFadeEnd / height, 0.5), 1)),
+            1
+        ]
+        CATransaction.commit()
+
+        if transcriptView.layer.mask !== textFadeMask {
+            transcriptView.layer.mask = textFadeMask
+        }
     }
 
     @objc private func update() {
@@ -679,6 +751,9 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
                             self.stackView.alpha = 0
                             self.showGeneratedTranscriptsPremiumOverlay?()
                         } else {
+                            if self.isPlayerTab {
+                                self.stackView.alpha = 1
+                            }
                             self.appearDate = Date()
                             let syncedState = FingerprintTimingManager.shared.state
                             self.track(.transcriptShown, properties: [
@@ -701,7 +776,7 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
     }
 
     @objc private func showUpsellView() {
-        NavigationManager.sharedManager.showUpsellView(from: self, source: .generatedTranscripts)
+        NavigationManager.shared.showUpsellView(from: self, source: .generatedTranscripts)
     }
 
     @objc private func subscriptionStatusDidChange() {
@@ -749,19 +824,26 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
     override public func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateTextMargins()
+        updateTextFadeMask()
     }
 
     private func updateTextMargins() {
-        let margin = self.view.readableContentGuide.layoutFrame.minX + Sizes.textMargin
+        let readableFrame = view.readableContentGuide.layoutFrame
+        guard !readableFrame.isEmpty else { return }
+        let leftMargin = readableFrame.minX + Sizes.textMargin
+        let rightMargin = view.bounds.maxX - readableFrame.maxX + Sizes.textMargin
         var topInset = 0.75 * Sizes.topGradientHeight
         if FeatureFlag.generatedTranscripts.enabled,
            transcriptManager?.hasGeneratedTranscripts == true {
-            let newMargin = margin + 5.0
-            bannerLabelLeadingConstraint?.constant = newMargin
-            bannerLabelTrailingConstraint?.constant = -newMargin
+            let isRightToLeft = view.effectiveUserInterfaceLayoutDirection == .rightToLeft
+            bannerLabelLeadingConstraint?.constant = (isRightToLeft ? rightMargin : leftMargin) + 5.0
+            bannerLabelTrailingConstraint?.constant = -((isRightToLeft ? leftMargin : rightMargin) + 5.0)
             topInset += 5.0
         }
-        transcriptView.textContainerInset = .init(top: topInset, left: margin, bottom: bottomContainerInset, right: margin)
+        transcriptView.textContainerInset = .init(top: topInset, left: leftMargin, bottom: bottomContainerInset, right: rightMargin)
+        if isPlayerTab {
+            transcriptView.verticalScrollIndicatorInsets.bottom = bottomContainerInset
+        }
     }
 
     @MainActor
@@ -797,10 +879,12 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         paragraphStyle.lineBreakMode = .byWordWrapping
         paragraphStyle.alignment = alignment
 
-        var standardFont = UIFont.preferredFont(forTextStyle: .body)
+        // The large screen player limits the text size with the view's maximum content size category.
+        let traits = view.maximumContentSizeCategory == nil ? nil : transcriptView.traitCollection
+        var standardFont = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
 
         if let descriptor = UIFontDescriptor.preferredFontDescriptor(
-          withTextStyle: .body)
+          withTextStyle: .body, compatibleWith: traits)
           .withDesign(.serif) {
             standardFont =  UIFont(descriptor: descriptor, size: 0)
         }
@@ -828,7 +912,7 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
             formattedText.addAttributes(highlightStyle, range: range)
         }
 
-        let speakerFont = UIFont.font(ofSize: 12, scalingWith: .footnote)
+        let speakerFont = UIFont.font(ofSize: 12, scalingWith: .footnote, maxSizeCategory: view.maximumContentSizeCategory ?? .accessibilityExtraExtraExtraLarge)
         formattedText.enumerateAttribute(.transcriptSpeaker, in: fullLength, options: [.reverse, .longestEffectiveRangeNotRequired]) { value, range, _ in
             if value == nil {
                 return
@@ -873,8 +957,6 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         if !showFromEpisode {
             addCustomObserver(Constants.Notifications.playbackTrackChanged, selector: #selector(update))
         }
-        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow(_:)), name: UIResponder.keyboardWillShowNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
         if FeatureFlag.syncedTranscripts.enabled {
             addCustomObserver(Constants.Notifications.playbackProgress, selector: #selector(updateTranscriptPosition))
             addCustomObserver(Constants.Notifications.playbackStarted, selector: #selector(updateHighlightDisplayLinkPauseState))
@@ -1047,7 +1129,7 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
             ])
             if case .unavailable = syncedState { return }
             let status = playbackManager.episodeUUID
-                .flatMap { DataManager.sharedManager.findBaseEpisode(uuid: $0) }
+                .flatMap { DataManager.shared.findBaseEpisode(uuid: $0) }
                 .flatMap { DownloadStatus(rawValue: $0.episodeStatus) }
             if status == .downloaded || status == .downloadedForStreaming { return }
             Toast.show(L10n.transcriptTapToSeekStreamingUnavailable)
@@ -1115,44 +1197,6 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         transcriptView.scrollToRange(firstResultRange)
     }
 
-    // MARK: - Keyboard
-
-    @objc func keyboardWillShow(_ notification: Notification) {
-        adjustTextViewForKeyboard(notification: notification, show: true)
-    }
-
-    @objc func keyboardWillHide(_ notification: Notification) {
-        adjustTextViewForKeyboard(notification: notification, show: false)
-    }
-
-    func adjustTextViewForKeyboard(notification: Notification, show: Bool) {
-        guard let userInfo = notification.userInfo,
-              let keyboardFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
-              let animationDuration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double else {
-            return
-        }
-
-        let keyboardHeight = keyboardFrame.height
-        let adjustmentHeight = (show ? keyboardHeight - (view.distanceFromBottom() ?? 0) : 0)
-        let previousContentOffset = transcriptView.contentOffset
-        UIView.animate(withDuration: animationDuration, animations: { [weak self] in
-            guard let self else { return }
-
-            if isSearching {
-                transcriptView.setContentOffset(previousContentOffset, animated: false)
-            }
-
-            transcriptView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: adjustmentHeight, right: 0)
-            transcriptView.verticalScrollIndicatorInsets.bottom = show ? adjustmentHeight : bottomContainerInset
-        }, completion: { [weak self] _ in
-            guard let self else { return }
-
-            if isSearching {
-                transcriptView.setContentOffset(previousContentOffset, animated: false)
-            }
-        })
-    }
-
     // MARK: - Tracks
 
     func track(_ event: AnalyticsEvent, properties: [String: Sendable] = [:]) {
@@ -1176,6 +1220,8 @@ class TranscriptViewController: PlayerItemViewController, AnalyticsSourceProvide
         static let bottomGradientHeight: CGFloat = 60
         static let activityIndicatorSize: CGFloat = 30
         static let textMargin: CGFloat = 8
+        static let floatingButtonsMargin: CGFloat = 16
+        static let floatingButtonsBottomMargin: CGFloat = 4
     }
 
     private enum Colors {
@@ -1192,6 +1238,7 @@ extension TranscriptViewController: UIScrollViewDelegate {
         if canScrollToDismiss {
             scrollViewHandler?.scrollViewDidScroll?(scrollView)
         }
+        updateTextFadeMask()
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -1254,7 +1301,7 @@ private extension TranscriptViewController {
     func makeBookmarkAction(for range: NSRange) -> UIAction? {
         guard range.length > 0, PaidFeature.bookmarks.isUnlocked,
               let transcript,
-              let episode = playbackManager.episodeUUID.flatMap({ DataManager.sharedManager.findBaseEpisode(uuid: $0) }),
+              let episode = playbackManager.episodeUUID.flatMap({ DataManager.shared.findBaseEpisode(uuid: $0) }),
               let position = bookmarkPosition(forSelectionStartingAt: range.location, in: transcript) else {
             return nil
         }

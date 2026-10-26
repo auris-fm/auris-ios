@@ -31,24 +31,6 @@ struct UpgradeLandingView: View {
         }
     }
 
-    private var selectedProduct: IAPProductID {
-        currentSubscriptionPeriod == .yearly ? selectedTier.plan.yearly : selectedTier.plan.monthly
-    }
-
-    /// If this device has a small screen
-    private var isSmallScreen: Bool {
-        UIScreen.main.bounds.height <= 667
-    }
-
-    /// If this device has a bottom safe area
-    private var hasBottomSafeArea: Bool {
-        !UIDevice.current.isiPad() && safeAreaBottomHeight > 0
-    }
-
-    private var safeAreaBottomHeight: CGFloat {
-        (SceneHelper.connectedScene()?.windows.first(where: \.isKeyWindow)?.safeAreaInsets.bottom ?? 0)
-    }
-
     var body: some View {
         ZStack {
             ForEach(tiers) { tier in
@@ -62,6 +44,7 @@ struct UpgradeLandingView: View {
                     topBar
 
                     GeometryReader { reader in
+                        let isSmallScreen = reader.size.height <= 667
                         ScrollView {
                             VStack(spacing: 0) {
                                 Spacer()
@@ -116,10 +99,10 @@ struct UpgradeLandingView: View {
                             LinearGradient(colors: [.black.opacity(0), .black], startPoint: .top, endPoint: .bottom)
                                 .opacity(0.8)
                                 .allowsHitTesting(false)
-                                .frame(height: purchaseButtonHeight + safeAreaBottomHeight + 10)
+                                .frame(height: purchaseButtonHeight + 10)
+                                .ignoresSafeArea()
                         }
                     }
-                    .ignoresSafeArea()
                 }
 
                 VStack(spacing: 0) {
@@ -170,7 +153,7 @@ struct UpgradeLandingView: View {
         })
         .buttonStyle(PlusOpaqueButtonStyle(isLoading: isLoading, plan: selectedTier.plan))
         .padding(.horizontal, 20)
-        .padding(.bottom, hasBottomSafeArea ? 0 : 16)
+        .padding(.bottom, 16)
         .alert(isPresented: hasError) {
             Alert(
                 title: Text(L10n.plusPurchaseFailed),
@@ -228,10 +211,6 @@ struct UpgradeLandingView_Previews: PreviewProvider {
 extension String {
     var slumberStudiosWithUrl: String {
         self.replacingOccurrences(of: "Slumber Studios", with: "[Slumber Studios](https://slumberstudios.com)")
-    }
-
-    var newSlumberStudiosWithUrl: String {
-        self.replacingOccurrences(of: self, with: "[\(self)](https://slumberstudios.com)")
     }
 
     var libroFmWithURL: String {
