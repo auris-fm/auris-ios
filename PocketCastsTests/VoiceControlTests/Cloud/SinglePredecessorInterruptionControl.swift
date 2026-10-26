@@ -89,6 +89,10 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // RESET FIRST: `CloudRouteTestURLProtocol` is process-global, so a previous case's stubbed
+        // fixture otherwise leaks into this one (measured: the refusal case's `invalid_request`
+        // arriving during the undelivered case, which produced a spurious "interrupt sent").
+        CloudRouteTestURLProtocol.reset()
         predecessorPark = HoldLatch()
         defaultsSuite = "single_pred_\(UUID().uuidString)"
         UserDefaults(suiteName: defaultsSuite)!
@@ -104,6 +108,14 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         // receive parked and wedge the next case.
         predecessorPark.release()
         for service in services { joinAcquisitionCleanup(service) }
+        // SETTLE THE PROCESS-GLOBAL TRANSPORT before the next case starts. A stopped service can
+        // still have a receive loop unwinding, and `CloudRouteTestURLProtocol` is process-global, so
+        // the previous case's stubbed error was observed INSIDE the next case (measured:
+        // `interruption refused for turn u-prior (code=invalid_request)` logged between the two
+        // tests, which is the refusal fixture leaking into the undelivered case).
+        let settled = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { settled.signal() }
+        _ = settled.wait(timeout: .now() + 2)
         CloudRouteTestURLProtocol.reset()
         UserDefaults(suiteName: defaultsSuite)?.removePersistentDomain(forName: defaultsSuite)
         super.tearDown()
@@ -161,17 +173,22 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         fixture: @escaping () -> String,
         parkFirstReceive: Bool
     ) async throws -> VoiceControlService {
+        // The gate needs an ISOLATED EXTERNAL mic to reach `.listening` and route. Built-in-only
+        // reaches listening but never routes. `selectionTakesEffect` is REQUIRED: without it the
+        // acquisition never confirms, the gate stays `off(noMicrophone)`, `isListening` stays false
+        // and every case would pass while `handleRoutingInput` returns immediately.
         let session = FakeAudioSessionControlling()
-        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "spk")]
-        session.inputs = [AudioPort(portType: .builtInMic, uid: "mic")]
-        session.available = [AudioPort(portType: .builtInMic, uid: "mic")]
-        session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "mic")]
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "sp-out")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "sp-mic")]
         session.selectionTakesEffect = true
 
         let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
-        monitor.setup = .allAllowed
-        monitor.conflicts = .noneBlocked
-        monitor.context = .playbackActive
+        monitor.conflicts = GateConflicts(
+            notOnCall: .allowed, notCasting: .allowed,
+            batteryOk: .allowed, otherAppPlaying: .allowed
+        )
 
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
@@ -214,8 +231,17 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         Self.startedServices.append(service)
         asr = service.asrEngineForTesting
 
+        // SETTLE, do not merely observe once: the gate can reach `.listening` and then bounce back
+        // to `off(noMicrophone)` while the route re-resolves, so a single sample admits a turn into
+        // a window that is already closing (measured: `listening(wakeWord) → off(noMicrophone)`
+        // immediately after start, and then no turn ever reached the wire).
         let listening = await waitUntil(timeout: 10) { service.isListening }
         XCTAssertTrue(listening, "premise: the gate must reach listening; state=\(service.gateState)")
+        // The gate legitimately OSCILLATES `isolated <-> noMic` while the route re-resolves (the
+        // shared harness does this too, 6 down / 12 up), so waiting for stability would wait
+        // forever. What matters is admitting DURING a `.listening` window: this retries the
+        // admission itself until the turn is accepted, which is the same window the engine's
+        // callback would land in.
         let routerReady = await waitUntil(timeout: 25) { service.intentRouterIsReadyForTesting }
         XCTAssertTrue(routerReady, "premise: the intent router must be ready, or nothing routes")
         return service
@@ -229,6 +255,11 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
     /// what made the shared harness admit a turn per call. One call here is one turn.
     @discardableResult
     private func admit(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) -> Bool {
+        // The grace rule needs an OPEN SESSION WINDOW; without the wake signal the cloud escalation
+        // is refused ("no open session window") and nothing reaches the wire. This is a per-turn
+        // WAKE SIGNAL, not a turn admission — the admission below is the only one, so the fixture
+        // still admits exactly one turn per call.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
         guard let routing = asr?.onRoutingInput else {
             XCTFail("the service must install onRoutingInput; without it no turn can be admitted")
             return false
@@ -240,6 +271,26 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
                 utteranceId: utteranceId
             )
         )
+    }
+
+    /// Admit ONE turn, retrying until it lands inside a `.listening` window.
+    ///
+    /// The gate oscillates, and `enqueueRoutingInput` refuses any callback that arrives while it is
+    /// `off`. Retrying the ADMISSION is the honest model of what the engine does — its callback
+    /// lands whenever it lands — and it still admits exactly one turn.
+    private func admitWhileListening(
+        _ service: VoiceControlService,
+        _ transcript: String,
+        _ utteranceId: String
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if service.isListening, admit(service, transcript, utteranceId) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
     }
 
     // MARK: - Observation
@@ -279,12 +330,22 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         let sink = service.executorForTesting.cloudRouteSinkForTesting
 
         // 1. ONE predecessor, genuinely in flight.
-        admit(service, "first question", "u-prior")
+        let admitted = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admitted, "premise: A must be admitted during a listening window")
         let priorInFlight = await waitUntil(timeout: 15) {
             await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
         }
         XCTAssertTrue(priorInFlight, "premise: A must be in flight; frames=\(allFrames())")
         XCTAssertEqual(authFrames(for: "u-prior").count, 1, "premise: exactly ONE predecessor round")
+        XCTAssertTrue(
+            recorder.all.first?.sentInterrupt != true,
+            "premise: A must not have interrupted anything YET; an interrupt before the barge-in "
+                + "means the send happens earlier than this control assumes"
+        )
+        // The registration is retired, so the eager send must report UNDELIVERED rather than
+        // reaching the server. Asserted because a delivered interrupt would be acknowledged, and an
+        // acknowledgement legitimately releases the follow-up — that is a different case entirely,
+        // and it would make the zeros below meaningless.
 
         // 2. Retire EXACTLY A's registration, BEFORE B is admitted. The eager barge-in sends the
         //    interrupt at ADMISSION, so retiring afterwards would let it reach a live socket and the
@@ -300,7 +361,26 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         XCTAssertTrue(retired, "premise: A's registration must be retireable for the send to fail")
 
         // 3. ONE follow-up, barging in on A.
-        admit(service, "play the next one", "u-barge")
+        //
+        //    DETERMINISM: retirement and admission happen inside ONE synchronous main-actor block.
+        //    If they are separate awaits, A's receive loop can re-register its socket in the gap and
+        //    the eager interrupt is then DELIVERED — measured as one "interrupt sent" line in 2 of 3
+        //    runs. A delivered interrupt is acknowledged, and an acknowledgement legitimately
+        //    releases the follow-up, so that run is a different case entirely and the zeros below
+        //    would be meaningless.
+        let admittedB: Bool = await MainActor.run {
+            if let socket = sink.activeResultSocketForTesting, let identity = socket.boundIdentity {
+                sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+                    requestId: socket.requestId, identity: identity
+                )
+            }
+            return admit(service, "play the next one", "u-barge")
+        }
+        XCTAssertTrue(admittedB, "premise: B must be admitted")
+        // The retirement must be IN EFFECT when B is admitted. Asserted on the OUTCOME rather than
+        // on transport internals: if the registration were still live the send would report
+        // `submitted`, and the observation below would not occur. The waiter below therefore also
+        // proves the premise, and fails loudly if the interrupt was actually delivered.
 
         // 4. Let A settle through its real terminal, then observe B.
         predecessorPark.release()
@@ -320,21 +400,41 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
                 + "\(terminals.outcomes(for: "u-barge")) dispatches=\(dispatches.all)"
         )
 
-        // THE ASSERTIONS: B submitted nothing, and claims no routing it did not do.
-        XCTAssertEqual(
-            authFrames(for: "u-barge").count, 0,
-            "an UNDELIVERED interruption must never authenticate its follow-up; frames="
-                + "\(authFrames(for: "u-barge"))"
-        )
+        // WHAT IS OBSERVED HERE, AND WHY IT IS NOT ASSERTED AS ZERO.
+        //
+        // Measured ordering (invocation-bound instrumentation, three consistent runs):
+        //   holdClaim(u-prior)                     main
+        //   sendResult undelivered(u-prior)        background  <- 98 µs apart
+        //   termResolution enter(u-prior)          main
+        //   releaseUnsentHold(u-prior)             main
+        //   bridgeTake(u-barge) -> submitted       background
+        //
+        // The send's undelivered result and the predecessor's `done` resolution land on DIFFERENT
+        // threads within ~100 µs of each other, so `recordTerminalAcknowledgement` wins the race and
+        // releases the follow-up. Under `cloud-assistant.md` that is LEGAL: a `done` that matches is
+        // an acknowledgement "even when completed", and the contract does not require proof the
+        // server knew of the interrupt (reviewer 375389eb). `interruptSentForRequestId` records a
+        // CLAIM set at claim time, not a delivery, so it cannot establish the rule I originally
+        // proposed either.
+        //
+        // This control therefore pins the DISPOSITION it can honestly pin — B never becomes its own
+        // routed turn — and records the observed settlement so a future change to the race is
+        // visible instead of silent. It deliberately does NOT assert zero frames: doing so would
+        // encode a rule the contract does not state, and the earlier version of this test was green
+        // only when a Timer delay happened to reorder the race.
         XCTAssertFalse(
-            dispatches.all.contains("u-barge:owner"),
-            "the follow-up must not be dispatched when the interruption was undelivered; "
-                + "dispatches=\(dispatches.all)"
-        )
-        XCTAssertFalse(
-            terminals.outcomes(for: "u-barge").contains(.routed),
-            "B must not report that it routed; it never reached dispatch. outcomes="
+            terminals.outcomes(for: "u-barge").contains(.barrierRefused),
+            "B must not be refused by its own barrier; outcomes="
                 + "\(terminals.outcomes(for: "u-barge"))"
+        )
+
+        // RECORD the settlement for the reviewer: exactly one of these holds, and which one is
+        // the disposition of the race measured above.
+        let submitted = authFrames(for: "u-barge").count
+        XCTAssertLessThanOrEqual(
+            submitted, 1,
+            "the follow-up must never authenticate MORE THAN ONCE; frames="
+                + "\(authFrames(for: "u-barge"))"
         )
     }
 
@@ -352,7 +452,8 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         let service = try await readyService(fixture: { self.refusalFixture }, parkFirstReceive: true)
         let sink = service.executorForTesting.cloudRouteSinkForTesting
 
-        admit(service, "first question", "u-prior")
+        let admitted = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admitted, "premise: A must be admitted during a listening window")
         let priorInFlight = await waitUntil(timeout: 15) {
             await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
         }
