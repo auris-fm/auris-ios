@@ -38,9 +38,127 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     private static var startedServices: [VoiceControlService] = []
 
     override func tearDown() {
+        // `stop()` alone can leave an ACQUISITION task in flight. Those tasks touch the one
+        // process-wide `AVAudioSession`, so a still-running one perturbs whatever test runs next
+        // — measured as an interruption test failing only in the combined run while passing alone.
+        // Cancel deterministically and let the tasks unwind before the next case starts.
         for service in Self.startedServices { service.stop() }
         Self.startedServices.removeAll()
+        let settled = XCTestExpectation(description: "service cleanup settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settled.fulfill() }
+        _ = XCTWaiter.wait(for: [settled], timeout: 2.0)
         super.tearDown()
+    }
+
+    /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
+    /// actual publisher chain. Shared by the connect/disconnect controls below.
+    @MainActor
+    private func startedServiceForLiveRoute(session: FakeAudioSessionControlling) -> VoiceControlService? {
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        monitor.setup = .allAllowed
+        monitor.conflicts = .noneBlocked
+        monitor.context = .playbackActive
+        guard let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: session,
+            conditionMonitor: monitor,
+            capture: FakeAudioCapture(),
+            inference: FakeLfmInference(),
+            asrBackend: { TranscribingAsrBackend(text: "play the latest episode") }
+        ) else {
+            XCTFail("no service built, so this control proves nothing")
+            return nil
+        }
+        Self.startedServices.append(service)
+        service.startIfAllowed()
+        return service
+    }
+
+    /// THE EXCEPTION MUST TRACK THE *CURRENT* ROUTE (reviewer `20f3cb92`, blocking).
+    ///
+    /// Driven through a LIVE service, not by constructing two gates: two fresh gates re-evaluate
+    /// from scratch and therefore pass even when the service captures availability once at wiring
+    /// time. (Measured — that first version of these controls was vacuous and a mutant survived it.)
+    ///
+    /// CONNECT: the service starts on a built-in-only route, where the diagnostic admits the
+    /// built-in microphone. An external input then appears. A service that read availability once
+    /// keeps the exception enabled and ignores the real headset.
+    @MainActor
+    func testLiveServiceDropsTheExceptionWhenAnExternalMicrophoneAppears() async throws {
+        XCTAssertTrue(DiagnosticMicOverride.isActive, "premise: Debug simulator build")
+
+        let session = FakeAudioSessionControlling()
+        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "sim-speaker")]
+        session.inputs = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
+        session.available = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
+        session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
+
+        guard let service = startedServiceForLiveRoute(session: session) else { return }
+        let listening = await awaitTrue(timeout: 10) { service.isListening }
+        XCTAssertTrue(listening, "premise: diagnostic admits the built-in mic; state=\(service.gateState)")
+        guard listening else { return }
+
+        // CONNECT an external input and republish the route, as a real route change would.
+        session.available = [
+            AudioPort(portType: .builtInMic, uid: "sim-builtin-mic"),
+            AudioPort(portType: .bluetoothHFP, uid: "late-bt-mic"),
+        ]
+        session.availableAfterConfigure = session.available
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "late-bt-out")]
+        service.routeMonitorForTesting.refreshRoute()
+
+        let dropped = await awaitTrue(timeout: 10) {
+            service.gateState.offReason == .exposedMicrophone
+        }
+        XCTAssertTrue(
+            dropped,
+            "a live service must drop the built-in exception the moment an external microphone "
+                + "appears; reading availability once at wiring leaves it enabled. "
+                + "state=\(service.gateState)"
+        )
+    }
+
+    /// DISCONNECT: the service starts WITH an external microphone, where the requirement correctly
+    /// suppresses the exception; the external input then goes away. A service that read
+    /// availability once keeps the exception suppressed for the rest of the process, so the
+    /// simulator permanently loses the approved diagnostic after any external route.
+    @MainActor
+    func testLiveServiceEnablesTheExceptionWhenTheExternalMicrophoneGoesAway() async throws {
+        XCTAssertTrue(DiagnosticMicOverride.isActive, "premise: Debug simulator build")
+
+        let session = FakeAudioSessionControlling()
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [AudioPort(portType: .bluetoothHFP, uid: "bt-mic")]
+        session.available = [AudioPort(portType: .bluetoothHFP, uid: "bt-mic")]
+        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        guard let service = startedServiceForLiveRoute(session: session) else { return }
+        // Premise: an external microphone IS in use. Note the gate legitimately reaches
+        // `listening` here — an isolated external mic is allowed without any exception — so the
+        // premise must be asserted on the EXPOSURE, not on listening. (`!isListening` was the
+        // wrong premise and failed for that reason, not because the diagnostic misbehaved.)
+        let isolated = await awaitTrue(timeout: 10) {
+            service.gatePosture.micExposure == .isolated
+        }
+        XCTAssertTrue(
+            isolated,
+            "premise: the external microphone must be in use, so the built-in exception is not "
+                + "the reason for listening; state=\(service.gateState) exposure=\(service.gatePosture.micExposure)"
+        )
+
+        // DISCONNECT: nothing external remains.
+        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "sim-speaker")]
+        session.inputs = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
+        session.available = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
+        session.availableAfterConfigure = session.available
+        service.routeMonitorForTesting.refreshRoute()
+
+        let enabled = await awaitTrue(timeout: 10) { service.isListening }
+        XCTAssertTrue(
+            enabled,
+            "the approved diagnostic must become available again once the external microphone is "
+                + "gone; a stale availability read suppresses it permanently. state=\(service.gateState)"
+        )
     }
 
     /// END TO END: a built-in-microphone-only session must reach `.listening` AND start capture,
