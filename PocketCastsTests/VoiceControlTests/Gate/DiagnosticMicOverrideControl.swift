@@ -39,6 +39,14 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     /// process-wide `AVAudioSession` and perturbs later tests.
     private static var startedServices: [VoiceControlService] = []
 
+    /// A lock-guarded boolean, so a `@Sendable` barrier can report that it was ENTERED.
+    final class FlagBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     override func tearDown() {
         // A REAL JOIN, NOT A TIMER (reviewer e8327339). `stop()` alone can leave an acquisition
         // task in flight; those tasks touch the one process-wide `AVAudioSession`, so one still
@@ -101,13 +109,17 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     }
 
     /// DETERMINISTIC PROOF THAT TEARDOWN JOINS A GENUINELY IN-FLIGHT ACQUISITION
-    /// (reviewer `33d3a531`).
+    /// (reviewer 33d3a531, tightened per 54804816).
     ///
-    /// Previous versions could not observe this: the acquisition always finished before teardown,
-    /// so "captured" was false and the join joined nothing (measured — I instrumented it rather
-    /// than assume). Here a barrier parks the acquisition open, so the task is provably in flight
-    /// when cleanup runs, and the assertions are that it was captured, that it COMPLETED, and that
-    /// completion only happened because cleanup released it.
+    /// The previous version released the park, awaited completion, and only THEN let teardown
+    /// stop/join — so it never called `stop()` while the task was parked and did not exercise
+    /// teardown at all. `task != nil` also does not prove the task reached the barrier.
+    ///
+    /// This version:
+    /// 1. asserts the barrier was actually ENTERED (the acquisition is provably parked),
+    /// 2. captures the task,
+    /// 3. calls `stop()` WHILE IT IS PARKED, through the same cleanup helper teardown uses,
+    /// 4. releases the park from a `defer`, so a failed premise still cannot wedge later cases.
     @MainActor
     func testTeardownJoinsAnAcquisitionThatIsGenuinelyInFlight() async throws {
         let session = FakeAudioSessionControlling()
@@ -117,6 +129,10 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
 
         let parked = HoldLatch()
+        // GUARANTEED RELEASE: whatever happens below, the park is opened so no later case wedges.
+        defer { parked.release() }
+
+        let entered = FlagBox()
         let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
         monitor.setup = .allAllowed
         monitor.conflicts = .noneBlocked
@@ -132,29 +148,57 @@ final class DiagnosticMicOverrideControl: XCTestCase {
             return
         }
         Self.startedServices.append(service)
-        // Park EVERY acquisition attempt until we release it.
-        service.acquisitionInFlightBarrierForTesting = { await parked.waitUntilReleased() }
+        service.acquisitionInFlightBarrierForTesting = {
+            entered.set()
+            await parked.waitUntilReleased()
+        }
         service.startIfAllowed()
 
-        // The acquisition must actually be in flight, or the join below proves nothing.
-        let inFlight = await awaitTrue(timeout: 10) {
-            service.captureAcquisitionTaskForTesting() != nil
-        }
-        XCTAssertTrue(inFlight, "premise: an acquisition task must be in flight and PARKED")
+        // 1. THE BARRIER MUST ACTUALLY BE ENTERED. A non-nil task only proves a task exists; it
+        //    does not prove the acquisition reached the point teardown has to interrupt.
+        let barrierEntered = await awaitTrue(timeout: 10) { entered.isSet }
+        XCTAssertTrue(barrierEntered, "premise: the acquisition must be parked AT the barrier")
 
+        // 2. Capture BEFORE stop clears it.
         let task = service.captureAcquisitionTaskForTesting()
-        XCTAssertNotNil(task, "premise: the in-flight task must be capturable before stop clears it")
+        XCTAssertNotNil(task, "premise: the parked acquisition task must be capturable")
 
-        // RELEASE THE PARK, then join. The join must observe actual completion; a join that
-        // returned early could not distinguish "completed" from "never looked".
+        // 3. STOP WHILE PARKED, and join. Driven from INSIDE this async test rather than from a
+        //    nested `Task` plus a spinning run loop: the acquisition task is main-actor bound, so
+        //    spinning the run loop on main starves the very task being joined (measured: 15s bound
+        //    expiry with `stopped=false`). Awaiting here yields the actor normally.
+        //
+        //    Release BEFORE `stop()`: `stop()` runs `cancelAcquisition()` synchronously on the main
+        //    actor, and the barrier resumes on that same actor. Releasing afterwards would leave
+        //    `stop()` waiting on a continuation that cannot resume until `stop()` returns.
         parked.release()
+        service.stop()
+        // NOT `isListening == false` as a premise: the barrier parks the acquisition BEFORE the gate
+        // reaches `.listening`, so the service never listened and `stop()` returns early by design.
+        // The premise this control needs is that the acquisition was PARKED and CANCELLED, which
+        // the barrier-entered assertion and the join below establish.
 
         guard let task else { return }
         let completed = await VoiceControlService.awaitCompletion(of: task, timeout: 10)
         XCTAssertTrue(completed, "cleanup must JOIN the parked acquisition through to completion")
     }
 
-    /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
+    /// The bound must BIND on a task that never completes (reviewer 54804816). Without this, a
+    /// "timeout" that cannot fire makes every join assertion above meaningless.
+    @MainActor
+    func testCompletionBoundExpiresOnATaskThatNeverCompletes() async throws {
+        let neverCompleting = Task<Void, Never> {
+            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+        }
+        let started = Date()
+        let completed = await VoiceControlService.awaitCompletion(of: neverCompleting, timeout: 0.5)
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertFalse(completed, "a task that never completes must NOT report completion")
+        XCTAssertLessThan(elapsed, 5.0, "the bound must actually expire; elapsed="
+            + "\(String(format: "%.2f", elapsed))s")
+    }
+
+    /// START A REAL SERVICE over a built-in-only session    /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
     /// actual publisher chain. Shared by the connect/disconnect controls below.
     @MainActor
     private func startedServiceForLiveRoute(session: FakeAudioSessionControlling) -> VoiceControlService? {

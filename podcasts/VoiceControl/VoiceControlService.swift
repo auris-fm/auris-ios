@@ -1348,24 +1348,55 @@ class VoiceControlService: ObservableObject {
         acquisitionTask
     }
 
-    /// TEST-ONLY: await a task captured earlier. Returns true only when the task actually
-    /// completed within the bound; a bound expiry is reported, never silently ignored.
+    /// TEST-ONLY: await a task captured earlier, with a BOUND THAT ACTUALLY BINDS.
+    ///
+    /// The previous version used `withTaskGroup` and `group.cancelAll()` when the timer won. That
+    /// does NOT unblock the sibling child that is awaiting `task.value` on an independent task:
+    /// leaving the task-group scope still waits for every child, so the "timeout" never returned —
+    /// measured as a scripted task that never completes hanging indefinitely on a 0.3s bound.
+    ///
+    /// This version uses an INDEPENDENT completion signal. The task records its own completion into
+    /// a lock-guarded flag and signals a semaphore; the waiter races that semaphore against the
+    /// timeout. Nothing is awaited on an independent task inside a scope that must drain, so a task
+    /// that never completes cannot block the caller past the bound.
     static func awaitCompletion(
         of task: Task<Void, Never>,
         timeout: TimeInterval
     ) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                await task.value
-                return true
+        let done = CompletionSignal()
+        // The observer task records completion. It is deliberately NOT awaited or cancelled here:
+        // if the task never completes, this observer may take until the end of the process. It
+        // holds no resources the bound depends on, which is the whole point of the rewrite.
+        Task.detached(priority: .utility) {
+            await task.value
+            done.signal()
+        }
+        // Wait OFF the main actor: this is called from a main-actor test, and blocking main would
+        // deadlock the main-actor-bound acquisition task it is waiting for.
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: done.wait(timeout: timeout))
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
+        }
+    }
+
+    /// A one-shot completion flag with a blocking bounded wait.
+    private final class CompletionSignal: @unchecked Sendable {
+        private let semaphore = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var completed = false
+        func signal() {
+            lock.lock()
+            if completed { lock.unlock(); return }
+            completed = true
+            lock.unlock()
+            semaphore.signal()
+        }
+        func wait(timeout: TimeInterval) -> Bool {
+            lock.lock()
+            if completed { lock.unlock(); return true }
+            lock.unlock()
+            return semaphore.wait(timeout: .now() + timeout) == .success
         }
     }
 
