@@ -91,7 +91,16 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             .set("https://cloud.test", forKey: CloudConfig.baseURLKey)
     }
 
+    /// Every service started by this class, stopped in teardown. The real `AVAudioSession` is one
+    /// process-wide object, so a leaked `VoiceControlService` keeps its route monitor subscribed
+    /// and keeps reacting to later route notifications — measured as an `isolated -> noMic`
+    /// oscillation inside a LATER test's premise, which is how `testBargeInReachesTheWire…`
+    /// failed only in full-suite runs.
+    private static var startedServices: [VoiceControlService] = []
+
     override func tearDown() {
+        for service in Self.startedServices { service.stop() }
+        Self.startedServices.removeAll()
         VoiceControlTestObservers.dispatchOwnership = nil
         VoiceControlTestObservers.followUpTaken = nil
         // UNCONDITIONAL RELEASE: a case that fails mid-way must not leave a turn parked forever
@@ -222,6 +231,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             throw XCTSkip("unreachable")
         }
         service.startIfAllowed()
+        Self.startedServices.append(service)
         let listening = await waitUntil(timeout: 10) { service.isListening }
         XCTAssertTrue(listening, "premise: the gate must reach listening; state=\(service.gateState)")
         let routerReady = await waitUntil(timeout: 25) { service.intentRouterIsReadyForTesting }
@@ -287,7 +297,11 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         speak(service, "first question", "u-prior")
         // BOUNDED PREMISE WAIT: fail if turn 1 never parks. A timeout here is a premise failure,
         // not evidence of a live predecessor.
-        let priorSockets = await waitUntil(timeout: 5) { self.recorder.all.first?.terminalWithheld == true }
+        // GENEROUS PREMISE WAIT UNDER LOAD (measured): 5s was not enough in a 128-test run — the
+        // service must reach listening, acquire a route, dial and park, and under full-suite load
+        // that exceeded the bound, failing the premise rather than the behaviour. 20s is a bound,
+        // not a wait: a healthy run returns as soon as the park exists.
+        let priorSockets = await waitUntil(timeout: 20) { self.recorder.all.first?.terminalWithheld == true }
         XCTAssertTrue(
             priorSockets,
             "premise: turn 1's receive must be parked with its terminal WITHHELD; "

@@ -203,8 +203,20 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// The Debug-simulator diagnostic exception must apply ONLY when this is false. Reading it
     /// from the session keeps the exception pinned to "the simulator genuinely has no external
     /// route" rather than "the gate happens to be off".
+    /// Whether an external microphone is or COULD BE available.
+    ///
+    /// Deliberately conservative in the direction that preserves the requirement: it is true if an
+    /// external input is listed OR the current output is itself an external route that could carry
+    /// one. The narrower `availableInputs`-only check was not sufficient — a session reports no
+    /// available inputs until it is configured input-capable, so the gate could evaluate while the
+    /// real answer was still "external mic possible" and the diagnostic would wrongly admit the
+    /// built-in microphone. Erring toward "external possible" can only keep the requirement, never
+    /// relax it.
     var hasExternalMicrophoneCandidate: Bool {
-        audioSession.availableInputs.contains { isExternalInput($0.portType) }
+        if audioSession.availableInputs.contains(where: { isExternalInput($0.portType) }) {
+            return true
+        }
+        return hasExternalOutputHint(currentRoute.output)
     }
 
     private let gracePeriodSignal: GracePeriodSignal

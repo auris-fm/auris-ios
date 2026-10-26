@@ -333,7 +333,6 @@ class VoiceControlService: ObservableObject {
 
         // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
         // 30s timer starts or expires (CombineLatest4 alone never saw that change).
-        let externalMicAvailable = routeMonitor.hasExternalMicrophoneCandidate
         Publishers.CombineLatest(
             Publishers.CombineLatest4(
                 conditionMonitor.$setup,
@@ -357,7 +356,12 @@ class VoiceControlService: ObservableObject {
                 admitsBuiltInMicForSimulatorDiagnostic: DiagnosticMicOverride.isActive,
                 // Only ever consulted when the diagnostic is active; a real external microphone
                 // always keeps the original requirement.
-                hasExternalMicrophoneCandidate: externalMicAvailable
+                // READ AT DECISION TIME, not cached at arm time (regression caught by
+                // testBargeInReachesTheWireWhileThePredecessorIsStillLive): the session's available
+                // inputs change as the route settles, so a value captured when the pipeline is
+                // built is stale — it reported "no external mic" while one was available and let
+                // the diagnostic admit the built-in mic in tests that must stay blocked.
+                hasExternalMicrophoneCandidate: self.routeMonitor.hasExternalMicrophoneCandidate
             )
         }
         .sink { [weak self] gate in
