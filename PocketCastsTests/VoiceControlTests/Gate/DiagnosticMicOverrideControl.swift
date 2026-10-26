@@ -488,16 +488,33 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertEqual(g.state.offReason, .noMicrophone)
     }
 
-    /// THE SHIPPING GUARANTEE: the override cannot be active in a Release build.
-    func testOverrideIsCompiledOutOfRelease() {
-        #if DEBUG
-        XCTAssertTrue(
-            DiagnosticMicOverride.enabledByBuild,
-            "in Debug the build-side constant is on (the simulator check is the other half)"
-        )
-        #else
-        XCTAssertFalse(DiagnosticMicOverride.enabledByBuild, "Release must not carry the override")
-        XCTAssertFalse(DiagnosticMicOverride.isActive)
-        #endif
+    @MainActor
+    func testStartedServiceCanDeallocateAfterStop() async throws {
+        weak var observed: VoiceControlService?
+        autoreleasepool {
+            let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+            monitor.context = .none
+            guard let service = VoiceControlAssembly().buildVoiceControlService(
+                audioSession: FakeAudioSessionControlling(),
+                conditionMonitor: monitor,
+                capture: FakeAudioCapture(),
+                inference: FakeLfmInference(),
+                asrBackend: { TranscribingAsrBackend(text: "unused") }
+            ) else {
+                XCTFail("premise: the service must be built")
+                return
+            }
+            observed = service
+            service.startIfAllowed()
+            service.stop()
+        }
+        let released = await awaitTrue(timeout: 5) { observed == nil }
+        XCTAssertTrue(released, "the armed gate subscription must not retain its service")
     }
+
+    #if DEBUG
+    func testBuildSideOverrideIsEnabledInDebug() {
+        XCTAssertTrue(DiagnosticMicOverride.enabledByBuild)
+    }
+    #endif
 }

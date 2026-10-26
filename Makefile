@@ -60,18 +60,9 @@ test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Te
         -only-testing:$(ONLY_TESTING) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
 
-build_staging: ensure_llama_ios ## Builds using the StagingDebug configuration
-	xcodebuild -project podcasts.xcodeproj \
-       -scheme "Pocket Casts Staging" \
-       -configuration StagingDebug \
-       -destination 'generic/platform=iOS Simulator' \
-       build
+build_staging: build ## Build the Debug app using the staging gateway
 
-test_staging: ensure_llama_ios ## Build and run Unit Tests using the StagingDebug configuration
-	xcodebuild test -project podcasts.xcodeproj \
-	    -scheme "Pocket Casts Staging" \
-        -only-testing:$(ONLY_TESTING) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
+test_staging: test ## Run Debug unit tests using the staging gateway
 
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
 	xcodebuild -project podcasts.xcodeproj \

@@ -349,7 +349,7 @@ class VoiceControlService: ObservableObject {
         )
         // Pass the published Bool through — do not re-read the signal inside the
         // gate (that raced with log-before-assign and inverted wakeWord/continuous).
-        .map { tuple, graceActive in
+        .map { [weak routeMonitor] tuple, graceActive in
             let (setup, conflicts, context, exposure) = tuple
             return VoiceControlGate(
                 setup: setup,
@@ -366,7 +366,7 @@ class VoiceControlService: ObservableObject {
                 // inputs change as the route settles, so a value captured when the pipeline is
                 // built is stale — it reported "no external mic" while one was available and let
                 // the diagnostic admit the built-in mic in tests that must stay blocked.
-                hasExternalMicrophoneCandidate: self.routeMonitor.hasExternalMicrophoneCandidate
+                hasExternalMicrophoneCandidate: routeMonitor?.hasExternalMicrophoneCandidate ?? true
             )
         }
         .sink { [weak self] gate in
@@ -1317,21 +1317,6 @@ class VoiceControlService: ObservableObject {
                 )
             }
         }
-    }
-
-    /// TEST-ONLY: await the in-flight acquisition task's actual completion.
-    ///
-    /// Teardown needs a real join, not a timer. An acquisition task touches the single
-    /// process-wide `AVAudioSession`, so one still running after a control finishes perturbs the
-    /// NEXT control — measured as an interruption case failing only in the combined run. A sleep
-    /// is a guess about how long that takes; awaiting the task is the fact. Returns nil when
-    /// nothing was in flight, which is the ordinary case.
-    @discardableResult
-    func awaitAcquisitionCleanupForTesting() async -> Bool {
-        guard let task = acquisitionTask else { return false }
-        task.cancel()
-        await task.value
-        return true
     }
 
     /// TEST-ONLY: an awaitable barrier entered at the head of an acquisition attempt, so a
