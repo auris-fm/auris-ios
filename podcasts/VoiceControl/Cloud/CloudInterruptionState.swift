@@ -128,19 +128,6 @@ final class CloudInterruptionState: @unchecked Sendable {
         return true
     }
 
-    /// True once an interrupt was emitted for this turn and its terminal has not landed yet.
-    func hasOpenInterrupt(forRequestId requestId: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return interruptSentForRequestId == requestId && !resolved.contains(requestId)
-    }
-
-    /// The turn currently interrupted and unresolved, if any. The sink uses this to know whether a
-    /// successor must wait before going on the wire.
-    var interruptedRequestId: String? {
-        lock.lock(); defer { lock.unlock() }
-        return interruptSentForRequestId
-    }
-
     // MARK: - Holding the follow-up
 
     /// Hold `request` as the follow-up for the interrupted turn `interruptedRequestId`.

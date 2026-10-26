@@ -41,7 +41,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testMixedStreamDispatchesSeekSpeaksTokensOnDone() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
@@ -76,7 +76,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testDoneResumesTurnOwnedAutoPause() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: token
             data: {"text":"Answer."}
@@ -102,7 +102,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// paused the client takes no hold, so there is nothing for the turn's end
     /// to release.
     func testDoesNotPauseOrResumeWhenHostWasAlreadyPaused() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: token
             data: {"text":"Answer."}
@@ -127,7 +127,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// a `done` with no audio restores the playback it stopped, so the user is
     /// left exactly as they were.
     func testTurnWithoutAudioRestoresTheHoldItTook() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -142,7 +142,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testPlayQuoteAndStopQuoteRestorePosition() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
@@ -173,7 +173,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testSeekRelativeExecutesAndCapturesPosition() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15}}
@@ -196,7 +196,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testSeekRelativeDirectionOnlyUsesForwardDefault() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{"direction":"backward"}}
@@ -217,7 +217,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testSeekRelativeNeitherDeltaNorDirectionUsesForwardDefault() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data:{"tool":"playback","action":"seek_relative","params":{}}
@@ -238,7 +238,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testUnknownActionIgnored() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"do_a_barrel_roll","params":{}}
@@ -256,7 +256,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testErrorClearsBufferRestoresPauseDoesNotRollbackSeek() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
@@ -746,7 +746,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // The joiner admits against A and (in this control) holds its token before dispatch.
         let joinAdmission = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
         guard case let .join(joinToken) = joinAdmission else {
-            return XCTFail("the duplicate must JOIN the held owner, got \(joinAdmission)")
+            XCTFail("the duplicate must JOIN the held owner, got \(joinAdmission)")
+            return
         }
 
         // The window CLOSES and REOPENS; a successor for the SAME id gets its OWN record.
@@ -1457,7 +1458,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSink()
 
         // Turn 1 captures a pre-quote position via play_quote.
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
@@ -1471,7 +1472,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         // Turn 2 (same sink): stop_quote without play_quote must be a no-op seek-wise.
         playback.clearCalls()
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: action
             data: {"tool":"playback","action":"stop_quote","params":{}}
@@ -1487,7 +1488,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// Slice 1: the sink sends one turn envelope — request_id on the wire and
     /// capabilities only once a structured-results renderer exists.
     func testSinkSendsTurnEnvelopeWithRequestIdAndGatedCapabilities() async throws {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: token
             data: {"text":"ok"}
@@ -1541,7 +1542,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     func testSinkAdvertisesSearchResultsV1OnlyWhenRendererAvailable() async throws {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2077,6 +2078,14 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     /// executed. Here turn A runs to `done` with audio payloads still outstanding, and the binding
     /// is asserted as a consequence of that turn.
     func testAnOrdinaryTurnWithBufferedAudioBindsPlaybackOwnershipAtDone() async throws {
+        try await checkBufferedPlaybackNextAuth(drainBeforeFollowUp: false)
+    }
+
+    func testDrainedBufferedPlaybackSendsNoInterruptionReportOnNextAuth() async throws {
+        try await checkBufferedPlaybackNextAuth(drainBeforeFollowUp: true)
+    }
+
+    private func checkBufferedPlaybackNextAuth(drainBeforeFollowUp: Bool) async throws {
         // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
         // nothing (measured — the first version of this control failed for exactly that reason and
@@ -2115,8 +2124,42 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             sink.interruptionStateForTesting.hasPendingReport
         }
         XCTAssertFalse(owesReport, "nothing is owed yet: the user has not stopped hearing it")
-    }
+        if drainBeforeFollowUp {
+            let player = await MainActor.run { sink.audioPlayerForTesting }
+            let actualPlayer = try XCTUnwrap(player)
+            let epoch = actualPlayer.finish()
+            let drained = await actualPlayer.awaitActualStop(after: epoch, timeout: 5)
+            XCTAssertTrue(drained, "natural finish must confirm its physical drain")
+            let binding = await MainActor.run {
+                sink.interruptionStateForTesting.bufferedPlaybackOwnerRequestIdForTesting
+            }
+            XCTAssertNil(binding, "the production drain callback must clear buffered ownership")
+        }
 
+        pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        _ = await sink.routeToCloud(
+            request: "follow up", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-next"
+        )
+        let frames = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
+            guard let data = text.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } ?? []
+        let auth = try XCTUnwrap(frames.first { $0["type"] as? String == "authenticate" })
+        XCTAssertEqual(auth["request_id"] as? String, "u-next")
+        if drainBeforeFollowUp {
+            XCTAssertNil(auth["interrupts"], "fully heard playback owes no interruption report")
+        } else {
+            let report = try XCTUnwrap(auth["interrupts"] as? [String: Any])
+            XCTAssertEqual(report["request_id"] as? String, "u-settled")
+        }
+        let stillPending = await MainActor.run { sink.interruptionStateForTesting.hasPendingReport }
+        XCTAssertFalse(stillPending)
+    }
 }
 
 
@@ -4083,7 +4126,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
     }
 
     func testTemplatedCodeIsSpoken() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: error
             data: {"code":"connection_lost","message":""}
@@ -4095,7 +4138,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
     }
 
     func testCodeWithoutATemplateUsesTheErrorEarcon() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: error
             data: {"code":"invalid_response","message":""}
@@ -4174,7 +4217,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
     }
 
     private func stubError(code: String) {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: error
             data: {"code":"\(code)","message":""}
@@ -4285,7 +4328,8 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // EXACTLY ONCE, not merely "contains": the response is a single .spoken value, and it is
         // not the generic remote text.
         guard case let .spoken(text) = response.response else {
-            return XCTFail("expected a single .spoken response, got \(response.response)")
+            XCTFail("expected a single .spoken response, got \(response.response)")
+            return
         }
         XCTAssertNotEqual(text, "this turn was not admitted", "the remote diagnostic must not be spoken")
         XCTAssertEqual(text.components(separatedBy: "Auris").count - 1, 1, "Auris is named exactly once")
@@ -4573,7 +4617,7 @@ final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
     }
 
     func testWhitespaceOnlyServerMessageIsNotSpokenAsSilence() async {
-        self.pendingFixture = 
+        self.pendingFixture =
             """
             event: error
             data: {"code":"invalid_response","message":"   "}
@@ -4640,7 +4684,6 @@ final class SpokenTemplateLocaleFallbackTests: XCTestCase {
         // without resting on Foundation's script inference (PR #19 review).
         let resolver = SpokenTemplateResolver(locale: Locale(identifier: "fr-FR"))
         XCTAssertEqual(resolver.resolvedLocalization, "fr", "the bare-language candidate finds the shipped fr bundle")
-
 }
 }
 

@@ -118,15 +118,15 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     /// This version:
     /// 1. asserts the barrier was actually ENTERED (the acquisition is provably parked),
     /// 2. captures the task,
-    /// 3. calls `stop()` WHILE IT IS PARKED, through the same cleanup helper teardown uses,
+    /// 3. calls `stop()` while parked and checks cancellation,
     /// 4. releases the park from a `defer`, so a failed premise still cannot wedge later cases.
     @MainActor
     func testTeardownJoinsAnAcquisitionThatIsGenuinelyInFlight() async throws {
         let session = FakeAudioSessionControlling()
-        session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "park-speaker")]
-        session.inputs = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
-        session.available = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
-        session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "park-builtin")]
+        session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "park-speaker")]
+        session.inputs = []
+        session.available = []
+        session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "park-mic")]
 
         let parked = HoldLatch()
         // GUARANTEED RELEASE: whatever happens below, the park is opened so no later case wedges.
@@ -163,39 +163,29 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         let task = service.captureAcquisitionTaskForTesting()
         XCTAssertNotNil(task, "premise: the parked acquisition task must be capturable")
 
-        // 3. STOP WHILE PARKED, and join. Driven from INSIDE this async test rather than from a
-        //    nested `Task` plus a spinning run loop: the acquisition task is main-actor bound, so
-        //    spinning the run loop on main starves the very task being joined (measured: 15s bound
-        //    expiry with `stopped=false`). Awaiting here yields the actor normally.
-        //
-        //    Release BEFORE `stop()`: `stop()` runs `cancelAcquisition()` synchronously on the main
-        //    actor, and the barrier resumes on that same actor. Releasing afterwards would leave
-        //    `stop()` waiting on a continuation that cannot resume until `stop()` returns.
-        parked.release()
+        let configurationsBeforeStop = session.configureCount
         service.stop()
-        // NOT `isListening == false` as a premise: the barrier parks the acquisition BEFORE the gate
-        // reaches `.listening`, so the service never listened and `stop()` returns early by design.
-        // The premise this control needs is that the acquisition was PARKED and CANCELLED, which
-        // the barrier-entered assertion and the join below establish.
-
+        XCTAssertTrue(task?.isCancelled == true, "stop must cancel acquisition before listening starts")
+        XCTAssertNil(service.captureAcquisitionTaskForTesting())
+        parked.release()
         guard let task else { return }
         let completed = await VoiceControlService.awaitCompletion(of: task, timeout: 10)
-        XCTAssertTrue(completed, "cleanup must JOIN the parked acquisition through to completion")
+        XCTAssertTrue(completed, "cleanup must join the cancelled acquisition")
+        XCTAssertEqual(session.configureCount, configurationsBeforeStop, "cancelled acquisition must not configure the session")
     }
 
-    /// The bound must BIND on a task that never completes (reviewer 54804816). Without this, a
-    /// "timeout" that cannot fire makes every join assertion above meaningless.
     @MainActor
     func testCompletionBoundExpiresOnATaskThatNeverCompletes() async throws {
-        let neverCompleting = Task<Void, Never> {
-            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
-        }
+        let stall = HoldLatch()
+        defer { stall.release() }
+        let stalled = Task<Void, Never> { await stall.waitUntilReleased() }
         let started = Date()
-        let completed = await VoiceControlService.awaitCompletion(of: neverCompleting, timeout: 0.5)
-        let elapsed = Date().timeIntervalSince(started)
-        XCTAssertFalse(completed, "a task that never completes must NOT report completion")
-        XCTAssertLessThan(elapsed, 5.0, "the bound must actually expire; elapsed="
-            + "\(String(format: "%.2f", elapsed))s")
+        let completed = await VoiceControlService.awaitCompletion(of: stalled, timeout: 0.5)
+        XCTAssertFalse(completed, "the stalled task must time out")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        stall.release()
+        let released = await VoiceControlService.awaitCompletion(of: stalled, timeout: 5)
+        XCTAssertTrue(released, "the stalled task must finish after unconditional release")
     }
 
     /// START A REAL SERVICE over a built-in-only session    /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the

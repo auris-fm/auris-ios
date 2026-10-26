@@ -147,8 +147,8 @@ class VoiceControlService: ObservableObject {
     /// (or a cancelled task) discarded it before reaching the barrier.
     enum InputTerminalOutcome: Sendable {
         case routed, barrierCancelled, barrierRefused, dropped
-        /// This link handed its utterance to the interruption's follow-up submitter, which is now
-        /// the single execution path for it. The link ended deliberately, before classification.
+        /// This link handed its utterance to interruption settlement, which owns any subsequent
+        /// submission or discard. The queued link ended before classification.
         case handedOffToFollowUpSubmission
         /// The predecessor's interruption could not be SETTLED (refused, or undeliverable), so this
         /// utterance was suppressed and nothing was submitted for it. Distinct from `.routed`,
@@ -204,6 +204,7 @@ class VoiceControlService: ObservableObject {
     private let transcriptLock = NSLock()
     private var transcriptSerialTask: Task<Void, Never>?
     private var transcriptEpoch: UInt64 = 0
+    private var isStopping = false
 
     // Command debounce: skip intents of the same type within 2 seconds
     private var lastIntentType: String?
@@ -389,10 +390,11 @@ class VoiceControlService: ObservableObject {
                 )
             }
 
+            guard !self.isStopping else { return }
             let wasCapturing = self.isListening
             switch gate.state {
             case .off:
-                self.stop()
+                self.stopCapture()
                 self.considerAcquisition(for: gate.posture)
             case .listening(let mode):
                 // The acquisition's own exposure flip publishes synchronously
@@ -625,30 +627,17 @@ class VoiceControlService: ObservableObject {
                         return
                     }
                 }
-                // PROVISIONAL ROUTING ACCEPTANCE, refined below. `handleRoutingInput` may still
-                // refuse this turn: the interruption it barge-ed in on can be undelivered or
-                // refused, which suppresses the utterance and submits nothing. Reporting `.routed`
-                // in that case claimed the turn reached routing when it did not (measured: terminal
-                // `.routed` alongside zero dispatches), so the suppressed branch below OVERRIDES
-                // this with its own terminal.
-                terminal = .routed
-
                 // The observer for THIS input, resolved here so no shared slot is involved.
                 let parsedObserver = self.parsedIntentObserverFactory?(input)
                 // The dispatch seam for THIS input, resolved here so no shared slot is involved.
                 let preparedObserver = self.preparedObserverFactory?(input)
-                let proceeded = await self.handleRoutingInput(
+                terminal = await self.handleRoutingInput(
                     input,
                     origin: capturedOrigin,
                     selection: capturedSelection,
                     preparedObserver: preparedObserver,
                     parsedIntentObserver: parsedObserver
                 )
-                // The provisional `.routed` above is only true if the turn was actually let
-                // through; a suppressed turn must not report that it routed.
-                if !proceeded {
-                    terminal = .suppressedByInterruption
-                }
             }
             self.transcriptSerialTask = task
             self.transcriptLock.unlock()
@@ -801,6 +790,14 @@ class VoiceControlService: ObservableObject {
     }
 
     func stop() {
+        guard !isStopping else { return }
+        isStopping = true
+        defer { isStopping = false }
+        cancelAcquisition()
+        stopCapture()
+    }
+
+    private func stopCapture() {
         guard isListening else { return }
         FileLog.shared.addMessage("[VoicePipeline] stop listening")
         asrEngine.stop()
@@ -883,9 +880,7 @@ class VoiceControlService: ObservableObject {
         )
     }
 
-    /// Returns `false` when the turn was SUPPRESSED (its interruption was refused or
-    /// undelivered), so the caller can report a terminal that reflects what actually happened
-    /// instead of the provisional `.routed`.
+    /// Returns the actual routing disposition, distinguishing capture loss from interruption suppression.
     @discardableResult
     func handleRoutingInput(
         _ input: IntentRoutingInput,
@@ -893,10 +888,10 @@ class VoiceControlService: ObservableObject {
         selection: CloudConversationSelection? = nil,
         preparedObserver: CloudRouteSink.PreparedObserver? = nil,
         parsedIntentObserver: ParsedIntentObserver? = nil
-    ) async -> Bool {
+    ) async -> InputTerminalOutcome {
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
-        guard isListening else { return false }
+        guard isListening else { return .dropped }
         // A REFUSED INTERRUPTION SUPPRESSES ITS UTTERANCE (cloud-assistant.md → Interruption).
         // The barge-in was emitted eagerly at admission, so its turn is already queued here.
         // After a refusal the contract forbids submitting it, so this turn must not reach the
@@ -911,7 +906,7 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage(
                 "[VoicePipeline] suppressed utterance \(utteranceId) — its interruption was refused"
             )
-            return false
+            return .suppressedByInterruption
         }
         let dialogContext = dialogManager.pendingDialog
         let transcript = input.routerTranscript
@@ -938,7 +933,7 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage(
                 "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
             )
-            return true
+            return .routed
         case .route:
             break
         }
@@ -987,18 +982,18 @@ class VoiceControlService: ObservableObject {
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
                 FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
-                return true
+                return .routed
             }
 
             FileLog.shared.addMessage("[VoicePipeline] intent \(intent) ← '\(transcript)'")
-            guard isListening else { return false }
+            guard isListening else { return .dropped }
             // A turn whose admission was RETIRED (privacy/route) must not execute, even when the
             // router chose an intent locally: retirement means the user's speech may no longer be
             // safe to act on, and the model-chosen path would otherwise run it directly without
             // ever consulting the reservation.
             guard !gracePeriodSignal.isRetiredTurn(input.utteranceId) else {
                 FileLog.shared.addMessage("[VoicePipeline] intent refused (admission retired) ← '\(transcript)'")
-                return true
+                return .routed
             }
             // RE-CHECK SUPPRESSION IMMEDIATELY BEFORE DISPATCH: a refusal that landed while this
             // turn was queued or classifying must still stop it from reaching the wire.
@@ -1009,7 +1004,7 @@ class VoiceControlService: ObservableObject {
                     "[VoicePipeline] suppressed at dispatch \(input.utteranceId ?? "-") — "
                     + "its interruption was refused"
                 )
-                return true
+                return .suppressedByInterruption
             }
             let response = await executor.execute(intent, preparedObserver: preparedObserver)
             // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
@@ -1042,7 +1037,7 @@ class VoiceControlService: ObservableObject {
             if let intent = dialogResult.intent {
                 guard !gracePeriodSignal.isRetiredTurn(input.utteranceId) else {
                     FileLog.shared.addMessage("[VoicePipeline] dialog intent refused (admission retired)")
-                    return true
+                    return .routed
                 }
                 let response = await executor.execute(intent, preparedObserver: preparedObserver)
                 // Same bridge on every executor path: an interruption resolved by THIS turn must
@@ -1098,7 +1093,7 @@ class VoiceControlService: ObservableObject {
             // classification, and capture can stop while that runs. Without this a
             // stopped session could still send the transcript. Checked before the
             // claim so a stopped session does not consume the allowance either.
-            guard isListening else { return false }
+            guard isListening else { return .dropped }
             let escalation = RouteFailureEscalationPolicy.outcome(for: reason)
             // Claimed as a statement, not a multi-line ternary: a continuation
             // line starting with "?" parses as optional chaining, not as the
@@ -1133,7 +1128,7 @@ class VoiceControlService: ObservableObject {
                 if gracePeriodSignal.claimRefusalTone() {
                     audioRenderer.playEarcon(.error)
                 }
-                return true
+                return .routed
             }
             if let dispatchGeneration {
                 let reasonText = reason ?? "?"
@@ -1166,7 +1161,7 @@ class VoiceControlService: ObservableObject {
                 // escalates must still submit its follow-up once acknowledged.
                 await submitRetainedFollowUpIfAny()
                 audioRenderer.render(response)
-                return true
+                return .routed
             }
 
             FileLog.shared.addMessage(
@@ -1181,7 +1176,7 @@ class VoiceControlService: ObservableObject {
             // a real question and got nothing.
             audioRenderer.playEarcon(.error)
         }
-        return true
+        return .routed
     }
 
     /// Emits the pipeline latency event from the latest ASR-stage timing and
@@ -1281,6 +1276,12 @@ class VoiceControlService: ObservableObject {
             if let barrier = self.acquisitionInFlightBarrierForTesting {
                 await barrier()
             }
+            guard !Task.isCancelled else {
+                if self.acquisitionGeneration == generation || self.acquisitionTask == nil {
+                    self.isAcquiring = false
+                }
+                return
+            }
             let result = await self.routeMonitor.acquireExternalInput(isPlaybackActive: isPlaybackActive)
             self.isAcquiring = false
             let isCurrent = !Task.isCancelled && self.acquisitionGeneration == generation
@@ -1336,6 +1337,12 @@ class VoiceControlService: ObservableObject {
     /// TEST-ONLY: an awaitable barrier entered at the head of an acquisition attempt, so a
     /// control can hold a task in flight across teardown. Nil in production.
     var acquisitionInFlightBarrierForTesting: (@Sendable () async -> Void)?
+
+    /// Captures the exact queued owner so cancellation controls cannot cancel a successor instead.
+    func captureRoutingTaskForTesting() -> Task<Void, Never>? {
+        transcriptLock.lock(); defer { transcriptLock.unlock() }
+        return transcriptSerialTask
+    }
 
     /// TEST-ONLY: CAPTURE the in-flight acquisition task, before anything can clear it.
     ///

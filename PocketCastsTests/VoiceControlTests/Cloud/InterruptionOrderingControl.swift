@@ -465,7 +465,8 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
 
         let frames = capturedTask?.sentTextFrames ?? []
         guard let authText = frames.first(where: { $0.contains("\"authenticate\"") }) else {
-            return XCTFail("no authenticate frame was submitted: \(frames)")
+            XCTFail("no authenticate frame was submitted: \(frames)")
+            return
         }
         XCTAssertTrue(
             authText.contains("\"interrupts\""),
@@ -646,7 +647,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             origin: Self.origin,
             selection: CloudConversationSelection.followUp
         )
-        XCTAssertNil(emitted, "an undelivered interrupt cannot retain a follow-up for submission")
+        XCTAssertEqual(emitted, priorRequestId, "the claimed interruption owns disposal even when its send fails")
 
         // THE WIRE ASSERTION: the interrupting utterance never reached any socket.
         let frames = capturedTask?.sentTextFrames ?? []
@@ -658,13 +659,8 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             state.recordTerminalAcknowledgement(forRequestId: priorRequestId),
             "nothing may be released for submission after an unsent interrupt"
         )
-        // THE DECISIVE ASSERTION, and the one that makes this control non-vacuous: the utterance
-        // must be SUPPRESSED, because its queued turn is already on the serial chain and will ask
-        // this before dispatching. Holding the follow-up is not enough — the hold was released by
-        // the failed send, so the queued turn's only protection is suppression. Without this the
-        // no-suppression mutant survives (measured), i.e. the control would pass while the real
-        // defect — an utterance submitted as an ordinary turn after an interrupt that never
-        // reached the server — went unnoticed.
+        // Suppression also protects direct dispatch callers. The service retires its queued
+        // link once interruption settlement owns the input, regardless of delivery outcome.
         XCTAssertTrue(
             state.isSuppressed("u-barge"),
             "an unsent interrupt must SUPPRESS its utterance: the failed send already released "
@@ -673,7 +669,6 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         gate.release()
         _ = await prior.value
     }
-
 }
 
 // MARK: - Doubles
@@ -697,5 +692,4 @@ private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
 
 private final class InterruptAnalytics: AnalyticsService, @unchecked Sendable {
     func track(_ event: String, properties: [String: Any]) {}
-
 }

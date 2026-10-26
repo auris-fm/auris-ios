@@ -581,7 +581,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     recordsByIdentity.removeValue(forKey: key)
                 }
             }
-
         }
         retainedOrigin = origin
         ownershipLock.unlock()
@@ -1090,6 +1089,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // can be discarded if the user abandons that conversation.
         let turnConversationId = conversation.conversationId
         lastAdmittedConversationId = turnConversationId
+        // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
+        // resolve it; cancellation and truncated streams must discard it rather than strand B.
+        defer {
+            interruptionState.recordRefusal(
+                forRequestId: turnRequestId,
+                retainingReport: .init(
+                    requestId: turnRequestId,
+                    playbackPositionMs: nil,
+                    conversationId: turnConversationId
+                )
+            )
+            turnToken.markAcknowledgement(.failed)
+        }
+
         // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
         // could re-drive it, and that retention IS what made replay possible: a completed or
         // possibly-submitted request left on the books is exactly what a replay path would find.
@@ -1812,6 +1825,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return interruptionState.interruptedRequestId(forHeldUtterance: utteranceId)
     }
 
+    /// Nil in production; orders a request’s failed-send cleanup against its receive terminal.
+    var beforeUnsentHoldReleaseForTesting: ((String) async -> Void)?
+    var afterUnsentHoldReleaseForTesting: ((String) -> Void)?
+
     /// Send the `interrupt` frame on the prior turn's still-open socket, if there is one.
     ///
     /// Extracted so the eager path and the dispatch path share ONE implementation. Returns the
@@ -1835,8 +1852,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             via: priorSocket
         )
         if report == .undelivered {
+            await beforeUnsentHoldReleaseForTesting?(priorRequestId)
             // The frame never reached the server, so no terminal is coming to resolve the hold.
             interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+            afterUnsentHoldReleaseForTesting?(priorRequestId)
         }
         return report
     }
@@ -1935,19 +1954,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // says the client stops output and clears buffered answer audio immediately on barge-in.
         _ = audioPlayer.cancel()
         if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
-            // UNDELIVERED IS NOT "NO INTERRUPTION HAPPENED" (reviewer eaa8c06a item 1). Returning
-            // here without suppressing left the input queued with nothing to stop it, so it
-            // proceeded as an ordinary turn — authenticating and submitting an utterance that was
-            // an interruption of a turn the server never heard about. The user asked to interrupt;
-            // the answer is still playing; sending that utterance as a plain question asserts a
-            // settlement that does not exist. Suppress it exactly as a refusal does, and end.
-            // The suppression already happened inside `releaseUnsentHold` — doing it here would
-            // find no held utterance and silently do nothing (reviewer c38ff4ba item 1).
+            // The interruption already claimed this input. A matching done may have handed it
+            // to the bridge while the send was suspended; otherwise failed-send cleanup discards
+            // it. Neither disposition returns execution ownership to the queued input link.
             FileLog.shared.addMessage(
-                "[VoicePipeline] interrupt UNDELIVERED for turn \(priorRequestId) — retained "
-                + "utterance \(utteranceId) suppressed; it must never be submitted"
+                "[VoicePipeline] interrupt undelivered for turn \(priorRequestId) — "
+                + "queued link \(utteranceId) retired; interruption settlement owns its disposition"
             )
-            return nil
+            return priorRequestId
         }
         FileLog.shared.addMessage(
             "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "

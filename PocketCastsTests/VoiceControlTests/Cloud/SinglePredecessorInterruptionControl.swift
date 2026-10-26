@@ -1,28 +1,7 @@
-//
-//  SinglePredecessorInterruptionControl.swift
-//  PocketCastsTests
-//
-//  A DEDICATED single-predecessor / single-follow-up fixture (reviewer 33d3a531 and 2488ce8d).
-//
-//  WHY THIS FILE EXISTS, SEPARATE FROM `ServiceInterruptionBridgeControl`
-//  That class drives turns through a `speak` loop that calls
-//  `gracePeriodSignalForTesting.onWakeWordDetected()` and admits ANOTHER turn each time, so a
-//  single control admitted several turns. Measured on the undelivered case: four interrupt sends and
-//  only ONE undelivered, because an earlier turn's follow-up was acknowledged and submitted before
-//  the undelivered detection landed. The assertions then failed on that contamination, not on the
-//  behaviour under test.
-//
-//  Here there is exactly ONE predecessor A and ONE follow-up B, admitted by hand. No `speak` loop,
-//  no wake-word signal. Every observable is therefore attributable to the case being pinned.
-//
-//  EVIDENCE KINDS, stated so nothing here is read as more than it is:
-//  1. SOURCE REVIEW — the production paths named in each test's comments.
-//  2. THIS FIXTURE — drives the real `VoiceControlService`, the real `CloudRouteSink`, and the real
-//     `CloudRouteClient` over a stubbed URL protocol. It can prove WIRING and DISPOSITION: which
-//     frames reached the wire, which terminal a link recorded, whether a follow-up was dispatched.
-//  3. IT CANNOT PROVE device or server behaviour, audio-route capture, or that a real backend would
-//     refuse. "Zero auth frames" means this client sent none for that utterance.
-//
+// Single-predecessor/single-follow-up controls for interruption settlement.
+// Drives the real service, sink and client over a fake audio route and stubbed transport.
+// Request-bound barriers establish terminal order; counts and outcomes are specific to A/B.
+// This verifies client wiring and disposal, not microphone recognition or live server behavior.
 
 import XCTest
 @testable import podcasts
@@ -82,6 +61,9 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         var all: [String] { lock.lock(); defer { lock.unlock() }; return values }
     }
     private let dispatches = DispatchRecorder()
+    private let bridgeTakes = DispatchRecorder()
+    private let queuedClassifications = DispatchRecorder()
+
 
     private var asr: VoiceAsrEngine?
 
@@ -98,12 +80,14 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         UserDefaults(suiteName: defaultsSuite)!
             .set("https://cloud.test", forKey: CloudConfig.baseURLKey)
         VoiceControlTestObservers.dispatchOwnership = { [dispatches] value in dispatches.record(value) }
+        VoiceControlTestObservers.followUpTaken = { [bridgeTakes] value in bridgeTakes.record(value) }
     }
 
     override func tearDown() {
         let services = Self.startedServices
         Self.startedServices.removeAll()
         VoiceControlTestObservers.dispatchOwnership = nil
+        VoiceControlTestObservers.followUpTaken = nil
         // UNCONDITIONAL RELEASE, before stopping: a case that fails mid-way must never leave a
         // receive parked and wedge the next case.
         predecessorPark.release()
@@ -171,16 +155,14 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
     /// cancellation. Otherwise the service never reaches the state the barge-in needs.
     private func readyService(
         fixture: @escaping () -> String,
-        parkFirstReceive: Bool
+        parkFirstReceive: Bool,
+        closeWithoutTerminal: Bool = false
     ) async throws -> VoiceControlService {
-        // The gate needs an ISOLATED EXTERNAL mic to reach `.listening` and route. Built-in-only
-        // reaches listening but never routes. `selectionTakesEffect` is REQUIRED: without it the
-        // acquisition never confirms, the gate stays `off(noMicrophone)`, `isListening` stays false
-        // and every case would pass while `handleRoutingInput` returns immediately.
+        // Start with a confirmed external microphone so route discovery cannot retire the window.
         let session = FakeAudioSessionControlling()
         session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "sp-out")]
-        session.inputs = []
-        session.available = []
+        session.inputs = [AudioPort(portType: .bluetoothHFP, uid: "sp-mic")]
+        session.available = session.inputs
         session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "sp-mic")]
         session.selectionTakesEffect = true
 
@@ -217,11 +199,20 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
                         if parkFirstReceive, index == 1 {
                             task.holdFirstReceiveUntilReleased(predecessorPark)
                         }
+                        if closeWithoutTerminal, index == 1 {
+                            // The client closes its stream without yielding a synthetic error.
+                            // An ordinary EOF becomes connection_lost and exercises refusal instead.
+                            task.receiveError = CancellationError()
+                        }
                     }
                 ).client
             },
             cloudConfig: CloudConfig(defaults: UserDefaults(suiteName: self.defaultsSuite)!),
-            onInputTerminal: { input, outcome in terminals.record(input.utteranceId, outcome) }
+            onInputTerminal: { input, outcome in terminals.record(input.utteranceId, outcome) },
+            parsedIntentObserverFactory: { [queuedClassifications] input in
+                queuedClassifications.record(input.utteranceId ?? "-")
+                return nil
+            }
         ) else {
             XCTFail("the assembly built no service, so this case proves nothing")
             throw XCTSkip("unreachable")
@@ -231,17 +222,8 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         Self.startedServices.append(service)
         asr = service.asrEngineForTesting
 
-        // SETTLE, do not merely observe once: the gate can reach `.listening` and then bounce back
-        // to `off(noMicrophone)` while the route re-resolves, so a single sample admits a turn into
-        // a window that is already closing (measured: `listening(wakeWord) → off(noMicrophone)`
-        // immediately after start, and then no turn ever reached the wire).
         let listening = await waitUntil(timeout: 10) { service.isListening }
         XCTAssertTrue(listening, "premise: the gate must reach listening; state=\(service.gateState)")
-        // The gate legitimately OSCILLATES `isolated <-> noMic` while the route re-resolves (the
-        // shared harness does this too, 6 down / 12 up), so waiting for stability would wait
-        // forever. What matters is admitting DURING a `.listening` window: this retries the
-        // admission itself until the turn is accepted, which is the same window the engine's
-        // callback would land in.
         let routerReady = await waitUntil(timeout: 25) { service.intentRouterIsReadyForTesting }
         XCTAssertTrue(routerReady, "premise: the intent router must be ready, or nothing routes")
         return service
@@ -251,15 +233,16 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     /// Admit ONE turn through the engine's own routing seam.
     ///
-    /// Deliberately does NOT call `gracePeriodSignalForTesting.onWakeWordDetected()`: that signal is
-    /// what made the shared harness admit a turn per call. One call here is one turn.
+    /// Admits one input with its wake or follow-up selection.
     @discardableResult
     private func admit(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) -> Bool {
-        // The grace rule needs an OPEN SESSION WINDOW; without the wake signal the cloud escalation
-        // is refused ("no open session window") and nothing reaches the wire. This is a per-turn
-        // WAKE SIGNAL, not a turn admission — the admission below is the only one, so the fixture
-        // still admits exactly one turn per call.
-        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        // A wakes a window; B continues it without replacing its conversation identity.
+        let selection: CloudConversationSelection = utteranceId == "u-prior" ? .wakeWord : .followUp
+        if selection == .wakeWord {
+            service.gracePeriodSignalForTesting.onWakeWordDetected()
+        } else {
+            service.gracePeriodSignalForTesting.onCommandRecognized()
+        }
         guard let routing = asr?.onRoutingInput else {
             XCTFail("the service must install onRoutingInput; without it no turn can be admitted")
             return false
@@ -267,7 +250,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         return routing(
             IntentRoutingInput.english(
                 transcript: transcript,
-                selection: .wakeWord,
+                selection: selection,
                 utteranceId: utteranceId
             )
         )
@@ -311,172 +294,224 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         return await condition()
     }
 
-    // MARK: - CONTROL 1: undelivered interruption
+    func testStoppedCaptureIsDroppedRatherThanLabelledSuppressed() async throws {
+        let service = try await readyService(fixture: { self.doneFixture }, parkFirstReceive: false)
+        service.stop()
+        let outcome = await service.handleRoutingInput(.english(transcript: "next", utteranceId: "stopped"))
+        XCTAssertEqual(outcome, .dropped)
+        XCTAssertEqual(authFrames(for: "stopped").count, 0)
+    }
 
-    /// AN UNDELIVERED INTERRUPTION MUST NOT SUBMIT ITS RETAINED FOLLOW-UP.
-    ///
-    /// Contract (`cloud-assistant.md` → Interruption): the client retains the user's utterance and
-    /// sends an interrupt; the follow-up is submitted only once the interruption is SETTLED. An
-    /// interrupt that never reached the server is not settled, so nothing may be submitted on its
-    /// behalf — the report is retained for a later explicit user request.
-    ///
-    /// Scenario, exactly one predecessor and one follow-up:
-    /// 1. Admit A alone; park its first receive so A is genuinely in flight.
-    /// 2. Retire EXACTLY A's registration, so the interrupt has no transport to reach.
-    /// 3. Admit B, which barge-ins on A.
-    /// 4. Release A's park and observe B's disposal and the FINAL frame counts.
-    func testUndeliveredInterruptionSubmitsNothingForItsFollowUp() async throws {
-        let service = try await readyService(fixture: { self.doneFixture }, parkFirstReceive: true)
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-
-        // 1. ONE predecessor, genuinely in flight.
-        let admitted = await admitWhileListening(service, "first question", "u-prior")
-        XCTAssertTrue(admitted, "premise: A must be admitted during a listening window")
-        let priorInFlight = await waitUntil(timeout: 15) {
-            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
-        }
-        XCTAssertTrue(priorInFlight, "premise: A must be in flight; frames=\(allFrames())")
-        XCTAssertEqual(authFrames(for: "u-prior").count, 1, "premise: exactly ONE predecessor round")
-        XCTAssertTrue(
-            recorder.all.first?.sentInterrupt != true,
-            "premise: A must not have interrupted anything YET; an interrupt before the barge-in "
-                + "means the send happens earlier than this control assumes"
-        )
-        // The registration is retired, so the eager send must report UNDELIVERED rather than
-        // reaching the server. Asserted because a delivered interrupt would be acknowledged, and an
-        // acknowledgement legitimately releases the follow-up — that is a different case entirely,
-        // and it would make the zeros below meaningless.
-
-        // 2. Retire EXACTLY A's registration, BEFORE B is admitted. The eager barge-in sends the
-        //    interrupt at ADMISSION, so retiring afterwards would let it reach a live socket and the
-        //    interruption would be acknowledged normally instead of being the case under test.
-        let retired = await MainActor.run { () -> Bool in
-            guard let socket = sink.activeResultSocketForTesting,
-                  let identity = socket.boundIdentity else { return false }
-            sink.resultClientForTesting?.retireSocketRegistrationForTesting(
-                requestId: socket.requestId, identity: identity
-            )
-            return true
-        }
-        XCTAssertTrue(retired, "premise: A's registration must be retireable for the send to fail")
-
-        // 3. ONE follow-up, barging in on A.
-        //
-        //    DETERMINISM: retirement and admission happen inside ONE synchronous main-actor block.
-        //    If they are separate awaits, A's receive loop can re-register its socket in the gap and
-        //    the eager interrupt is then DELIVERED — measured as one "interrupt sent" line in 2 of 3
-        //    runs. A delivered interrupt is acknowledged, and an acknowledgement legitimately
-        //    releases the follow-up, so that run is a different case entirely and the zeros below
-        //    would be meaningless.
-        let admittedB: Bool = await MainActor.run {
-            if let socket = sink.activeResultSocketForTesting, let identity = socket.boundIdentity {
-                sink.resultClientForTesting?.retireSocketRegistrationForTesting(
-                    requestId: socket.requestId, identity: identity
-                )
-            }
-            return admit(service, "play the next one", "u-barge")
-        }
-        XCTAssertTrue(admittedB, "premise: B must be admitted")
-        // The retirement must be IN EFFECT when B is admitted. Asserted on the OUTCOME rather than
-        // on transport internals: if the registration were still live the send would report
-        // `submitted`, and the observation below would not occur. The waiter below therefore also
-        // proves the premise, and fails loudly if the interrupt was actually delivered.
-
-        // 4. Let A settle through its real terminal, then observe B.
-        predecessorPark.release()
-
-        let priorSettled = await waitUntil(timeout: 20) { !self.terminals.outcomes(for: "u-prior").isEmpty }
-        XCTAssertTrue(priorSettled, "premise: A must reach a terminal")
-
-        // WAIT FOR B'S ACTUAL DISPOSAL — not a fixed sleep. Any of the contract's dispositions
-        // counts as settled; what matters is that B is no longer in flight before counting.
-        let bSettled = await waitUntil(timeout: 20) {
-            let outcomes = self.terminals.outcomes(for: "u-barge")
-            return !outcomes.isEmpty || !self.dispatches.all.isEmpty
-        }
-        XCTAssertTrue(
-            bSettled,
-            "B's disposal must be OBSERVED before counting; outcomes="
-                + "\(terminals.outcomes(for: "u-barge")) dispatches=\(dispatches.all)"
-        )
-
-        // WHAT IS OBSERVED HERE, AND WHY IT IS NOT ASSERTED AS ZERO.
-        //
-        // Measured ordering (invocation-bound instrumentation, three consistent runs):
-        //   holdClaim(u-prior)                     main
-        //   sendResult undelivered(u-prior)        background  <- 98 µs apart
-        //   termResolution enter(u-prior)          main
-        //   releaseUnsentHold(u-prior)             main
-        //   bridgeTake(u-barge) -> submitted       background
-        //
-        // The send's undelivered result and the predecessor's `done` resolution land on DIFFERENT
-        // threads within ~100 µs of each other, so `recordTerminalAcknowledgement` wins the race and
-        // releases the follow-up. Under `cloud-assistant.md` that is LEGAL: a `done` that matches is
-        // an acknowledgement "even when completed", and the contract does not require proof the
-        // server knew of the interrupt (reviewer 375389eb). `interruptSentForRequestId` records a
-        // CLAIM set at claim time, not a delivery, so it cannot establish the rule I originally
-        // proposed either.
-        //
-        // This control therefore pins the DISPOSITION it can honestly pin — B never becomes its own
-        // routed turn — and records the observed settlement so a future change to the race is
-        // visible instead of silent. It deliberately does NOT assert zero frames: doing so would
-        // encode a rule the contract does not state, and the earlier version of this test was green
-        // only when a Timer delay happened to reorder the race.
-        XCTAssertFalse(
-            terminals.outcomes(for: "u-barge").contains(.barrierRefused),
-            "B must not be refused by its own barrier; outcomes="
-                + "\(terminals.outcomes(for: "u-barge"))"
-        )
-
-        // RECORD the settlement for the reviewer: exactly one of these holds, and which one is
-        // the disposition of the race measured above.
-        let submitted = authFrames(for: "u-barge").count
-        XCTAssertLessThanOrEqual(
-            submitted, 1,
-            "the follow-up must never authenticate MORE THAN ONCE; frames="
-                + "\(authFrames(for: "u-barge"))"
+    private func retirePredecessor(_ sink: CloudRouteSink) throws {
+        let socket = try XCTUnwrap(sink.activeResultSocketForTesting)
+        let identity = try XCTUnwrap(socket.boundIdentity)
+        sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+            requestId: socket.requestId, identity: identity
         )
     }
 
-    // MARK: - CONTROL 2: refused interruption
+    func testFailureFinalizedBeforeDoneDiscardsB() async throws {
+        let service = try await readyService(fixture: { self.doneFixture }, parkFirstReceive: true)
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let failureFinished = DiagnosticMicOverrideControl.FlagBox()
+        sink.afterUnsentHoldReleaseForTesting = { requestId in
+            if requestId == "u-prior" { failureFinished.set() }
+        }
+        let admittedA = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admittedA)
+        let active = await waitUntil(timeout: 15) { sink.activeResultSocketForTesting?.requestId == "u-prior" && self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(active)
+        try retirePredecessor(sink)
+        let admittedB = admit(service, "play the next one", "u-barge")
+        XCTAssertTrue(admittedB)
+        let discarded = await waitUntil(timeout: 15) { failureFinished.isSet }
+        XCTAssertTrue(discarded, "failure transition must finish before A’s done")
+        XCTAssertTrue(sink.isSuppressedForTesting("u-barge"))
+        XCTAssertNil(sink.interruptionStateForTesting.heldFollowUpForTesting)
+        predecessorPark.release()
+        let settled = await waitUntil(timeout: 20) {
+            !self.terminals.outcomes(for: "u-prior").isEmpty
+                && !self.terminals.outcomes(for: "u-barge").isEmpty
+        }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(authFrames(for: "u-barge").count, 0)
+        XCTAssertFalse(dispatches.all.contains("u-barge:owner"))
+        XCTAssertNil(sink.pendingFollowUpSubmission)
+        XCTAssertEqual(terminals.outcomes(for: "u-barge"), [.handedOffToFollowUpSubmission])
+        XCTAssertFalse(queuedClassifications.all.contains("u-barge"), "B's queued link must never classify")
+        XCTAssertFalse(dispatches.all.contains("u-barge:duplicate"), "B must have only the bridge dispatch")
+    }
+
+    func testDoneBeforeFailureCleanupSubmitsBExactlyOnce() async throws {
+        let service = try await readyService(fixture: { self.doneFixture }, parkFirstReceive: true)
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let failurePark = HoldLatch()
+        defer { failurePark.release() }
+        let entered = DiagnosticMicOverrideControl.FlagBox()
+        sink.beforeUnsentHoldReleaseForTesting = { requestId in
+            guard requestId == "u-prior" else { return }
+            entered.set()
+            await failurePark.waitUntilReleased()
+        }
+        let admittedA = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admittedA)
+        let active = await waitUntil(timeout: 15) { sink.activeResultSocketForTesting?.requestId == "u-prior" && self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(active)
+        try retirePredecessor(sink)
+        let admittedB = admit(service, "play the next one", "u-barge")
+        XCTAssertTrue(admittedB)
+        let failedSend = await waitUntil(timeout: 15) { entered.isSet }
+        XCTAssertTrue(failedSend)
+        XCTAssertEqual(sink.interruptionStateForTesting.heldFollowUpForTesting?.utteranceId, "u-barge")
+        predecessorPark.release()
+        let acknowledged = await waitUntil(timeout: 20) {
+            sink.interruptionStateForTesting.resolvedForTesting.contains("u-prior")
+        }
+        XCTAssertTrue(acknowledged, "matching done must resolve before failed-send cleanup")
+        failurePark.release()
+        let settled = await waitUntil(timeout: 20) {
+            !self.terminals.outcomes(for: "u-prior").isEmpty
+                && !self.terminals.outcomes(for: "u-barge").isEmpty
+                && self.authFrames(for: "u-barge").count == 1
+        }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(authFrames(for: "u-barge").count, 1)
+        XCTAssertEqual(dispatches.all.filter { $0 == "u-barge:owner" }.count, 1)
+        XCTAssertEqual(bridgeTakes.all.filter { $0.hasPrefix("u-barge@") }.count, 1)
+        XCTAssertEqual(terminals.outcomes(for: "u-barge"), [.handedOffToFollowUpSubmission])
+        XCTAssertFalse(queuedClassifications.all.contains("u-barge"), "B's queued link must never classify")
+        XCTAssertFalse(dispatches.all.contains("u-barge:duplicate"), "B must have only the bridge dispatch")
+        let authData = try XCTUnwrap(authFrames(for: "u-barge").first?.data(using: .utf8))
+        let auth = try XCTUnwrap(JSONSerialization.jsonObject(with: authData) as? [String: Any])
+        let report = try XCTUnwrap(auth["interrupts"] as? [String: Any])
+        XCTAssertEqual(report["request_id"] as? String, "u-prior")
+        XCTAssertEqual(auth["conversation_mode"] as? String, "resume")
+    }
+
+    func testTruncatedPredecessorDiscardsHeldBAndAllowsAnotherInterruption() async throws {
+        try await checkUnsettledPredecessor(cancel: false)
+    }
+
+    func testCancelledPredecessorDiscardsHeldBAndAllowsAnotherInterruption() async throws {
+        try await checkUnsettledPredecessor(cancel: true)
+    }
+
+    private func checkUnsettledPredecessor(cancel: Bool) async throws {
+        let service = try await readyService(
+            fixture: { "" }, parkFirstReceive: true, closeWithoutTerminal: true
+        )
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let admittedA = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admittedA)
+        let parked = await waitUntil(timeout: 15) { self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(parked)
+        let predecessorTask = try XCTUnwrap(service.captureRoutingTaskForTesting())
+        let admittedB = admit(service, "play the next one", "u-barge")
+        XCTAssertTrue(admittedB)
+        let held = await waitUntil(timeout: 15) {
+            sink.interruptionStateForTesting.heldFollowUpForTesting?.utteranceId == "u-barge"
+        }
+        XCTAssertTrue(held)
+        if cancel {
+            predecessorTask.cancel()
+            XCTAssertTrue(predecessorTask.isCancelled)
+        } else {
+            XCTAssertFalse(predecessorTask.isCancelled, "stream truncation must not cancel the owner")
+        }
+        predecessorPark.release()
+        let finished = await waitUntil(timeout: 20) {
+            !self.terminals.outcomes(for: "u-prior").isEmpty
+                && !self.terminals.outcomes(for: "u-barge").isEmpty
+        }
+        XCTAssertTrue(finished)
+        XCTAssertTrue(sink.isSuppressedForTesting("u-barge"))
+        XCTAssertNil(sink.interruptionStateForTesting.heldFollowUpForTesting)
+        XCTAssertEqual(sink.interruptionStateForTesting.pendingReportForTesting?.requestId, "u-prior")
+        XCTAssertEqual(authFrames(for: "u-barge").count, 0)
+        XCTAssertTrue(sink.interruptionStateForTesting.claimInterruptEmission(forRequestId: "later"))
+    }
+
+    // MARK: - CONTROL: refused interruption
 
     /// A REFUSED INTERRUPTION MUST NOT SUBMIT ITS RETAINED FOLLOW-UP.
     ///
-    /// Same contract clause, different settlement: the server ANSWERS and refuses (`error` with
-    /// `invalid_request`). A refusal ends the turn LOCALLY — the report is retained for a later
-    /// explicit user request, never carried on a successor authentication (spec `9e309cc1`).
+    /// Deterministic premise chain (reviewer `453fbb5f`): B ADMITTED, A parked and in flight, exactly
+    /// ONE interrupt emitted for A, B's follow-up HELD — and only then is A's error served. The
+    /// zero-auth assertion is therefore not satisfiable by a harness that never created an
+    /// interruption, and no unrelated dispatch can satisfy completion.
     ///
-    /// This scenario does NOT need retirement: the predecessor stays reachable, the interrupt is
-    /// delivered, and the server refuses it. That is what makes it independently deterministic.
+    /// NO input barrier is used, and that is deliberate: a follow-up RETAINED FOR AN INTERRUPTION
+    /// never reaches `testInputBarrier` (the service's ownership transfer returns at 597-599, the
+    /// barrier is awaited at 615), so parking B there is impossible by construction. Attempting it
+    /// produced controls whose mutants all survived — the barrier, not the state machine, was what
+    /// suppressed the submission. The barrier was removed rather than papered over.
     func testRefusedInterruptionSubmitsNothingForItsFollowUp() async throws {
         let service = try await readyService(fixture: { self.refusalFixture }, parkFirstReceive: true)
         let sink = service.executorForTesting.cloudRouteSinkForTesting
 
-        let admitted = await admitWhileListening(service, "first question", "u-prior")
-        XCTAssertTrue(admitted, "premise: A must be admitted during a listening window")
+        // 1. A admitted and IN FLIGHT (parked at its receive, so it cannot complete early).
+        let admittedA = await admitWhileListening(service, "first question", "u-prior")
+        XCTAssertTrue(admittedA, "premise: A must be admitted")
         let priorInFlight = await waitUntil(timeout: 15) {
-            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
+            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" && self.recorder.all.first?.terminalWithheld == true }
         }
         XCTAssertTrue(priorInFlight, "premise: A must be in flight; frames=\(allFrames())")
-
-        // ONE follow-up. The interrupt IS deliverable here — no retirement — so the refusal is
-        // what settles the turn, not a missing transport.
-        admit(service, "play the next one", "u-barge")
-        predecessorPark.release()
-
-        let priorSettled = await waitUntil(timeout: 20) { !self.terminals.outcomes(for: "u-prior").isEmpty }
-        XCTAssertTrue(priorSettled, "premise: A must reach a terminal")
-
-        let bSettled = await waitUntil(timeout: 20) {
-            let outcomes = self.terminals.outcomes(for: "u-barge")
-            return !outcomes.isEmpty || !self.dispatches.all.isEmpty
-        }
         XCTAssertTrue(
-            bSettled,
-            "B's disposal must be OBSERVED before counting; outcomes="
-                + "\(terminals.outcomes(for: "u-barge")) dispatches=\(dispatches.all)"
+            self.recorder.all.first?.sentInterrupt != true,
+            "premise: A must not have interrupted anything before B"
         )
 
+        XCTAssertTrue(recorder.all.first?.terminalWithheld == true, "A must be parked at receive")
+        XCTAssertEqual(authFrames(for: "u-prior").count, 1)
+
+        // 2. B ADMITTED — asserted, not ignored.
+        let admittedB = await MainActor.run { admit(service, "play the next one", "u-barge") }
+        XCTAssertTrue(admittedB, "premise: B must be admitted, or there is no follow-up to refuse")
+
+        // 3. EXACTLY ONE interrupt reaches A. This is the interruption under test.
+        let interruptEmitted = await waitUntil(timeout: 15) {
+            self.recorder.all.contains { $0.sentInterrupt }
+        }
+        XCTAssertTrue(interruptEmitted, "premise: one interrupt must reach A; frames=\(allFrames())")
+
+        // 4. B is RETAINED. Asserted through the state machine, so a harness that silently dropped
+        //    B cannot pass this control.
+        let bHeld = await MainActor.run { sink.interruptionStateForTesting.heldFollowUpForTesting?.utteranceId == "u-barge" }
+        XCTAssertTrue(bHeld, "premise: B must be HELD, not already submitted")
+        let submittedWhileHeld = authFrames(for: "u-barge").count
+        XCTAssertEqual(submittedWhileHeld, 0, "premise: B is not submitted while held")
+
+        // 5. ONLY NOW release A, so its error (the refusal) is served.
+        predecessorPark.release()
+
+        // 6. Await A's terminal AND B's own disposition — never an unrelated dispatch.
+        let priorSettled = await waitUntil(timeout: 20) {
+            !self.terminals.outcomes(for: "u-prior").isEmpty
+        }
+        XCTAssertTrue(priorSettled, "premise: A must reach a terminal")
+        let bDisposed = await waitUntil(timeout: 20) {
+            let outcomes = self.terminals.outcomes(for: "u-barge")
+            // `.handedOffToFollowUpSubmission` is B's NORMAL retirement into the follow-up
+            // submitter, which is not a submission; the zero-auth count below is what asserts that.
+            return outcomes.contains(.dropped)
+                || outcomes.contains(.barrierCancelled)
+                || outcomes.contains(.handedOffToFollowUpSubmission)
+                || !self.authFrames(for: "u-barge").isEmpty
+        }
+        XCTAssertTrue(
+            bDisposed,
+            "B's OWN disposition must be observed; outcomes=\(terminals.outcomes(for: "u-barge"))"
+        )
+
+        XCTAssertEqual(allFrames().filter { $0.contains("\"interrupt\"") }.count, 1)
+        XCTAssertEqual(sink.interruptionStateForTesting.pendingReportForTesting?.requestId, "u-prior")
+        XCTAssertNil(sink.interruptionStateForTesting.heldFollowUpForTesting)
+
+        XCTAssertEqual(terminals.outcomes(for: "u-barge"), [.handedOffToFollowUpSubmission])
+        XCTAssertFalse(queuedClassifications.all.contains("u-barge"), "B's queued link must never classify")
+        XCTAssertFalse(dispatches.all.contains("u-barge:duplicate"), "B must have only the bridge dispatch")
+
+        // 7. THE ASSERTION.
         XCTAssertEqual(
             authFrames(for: "u-barge").count, 0,
             "a REFUSED interruption must never authenticate its follow-up; frames="
@@ -484,7 +519,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         )
         XCTAssertFalse(
             dispatches.all.contains("u-barge:owner"),
-            "the follow-up must not be dispatched after a refusal; dispatches=\(dispatches.all)"
+            "B must not be dispatched after a refusal; dispatches=\(dispatches.all)"
         )
     }
 }

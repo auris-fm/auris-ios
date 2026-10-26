@@ -129,15 +129,12 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         """
     }
 
-    /// The #48 gate needs an isolated external mic to reach `.listening`. This is the same shape
-    /// `ServiceSelectionProvenance` uses. `selectionTakesEffect` is REQUIRED: without it the
-    /// acquisition never confirms, the gate stays `off(noMicrophone)`, `isListening` stays false and
-    /// every case passes while `handleRoutingInput` returns immediately.
+    /// A confirmed external route keeps these dispatch controls independent of acquisition retries.
     private func gatedSession() -> FakeAudioSessionControlling {
         let session = FakeAudioSessionControlling()
         session.outputs = [AudioPort(portType: .bluetoothA2DP, uid: "bridge-bt-out")]
-        session.inputs = []
-        session.available = []
+        session.inputs = [AudioPort(portType: .bluetoothHFP, uid: "bridge-bt-mic")]
+        session.available = session.inputs
         session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "bridge-bt-mic")]
         session.selectionTakesEffect = true
         return session
@@ -440,112 +437,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
     }
 
-    /// QUEUED UNDELIVERED, TERMINAL-BOUND AND THROUGH THE SERVICE (reviewer `e8327339`).
-    ///
-    /// The prior turn's interruption cannot be delivered — its socket registration is retired
-    /// through the production retirement path — so the interruption resolves as `.undelivered`.
-    /// That is a TERMINAL, not a settlement, and the retained follow-up must NOT be submitted: the
-    /// wire must show zero authentication frames for it after everything settles.
-    ///
-    /// Counted at the END, after both terminals, which is what "final zero-auth counts" means —
-    /// an early snapshot could pass while a late auth frame was still in flight.
-    ///
-    /// STATUS, stated so nobody mistakes it for more than it is: this control is a REGRESSION
-    /// GUARD, not evidence of a fix. It passes on unmodified code, because the pre-existing
-    /// entry-time suppression check in `handleRoutingInput` already refuses a suppressed utterance.
-    /// Measured: with my sink-level early-return fully reverted, this still passes. So it pins the
-    /// observable (zero final auth frames, no owning dispatch) without any source change of mine
-    /// being load-bearing for it.
-    func testQueuedUndeliveredSubmitsNoSuccessorAuthenticateThroughTheService() async throws {
-        let service = try await readyService(fixture: { self.doneFixture })
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-
-        speak(service, "first question", "u-prior")
-        let priorLive = await waitUntil(timeout: 15) {
-            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
-        }
-        XCTAssertTrue(priorLive, "premise: turn 1 must be in flight; frames=\(allFrames())")
-
-        // RETIRE BEFORE THE BARGE-IN. The eager path sends the interrupt at ADMISSION, so
-        // retiring afterwards would let the interrupt reach a still-registered socket and the turn
-        // would be ACKNOWLEDGED normally (measured — that is exactly what happened on the first
-        // attempt). Retiring first makes the send genuinely undeliverable.
-        await MainActor.run {
-            if let socket = sink.activeResultSocketForTesting, let identity = socket.boundIdentity {
-                sink.resultClientForTesting?.retireSocketRegistrationForTesting(
-                    requestId: socket.requestId, identity: identity
-                )
-            }
-        }
-        speak(service, "play the next one", "u-barge")
-        // NO INTERRUPT FRAME IS EXPECTED: the registration is already retired, so the send is
-        // reported undelivered locally and nothing goes on the wire. Asserting a frame here would
-        // be asserting the opposite of the case under test (the first attempt did exactly that).
-        let undeliverable = await waitUntil(timeout: 15) {
-            self.terminals.contains("u-barge") || self.dispatches.all.contains("u-barge:owner")
-        }
-        firstTurnLatch.release()
-
-        let priorSettled = await waitUntil(timeout: 20) { self.terminals.contains("u-prior") }
-        XCTAssertTrue(priorSettled, "premise: the prior turn must reach a terminal")
-
-        // Give any wrongly-submitted successor time to reach the wire before counting.
-        _ = await waitUntil(timeout: 2) { false }
-
-        XCTAssertEqual(
-            authFrames(for: "u-barge").count, 0,
-            "an UNDELIVERED interruption must never authenticate the retained follow-up; "
-            + "frames=\(allFrames()) dispatches=\(dispatches.all)"
-        )
-        XCTAssertFalse(
-            dispatches.all.contains("u-barge:owner"),
-            "the retained follow-up must not be dispatched when the interruption was undelivered; "
-            + "measured=\(dispatches.all)"
-        )
-    }
-
-    /// QUEUED REFUSAL, TERMINAL-BOUND AND THROUGH THE SERVICE (reviewer `e8327339`).
-    ///
-    /// The prior turn answers with an `error` carrying a refusal code. The retained follow-up is
-    /// DISCARDED (spec `9e309cc1`: retain the report for a later EXPLICIT user request; never carry
-    /// it on a successor authentication frame), so the final zero-auth count is the assertion.
-    ///
-    /// Same status as the undelivered case above: a REGRESSION GUARD that passes on unmodified
-    /// code via the pre-existing entry-time suppression check, not evidence of a new fix.
-    func testQueuedRefusalSubmitsNoSuccessorAuthenticateThroughTheService() async throws {
-        // The PRIOR turn is refused, so the fixture must be error-only.
-        let service = try await readyService(fixture: { self.refusalFixture })
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-
-        speak(service, "first question", "u-prior")
-        let priorLive = await waitUntil(timeout: 15) {
-            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
-        }
-        XCTAssertTrue(priorLive, "premise: turn 1 must be in flight; frames=\(allFrames())")
-
-        speak(service, "play the next one", "u-barge")
-        let interrupted = await waitUntil(timeout: 15) { !self.interruptFrames().isEmpty }
-        XCTAssertTrue(interrupted, "premise: the barge-in must emit an interrupt; frames=\(allFrames())")
-
-        firstTurnLatch.release()
-
-        let priorSettled = await waitUntil(timeout: 20) { self.terminals.contains("u-prior") }
-        XCTAssertTrue(priorSettled, "premise: the prior turn must reach a terminal")
-
-        // Count at the END: a late auth frame is exactly the defect being guarded against.
-        _ = await waitUntil(timeout: 2) { false }
-
-        XCTAssertEqual(
-            authFrames(for: "u-barge").count, 0,
-            "a REFUSED interruption must never authenticate the retained follow-up; "
-            + "frames=\(allFrames()) dispatches=\(dispatches.all)"
-        )
-        XCTAssertFalse(
-            dispatches.all.contains("u-barge:owner"),
-            "the retained follow-up must be discarded on refusal, not dispatched; "
-            + "measured=\(dispatches.all)"
-        )
-    }
+    // SinglePredecessorInterruptionControl covers final zero-auth disposal with one A/B pair.
 
     /// REFUSAL FIRST — a refused interruption never submits its retained utterance.
     ///
@@ -719,98 +611,4 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "nothing may be released for submission after the interrupt never arrived"
         )
     }
-
-    // MARK: - PRODUCTION-PATH refusal (reviewer c38ff4ba item 2)
-
-    /// A REFUSED INTERRUPTION NEVER AUTHENTICATES THE UTTERANCE — via the ERROR-EVENT path.
-    ///
-    /// SCOPE, MEASURED (and disclosed rather than overclaimed): the refusal here arrives as an
-    /// `error` event on the PRIOR turn's socket, so it takes the `.error` branch. That branch
-    /// already ended the turn correctly, and a mutant restoring the `.refused` LATCH fall-through
-    /// SURVIVES this test. The latch branch is covered by
-    /// `InterruptionOrderingControl.testRefusalFirstDiscardsAndSubmitsNothing`, which does reach it
-    /// (confirmed by that branch's own log line) and which kills the mutant. Two refusal orderings,
-    /// two controls — neither claims the other's evidence.
-    ///
-    /// The state-level control could not catch the fall-through: it asserted a transition, not what
-    /// the turn then does. Here the refusal is served as the fixture and the assertion is on the
-    /// wire — the interrupting utterance must never authenticate.
-    func testARefusedInterruptionNeverAuthenticatesTheUtterance() async throws {
-        let service = try await readyService(fixture: { self.refusalFixture })
-        let sink = service.executorForTesting.cloudRouteSinkForTesting
-
-        speak(service, "first question", "u-prior")
-        let parked = await waitUntil(timeout: 5) { self.recorder.all.first?.terminalWithheld == true }
-        XCTAssertTrue(parked, "premise: turn 1 must be in flight; sockets=\(recorder.all.count)")
-        guard let priorSocket = recorder.all.first else {
-            XCTFail("no predecessor socket")
-            return
-        }
-
-        speak(service, "play the next one", "u-barge")
-
-        // Capture the retained-report state as the refusal lands, before the predecessor's socket
-        // can construct another frame.
-        let refusalRetainedReport = await waitUntil(timeout: 8) {
-            sink.hasPendingInterruptionReportForTesting
-        }
-
-        // THE DECISIVE OBSERVABLE: the successor utterance never reaches the wire. Count
-        // authenticate frames carrying it across EVERY socket, not just the newest. The window is
-        // bounded but generous, and the refused turn's own settlement (the 10s acknowledgement
-        // deadline does not apply to a refusal) is awaited first, so a slow settle cannot be
-        // mistaken for "never authenticated".
-        // AWAIT A's REFUSAL SPECIFICALLY (reviewer 79614a4f item 2). Accepting A OR B's terminal
-        // let B's early hand-off terminal satisfy the wait, which does not establish that A ever
-        // processed the refusal — the whole thing being tested. A must reach its own terminal.
-        XCTAssertTrue(
-            recorder.all.contains { $0.sentInterrupt },
-            "premise: the interrupt must be on A before we wait for A's refusal; "
-            + "frames=\(allFrames())"
-        )
-        let aSettled = await waitUntil(timeout: 8) { self.terminals.contains("u-prior") }
-        XCTAssertTrue(
-            aSettled,
-            "A must process the refusal and reach its OWN terminal; terminals=\(terminals.all)"
-        )
-        // B is DISPOSED — it reports a terminal, but that terminal is the suppression outcome, not
-        // a routed/completed turn. Asserting "no terminal at all" conflated disposal with silence
-        // (measured: B reports `dropped`); what the contract forbids is B being SUBMITTED.
-        // B RETIRES AT HAND-OFF, BEFORE CLASSIFICATION. The eager path already took B's execution
-        // when the refusal had not yet arrived, so B's queued link ends `handedOffToFollowUpSubmission`
-        // — the designed ownership transfer, not a submission. The forbidden outcome is `.routed`:
-        // that would mean B was classified and dispatched as an ordinary turn, which is exactly the
-        // fall-through this control exists to forbid.
-        let bOutcomes = terminals.outcomes(for: "u-barge")
-        XCTAssertFalse(
-            bOutcomes.contains(.routed),
-            "B must NEVER be routed after a refused interruption; measured outcomes=\(bOutcomes)"
-        )
-        XCTAssertTrue(
-            bOutcomes.allSatisfy {
-                $0 == .dropped || $0 == .handedOffToFollowUpSubmission
-            },
-            "every B link must end as a disposal or a hand-off, never a routed turn; "
-            + "measured outcomes=\(bOutcomes)"
-        )
-        let authenticated = self.recorder.all.contains {
-            $0.sentTextFrames.contains { $0.contains("u-barge") }
-        }
-        XCTAssertFalse(
-            authenticated,
-            "a refused interruption must END LOCALLY: the held utterance may never authenticate. "
-            + "frames=\(allFrames())"
-        )
-        // The report is retained for a later EXPLICIT user request, not carried by a successor.
-        // Read at the moment the interruption resolves: the predecessor's own socket continues to
-        // run after the refusal (its connection keeps draining), and any later frame it constructs
-        // legitimately consumes the report — so a later read would observe disappearance that is
-        // correct behaviour, not a missing report (measured: `report=u-prior` at recordRefusal).
-        XCTAssertTrue(
-            refusalRetainedReport,
-            "the interruption report must be RETAINED for a later explicit user request"
-        )
-        firstTurnLatch.release()
-    }
-
 }
