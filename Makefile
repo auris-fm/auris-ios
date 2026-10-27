@@ -145,9 +145,13 @@ build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on M
 
 launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	killall podcasts 2>/dev/null || true; \
-	APP="$$(for d in "$$HOME"/Library/Developer/Xcode/DerivedData/podcasts-*; do \
-		[ "$$(plutil -extract WorkspacePath raw "$$d/info.plist" 2>/dev/null)" = "$$PWD/podcasts.xcodeproj" ] || continue; \
-		echo "$$d/Build/Products/Debug-iphonesimulator/podcasts.app"; \
+	APP="$$(ROOT="$$(pwd -P)"; for d in "$$HOME"/Library/Developer/Xcode/DerivedData/podcasts-*; do \
+		ws="$$(plutil -extract WorkspacePath raw "$$d/info.plist" 2>/dev/null)"; \
+		[ -n "$$ws" ] || continue; \
+		[ "$$(cd "$$(dirname "$$ws")" 2>/dev/null && pwd -P)" = "$$ROOT" ] || continue; \
+		app="$$d/Build/Products/Debug-iphonesimulator/podcasts.app"; \
+		[ -d "$$app" ] || continue; \
+		echo "$$app"; \
 		break; \
 	done)"; \
 	if [ ! -d "$$APP" ]; then \
