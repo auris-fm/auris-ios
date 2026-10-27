@@ -35,6 +35,9 @@ class NativeVadSegmenter {
     /// to `maxPreRollSamples` later than its first sample, which misplaces the segment against
     /// the emitted reference the echo filter uses.
     private var preRollCapturedAt: MonotonicTime?
+
+    /// Capture session these samples belong to, if the caller supplies one.
+    private(set) var currentSession: Int?
     /// Continuous-speech bound that marks a stuck detector. See `defaultStuckActiveMs`.
     private let stuckActiveSamples: Int
     /// Samples of continuously-active speech since it began, used for the stuck check.
@@ -178,7 +181,11 @@ class NativeVadSegmenter {
         self.stuckActiveSamples = stuckActiveMs * 16000 / 1000
     }
 
-    func process(_ samples: [Float], capturedAt: MonotonicTime? = nil) {
+    func process(_ samples: [Float], capturedAt: MonotonicTime? = nil, session: Int? = nil) {
+        // Recorded so a fault raised by THESE samples can be attributed to the capture session
+        // that produced them. `capture.stop()` does not drain already-queued callbacks, so the
+        // session that ends can differ from the one delivering the notification.
+        currentSession = session
         if isClassifierUnavailable {
             // Nothing may be dispatched without a classifier: an energy decision here is the
             // defect this change exists to remove.

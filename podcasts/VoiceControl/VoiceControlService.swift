@@ -220,9 +220,12 @@ class VoiceControlService: ObservableObject {
     /// than presented as working: the pipeline has no trustworthy endpoint.
     var isSpeechClassificationAvailable: Bool { !asrEngine.isClassifierUnavailable }
 
-    /// Earcons this service has requested, for controls that assert the user-facing presentation
-    /// rather than only the internal state change.
-    var playedEarconsForTesting: [EarconId] { audioRenderer.playedEarcons }
+    /// Observer for earcon requests, for controls that assert the user-facing presentation rather
+    /// than only the internal state change.
+    var earconObserverForTesting: ((EarconId) -> Void)? {
+        get { audioRenderer.earconObserverForTesting }
+        set { audioRenderer.earconObserverForTesting = newValue }
+    }
     private var latestRouterMetrics: RouterClassificationMetrics?
 
     private var cancellables = Set<AnyCancellable>()

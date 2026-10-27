@@ -316,19 +316,48 @@ class VoiceAsrEngine {
     /// a pipeline that cannot produce an utterance.
     var isClassifierUnavailable: Bool { segmenter.isClassifierUnavailable }
 
-    /// Starts capture and returns whether it actually started. Capture errors
-    /// are reported rather than swallowed: the caller must not treat a failed
-    /// start as listening, and must release any acquired input route.
+    /// Identifies the current capture session.
+    ///
+    /// `capture.stop()` does not drain callbacks already queued by the capture, so a stopped
+    /// session's samples and the faults they produce can arrive AFTER a restart. Main-queue
+    /// delivery does not order events produced on different threads, so the fence has to be a
+    /// generation: notifications carrying an older generation are dropped instead of reviving
+    /// state that a stop or restart already cleared.
+    private var sessionGeneration = 0
+    private let sessionLock = NSLock()
+
+    private func currentSession() -> Int {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return sessionGeneration
+    }
+
+    /// Invalidates queued work from the previous session.
     @discardableResult
+    private func beginNewSession() -> Int {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        sessionGeneration += 1
+        return sessionGeneration
+    }
 
     /// Runs `body` on the main actor, preserving order with previously queued deliveries.
     ///
     /// Capture callbacks arrive on an audio thread; the consumers mutate published state that
     /// views read, so the transition must be applied where those are valid. Sequential hops keep
     /// a fault and the recovery that follows it in the order they were produced.
-    private func deliverOnMain(_ body: @escaping (VoiceAsrEngine) -> Void) {
+    private func deliverOnMain(session: Int? = nil, _ body: @escaping (VoiceAsrEngine) -> Void) {
+        let generation = session ?? currentSession()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // Drop notifications produced by a session that has since been stopped or replaced:
+            // otherwise a fault queued by the old session reappears after the restart's recovery
+            // already cleared it. Main-queue delivery alone cannot order events produced on
+            // different threads, so the session is what has to be compared.
+            guard generation == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped stale session notification generation=\(generation) current=\(self.currentSession())")
+                return
+            }
             body(self)
         }
     }
@@ -348,7 +377,11 @@ class VoiceAsrEngine {
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
         segmenter.onStuckActiveFault = { [weak self] fault in
-            self?.deliverOnMain { engine in
+            guard let self else { return }
+            // Attribute the fault to the session whose samples raised it, not to whatever session
+            // happens to be current when the delivery runs.
+            let session = self.segmenter.currentSession ?? self.currentSession()
+            self.deliverOnMain(session: session) { engine in
                 engine.onSegmentationFault?(SegmentationFault(
                     kind: .durationLimitReached,
                     discardedSamples: fault.discardedSamples,
@@ -376,13 +409,26 @@ class VoiceAsrEngine {
             }
         }
         capture.onCapturedSamples = { [weak self] samples, capturedAt in
-            self?.segmenter.process(samples, capturedAt: capturedAt)
+            guard let self else { return }
+            // Read the session BEFORE processing: a `stop()` landing while these samples are
+            // processed bumps the generation, and the fault they raise must then be recognised
+            // as belonging to the session that just ended, not the one starting.
+            let session = self.currentSession()
+            self.segmenter.process(samples, capturedAt: capturedAt, session: session)
         }
     }
 
+    /// Starts capture and returns whether it actually started. Capture errors
+    /// are reported rather than swallowed: the caller must not treat a failed
+    /// start as listening, and must release any acquired input route.
+    @discardableResult
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         wireCaptureCallbacks()
+
+        // A restart begins a new session, so notifications still queued from the previous one
+        // are dropped rather than delivered against this session's state.
+        beginNewSession()
 
         // Never present a pipeline that cannot segment. Without a classifier there is no
         // trustworthy endpoint, so opening the microphone would capture audio the engine can
@@ -411,6 +457,10 @@ class VoiceAsrEngine {
     func stop() {
         FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
+        // `capture.stop()` does not drain callbacks the capture already queued, so invalidate
+        // this session BEFORE clearing: a fault produced by those late samples must not arrive
+        // after the recovery below and revive the interruption.
+        beginNewSession()
         // An explicit stop is the advertised escape from a surfaced fault, so the faulty state
         // must not survive it. Routine frames never clear it — only this deliberate restart and a
         // genuine silence boundary do, so the tail of a still-spoken request cannot be dispatched.

@@ -15,16 +15,6 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         func release() {}
     }
 
-    /// Capture stub that records whether the microphone was actually opened, so "refused to
-    /// listen" can be asserted as "capture never started" rather than inferred from a return value.
-    private final class RecordingCapture: AudioCaptureSource {
-        var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
-        private(set) var startCount = 0
-
-        func start() throws { startCount += 1 }
-        func stop() {}
-    }
-
     /// Fault deliveries hop to the main actor, so a control must drain that queue before
     /// asserting. Draining also preserves the order the deliveries were produced in.
     private func drainMainQueue() {
@@ -33,9 +23,9 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         wait(for: [drained], timeout: 2)
     }
 
-    private func makeEngine(segmenter: NativeVadSegmenter) -> VoiceAsrEngine {
+    private func makeEngine(segmenter: NativeVadSegmenter, capture: AudioCaptureSource? = nil) -> VoiceAsrEngine {
         VoiceAsrEngine(
-            capture: NativeAudioCapture(),
+            capture: capture ?? NativeAudioCapture(),
             segmenter: segmenter,
             backend: WhisperCppBackend(modelPath: "/tmp/test"),
             signalFilter: SignalFilter(),
@@ -72,6 +62,40 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertEqual(fault.kind, .durationLimitReached)
         XCTAssertGreaterThan(fault.elapsedMs, 0)
         XCTAssertTrue(dispatched.isEmpty, "the fault dispatched audio instead of suppressing it")
+    }
+
+    /// A fault produced by a STOPPED session must not reappear after the restart cleared it.
+    ///
+    /// `capture.stop()` does not drain callbacks the capture already queued. Those late samples
+    /// can still raise a fault, and main-queue delivery alone cannot order events produced on
+    /// different threads — so the session itself must be the fence.
+    func testAStaleSessionFaultDoesNotReviveAfterRestart() {
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        let capture = RecordingCapture()
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        var faults: [VoiceAsrEngine.SegmentationFault] = []
+        var recovered = 0
+        engine.onSegmentationFault = { faults.append($0) }
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        // Reach the ceiling so a fault is pending on the main queue, but do NOT drain yet: this is
+        // the real ordering, where stop() runs before the queued delivery is executed.
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive, "the ceiling did not trip")
+
+        // stop() clears the fault and queues its own recovery behind the pending fault delivery.
+        engine.stop()
+        drainMainQueue()
+
+        XCTAssertEqual(recovered, 1, "restart did not clear the fault")
+        XCTAssertEqual(
+            faults.count, 0,
+            "a fault produced by the stopped session was delivered after the restart, so the "
+                + "interruption reappears with no way to clear it (\(faults.count) fault(s) shown)"
+        )
+        XCTAssertFalse(segmenter.isStuckActive)
     }
 
     /// An explicit restart must clear a surfaced fault and its published state.
@@ -229,6 +253,9 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
         )
         guard let service else { return XCTFail("service could not be built") }
 
+        var earcons: [EarconId] = []
+        service.earconObserverForTesting = { earcons.append($0) }
+
         XCTAssertNil(service.segmentationFault, "no fault should be presented before one occurs")
         service.presentSegmentationFault(VoiceAsrEngine.SegmentationFault(
             kind: .durationLimitReached,
@@ -239,7 +266,7 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
 
         XCTAssertNotNil(service.segmentationFault, "the interruption was not published")
         XCTAssertEqual(
-            service.playedEarconsForTesting, [.error],
+            earcons, [.error],
             "no earcon was requested, so the interruption has no audible presentation"
         )
     }
@@ -250,6 +277,8 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
             capture: RecordingCapture()
         )
         guard let service else { return XCTFail("service could not be built") }
+        var earcons: [EarconId] = []
+        service.earconObserverForTesting = { earcons.append($0) }
 
         service.presentSegmentationFault(VoiceAsrEngine.SegmentationFault(
             kind: .classifierUnavailable,
@@ -259,12 +288,16 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
         ))
 
         XCTAssertEqual(service.segmentationFault?.kind, .classifierUnavailable)
-        XCTAssertEqual(service.playedEarconsForTesting, [.error])
+        XCTAssertEqual(earcons, [.error])
     }
 }
 
 final class RecordingCapture: AudioCaptureSource {
     var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
-    func start() throws {}
+    private(set) var startCount = 0
+    func start() throws { startCount += 1 }
     func stop() {}
+    /// Feeds a frame through the callback the engine installed, which is how a queued capture
+    /// frame reaches the segmenter.
+    func deliver(_ samples: [Float]) { onCapturedSamples?(samples, nil) }
 }

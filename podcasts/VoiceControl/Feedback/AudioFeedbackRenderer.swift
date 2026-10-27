@@ -45,12 +45,15 @@ class AudioFeedbackRenderer {
         }
     }
 
-    /// Every earcon the service asks for, so a control can assert which feedback the user would
-    /// actually hear instead of inferring it from a call site.
-    private(set) var playedEarcons: [EarconId] = []
+    /// Observer for the earcon request, so a control can assert the presentation the user would
+    /// hear without the production renderer retaining a history.
+    ///
+    /// Deliberately not a stored array: nothing in production needs the history, and an unbounded
+    /// one would grow for the life of the process purely to satisfy tests.
+    var earconObserverForTesting: ((EarconId) -> Void)?
 
     func playEarcon(_ id: EarconId) {
-        playedEarcons.append(id)
+        earconObserverForTesting?(id)
         render(.earcon(id))
     }
 
