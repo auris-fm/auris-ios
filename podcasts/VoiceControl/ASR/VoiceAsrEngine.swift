@@ -349,10 +349,14 @@ class VoiceAsrEngine {
     /// Capture callbacks arrive on an audio thread; the consumers mutate published state that
     /// views read, so the transition must be applied where those are valid. Sequential hops keep
     /// a fault and the recovery that follows it in the order they were produced.
-    private func deliverOnMain(session: Int? = nil, _ body: @escaping (VoiceAsrEngine) -> Void) {
+    private func deliverOnMain(session: Int? = nil, fenced: Bool = true, _ body: @escaping (VoiceAsrEngine) -> Void) {
         let generation = session ?? currentSession()
-        DispatchQueue.main.async { [weak self] in
+        deliveryQueueForTesting.async { [weak self] in
             guard let self else { return }
+            guard fenced else {
+                body(self)
+                return
+            }
             // Drop notifications produced by a session that has since been stopped or replaced:
             // otherwise a fault queued by the old session reappears after the restart's recovery
             // already cleared it. Main-queue delivery alone cannot order events produced on
@@ -364,6 +368,11 @@ class VoiceAsrEngine {
             body(self)
         }
     }
+
+    /// TEST SEAM: the main queue deliveries are posted to. Passing a queue whose blocks the
+    /// control releases by hand lets it place a `stop()`/`start()` BETWEEN a delivery being
+    /// enqueued and that delivery running — the real interleave, forced rather than hoped for.
+    var deliveryQueueForTesting: DispatchQueue = .main
 
     /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
@@ -504,7 +513,10 @@ class VoiceAsrEngine {
         if segmenter.isStuckActive {
             FileLog.shared.addMessage("[VoicePipeline] explicit stop clearing the fault state")
             segmenter.clearStuckActiveFault()
-            deliverOnMain { $0.onSegmentationFaultRecovered?() }
+            // Delivered WITHOUT a session fence: recovery is confirmation that the fault state is
+            // gone, and a restart bumping the generation after this is queued must not suppress
+            // it — otherwise the interruption stays presented with nothing left to clear it.
+            deliverOnMain(session: nil, fenced: false) { $0.onSegmentationFaultRecovered?() }
         }
         // Reset ALL remaining segmentation state at the boundary. A partially buffered utterance
         // is not a fault, so the block above does not cover it; leaving it in place would

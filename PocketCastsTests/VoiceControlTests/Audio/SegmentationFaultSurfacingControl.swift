@@ -131,6 +131,48 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         )
     }
 
+    /// Forced interleave: stop and restart while a fault delivery is still QUEUED.
+    ///
+    /// The earlier controls arranged the ordering; this one forces it. Deliveries are posted to a
+    /// SUSPENDED serial queue, so the fault is provably still pending when `stop()`/`start()` run
+    /// — the exact interleave a real stop lands in relative to the audio thread's queued work.
+    func testAStopAndRestartInterleaveDropsTheQueuedFault() {
+        let capture = RecordingCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        let deliveryQueue = DispatchQueue(label: "interleave.control")
+        engine.deliveryQueueForTesting = deliveryQueue
+        var faults: [VoiceAsrEngine.SegmentationFault] = []
+        var recovered = 0
+        engine.onSegmentationFault = { faults.append($0) }
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        // Hold every delivery back so the fault cannot run yet.
+        deliveryQueue.suspend()
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive, "the ceiling did not trip, so nothing is queued")
+        XCTAssertEqual(faults.count, 0, "a delivery ran before it was released")
+
+        // The boundary lands while the fault delivery is still queued.
+        engine.stop()
+        _ = engine.start()
+
+        // Now let the queued delivery run.
+        deliveryQueue.resume()
+        let drained = expectation(description: "deliveries drained")
+        deliveryQueue.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+
+        XCTAssertEqual(
+            faults.count, 0,
+            "the fault queued before the restart was delivered afterwards, so the interruption "
+                + "reappears with no way to clear it"
+        )
+        XCTAssertGreaterThanOrEqual(recovered, 1, "restart did not announce recovery")
+    }
+
     /// The full sequence: old buffer queued, stop, START, then the old buffer released.
     ///
     /// The restart overwrites the capture's current session, so a buffer that reads that value at
