@@ -8814,6 +8814,8 @@
 		};
 		3FD6E0552BFC790F003941C0 /* StagingDebug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 3F7463D02F55488A004C7FF6 /* config */;
+			baseConfigurationReferenceRelativePath = PocketCasts.app.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
@@ -9904,6 +9906,8 @@
 		};
 		BD69A01A2266A9E400168459 /* Prototype */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 3F7463D02F55488A004C7FF6 /* config */;
+			baseConfigurationReferenceRelativePath = PocketCasts.app.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIconPrototype;
 				CLANG_ENABLE_MODULES = YES;
@@ -10191,6 +10195,8 @@
 		};
 		BDBD540F17019B2A0048C8C5 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 3F7463D02F55488A004C7FF6 /* config */;
+			baseConfigurationReferenceRelativePath = PocketCasts.app.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
@@ -10225,6 +10231,8 @@
 		};
 		BDBD541017019B2A0048C8C5 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 3F7463D02F55488A004C7FF6 /* config */;
+			baseConfigurationReferenceRelativePath = PocketCasts.app.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
