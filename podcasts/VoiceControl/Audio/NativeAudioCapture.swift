@@ -61,6 +61,18 @@ class NativeAudioCapture: AudioCaptureSource {
     private let sampleRate = 16000.0
     private var energyLogged = false
     private var tapInstalled = false
+    /// Periodic capture telemetry.
+    ///
+    /// `First buffer` is logged once per process and the VAD logs only when an utterance is
+    /// emitted, so after the first buffer nothing reports whether samples still arrive. A user
+    /// reporting "everything is ready but still no wake word" could not be diagnosed from the log
+    /// at all: a quiet room, a level under the VAD threshold, and a dead tap all produce silence
+    /// (#core:25b91a1b `98ba5c48`). This reports buffer arrival and the peak level against the
+    /// threshold, throttled so a healthy pipeline does not flood the log.
+    ///
+    /// Observability only: it does not gate, alter or delay sample delivery.
+    private var telemetry = CaptureTelemetry()
+    private static let telemetryInterval: TimeInterval = 5
     private let session: CaptureAudioSession
     /// Live playback-ownership signal, re-read at teardown. Deactivating a
     /// session playback owns would stop the user's podcast, so only a session
@@ -159,6 +171,20 @@ class NativeAudioCapture: AudioCaptureSource {
                     let maxVal = converted.max() ?? 0
                     let minVal = converted.min() ?? 0
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
+                    FileLog.shared.forceFlush()
+                }
+                self.telemetry.record(rms: CaptureTelemetry.rms(of: converted))
+                if let report = self.telemetry.takeReport(
+                    now: Date(),
+                    interval: Self.telemetryInterval
+                ) {
+                    FileLog.shared.addMessage(report)
+                    // FORCE THE FLUSH. `FileLog` holds entries in memory until 100 accumulate
+                    // (`bufferThreshold`), so a buffered line is invisible for minutes and is lost
+                    // entirely if the process is terminated first. The whole point of this line is
+                    // to be readable WHILE capture is running — a buffered diagnostic is no better
+                    // than the silence it replaces. `First buffer` already forces its flush for
+                    // exactly this reason.
                     FileLog.shared.forceFlush()
                 }
                 self.deliver(converted, when: when)
