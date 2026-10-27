@@ -17,6 +17,13 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
 
     /// Fault deliveries hop to the main actor, so a control must drain that queue before
     /// asserting. Draining also preserves the order the deliveries were produced in.
+    /// Drains an arbitrary queue (the delivery seam can be redirected off the main queue).
+    private func drainQueue(_ queue: DispatchQueue) {
+        let drained = expectation(description: "queue drained")
+        queue.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+    }
+
     private func drainMainQueue() {
         let drained = expectation(description: "main queue drained")
         DispatchQueue.main.async { drained.fulfill() }
@@ -171,6 +178,110 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
                 + "reappears with no way to clear it"
         )
         XCTAssertGreaterThanOrEqual(recovered, 1, "restart did not announce recovery")
+    }
+
+    /// Fault delivered, recovery queued by SILENCE, then stop/restart before it runs.
+    ///
+    /// The silence path clears `isStuckActive` itself and queues its own recovery. A stop landing
+    /// before that delivery sees `isStuckActive == false` and queues no replacement — so if the
+    /// queued recovery is fenced, it is dropped and the presented interruption can never clear.
+    func testSilenceRecoveryQueuedBeforeARestartIsStillDelivered() async {
+        let capture = RecordingCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020, silenceTimeoutMs: 0, classifier: script
+        )
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        let deliveryQueue = DispatchQueue(label: "silence.recovery.control")
+        engine.deliveryQueueForTesting = deliveryQueue
+        var faults = 0
+        var recovered = 0
+        engine.onSegmentationFault = { _ in faults += 1 }
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        // Trip the ceiling and let its delivery run.
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        drainQueue(deliveryQueue)
+        XCTAssertEqual(faults, 1, "the ceiling did not surface a fault")
+        XCTAssertTrue(segmenter.isStuckActive)
+
+        // Now HOLD deliveries, and feed genuine silence so the silence path clears the fault and
+        // queues its recovery — which must not run yet.
+        deliveryQueue.suspend()
+        script.silenceAfterSpeech = true
+        // The silence endpoint is decided by wall-clock (`> silenceTimeoutMs`), so span real time
+        // rather than assuming one frame is enough: a single frame can share the start's
+        // millisecond and never trip the `>`.
+        let silenceDeadline = Date().addingTimeInterval(2)
+        while segmenter.isStuckActive && Date() < silenceDeadline {
+            capture.deliver([Float](repeating: 0, count: 320))
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertFalse(
+            segmenter.isStuckActive,
+            "silence did not clear the fault, so this control would not exercise the path"
+        )
+
+        // Boundary lands while the silence recovery is still queued.
+        engine.stop()
+        _ = engine.start()
+
+        deliveryQueue.resume()
+        drainQueue(deliveryQueue)
+
+        XCTAssertGreaterThanOrEqual(
+            recovered, 1,
+            "the silence recovery was dropped by the restart and stop queued no replacement, so "
+                + "the interruption stays presented with nothing left to clear it"
+        )
+    }
+
+    /// A delayed recovery must not clear a NEWER fault that arrived while it was queued.
+    ///
+    /// Recovery is delivered unfenced so a restart cannot suppress it. That freedom cuts both
+    /// ways: if a second fault is raised after the silence boundary that produced the recovery,
+    /// the interruption is real and must stay presented.
+    func testADelayedRecoveryDoesNotClearANewerFault() async {
+        let capture = RecordingCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 0, classifier: script)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        let deliveryQueue = DispatchQueue(label: "newer.fault.control")
+        engine.deliveryQueueForTesting = deliveryQueue
+        var recovered = 0
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        drainQueue(deliveryQueue)
+        XCTAssertTrue(segmenter.isStuckActive)
+
+        // Silence clears the fault and queues its recovery; hold the queue so it cannot run.
+        deliveryQueue.suspend()
+        script.silenceAfterSpeech = true
+        // Span real time: the endpoint uses `elapsed > silenceTimeoutMs`, so one frame can share
+        // the start's millisecond and never trip the strict comparison.
+        let silenceDeadline = Date().addingTimeInterval(2)
+        while segmenter.isStuckActive && Date() < silenceDeadline {
+            capture.deliver([Float](repeating: 0, count: 320))
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertFalse(segmenter.isStuckActive)
+
+        // A NEWER fault is raised while the recovery is still queued. Driven through real
+        // processing, not by poking the state: speech resumes and the ceiling is reached again.
+        script.silenceAfterSpeech = false
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive, "the newer fault did not trip")
+
+        deliveryQueue.resume()
+        drainQueue(deliveryQueue)
+
+        XCTAssertEqual(
+            recovered, 0,
+            "a delayed recovery cleared a newer fault, so a live interruption is reported as gone"
+        )
     }
 
     /// The full sequence: old buffer queued, stop, START, then the old buffer released.

@@ -425,7 +425,23 @@ class VoiceAsrEngine {
         // cannot interleave: a recovery announced while a fault is still being delivered would
         // otherwise clear the interruption before it was ever shown.
         segmenter.onRecoveredFromFault = { [weak self] in
-            self?.deliverOnMain { $0.onSegmentationFaultRecovered?() }
+            guard let self else { return }
+            // Recovery is a statement about segmenter state, not work owned by a capture session,
+            // so it is delivered UNFENCED. It must not be suppressible by an unrelated session
+            // change: if a stop/restart lands while this is queued, it would be dropped and —
+            // `isStuckActive` already being false — stop() would queue no replacement, leaving the
+            // interruption presented with nothing left to clear it.
+            //
+            // It is still delivered in order, and it must not report recovery over a NEWER fault:
+            // if one was raised after this silence boundary, the interruption is real and stays.
+            deliverOnMain(fenced: false) { [weak self] engine in
+                guard let self else { return }
+                guard !self.segmenter.isStuckActive else {
+                    FileLog.shared.addMessage("[VoicePipeline] recovery dropped: a newer fault is active")
+                    return
+                }
+                engine.onSegmentationFaultRecovered?()
+            }
         }
         segmenter.onClassifierUnavailable = { [weak self] fault in
             self?.deliverOnMain { engine in
