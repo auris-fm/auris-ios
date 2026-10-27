@@ -379,12 +379,21 @@ class VoiceAsrEngine {
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach
             // ASR and change the next turn.
-            let session = self.capture.tapSession
+            let session = self.segmenter.currentSession ?? self.currentSession()
             guard session == self.currentSession() else {
                 FileLog.shared.addMessage("[VoicePipeline] dropped utterance from stale session=\(session) current=\(self.currentSession())")
                 return
             }
-            Task { await self.processUtterance(utterance, capturedAt: capturedAt) }
+            Task { [weak self] in
+                guard let self else { return }
+                // Re-check when the task actually runs: a stop() can land between enqueue and
+                // execution, and the check above only proves the session was valid then.
+                guard session == self.currentSession() else {
+                    FileLog.shared.addMessage("[VoicePipeline] dropped utterance queued before a session change session=\(session) current=\(self.currentSession())")
+                    return
+                }
+                await self.processUtterance(utterance, capturedAt: capturedAt)
+            }
         }
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
@@ -420,15 +429,13 @@ class VoiceAsrEngine {
                 engine.onClassifierUnavailable?(fault.reason)
             }
         }
-        capture.onCapturedSamples = { [weak self] samples, capturedAt in
+        capture.onCapturedSamples = { [weak self] samples, capturedAt, tapSession in
             guard let self else { return }
-            // Ownership is the TAP's session, stamped when capture started — not the generation
-            // current at delivery. A buffer the old tap queued before `stop()` arrives later but
-            // still belongs to the session that produced it.
-            let tapSession = self.capture.tapSession
-            // Segmenter mutation is serialized against stop()'s clear/reset, which runs on
-            // another thread. Without this the two would interleave and stale PCM could change
-            // the next utterance even though its notification was suppressed.
+            // Ownership is the session carried WITH the buffer — stamped when the tap was
+            // installed — never the session current at delivery.
+            // Segmenter mutation is serialized against start()'s wiring and stop()'s reset, which
+            // run on other threads. Without this the two would interleave and stale PCM could
+            // change the next utterance even though its notification was suppressed.
             self.segmenterLock.lock()
             defer { self.segmenterLock.unlock() }
             guard tapSession == self.currentSession() else {
@@ -449,10 +456,10 @@ class VoiceAsrEngine {
         // current state (a missing classifier) through the delivery fence, and a replay tagged
         // with the previous generation would be dropped as stale — losing the very fault that
         // explains why capture is about to be refused.
-        // The tap is created now, so its buffers are stamped with this session from this point.
-        // Stamped from the value `beginNewSession()` RETURNED: re-reading the property here would
-        // race a concurrent stop() and could stamp the tap with a superseded session.
-        capture.tapSession = beginNewSession()
+        // The tap is stamped with the value `beginNewSession()` RETURNED: re-reading the property
+        // here would race a concurrent stop() and could stamp the tap with a superseded session.
+        let session = beginNewSession()
+        capture.tapSession = session
         // Mutates the segmenter (installs callbacks, replays state), so it is serialized against
         // capture processing and stop() on other threads.
         segmenterLock.lock()
@@ -499,6 +506,10 @@ class VoiceAsrEngine {
             segmenter.clearStuckActiveFault()
             deliverOnMain { $0.onSegmentationFaultRecovered?() }
         }
+        // Reset ALL remaining segmentation state at the boundary. A partially buffered utterance
+        // is not a fault, so the block above does not cover it; leaving it in place would
+        // concatenate old-session PCM with the new session's and dispatch them as one command.
+        segmenter.resetForNewSession()
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).

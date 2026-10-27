@@ -131,6 +131,78 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         )
     }
 
+    /// The full sequence: old buffer queued, stop, START, then the old buffer released.
+    ///
+    /// The restart overwrites the capture's current session, so a buffer that reads that value at
+    /// delivery reports the NEW session and passes the fence. Ownership must travel with the
+    /// buffer. Asserts no old sample, fault or utterance reaches the new session.
+    func testAnOldBufferReleasedAfterARestartNeverReachesTheNewSession() {
+        let capture = HoldableCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: 3)
+        // Observe what reaches the segmenter. State alone cannot prove this: engine.start() resets
+        // the segmenter, so a stale buffer that IS processed would then look identical to one that
+        // was correctly dropped. The classifier is only consulted for accepted audio.
+        let counting = CountingClassifier(wrapping: script)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: counting)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        var utterances = 0
+        var faults = 0
+        segmenter.onUtterance = { _, _ in utterances += 1 }
+        segmenter.onStuckActiveFault = { _ in faults += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        // Hold a buffer that alone would confirm speech, while the first tap is live.
+        capture.hold(samples: Array(repeating: 0.5, count: 320 * 6))
+        engine.stop()
+        drainMainQueue()
+
+        // Restart: the capture's session value now names the new tap.
+        engine.start()
+        let sessionsBefore = (segmenter.currentSession, segmenter.activeSamples)
+        XCTAssertEqual(segmenter.activeSamples, 0, "restart did not reset segmentation state")
+
+        // Release the OLD buffer now.
+        capture.releaseHeld()
+        drainMainQueue()
+
+        XCTAssertEqual(
+            counting.calls, 0,
+            "the old buffer reached the segmenter (\(counting.calls) classifier call(s)), so stale "
+                + "PCM was treated as new-session audio (session before=\(String(describing: sessionsBefore.0)))"
+        )
+        XCTAssertEqual(utterances, 0, "an utterance was assembled from stale PCM")
+        XCTAssertEqual(faults, 0, "stale PCM raised a fault in the new session")
+    }
+
+    /// An ordinary partially buffered utterance must not survive a restart.
+    ///
+    /// This is not a fault, so clearing only the fault state leaves the partial buffer in place
+    /// and old-session PCM concatenates with the new session's audio.
+    func testAPartialUtteranceDoesNotSurviveARestart() {
+        let capture = RecordingCapture()
+        // Enough speech frames to CONFIRM (so real samples are retained in the utterance buffer)
+        // but too few to close: the silence timeout is long, so nothing is dispatched and this is
+        // a genuinely partial utterance rather than a fault.
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: 12)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, minSpeechFrames: 5, classifier: script)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        engine.installCaptureCallbacksForTesting()
+
+        for _ in 0..<12 { capture.deliver(Array(repeating: 0.5, count: 320)) }
+        XCTAssertFalse(segmenter.isStuckActive, "the case must not be a fault")
+        XCTAssertGreaterThan(
+            segmenter.activeSamples, 0,
+            "the utterance was never confirmed, so a restart would not have anything to discard"
+        )
+
+        engine.stop()
+        drainMainQueue()
+        XCTAssertEqual(
+            segmenter.activeSamples, 0,
+            "a partial utterance survived the restart, so old and new session PCM can concatenate"
+        )
+    }
+
     /// A start-time classifier fault must survive its own main-queue delivery.
     ///
     /// Installing callbacks replays current state through the session fence; if the new session
@@ -352,32 +424,44 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
 
 /// A capture that can withhold a buffer and release it later, standing in for audio the tap
 /// queued before `stop()`.
+/// Counts classifications, which only happen for audio the segmenter accepted.
+final class CountingClassifier: SpeechFrameClassifier {
+    private let wrapped: SpeechFrameClassifier
+    private(set) var calls = 0
+    init(wrapping wrapped: SpeechFrameClassifier) { self.wrapped = wrapped }
+    func isSpeech(_ samples: [Float]) -> Bool { calls += 1; return wrapped.isSpeech(samples) }
+    func reset() { wrapped.reset() }
+}
+
 final class HoldableCapture: AudioCaptureSource {
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)?
     var tapSession: Int = 0
     private var held: [Float]?
     private var heldAt: MonotonicTime?
+    /// Session of the tap that queued the held buffer, frozen at hold time as the real tap does.
+    private var heldSession: Int?
     private(set) var startCount = 0
     func start() throws { startCount += 1 }
     func stop() {}
     func hold(samples: [Float], at time: MonotonicTime? = nil) {
         held = samples
         heldAt = time
+        heldSession = tapSession
     }
     func releaseHeld() {
-        guard let held else { return }
+        guard let held, let heldSession else { return }
         self.held = nil
-        onCapturedSamples?(held, heldAt)
+        onCapturedSamples?(held, heldAt, heldSession)
     }
 }
 
 final class RecordingCapture: AudioCaptureSource {
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)?
     var tapSession: Int = 0
     private(set) var startCount = 0
     func start() throws { startCount += 1 }
     func stop() {}
     /// Feeds a frame through the callback the engine installed, which is how a queued capture
     /// frame reaches the segmenter.
-    func deliver(_ samples: [Float]) { onCapturedSamples?(samples, nil) }
+    func deliver(_ samples: [Float]) { onCapturedSamples?(samples, nil, tapSession) }
 }

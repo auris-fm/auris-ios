@@ -147,6 +147,17 @@ class NativeVadSegmenter {
         reset()
     }
 
+    /// Resets ALL segmentation state at a real session boundary (stop/restart).
+    ///
+    /// Unlike `clearStuckActiveFault()` this is not guarded on `isStuckActive`: an ordinary
+    /// partially buffered utterance would otherwise survive a restart, letting PCM from the old
+    /// session concatenate with the new one and be dispatched as a single command. Classifier
+    /// unavailability is deliberately NOT reset — it describes the assembled pipeline, not a
+    /// session, and clearing it would let listening resume with no classifier to segment it.
+    func resetForNewSession() {
+        reset()
+    }
+
     /// - Parameters:
     ///   - threshold: RMS energy threshold above which audio is considered speech (energy
     ///     classifier only; the injected classifier decides when one is supplied)

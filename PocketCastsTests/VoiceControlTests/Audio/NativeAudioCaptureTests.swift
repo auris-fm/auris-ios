@@ -281,7 +281,7 @@ extension NativeAudioCaptureTests {
     func test_validHostTime_deliversTheHardwareCaptureInstantToASubscriber() throws {
         let capture = NativeAudioCapture()
         var received: [([Float], MonotonicTime?)] = []
-        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+        capture.onCapturedSamples = { samples, instant, _ in received.append((samples, instant)) }
 
         let hostTime: UInt64 = 987_654_321
         let when = AVAudioTime(hostTime: hostTime, sampleTime: 0, atRate: 16_000)
@@ -300,7 +300,7 @@ extension NativeAudioCaptureTests {
     func test_invalidHostTime_deliversNilToASubscriberSoTheConsumerDoesNotGuess() {
         let capture = NativeAudioCapture()
         var received: [([Float], MonotonicTime?)] = []
-        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+        capture.onCapturedSamples = { samples, instant, _ in received.append((samples, instant)) }
 
         // A sample-time-only AVAudioTime has no valid host time — the shape the tap
         // sees on routes where the hardware clock is unavailable.

@@ -22,16 +22,18 @@ protocol CaptureAudioSession: AnyObject {
 /// behaviourally what the production object does; nothing about the listening or provenance
 /// semantics changes.
 protocol AudioCaptureSource: AnyObject {
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? { get set }
+    /// Session the next installed tap belongs to; set by the engine when capture starts.
+    var tapSession: Int { get set }
+
+    /// Carries the session of the tap that produced these samples.
+    ///
+    /// The session must travel WITH the buffer rather than be read from a property at delivery:
+    /// capture `stop()` does not drain buffers the tap already queued, so a property would hold
+    /// the restarted session's value by the time an old buffer is delivered and the old audio
+    /// would pass as new.
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)? { get set }
     func start() throws
     func stop()
-
-    /// Identifier of the tap that produced the samples, set when capture starts.
-    ///
-    /// Capture `stop()` does not drain buffers the tap already queued. Those buffers belong to
-    /// the session that produced them, so ownership has to be stamped when the audio is captured
-    /// — deciding it on delivery would label an old buffer as belonging to the new session.
-    var tapSession: Int { get set }
 }
 
 
@@ -86,10 +88,11 @@ class NativeAudioCapture: AudioCaptureSource {
     /// capture itself activated may be deactivated.
     private let isPlaybackActive: () -> Bool
     /// Delivers converted samples with the instant the hardware captured them (from the
-    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route.
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route, plus the
+    /// session of the tap that produced them.
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)?
 
-    /// Stamped by the engine when capture starts; see `AudioCaptureSource.tapSession`.
+    /// Session of the currently installed tap; see `AudioCaptureSource.onCapturedSamples`.
     var tapSession: Int = 0
 
     init(
@@ -114,7 +117,7 @@ class NativeAudioCapture: AudioCaptureSource {
     /// buffer's own capture time, not this call's arrival; on a route whose host time is invalid
     /// the instant is nil and the echo filter declines to align rather than guessing.
     func deliver(_ samples: [Float], when: AVAudioTime) {
-        onCapturedSamples?(samples, Self.captureInstant(when: when))
+        onCapturedSamples?(samples, Self.captureInstant(when: when), tapSession)
     }
 
     func start() throws {
@@ -138,6 +141,10 @@ class NativeAudioCapture: AudioCaptureSource {
         // may deliver Int16 PCM from the Mac's audio hardware. When floatChannelData
         // is nil (non-float format), fall back to int16ChannelData and convert.
         var formatWarningLogged = false
+        // Capture the session ONCE, when this tap is installed. Every buffer this tap queues
+        // carries it, so a buffer released after a restart still reports the session that
+        // produced it rather than the session that happens to be current.
+        let tapSession = self.tapSession
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
