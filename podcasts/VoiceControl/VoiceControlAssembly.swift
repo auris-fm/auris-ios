@@ -114,9 +114,24 @@ class VoiceControlAssembly {
 
         let cloudAudioPlayer = CloudAudioPlayer()
 
+        // Classified speech, not a fixed energy level. A room whose ambient noise sits above
+        // 0.020 makes every frame "speech" under the energy rule, so no silence endpoint arrives
+        // and the utterance never closes — measured as a single utterance growing without limit.
+        //
+        // No fallback: if the model cannot be loaded the segmenter is told so and dispatches
+        // nothing, because the energy rule is precisely the failure being removed. Reporting
+        // normal listening while running it would hide the defect behind a working-looking UI.
+        let speechClassifier = SileroSpeechFrameClassifier.bundled()
+        let vadSegmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            classifier: speechClassifier
+        )
+        if speechClassifier == nil {
+            vadSegmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded from the app bundle")
+        }
         let asrEngine = VoiceAsrEngine(
             capture: injectedCapture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
-            segmenter: NativeVadSegmenter(threshold: 0.020),
+            segmenter: vadSegmenter,
             backend: asrBackend,
             signalFilter: SignalFilter(),
             wakeWordDetector: wakeWordDetector,
