@@ -7412,7 +7412,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "[ $CI ] && exit 0\nmake lint_lenient\n";
+			shellScript = "[ $CI ] && exit 0\n[ \"$SKIP_LINT\" = 1 ] && exit 0\nmake lint_lenient\n";
 		};
 		3F407FBC28EC30B800818E41 /* SwiftLint */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -7431,7 +7431,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "make lint\n";
+			shellScript = "[ \"$SKIP_LINT\" = 1 ] && exit 0\nmake lint\n";
 			showEnvVarsInLog = 0;
 		};
 		462EE0C527025346003D67DC /* GenerateCredentials */ = {

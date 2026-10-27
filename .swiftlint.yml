@@ -17,6 +17,9 @@ excluded:
   - Modules/Utils/.build
   - Pods
   - Scripts
+  # Vendored checkouts: ThirdParty/llama.cpp is a symlink to the pinned upstream llama.cpp
+  # clone, so linting it only reports violations in code we do not own.
+  - ThirdParty
   # Automattic's CI caching setup may generate this in the project folder
   - Users/builder/Library/Caches/CocoaPods/Pods
   - vendor
