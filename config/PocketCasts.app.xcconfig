@@ -1,0 +1,25 @@
+// App-target-only build settings (base configuration of the `podcasts` target).
+//
+// These used to live in PocketCasts.base.xcconfig, which is the *project-level* xcconfig:
+// every app extension, the widget, the watch app and the TV app inherit it. All of them were
+// therefore told to link an arm64-only iOS static library that none of them call, which meant
+// `Library 'lfm_runtime' not found` failed the Share Extension link whenever
+// ThirdParty/llama-cpp-build had not been built yet, and the TV app was pointed at an
+// ios-device slice that does not exist for tvOS.
+//
+// Only podcasts/podcasts-Bridging-Header.h pulls in WakeWordDetector.h / LlmBridge.h, and
+// only the `podcasts` target uses that bridging header. PocketCastsTests reaches the same
+// Swift API through BUNDLE_LOADER = $(TEST_HOST), so it needs no link inputs of its own.
+
+// ONNX Runtime for wake word detection
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord
+// Native headers only (LlmBridge / LfmRuntimeC). llama/ggml headers stay out of the app
+// target so whisper.spm's ggml.h does not collide.
+HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/podcasts/VoiceControl/WakeWord/onnxruntime_headers $(SRCROOT)/podcasts/VoiceControl/IntentRouter/Native
+
+// CPU-only llama.cpp pin 0eadefebd3f8f92a86d634a0e5b8fffc9dc792c0 (Metal off; whisper stays separate).
+LLAMA_SLICE = ios-device
+LLAMA_SLICE[sdk=iphonesimulator*] = ios-sim
+// Only the symbol-isolated LFM archive is linked into the app (llama/ggml stay inside it).
+LIBRARY_SEARCH_PATHS = $(inherited) $(SRCROOT)/ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/lfm
+OTHER_LDFLAGS = $(inherited) -llfm_runtime -framework Accelerate
