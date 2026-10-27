@@ -25,6 +25,13 @@ protocol AudioCaptureSource: AnyObject {
     var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? { get set }
     func start() throws
     func stop()
+
+    /// Identifier of the tap that produced the samples, set when capture starts.
+    ///
+    /// Capture `stop()` does not drain buffers the tap already queued. Those buffers belong to
+    /// the session that produced them, so ownership has to be stamped when the audio is captured
+    /// — deciding it on delivery would label an old buffer as belonging to the new session.
+    var tapSession: Int { get set }
 }
 
 
@@ -81,6 +88,9 @@ class NativeAudioCapture: AudioCaptureSource {
     /// Delivers converted samples with the instant the hardware captured them (from the
     /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route.
     var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+
+    /// Stamped by the engine when capture starts; see `AudioCaptureSource.tapSession`.
+    var tapSession: Int = 0
 
     init(
         session: CaptureAudioSession = RealCaptureAudioSession(),

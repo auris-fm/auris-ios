@@ -41,7 +41,7 @@ class NativeVadSegmenter {
     /// Continuous-speech bound that marks a stuck detector. See `defaultStuckActiveMs`.
     private let stuckActiveSamples: Int
     /// Samples of continuously-active speech since it began, used for the stuck check.
-    private var activeSamples = 0
+    private(set) var activeSamples = 0
     /// Capture instant of each sample in `preRoll`, parallel to it.
     ///
     /// Trimming evicts the OLDEST samples, so the instant of the first retained sample moves

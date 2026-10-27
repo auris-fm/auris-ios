@@ -98,6 +98,64 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertFalse(segmenter.isStuckActive)
     }
 
+    /// A buffer the OLD tap queued before stop must not be treated as new-session audio.
+    ///
+    /// This is the case the delivery-time check cannot catch: the buffer is released after the
+    /// restart, so reading the session at delivery would label it as the new session and let
+    /// stale PCM change the next utterance.
+    func testABufferQueuedByTheOldTapBeforeStopDoesNotReachTheNewSession() {
+        let capture = HoldableCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        engine.installCaptureCallbacksForTesting()
+
+        // Queue a buffer while the old tap is live, without letting it reach the segmenter yet.
+        capture.hold(samples: [Float](repeating: 0.5, count: 320))
+        engine.stop()
+        drainMainQueue()
+        XCTAssertFalse(segmenter.isStuckActive)
+
+        // Release it now that the session has been replaced.
+        capture.releaseHeld()
+        drainMainQueue()
+
+        XCTAssertFalse(
+            segmenter.isStuckActive,
+            "a buffer captured by the stopped tap was processed as new-session audio, so stale "
+                + "PCM can shape the next utterance"
+        )
+        XCTAssertEqual(
+            segmenter.activeSamples, 0,
+            "stale samples were retained into the new session (\(segmenter.activeSamples) kept)"
+        )
+    }
+
+    /// A start-time classifier fault must survive its own main-queue delivery.
+    ///
+    /// Installing callbacks replays current state through the session fence; if the new session
+    /// is established after that, the replay is tagged stale and dropped, so the user is refused
+    /// capture with no explanation.
+    func testStartupClassifierFaultSurvivesMainQueueDrain() {
+        let capture = RecordingCapture()
+        // Unavailability is decided at assembly, before the engine exists and before it can
+        // install its forwarding — exactly the startup ordering that loses a one-shot event.
+        let segmenter = NativeVadSegmenter(threshold: 0.02)
+        segmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded from the app bundle")
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        var unavailableReasons: [String] = []
+        engine.onClassifierUnavailable = { unavailableReasons.append($0) }
+
+        XCTAssertFalse(engine.start(), "start must be refused without a classifier")
+        XCTAssertEqual(capture.startCount, 0, "capture was opened without a classifier")
+        drainMainQueue()
+
+        XCTAssertEqual(
+            unavailableReasons.count, 1,
+            "the startup fault was dropped as stale, so the refused start is unexplained"
+        )
+    }
+
     /// An explicit restart must clear a surfaced fault and its published state.
     ///
     /// `arch/ios.md` names "explicit listening restart" as an escape from the fault state. If
@@ -292,8 +350,30 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
     }
 }
 
+/// A capture that can withhold a buffer and release it later, standing in for audio the tap
+/// queued before `stop()`.
+final class HoldableCapture: AudioCaptureSource {
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var tapSession: Int = 0
+    private var held: [Float]?
+    private var heldAt: MonotonicTime?
+    private(set) var startCount = 0
+    func start() throws { startCount += 1 }
+    func stop() {}
+    func hold(samples: [Float], at time: MonotonicTime? = nil) {
+        held = samples
+        heldAt = time
+    }
+    func releaseHeld() {
+        guard let held else { return }
+        self.held = nil
+        onCapturedSamples?(held, heldAt)
+    }
+}
+
 final class RecordingCapture: AudioCaptureSource {
     var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var tapSession: Int = 0
     private(set) var startCount = 0
     func start() throws { startCount += 1 }
     func stop() {}

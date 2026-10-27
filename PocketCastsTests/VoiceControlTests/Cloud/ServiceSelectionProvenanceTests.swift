@@ -5,6 +5,7 @@ import XCTest
 /// a buffer as the real capture would.
 final class FakeAudioCapture: AudioCaptureSource {
     var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var tapSession: Int = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
     func start() throws { startCount += 1 }

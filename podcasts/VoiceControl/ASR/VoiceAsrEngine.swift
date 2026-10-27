@@ -326,6 +326,9 @@ class VoiceAsrEngine {
     private var sessionGeneration = 0
     private let sessionLock = NSLock()
 
+    /// Serializes segmenter mutation between queued capture processing and stop()/start().
+    private let segmenterLock = NSLock()
+
     private func currentSession() -> Int {
         sessionLock.lock()
         defer { sessionLock.unlock() }
@@ -372,7 +375,16 @@ class VoiceAsrEngine {
     /// and be missing on another.
     private func wireCaptureCallbacks() {
         segmenter.onUtterance = { [weak self] utterance, capturedAt in
-            Task { await self?.processUtterance(utterance, capturedAt: capturedAt) }
+            guard let self else { return }
+            // Fenced as well as the notifications: an utterance emitted from a stopped session
+            // is stale PCM, and suppressing only its UI event would still let that audio reach
+            // ASR and change the next turn.
+            let session = self.capture.tapSession
+            guard session == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped utterance from stale session=\(session) current=\(self.currentSession())")
+                return
+            }
+            Task { await self.processUtterance(utterance, capturedAt: capturedAt) }
         }
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
@@ -410,11 +422,20 @@ class VoiceAsrEngine {
         }
         capture.onCapturedSamples = { [weak self] samples, capturedAt in
             guard let self else { return }
-            // Read the session BEFORE processing: a `stop()` landing while these samples are
-            // processed bumps the generation, and the fault they raise must then be recognised
-            // as belonging to the session that just ended, not the one starting.
-            let session = self.currentSession()
-            self.segmenter.process(samples, capturedAt: capturedAt, session: session)
+            // Ownership is the TAP's session, stamped when capture started — not the generation
+            // current at delivery. A buffer the old tap queued before `stop()` arrives later but
+            // still belongs to the session that produced it.
+            let tapSession = self.capture.tapSession
+            // Segmenter mutation is serialized against stop()'s clear/reset, which runs on
+            // another thread. Without this the two would interleave and stale PCM could change
+            // the next utterance even though its notification was suppressed.
+            self.segmenterLock.lock()
+            defer { self.segmenterLock.unlock() }
+            guard tapSession == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped capture buffer from stale tap session=\(tapSession) current=\(self.currentSession())")
+                return
+            }
+            self.segmenter.process(samples, capturedAt: capturedAt, session: tapSession)
         }
     }
 
@@ -424,11 +445,19 @@ class VoiceAsrEngine {
     @discardableResult
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
+        // The new session must exist BEFORE callbacks are installed: installing them replays
+        // current state (a missing classifier) through the delivery fence, and a replay tagged
+        // with the previous generation would be dropped as stale — losing the very fault that
+        // explains why capture is about to be refused.
+        // The tap is created now, so its buffers are stamped with this session from this point.
+        // Stamped from the value `beginNewSession()` RETURNED: re-reading the property here would
+        // race a concurrent stop() and could stamp the tap with a superseded session.
+        capture.tapSession = beginNewSession()
+        // Mutates the segmenter (installs callbacks, replays state), so it is serialized against
+        // capture processing and stop() on other threads.
+        segmenterLock.lock()
         wireCaptureCallbacks()
-
-        // A restart begins a new session, so notifications still queued from the previous one
-        // are dropped rather than delivered against this session's state.
-        beginNewSession()
+        segmenterLock.unlock()
 
         // Never present a pipeline that cannot segment. Without a classifier there is no
         // trustworthy endpoint, so opening the microphone would capture audio the engine can
@@ -457,10 +486,11 @@ class VoiceAsrEngine {
     func stop() {
         FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
-        // `capture.stop()` does not drain callbacks the capture already queued, so invalidate
-        // this session BEFORE clearing: a fault produced by those late samples must not arrive
-        // after the recovery below and revive the interruption.
         beginNewSession()
+        // Clearing the segmenter races queued capture processing on another thread; serialize
+        // against it so a stale buffer cannot mutate the segmenter while it is being reset.
+        segmenterLock.lock()
+        defer { segmenterLock.unlock() }
         // An explicit stop is the advertised escape from a surfaced fault, so the faulty state
         // must not survive it. Routine frames never clear it — only this deliberate restart and a
         // genuine silence boundary do, so the tail of a still-spoken request cannot be dispatched.
