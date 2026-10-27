@@ -52,7 +52,7 @@ class NativeVadSegmenter {
     private var preRollInstants: [MonotonicTime?] = []
     /// Retains at most this much pre-confirmation audio. 0.5 s covers the classifier's window
     /// plus `minSpeechDuration` with margin while bounding memory when a room never confirms.
-    private static let maxPreRollSamples = 8000
+    static let maxPreRollSamples = 8000
 
     /// Capture rate used to convert a sample index into an instant offset.
     static let captureSampleRate = 16_000

@@ -110,13 +110,18 @@ class NativeAudioCapture: AudioCaptureSource {
         when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
     }
 
-    /// Delivers one tap buffer to the subscribed consumer with its capture instant.
+    /// Delivers one tap buffer to the subscribed consumer with its capture instant and the
+    /// session of the tap that produced it.
     ///
     /// The tap calls THIS, and a control observes the same function, so the boundary under test
     /// is the one production runs — not a parallel copy of its arithmetic. `when` is the
     /// buffer's own capture time, not this call's arrival; on a route whose host time is invalid
     /// the instant is nil and the echo filter declines to align rather than guessing.
-    func deliver(_ samples: [Float], when: AVAudioTime) {
+    ///
+    /// `tapSession` must be the value captured when the tap was installed. Reading the mutable
+    /// property here would report whatever session is current at delivery, which is precisely the
+    /// relabelling the fence exists to prevent.
+    func deliver(_ samples: [Float], when: AVAudioTime, tapSession: Int) {
         onCapturedSamples?(samples, Self.captureInstant(when: when), tapSession)
     }
 
@@ -144,7 +149,7 @@ class NativeAudioCapture: AudioCaptureSource {
         // Capture the session ONCE, when this tap is installed. Every buffer this tap queues
         // carries it, so a buffer released after a restart still reports the session that
         // produced it rather than the session that happens to be current.
-        let tapSession = self.tapSession
+        let tapSessionCapturedAtInstall = self.tapSession
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
@@ -204,7 +209,7 @@ class NativeAudioCapture: AudioCaptureSource {
                     // exactly this reason.
                     FileLog.shared.forceFlush()
                 }
-                self.deliver(converted, when: when)
+                self.deliver(converted, when: when, tapSession: tapSessionCapturedAtInstall)
             }
         }
         tapInstalled = true
