@@ -195,9 +195,16 @@ class VoiceControlService: ObservableObject {
 
     private var latestStageTiming: PipelineStageTiming?
 
-    /// The most recent segmentation fault, for diagnostics and any listener that renders the
-    /// interruption. Nil while the pipeline is healthy.
-    private(set) var latestSegmentationFault: VoiceAsrEngine.SegmentationFault?
+    /// The current segmentation fault, published so a listener can render the interruption.
+    ///
+    /// Published rather than merely stored, and cleared on recovery: `arch/ios.md` requires an
+    /// inspectable fault state, and a private stored value that never clears shows the user an
+    /// interruption that has already ended (or hides one that has not).
+    @Published private(set) var segmentationFault: VoiceAsrEngine.SegmentationFault?
+
+    /// True while speech classification cannot run. Listening is refused in this state rather
+    /// than presented as working: the pipeline has no trustworthy endpoint.
+    var isSpeechClassificationAvailable: Bool { !asrEngine.isClassifierUnavailable }
     private var latestRouterMetrics: RouterClassificationMetrics?
 
     private var cancellables = Set<AnyCancellable>()
@@ -744,8 +751,11 @@ class VoiceControlService: ObservableObject {
         // here makes the interruption inspectable (a listener such as the UI can read
         // `latestSegmentationFault`) and logs it alongside the other pipeline state, rather than
         // leaving it as a flag private to the segmenter with no observer.
+        asrEngine.onSegmentationFaultRecovered = { [weak self] in
+            self?.segmentationFault = nil
+        }
         asrEngine.onSegmentationFault = { [weak self] fault in
-            self?.latestSegmentationFault = fault
+            self?.segmentationFault = fault
             FileLog.shared.addMessage(
                 "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
                     + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"

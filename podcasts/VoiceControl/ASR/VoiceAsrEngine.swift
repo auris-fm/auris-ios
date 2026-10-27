@@ -214,6 +214,9 @@ class VoiceAsrEngine {
     /// observe the interruption, so the user would see silence with no explanation.
     var onSegmentationFault: ((SegmentationFault) -> Void)?
 
+    /// Announces that the surfaced fault ended, so a listener can clear the interruption.
+    var onSegmentationFaultRecovered: (() -> Void)?
+
     /// Surfaces that speech classification cannot run at all.
     ///
     /// Distinct from a segmentation fault: no classifier means no trustworthy endpoint, so the
@@ -309,10 +312,15 @@ class VoiceAsrEngine {
         backendReadyBox.task = nil
     }
 
+    /// Current classifier availability, so a caller can refuse listening instead of presenting
+    /// a pipeline that cannot produce an utterance.
+    var isClassifierUnavailable: Bool { segmenter.isClassifierUnavailable }
+
     /// Starts capture and returns whether it actually started. Capture errors
     /// are reported rather than swallowed: the caller must not treat a failed
     /// start as listening, and must release any acquired input route.
     @discardableResult
+
     /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
     func installCaptureCallbacksForTesting() {
@@ -335,6 +343,9 @@ class VoiceAsrEngine {
                 reason: nil
             ))
         }
+        segmenter.onRecoveredFromFault = { [weak self] in
+            self?.onSegmentationFaultRecovered?()
+        }
         segmenter.onClassifierUnavailable = { [weak self] fault in
             self?.onSegmentationFault?(SegmentationFault(
                 kind: .classifierUnavailable,
@@ -352,6 +363,14 @@ class VoiceAsrEngine {
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         wireCaptureCallbacks()
+
+        // Never present a pipeline that cannot segment. Without a classifier there is no
+        // trustworthy endpoint, so opening the microphone would capture audio the engine can
+        // never close into an utterance — listening that looks active and can never work.
+        if segmenter.isClassifierUnavailable {
+            FileLog.shared.addMessage("[VoicePipeline] engine start refused: no speech classifier; capture not opened")
+            return false
+        }
 
         preloadBackend()
 

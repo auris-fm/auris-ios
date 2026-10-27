@@ -402,6 +402,43 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
     }
 
+    /// The ceiling must trip on HANGOVER frames too, not only on positive classification.
+    ///
+    /// The negative branch also retains audio. Checking the bound only when a positive frame
+    /// arrives lets a long hangover push the retained utterance past the ceiling and then be
+    /// emitted by the endpoint without any interruption.
+    func testCeilingCrossedOnHangoverFramesTripsBeforeAnyEndpoint() {
+        // Reach just under the ceiling on positives, then keep feeding negatives. The silence
+        // timeout is long enough that no endpoint fires while the hangover accumulates.
+        let framesToCeiling = 240_000 / 20
+        let frame = [Float](repeating: 0.1, count: 320)
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: 60_000,   // no endpoint during the test
+            classifier: script
+        )
+        var dispatched: [[Float]] = []
+        var faults: [NativeVadSegmenter.StuckActiveFault] = []
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onStuckActiveFault = { faults.append($0) }
+
+        for _ in 0..<(framesToCeiling - 10) { segmenter.process(frame) }
+        XCTAssertTrue(faults.isEmpty, "tripped before the hangover, so this run proves nothing")
+
+        // Only negatives from here: the retained buffer, not a positive count, must cross the bound.
+        script.silenceAfterSpeech = true
+        for _ in 0..<30 { segmenter.process(frame) }
+
+        XCTAssertFalse(
+            faults.isEmpty,
+            "the retained utterance crossed the supported ceiling on hangover frames but no "
+                + "interruption was surfaced"
+        )
+        XCTAssertTrue(dispatched.isEmpty, "audio was dispatched instead of suppressed on the fault")
+        XCTAssertEqual(faults.first?.elapsedMs, 240_000)
+    }
+
     // MARK: - Classifier unavailability is surfaced, not degraded
 
     /// A missing classifier must be reported and must dispatch nothing.

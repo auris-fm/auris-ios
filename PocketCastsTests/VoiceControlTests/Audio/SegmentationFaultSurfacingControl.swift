@@ -15,6 +15,16 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         func release() {}
     }
 
+    /// Capture stub that records whether the microphone was actually opened, so "refused to
+    /// listen" can be asserted as "capture never started" rather than inferred from a return value.
+    private final class RecordingCapture: AudioCaptureSource {
+        var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+        private(set) var startCount = 0
+
+        func start() throws { startCount += 1 }
+        func stop() {}
+    }
+
     private func makeEngine(segmenter: NativeVadSegmenter) -> VoiceAsrEngine {
         VoiceAsrEngine(
             capture: NativeAudioCapture(),
@@ -53,6 +63,76 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertEqual(fault.kind, .durationLimitReached)
         XCTAssertGreaterThan(fault.elapsedMs, 0)
         XCTAssertTrue(dispatched.isEmpty, "the fault dispatched audio instead of suppressing it")
+    }
+
+    /// A classifier that was unavailable at construction must still reach an observer.
+    ///
+    /// Assembly decides availability before the engine installs its forwarding, so an event fired
+    /// only at that moment is lost. The engine must learn the current state when it wires up.
+    func testClassifierUnavailabilitySurvivesTheStartupOrdering() {
+        let segmenter = NativeVadSegmenter(threshold: 0.020)
+        // Same order as assembly: report BEFORE the engine exists and installs callbacks.
+        segmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded from the app bundle")
+
+        let engine = makeEngine(segmenter: segmenter)
+        var faults: [VoiceAsrEngine.SegmentationFault] = []
+        engine.onSegmentationFault = { faults.append($0) }
+        engine.installCaptureCallbacksForTesting()
+
+        XCTAssertEqual(
+            faults.count, 1,
+            "the startup-time unavailability was lost: the engine installed its forwarding after "
+                + "the only notification, so nothing can show the interruption"
+        )
+        XCTAssertEqual(faults.first?.kind, .classifierUnavailable)
+        XCTAssertTrue(engine.isClassifierUnavailable)
+    }
+
+    /// Starting capture without a classifier must be refused.
+    ///
+    /// Otherwise the microphone opens and can never close an utterance, which presents a broken
+    /// pipeline as listening.
+    func testStartIsRefusedWhenNoClassifierIsAvailable() {
+        let segmenter = NativeVadSegmenter(threshold: 0.020)
+        segmenter.reportClassifierUnavailable("model missing")
+        let capture = RecordingCapture()
+        let engine = VoiceAsrEngine(
+            capture: capture,
+            segmenter: segmenter,
+            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: SilentDetector(),
+            gracePeriodSignal: GracePeriodSignal()
+        )
+
+        XCTAssertFalse(engine.start(), "start reported success with no speech classifier")
+        XCTAssertEqual(capture.startCount, 0, "capture was opened even though nothing can segment it")
+    }
+
+    /// Recovery must clear the surfaced fault.
+    func testRecoveryClearsTheSurfacedFault() {
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 20, classifier: script)
+        let engine = makeEngine(segmenter: segmenter)
+        var faults: [VoiceAsrEngine.SegmentationFault] = []
+        var recovered = 0
+        engine.onSegmentationFault = { faults.append($0) }
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        XCTAssertEqual(faults.count, 1, "the ceiling did not surface a fault")
+
+        script.silenceAfterSpeech = true
+        let deadline = Date().addingTimeInterval(0.12)
+        while Date() < deadline { segmenter.process([Float](repeating: 0, count: 320)) }
+
+        XCTAssertEqual(
+            recovered, 1,
+            "recovery was not announced, so a listener would keep presenting an interruption that "
+                + "has already ended"
+        )
+        XCTAssertFalse(segmenter.isStuckActive)
     }
 
     /// A missing classifier must be observable too, not just logged.

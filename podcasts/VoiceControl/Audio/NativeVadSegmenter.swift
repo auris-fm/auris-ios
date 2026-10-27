@@ -99,16 +99,37 @@ class NativeVadSegmenter {
     /// dispatches nothing: with no classifier there is no trustworthy endpoint.
     private(set) var isClassifierUnavailable = false
 
+    /// The reason recorded when classification became unavailable, retained so a late observer
+    /// can still learn about it.
+    ///
+    /// Assembly decides availability at construction, before the engine installs its forwarding.
+    /// An event that fires only at that moment is lost, which is why unavailability is held as
+    /// state as well as delivered as an event.
+    private(set) var classifierUnavailableReason: String?
+
     struct ClassifierUnavailableFault: Equatable {
         let reason: String
     }
 
-    var onClassifierUnavailable: ((ClassifierUnavailableFault) -> Void)?
+    /// Delivers unavailability. Setting it replays the current reason if classification is
+    /// ALREADY unavailable, because the condition is decided at construction and an observer
+    /// installed afterwards would otherwise never hear about it.
+    /// Announces that a fault ended, so a listener can clear the interruption.
+    var onRecoveredFromFault: (() -> Void)?
+
+    var onClassifierUnavailable: ((ClassifierUnavailableFault) -> Void)? {
+        didSet {
+            if let reason = classifierUnavailableReason, onClassifierUnavailable != nil {
+                onClassifierUnavailable?(ClassifierUnavailableFault(reason: reason))
+            }
+        }
+    }
 
     /// Reports that speech classification cannot run, so capture must not pretend to work.
     func reportClassifierUnavailable(_ reason: String) {
         guard !isClassifierUnavailable else { return }
         isClassifierUnavailable = true
+        classifierUnavailableReason = reason
         FileLog.shared.addMessage("[VoicePipeline] vad classifier unavailable: \(reason); not falling back to the energy rule")
         onClassifierUnavailable?(ClassifierUnavailableFault(reason: reason))
     }
@@ -201,31 +222,7 @@ class NativeVadSegmenter {
                 return
             }
             silenceStart = nil
-            // The supported ceiling bounds the RETAINED utterance: pre-roll prepended on
-            // confirmation and negative frames kept inside it are audio the user genuinely spoke
-            // through, so counting only post-confirmation positives would let the emitted
-            // utterance exceed the ceiling the platform promises.
-            if speechActive {
-                activeSamples = buffer.count
-            }
-            // A detector that keeps reporting speech is a fault, not a long command. Dispatch
-            // nothing — a fragment must never reach ASR — report it, and rearm.
-            if speechActive, !isStuckActive, activeSamples >= stuckActiveSamples {
-                let discarded = buffer.count
-                let elapsedMs = activeSamples / 16
-                FileLog.shared.addMessage("[VoicePipeline] vad stuck-active fault: \(elapsedMs)ms of continuous speech; discarded \(discarded) samples without dispatching; staying in the faulty state until silence")
-                isStuckActive = true
-                // Discard the captured audio and refuse to dispatch any of it.
-                buffer.removeAll(keepingCapacity: true)
-                preRoll.removeAll(keepingCapacity: true)
-                preRollInstants.removeAll()
-                preRollCapturedAt = nil
-                utteranceCapturedAt = nil
-                speechFrameCount = 0
-                silenceStart = nil
-                onStuckActiveFault?(StuckActiveFault(discardedSamples: discarded, elapsedMs: elapsedMs))
-                return
-            }
+            if checkRetainedCeiling() { return }
         } else if speechActive || isStuckActive {
             if silenceStart == nil {
                 silenceStart = Date()
@@ -233,15 +230,21 @@ class NativeVadSegmenter {
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
                 buffer.append(contentsOf: samples)
+                // Hangover frames are retained audio and count toward the ceiling. Checking only
+                // on positive classification would let a long hangover cross the bound and then
+                // be emitted by the endpoint without any interruption.
+                if checkRetainedCeiling() { return }
             }
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
                 if isStuckActive {
                     // Genuine silence ended the request: leave the faulty state without
-                    // dispatching anything from it.
-                    FileLog.shared.addMessage("[VoicePipeline] vad stuck-active cleared after silence; nothing dispatched")
+                    // dispatching anything from it. Recovery is announced so an observer can
+                    // clear the interruption instead of leaving it presented forever.
+                    FileLog.shared.addMessage("[VoicePipeline] vad duration-limit interruption cleared after silence; nothing dispatched")
                     isStuckActive = false
                     reset()
+                    onRecoveredFromFault?()
                 } else {
                     emitUtterance()
                 }
@@ -261,6 +264,37 @@ class NativeVadSegmenter {
     }
 
     /// Hold unconfirmed audio, keeping its capture instants aligned under eviction.
+    /// Enforces the supported ceiling against the RETAINED utterance.
+    ///
+    /// Must be called after every append that grows the retained buffer, in both the positive and
+    /// negative branches: pre-roll prepended on confirmation and hangover frames kept inside the
+    /// utterance are audio the user genuinely spoke. Counting only post-confirmation positives —
+    /// or checking only when a positive frame arrives — lets the emitted utterance exceed the
+    /// ceiling the platform promises, with no interruption.
+    ///
+    /// - Returns: true when the fault tripped and the caller must stop processing this frame.
+    @discardableResult
+    private func checkRetainedCeiling() -> Bool {
+        guard speechActive, !isStuckActive else { return false }
+        activeSamples = buffer.count
+        guard activeSamples >= stuckActiveSamples else { return false }
+
+        let discarded = buffer.count
+        let elapsedMs = activeSamples / 16
+        FileLog.shared.addMessage("[VoicePipeline] vad duration-limit interruption: \(elapsedMs)ms retained; discarded \(discarded) samples without dispatching; staying in the fault state until silence")
+        isStuckActive = true
+        // Discard the captured audio and refuse to dispatch any of it.
+        buffer.removeAll(keepingCapacity: true)
+        preRoll.removeAll(keepingCapacity: true)
+        preRollInstants.removeAll()
+        preRollCapturedAt = nil
+        utteranceCapturedAt = nil
+        speechFrameCount = 0
+        silenceStart = nil
+        onStuckActiveFault?(StuckActiveFault(discardedSamples: discarded, elapsedMs: elapsedMs))
+        return true
+    }
+
     /// Holds unconfirmed audio with a per-sample capture instant.
     ///
     /// `capturedAt` is the instant of the buffer's FIRST sample, so each sample's instant is that
