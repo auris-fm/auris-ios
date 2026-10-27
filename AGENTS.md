@@ -103,7 +103,8 @@ answer into 50 blind minutes.
 every worktree (and every `/tmp` scratch clone) has its own. One session installed
 `podcasts-bmth…` — a `/tmp/rev-pres` clone — while working in a different worktree, i.e. it put
 the wrong app on the simulator. Read `CODESIGNING_FOLDER_PATH` from `xcodebuild -showBuildSettings`,
-or use `make launch_mac`.
+or use `make launch_mac`, which resolves *this* checkout's DerivedData by matching `WorkspacePath`
+in each `info.plist` and fails instead of guessing.
 
 **`build_fast` / `test_fast` are for the local loop only.** They add
 `-disableAutomaticPackageResolution`, `DEBUG_INFORMATION_FORMAT=dwarf`, `CODE_SIGNING_ALLOWED=NO`

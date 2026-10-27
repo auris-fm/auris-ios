@@ -132,6 +132,10 @@ test_fast: ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not f
         2>&1 | tee $(LOG_DIR)/test_fast.log
 
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
+	# $(SIM_ARCH), not a hardcoded ARCHS=arm64: Intel hosts are not supported, and
+	# scripts/build-llama-ios.sh builds the simulator slice arm64-only ("no x86_64 simulator
+	# slice"), so an Intel build fails loudly at the x86_64 link. That is deliberate — the
+	# previous arm64 pin made it "succeed" into an arm64 simulator app an Intel Mac cannot run.
 	xcodebuild -project podcasts.xcodeproj \
 	       -scheme pocketcasts \
 	       -configuration Debug \
@@ -141,8 +145,16 @@ build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on M
 
 launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	killall podcasts 2>/dev/null || true; \
-	APP="$$(find ~/Library/Developer/Xcode/DerivedData -name podcasts.app -path '*/Debug-iphonesimulator/*' -maxdepth 5 2>/dev/null | head -1)"; \
-	if [ -n "$$APP" ] && [ -d podcasts/VoiceControl/Resources/earcons ]; then \
+	APP="$$(for d in "$$HOME"/Library/Developer/Xcode/DerivedData/podcasts-*; do \
+		[ "$$(plutil -extract WorkspacePath raw "$$d/info.plist" 2>/dev/null)" = "$$PWD/podcasts.xcodeproj" ] || continue; \
+		echo "$$d/Build/Products/Debug-iphonesimulator/podcasts.app"; \
+		break; \
+	done)"; \
+	if [ ! -d "$$APP" ]; then \
+		echo "error: no Debug-iphonesimulator podcasts.app in DerivedData for $$PWD"; \
+		exit 1; \
+	fi; \
+	if [ -d podcasts/VoiceControl/Resources/earcons ]; then \
 		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
 	fi; \
 	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \
