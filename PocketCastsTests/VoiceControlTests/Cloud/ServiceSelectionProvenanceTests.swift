@@ -200,11 +200,25 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// Delivers audio through the capture so the REAL registered path runs — the only input the
     /// registered case uses.
     private func driveRegisteredCallback(capture: FakeAudioCapture) async {
+        let frameSize = 1_600                                              // 100 ms at 16 kHz
+        // The audio must be speech to the REAL model. This control drives the real assembly, which
+        // classifies with the bundled Silero model. The previous fixture was constant 0.05 DC —
+        // accepted by the energy rule on loudness alone, and correctly not speech to a model that
+        // reads structure. `SileroSegmenterIntegrationControl.test_fixtureEvidence_...` measures
+        // both directions. With a non-speech fixture no utterance can form, so "no turn" described
+        // the fixture rather than the provenance this control exists to carry.
+        let speech = Self.recordedSpeechSamples()
+        XCTAssertGreaterThan(
+            speech.count, frameSize * 5,
+            "no recorded speech fixture is available, so this control cannot supply speech to the "
+                + "real classifier and would prove nothing"
+        )
         // ONE FRAME PER CALL: `minSpeechFrames` (5) counts CALLS, not samples, so a single large
         // buffer is one frame and speech is never confirmed.
-        let frameSize = 1_600                                              // 100 ms at 16 kHz
-        for _ in 0..<20 {                                                  // 2s of speech
-            capture.emit(samples: [Float](repeating: 0.05, count: frameSize), at: nil)
+        var offset = 0
+        while offset + frameSize <= speech.count {
+            capture.emit(samples: Array(speech[offset..<(offset + frameSize)]), at: nil)
+            offset += frameSize
         }
         // The silence window is WALL-CLOCK (`Date()` vs 500 ms), so quiet frames must be spread
         // across real time; back-to-back they elapse microseconds and the condition never fires.
@@ -213,6 +227,43 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
         try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    /// Recorded human speech at the model's rate, read in place from the host checkout.
+    ///
+    /// Never copied into the repository: it is an external Apache-2.0 fixture, and duplicating it
+    /// would make the test pass against a stale copy of something it does not own.
+    private static func recordedSpeechSamples() -> [Float] {
+        let hostHome = ProcessInfo.processInfo.environment["AURIS_HOST_HOME"] ?? "/Users/dev"
+        let url = URL(fileURLWithPath: hostHome)
+            .appendingPathComponent("code/auris/livekit-wakeword/swift/Tests/LiveKitWakeWordTests/Fixtures/positive.wav")
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        // Minimal RIFF parse, matching the integration control's reader.
+        func u32(_ o: Int) -> Int {
+            Int(data[o]) | Int(data[o + 1]) << 8 | Int(data[o + 2]) << 16 | Int(data[o + 3]) << 24
+        }
+        var index = 12
+        var dataRange: Range<Int>?
+        while index + 8 <= data.count {
+            let id = String(bytes: data[index..<(index + 4)], encoding: .ascii) ?? ""
+            let size = u32(index + 4)
+            let body = index + 8
+            if id == "data" {
+                dataRange = body..<min(body + size, data.count)
+                break
+            }
+            index = body + size + (size % 2)
+        }
+        guard let range = dataRange else { return [] }
+        var samples: [Float] = []
+        samples.reserveCapacity(range.count / 2)
+        var i = range.lowerBound
+        while i + 1 < range.upperBound {
+            let raw = Int16(bitPattern: UInt16(data[i]) | UInt16(data[i + 1]) << 8)
+            samples.append(Float(raw) / 32768.0)
+            i += 2
+        }
+        return samples
     }
 
     /// Acquisition is asynchronous: wait (bounded) for the gate to reach listening instead of

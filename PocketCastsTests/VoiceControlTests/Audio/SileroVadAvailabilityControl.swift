@@ -192,3 +192,27 @@ final class SileroBundledModelResolutionControl: XCTestCase {
     }
 }
 #endif
+
+/// Determines whether the constant-valued fixture used by `ServiceSelectionProvenanceTests`
+/// ("speech") is speech to the real model.
+///
+/// WHY. That control drives the REAL assembly, which classifies with real Silero. Its fixture is
+/// 20 frames of constant 0.05 DC — a shape the energy rule accepted on loudness alone. If Silero
+/// does not call it speech, the assertion "the registered input produced no turn" describes a
+/// fixture artefact rather than a provenance defect, and the fixture must supply real speech.
+final class SileroFixtureClassificationControl: XCTestCase {
+    func test_constantDCFixture_isNotClassifiedAsSpeechByTheRealModel() throws {
+        guard let classifier = SileroSpeechFrameClassifier.bundled() else {
+            throw XCTSkip("the bundled model is unavailable in this environment")
+        }
+        // Exactly what the fixture emits: 1,600 samples (100 ms) of constant 0.05.
+        let fixture = [Float](repeating: 0.05, count: 1_600)
+        let classified = classifier.isSpeech(fixture)
+        print("FIXTUREDIAG constant-0.05 isSpeech=\(classified)")
+        XCTAssertFalse(
+            classified,
+            "if the model DID call constant DC speech, the fixture would be valid and the "
+                + "provenance failure would have another cause"
+        )
+    }
+}

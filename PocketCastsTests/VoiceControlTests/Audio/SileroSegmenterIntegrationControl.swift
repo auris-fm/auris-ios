@@ -49,6 +49,39 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
     }
 
     /// Reads a 16-bit PCM WAV into normalised floats at its native rate.
+    /// The provenance control's "speech" fixture must actually BE speech to this model.
+    ///
+    /// `ServiceSelectionProvenanceTests` drives the real assembly, so its frames are classified by
+    /// real Silero. Its fixture was constant 0.05 DC — valid under the energy rule, which decided on
+    /// loudness alone, and not speech to a model that reads structure. Measured here: constant DC
+    /// is not speech, recorded speech is. That is why the fixture must be repaired rather than the
+    /// failure relabelled baseline.
+    func test_fixtureEvidence_constantDCIsNotSpeechButRecordedSpeechIs() throws {
+        try requireFixtures()
+        let classifier = try XCTUnwrap(SileroSpeechFrameClassifier.make(modelPath: try bundledModelPath()))
+
+        XCTAssertFalse(
+            classifier.isSpeech([Float](repeating: 0.05, count: 1_600)),
+            "constant DC is not speech to the real model, so it cannot stand in for speech"
+        )
+
+        let (samples, rate) = try readWav(speechFixture)
+        XCTAssertEqual(rate, 16_000, "the fixture is expected at the model's rate")
+        // The recording sits on near-silent padding, so require that SOME window is speech rather
+        // than every one.
+        var speechWindows = 0
+        var index = 0
+        while index + SileroSpeechFrameClassifier.frameSize <= samples.count {
+            let window = Array(samples[index..<(index + SileroSpeechFrameClassifier.frameSize)])
+            if classifier.isSpeech(window) { speechWindows += 1 }
+            index += SileroSpeechFrameClassifier.frameSize
+        }
+        XCTAssertGreaterThan(
+            speechWindows, 0,
+            "recorded speech must classify as speech, or no fixture can drive the classified path"
+        )
+    }
+
     private func readWav(_ url: URL) throws -> (samples: [Float], sampleRate: Int) {
         let data = try Data(contentsOf: url)
         // Minimal RIFF parse: find "fmt " and "data" chunks rather than assuming a fixed layout.
