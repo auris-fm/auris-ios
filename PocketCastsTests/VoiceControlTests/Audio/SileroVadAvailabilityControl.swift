@@ -153,3 +153,42 @@ final class SileroVadAvailabilityControl: XCTestCase {
         XCTAssertFalse(detector.isSpeechDetected(), "silence must not be classified as speech")
     }
 }
+
+#if canImport(PocketCastsServer)
+/// The production bundle lookup must resolve the model in the layout the app actually ships.
+///
+/// The model enters the app through a folder reference, and Xcode's flattening determines where
+/// it lands. A lookup that assumes the wrong location returns nil — which used to silently
+/// reinstate the energy rule, so the failure looked like normal listening instead of a broken
+/// classifier. This control asserts resolution against the real built bundle rather than a path
+/// synthesized for the test.
+final class SileroBundledModelResolutionControl: XCTestCase {
+    func testTheProductionLookupResolvesTheModelsShippedLocation() throws {
+        var found: [String] = []
+        if let root = Bundle.main.path(forResource: "silero_vad", ofType: "onnx") { found.append(root) }
+        if let nested = Bundle.main.path(forResource: "silero_vad", ofType: "onnx", inDirectory: "vad") { found.append(nested) }
+
+        XCTAssertFalse(
+            found.isEmpty,
+            "neither the bundle root nor vad/ contains silero_vad.onnx; the production lookup "
+                + "would fail silently unless unavailability is surfaced. Bundle: \(Bundle.main.bundlePath)"
+        )
+        for path in found {
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? nil
+            XCTAssertEqual(size, 643_854, "unexpected model size at \(path)")
+        }
+    }
+
+    /// `bundled()` must return a usable classifier in the shipped layout, not nil.
+    func testProductionClassifierLoadsFromTheBundle() {
+        guard let classifier = SileroSpeechFrameClassifier.bundled() else {
+            return XCTFail(
+                "bundled() returned nil in the shipped bundle; the app would report no classifier "
+                    + "and dispatch nothing, or previously have run the energy rule"
+            )
+        }
+        // A loaded classifier must produce a decision, not merely exist.
+        _ = classifier.isSpeech([Float](repeating: 0, count: 5_120))
+    }
+}
+#endif

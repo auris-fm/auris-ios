@@ -75,10 +75,24 @@ final class SileroSpeechFrameClassifier: SpeechFrameClassifier {
     ///
     /// - Returns: nil when the model resource is missing or the runtime rejects the config.
     static func bundled() -> SileroSpeechFrameClassifier? {
-        guard let modelPath = Bundle.main.path(forResource: "silero_vad", ofType: "onnx") else {
-            FileLog.shared.addMessage("[VoicePipeline] silero model missing from bundle")
+        // The model ships through a folder reference (`Resources/vad`). Xcode flattens that
+        // reference: measured in a built app, `silero_vad.onnx` appears at the bundle root AND
+        // under `vad/`, with the root copy the one the build refreshes. The root is therefore
+        // tried first, with `vad/` as a fallback for a layout that keeps the directory.
+        //
+        // Both are tried explicitly because resolving only one made availability depend on which
+        // layout the build happened to produce — and an unresolved model used to fall back
+        // silently to the energy rule, hiding the failure behind working-looking capture.
+        let candidates = [
+            Bundle.main.path(forResource: "silero_vad", ofType: "onnx"),
+            Bundle.main.path(forResource: "silero_vad", ofType: "onnx", inDirectory: "vad")
+        ].compactMap { $0 }
+
+        guard let modelPath = candidates.first else {
+            FileLog.shared.addMessage("[VoicePipeline] silero model missing from bundle (looked in vad/ and root)")
             return nil
         }
+        FileLog.shared.addMessage("[VoicePipeline] silero model resolved at \(modelPath)")
         return make(modelPath: modelPath)
     }
 
