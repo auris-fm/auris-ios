@@ -141,7 +141,10 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         // from "we had one and the exchange failed" — the first is a local state
         // problem and must not be reported as a server rejection.
         if credentialProvider()?.isEmpty != false {
-            Self.diagnose("no account credential is stored, so no token can be acquired and nothing was dialled")
+            // State ONLY the observed fact. A cached refresh acquisition can still follow this
+            // point in the await below, so claiming "nothing was dialled" pre-judges an outcome
+            // this line cannot see.
+            Self.diagnose("no account credential is stored, so no token can be acquired from the account")
         }
 
         // Nothing usable cached: the unavoidable await. Retried **in place** (not

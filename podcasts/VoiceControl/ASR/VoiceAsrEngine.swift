@@ -374,6 +374,30 @@ class VoiceAsrEngine {
     /// enqueued and that delivery running — the real interleave, forced rather than hoped for.
     var deliveryQueueForTesting: DispatchQueue = .main
 
+    /// The single recovery-delivery path, shared by the silence boundary and an explicit stop.
+    ///
+    /// Delivered WITHOUT a session fence: recovery reports that the fault state is gone, not work
+    /// owned by a capture session, and a restart bumping the generation after this is queued must
+    /// not suppress it — `stop()` sees `isStuckActive == false` once silence already cleared it and
+    /// would queue no replacement, leaving the interruption presented forever.
+    ///
+    /// Because it is unfenced, it must not clear a NEWER fault. That state is read under
+    /// `segmenterLock`, the same lock capture processing mutates it under: reading it unlocked on
+    /// the delivery queue is a data race with the audio thread.
+    private func queueRecoveryNotification() {
+        deliverOnMain(fenced: false) { [weak self] engine in
+            guard let self else { return }
+            self.segmenterLock.lock()
+            let stillFaulted = self.segmenter.isStuckActive
+            self.segmenterLock.unlock()
+            guard !stillFaulted else {
+                FileLog.shared.addMessage("[VoicePipeline] recovery dropped: a newer fault is active")
+                return
+            }
+            engine.onSegmentationFaultRecovered?()
+        }
+    }
+
     /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
     func installCaptureCallbacksForTesting() {
@@ -434,14 +458,7 @@ class VoiceAsrEngine {
             //
             // It is still delivered in order, and it must not report recovery over a NEWER fault:
             // if one was raised after this silence boundary, the interruption is real and stays.
-            deliverOnMain(fenced: false) { [weak self] engine in
-                guard let self else { return }
-                guard !self.segmenter.isStuckActive else {
-                    FileLog.shared.addMessage("[VoicePipeline] recovery dropped: a newer fault is active")
-                    return
-                }
-                engine.onSegmentationFaultRecovered?()
-            }
+            self.queueRecoveryNotification()
         }
         segmenter.onClassifierUnavailable = { [weak self] fault in
             self?.deliverOnMain { engine in
@@ -529,10 +546,7 @@ class VoiceAsrEngine {
         if segmenter.isStuckActive {
             FileLog.shared.addMessage("[VoicePipeline] explicit stop clearing the fault state")
             segmenter.clearStuckActiveFault()
-            // Delivered WITHOUT a session fence: recovery is confirmation that the fault state is
-            // gone, and a restart bumping the generation after this is queued must not suppress
-            // it — otherwise the interruption stays presented with nothing left to clear it.
-            deliverOnMain(session: nil, fenced: false) { $0.onSegmentationFaultRecovered?() }
+            queueRecoveryNotification()
         }
         // Reset ALL remaining segmentation state at the boundary. A partially buffered utterance
         // is not a fault, so the block above does not cover it; leaving it in place would

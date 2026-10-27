@@ -237,6 +237,45 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         )
     }
 
+    /// The STOP path must not clear a newer fault either.
+    ///
+    /// `stop()` now shares the silence path's recovery delivery, which drops itself when a fault
+    /// is active again by the time it runs. This drives that guard on the stop side: stop,
+    /// restart, then a second real fault while deliveries are still suspended.
+    func testAStopRecoveryDoesNotClearAFaultRaisedAfterTheRestart() async {
+        let capture = RecordingCapture()
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        let engine = makeEngine(segmenter: segmenter, capture: capture)
+        let deliveryQueue = DispatchQueue(label: "stop.newer.fault.control")
+        engine.deliveryQueueForTesting = deliveryQueue
+        var recovered = 0
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        drainQueue(deliveryQueue)
+        XCTAssertTrue(segmenter.isStuckActive)
+
+        // Hold deliveries, then stop and restart: stop queues its recovery, still unsent.
+        deliveryQueue.suspend()
+        engine.stop()
+        _ = engine.start()
+
+        // A second, REAL fault is raised while that recovery is still queued.
+        for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive, "the second fault did not trip")
+
+        deliveryQueue.resume()
+        drainQueue(deliveryQueue)
+
+        XCTAssertEqual(
+            recovered, 0,
+            "stop's recovery cleared a fault raised after the restart, so a live interruption is "
+                + "reported as gone"
+        )
+    }
+
     /// A delayed recovery must not clear a NEWER fault that arrived while it was queued.
     ///
     /// Recovery is delivered unfenced so a restart cannot suppress it. That freedom cuts both
