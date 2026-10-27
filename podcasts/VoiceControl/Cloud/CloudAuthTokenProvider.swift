@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsServer
+import PocketCastsUtils
 
 /// Task #33 client half — the Auris-issued token implementation behind
 /// `CloudTokenProviding`.
@@ -62,10 +63,15 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// failing verification path (503/429/transport) must not sign the user out.
     private enum Outcome {
         case success(Tokens)
-        /// Checked and rejected (401): the credential or chain is genuinely bad.
-        case rejected
+        /// Checked and rejected: the credential or chain is genuinely bad.
+        ///
+        /// Deliberately carries `reason` because "rejected" alone is ambiguous: `post`
+        /// maps 401 and 403 from *either* endpoint here, and a request body that fails
+        /// to encode also lands here without any server contact. A diagnostic that
+        /// reports only "rejected" would invite exactly the wrong conclusion.
+        case rejected(reason: String)
         /// Could not be checked (5xx/429/transport/unconfigured): keep everything.
-        case inconclusive
+        case inconclusive(reason: String)
     }
 
     private let authBaseURLProvider: () -> String
@@ -131,6 +137,13 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
             refreshInBackground()
             return usable
         }
+        // Nothing usable cached. Distinguish "we hold no credential to exchange"
+        // from "we had one and the exchange failed" — the first is a local state
+        // problem and must not be reported as a server rejection.
+        if credentialProvider()?.isEmpty != false {
+            Self.diagnose("no account credential is stored, so no token can be acquired and nothing was dialled")
+        }
+
         // Nothing usable cached: the unavoidable await. Retried **in place** (not
         // by recursing into `token()`) when the account changed under an in-flight
         // acquisition — a joiner can resume before the single-flight owner clears
@@ -152,19 +165,41 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 // otherwise the turn is dialled as an abandoned account, or with a
                 // token minted by the old origin (PR #20 review).
                 return tokens.accessToken
-            case .success:
+            case let .success(tokens):
                 // The in-flight work belonged to a previous account, arrived after
                 // the credential was withdrawn, or was minted against another
                 // origin: acquire for the current state rather than handing it over.
-                guard attempt == 0 else { return nil }
+                //
+                // Name WHICH guard failed. `token()` returning nil has several
+                // distinct causes — a rejected refresh, an inconclusive exchange,
+                // or a success disqualified here — and a caller that reports only
+                // "no credential" cannot tell a bad session from a bad origin.
+                // Identity and origin are compared, never printed; no token value
+                // or credential is logged.
+                if attempt > 0 {
+                    Self.diagnose(
+                        "token acquisition returned no usable token: identityMatch=\(tokens.sourceIdentity == identityProvider()) "
+                            + "credentialPresent=\(credentialProvider()?.isEmpty == false) "
+                            + "originMatch=\(tokens.sourceOrigin == authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))))"
+                    )
+                    return nil
+                }
                 continue
-            case .rejected:
+            case let .rejected(reason):
+                Self.diagnose("token acquisition rejected: \(reason)")
                 return nil
-            case .inconclusive:
+            case let .inconclusive(reason):
+                Self.diagnose("token acquisition inconclusive: \(reason); no cached token was usable")
                 return cachedUsableToken()
             }
         }
         return nil
+    }
+
+    /// Log-only diagnostics. Coarse reasons and booleans only: never a token,
+    /// credential, URL containing a secret, or response body.
+    private static func diagnose(_ message: String) {
+        FileLog.shared.addMessage("[CloudAuth] \(message)")
     }
 
     func handleUnauthorized() async {
@@ -200,14 +235,14 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 store(rotated)
                 return .success(rotated)
             case .rejected:
-                // 401: the chain is revoked/rotated-out — re-acquire from the
-                // account credential instead of replaying the refresh.
+                // The chain is revoked/rotated-out — re-acquire from the account
+                // credential instead of replaying the refresh.
                 dropChain()
                 return await exchangeCredential()
-            case .inconclusive:
+            case let .inconclusive(reason):
                 // Verification path unreachable: keep the chain AND any token
                 // that is still within its real lifetime.
-                return .inconclusive
+                return .inconclusive(reason: "refresh inconclusive: \(reason)")
             }
         }
         return await exchangeCredential()
@@ -274,7 +309,9 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     private func exchangeCredential() async -> Outcome {
         // Sampled at request start so the minted tokens are keyed to the account
         // that actually presented the credential (PR #20 review).
-        guard let credential = credentialProvider(), !credential.isEmpty else { return .rejected }
+        guard let credential = credentialProvider(), !credential.isEmpty else {
+            return .rejected(reason: "no account credential is stored; no exchange was attempted")
+        }
         let identity = identityProvider()
         let body: [String: Any] = [
             "credential": credential,
@@ -288,10 +325,10 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         case let .success(tokens):
             store(tokens)
             return .success(tokens)
-        case .rejected:
-            return .rejected
-        case .inconclusive:
-            return .inconclusive
+        case let .rejected(reason):
+            return .rejected(reason: reason)
+        case let .inconclusive(reason):
+            return .inconclusive(reason: reason)
         }
     }
 
@@ -314,26 +351,36 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// decoded (PR #20 review).
     private func post(path: String, body: [String: Any], presentedIdentity: String?, presentedOrigin: String?) async -> Outcome {
         let baseURL = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else { return .inconclusive }
+        guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else {
+            return .inconclusive(reason: "no auth base URL configured")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = Self.requestTimeoutSeconds
-        guard let encoded = try? JSONSerialization.data(withJSONObject: body) else { return .rejected }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
+            // Local failure: no request was sent.
+            return .rejected(reason: "request body failed to encode locally; no request was sent")
+        }
         request.httpBody = encoded
 
         do {
             let (data, response) = try await session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if status == 200 {
-                guard let tokens = decodeTokens(data, presentedIdentity: presentedIdentity, presentedOrigin: presentedOrigin) else { return .inconclusive }
+                guard let tokens = decodeTokens(data, presentedIdentity: presentedIdentity, presentedOrigin: presentedOrigin) else {
+                    return .inconclusive(reason: "200 from \(path) but the response could not be decoded")
+                }
                 return .success(tokens)
             }
             // 401/403: checked and rejected. Anything else (5xx/429/other) is
             // "could not check" — never a reason to discard the credential.
-            return (status == 401 || status == 403) ? .rejected : .inconclusive
+            if status == 401 || status == 403 {
+                return .rejected(reason: "HTTP \(status) from \(path)")
+            }
+            return .inconclusive(reason: "HTTP \(status) from \(path)")
         } catch {
-            return .inconclusive
+            return .inconclusive(reason: "transport error contacting \(path): \(type(of: error))")
         }
     }
 

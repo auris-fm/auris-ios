@@ -61,6 +61,4 @@ protocol VoiceCloudRouteSink {
     /// live all receive a non-owner disposition. The token is passed back to `routeToCloud`, so
     /// the same admission decides both wire and effect ownership (reviewer b2c09394).
     func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership
-
-
 }
