@@ -195,6 +195,20 @@ class VoiceControlService: ObservableObject {
 
     private var latestStageTiming: PipelineStageTiming?
 
+    /// Presents a segmentation fault to the user.
+    ///
+    /// Extracted so the presentation itself is assertable: published state alone leaves the
+    /// silence unexplained, so the fault is also given audible feedback through the product's
+    /// existing error earcon.
+    func presentSegmentationFault(_ fault: VoiceAsrEngine.SegmentationFault) {
+        segmentationFault = fault
+        FileLog.shared.addMessage(
+            "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
+                + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"
+        )
+        audioRenderer.playEarcon(.error)
+    }
+
     /// The current segmentation fault, published so a listener can render the interruption.
     ///
     /// Published rather than merely stored, and cleared on recovery: `arch/ios.md` requires an
@@ -205,6 +219,10 @@ class VoiceControlService: ObservableObject {
     /// True while speech classification cannot run. Listening is refused in this state rather
     /// than presented as working: the pipeline has no trustworthy endpoint.
     var isSpeechClassificationAvailable: Bool { !asrEngine.isClassifierUnavailable }
+
+    /// Earcons this service has requested, for controls that assert the user-facing presentation
+    /// rather than only the internal state change.
+    var playedEarconsForTesting: [EarconId] { audioRenderer.playedEarcons }
     private var latestRouterMetrics: RouterClassificationMetrics?
 
     private var cancellables = Set<AnyCancellable>()
@@ -754,12 +772,11 @@ class VoiceControlService: ObservableObject {
         asrEngine.onSegmentationFaultRecovered = { [weak self] in
             self?.segmentationFault = nil
         }
+        // The interruption has to reach the user, not just a log. Published state alone leaves the
+        // silence unexplained, so this follows the product's existing feedback pattern: the same
+        // error earcon already used when a capture could not be turned into a request.
         asrEngine.onSegmentationFault = { [weak self] fault in
-            self?.segmentationFault = fault
-            FileLog.shared.addMessage(
-                "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
-                    + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"
-            )
+            self?.presentSegmentationFault(fault)
         }
         intentRouter.onMetrics = { [weak self] metrics in
             self?.latestRouterMetrics = metrics

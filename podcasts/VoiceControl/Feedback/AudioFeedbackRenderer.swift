@@ -45,7 +45,12 @@ class AudioFeedbackRenderer {
         }
     }
 
+    /// Every earcon the service asks for, so a control can assert which feedback the user would
+    /// actually hear instead of inferring it from a call site.
+    private(set) var playedEarcons: [EarconId] = []
+
     func playEarcon(_ id: EarconId) {
+        playedEarcons.append(id)
         render(.earcon(id))
     }
 

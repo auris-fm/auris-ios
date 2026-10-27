@@ -25,6 +25,14 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         func stop() {}
     }
 
+    /// Fault deliveries hop to the main actor, so a control must drain that queue before
+    /// asserting. Draining also preserves the order the deliveries were produced in.
+    private func drainMainQueue() {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+    }
+
     private func makeEngine(segmenter: NativeVadSegmenter) -> VoiceAsrEngine {
         VoiceAsrEngine(
             capture: NativeAudioCapture(),
@@ -53,6 +61,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        drainMainQueue()
 
         guard let fault = faults.first else {
             return XCTFail(
@@ -63,6 +72,55 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertEqual(fault.kind, .durationLimitReached)
         XCTAssertGreaterThan(fault.elapsedMs, 0)
         XCTAssertTrue(dispatched.isEmpty, "the fault dispatched audio instead of suppressing it")
+    }
+
+    /// An explicit restart must clear a surfaced fault and its published state.
+    ///
+    /// `arch/ios.md` names "explicit listening restart" as an escape from the fault state. If
+    /// stop/start leaves the fault set, the advertised escape does not exist: the user is told an
+    /// interruption is ongoing with no way to clear it.
+    func testExplicitRestartClearsASurfacedFault() {
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        let engine = makeEngine(segmenter: segmenter)
+        var faults: [VoiceAsrEngine.SegmentationFault] = []
+        var recovered = 0
+        engine.onSegmentationFault = { faults.append($0) }
+        engine.onSegmentationFaultRecovered = { recovered += 1 }
+        engine.installCaptureCallbacksForTesting()
+
+        for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        drainMainQueue()
+        XCTAssertEqual(faults.count, 1, "the ceiling did not surface a fault")
+        XCTAssertTrue(segmenter.isStuckActive)
+
+        // The advertised escape: stop, then start again.
+        engine.stop()
+        drainMainQueue()
+        XCTAssertFalse(
+            segmenter.isStuckActive,
+            "an explicit restart left the fault state set, so the escape path does not work"
+        )
+        XCTAssertEqual(recovered, 1, "the published interruption was not cleared on restart")
+    }
+
+    /// Routine frames must NOT clear the fault: only silence or an explicit restart may.
+    ///
+    /// Otherwise the tail of the still-spoken request becomes a new command.
+    func testRoutineFramesDoNotClearTheFault() {
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
+        var dispatched: [[Float]] = []
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onStuckActiveFault = { _ in }
+
+        for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive)
+
+        // Keep speaking: the tail must stay suppressed and the fault must stay set.
+        for _ in 0..<200 { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        XCTAssertTrue(segmenter.isStuckActive, "routine positive frames cleared the fault")
+        XCTAssertTrue(dispatched.isEmpty, "the tail was dispatched after the fault")
     }
 
     /// A classifier that was unavailable at construction must still reach an observer.
@@ -78,6 +136,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         var faults: [VoiceAsrEngine.SegmentationFault] = []
         engine.onSegmentationFault = { faults.append($0) }
         engine.installCaptureCallbacksForTesting()
+        drainMainQueue()
 
         XCTAssertEqual(
             faults.count, 1,
@@ -121,11 +180,13 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         engine.installCaptureCallbacksForTesting()
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
+        drainMainQueue()
         XCTAssertEqual(faults.count, 1, "the ceiling did not surface a fault")
 
         script.silenceAfterSpeech = true
         let deadline = Date().addingTimeInterval(0.12)
         while Date() < deadline { segmenter.process([Float](repeating: 0, count: 320)) }
+        drainMainQueue()
 
         XCTAssertEqual(
             recovered, 1,
@@ -153,4 +214,57 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertEqual(faults.first?.reason, "model missing")
         XCTAssertTrue(dispatched.isEmpty, "no classifier must mean no dispatch")
     }
+}
+
+/// The interruption must reach the user, not only a stored value.
+///
+/// `arch/ios.md` requires a surfaced interruption. Published state that nothing renders leaves
+/// the user with unexplained silence, so this asserts the product's actual feedback consumer:
+/// the earcon the service asks the renderer to play.
+final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
+    func testPresentingAFaultRequestsAudibleFeedbackAndPublishesState() {
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: FakeAudioSessionControlling(),
+            capture: RecordingCapture()
+        )
+        guard let service else { return XCTFail("service could not be built") }
+
+        XCTAssertNil(service.segmentationFault, "no fault should be presented before one occurs")
+        service.presentSegmentationFault(VoiceAsrEngine.SegmentationFault(
+            kind: .durationLimitReached,
+            discardedSamples: 3_840_000,
+            elapsedMs: 240_000,
+            reason: nil
+        ))
+
+        XCTAssertNotNil(service.segmentationFault, "the interruption was not published")
+        XCTAssertEqual(
+            service.playedEarconsForTesting, [.error],
+            "no earcon was requested, so the interruption has no audible presentation"
+        )
+    }
+
+    func testPresentingClassifierUnavailabilityRequestsFeedbackToo() {
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: FakeAudioSessionControlling(),
+            capture: RecordingCapture()
+        )
+        guard let service else { return XCTFail("service could not be built") }
+
+        service.presentSegmentationFault(VoiceAsrEngine.SegmentationFault(
+            kind: .classifierUnavailable,
+            discardedSamples: 0,
+            elapsedMs: 0,
+            reason: "model missing"
+        ))
+
+        XCTAssertEqual(service.segmentationFault?.kind, .classifierUnavailable)
+        XCTAssertEqual(service.playedEarconsForTesting, [.error])
+    }
+}
+
+final class RecordingCapture: AudioCaptureSource {
+    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    func start() throws {}
+    func stop() {}
 }

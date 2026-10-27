@@ -321,6 +321,18 @@ class VoiceAsrEngine {
     /// start as listening, and must release any acquired input route.
     @discardableResult
 
+    /// Runs `body` on the main actor, preserving order with previously queued deliveries.
+    ///
+    /// Capture callbacks arrive on an audio thread; the consumers mutate published state that
+    /// views read, so the transition must be applied where those are valid. Sequential hops keep
+    /// a fault and the recovery that follows it in the order they were produced.
+    private func deliverOnMain(_ body: @escaping (VoiceAsrEngine) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            body(self)
+        }
+    }
+
     /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
     func installCaptureCallbacksForTesting() {
@@ -336,24 +348,32 @@ class VoiceAsrEngine {
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
         segmenter.onStuckActiveFault = { [weak self] fault in
-            self?.onSegmentationFault?(SegmentationFault(
-                kind: .durationLimitReached,
-                discardedSamples: fault.discardedSamples,
-                elapsedMs: fault.elapsedMs,
-                reason: nil
-            ))
+            self?.deliverOnMain { engine in
+                engine.onSegmentationFault?(SegmentationFault(
+                    kind: .durationLimitReached,
+                    discardedSamples: fault.discardedSamples,
+                    elapsedMs: fault.elapsedMs,
+                    reason: nil
+                ))
+            }
         }
+        // These fire from capture processing on an audio thread, and their consumers mutate
+        // published UI state. Hops are queued rather than dispatched synchronously so transitions
+        // cannot interleave: a recovery announced while a fault is still being delivered would
+        // otherwise clear the interruption before it was ever shown.
         segmenter.onRecoveredFromFault = { [weak self] in
-            self?.onSegmentationFaultRecovered?()
+            self?.deliverOnMain { $0.onSegmentationFaultRecovered?() }
         }
         segmenter.onClassifierUnavailable = { [weak self] fault in
-            self?.onSegmentationFault?(SegmentationFault(
-                kind: .classifierUnavailable,
-                discardedSamples: 0,
-                elapsedMs: 0,
-                reason: fault.reason
-            ))
-            self?.onClassifierUnavailable?(fault.reason)
+            self?.deliverOnMain { engine in
+                engine.onSegmentationFault?(SegmentationFault(
+                    kind: .classifierUnavailable,
+                    discardedSamples: 0,
+                    elapsedMs: 0,
+                    reason: fault.reason
+                ))
+                engine.onClassifierUnavailable?(fault.reason)
+            }
         }
         capture.onCapturedSamples = { [weak self] samples, capturedAt in
             self?.segmenter.process(samples, capturedAt: capturedAt)
@@ -391,6 +411,14 @@ class VoiceAsrEngine {
     func stop() {
         FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
+        // An explicit stop is the advertised escape from a surfaced fault, so the faulty state
+        // must not survive it. Routine frames never clear it — only this deliberate restart and a
+        // genuine silence boundary do, so the tail of a still-spoken request cannot be dispatched.
+        if segmenter.isStuckActive {
+            FileLog.shared.addMessage("[VoicePipeline] explicit stop clearing the fault state")
+            segmenter.clearStuckActiveFault()
+            deliverOnMain { $0.onSegmentationFaultRecovered?() }
+        }
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
