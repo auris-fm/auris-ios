@@ -1,6 +1,18 @@
 import XCTest
 @testable import podcasts
 
+/// Classifies every frame as speech, supplying the DECISION deterministically.
+///
+/// The control under test keeps the real capture registration, routing and provenance path; only
+/// the model's verdict is substituted, so the test does not depend on a recording that a clean
+/// checkout does not carry.
+final class ConstantSpeechClassifier: SpeechFrameClassifier {
+    /// The fixture's quiet frames are all-zero; treating those as non-speech is what lets the
+    /// segmenter reach an endpoint. Everything else is speech.
+    func isSpeech(_ samples: [Float]) -> Bool { samples.contains { $0 != 0 } }
+    func reset() {}
+}
+
 /// A capture substitute: records that capture was requested, opens no microphone, and can deliver
 /// a buffer as the real capture would.
 final class FakeAudioCapture: AudioCaptureSource {
@@ -156,7 +168,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let backend = TranscribingAsrBackend(text: "what did the host mean by that remark")
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager, asrBackend: { backend }) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager, asrBackend: { backend }, injectedSpeechClassifier: ConstantSpeechClassifier()) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
@@ -200,25 +212,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// Delivers audio through the capture so the REAL registered path runs — the only input the
     /// registered case uses.
     private func driveRegisteredCallback(capture: FakeAudioCapture) async {
-        let frameSize = 1_600                                              // 100 ms at 16 kHz
-        // The audio must be speech to the REAL model. This control drives the real assembly, which
-        // classifies with the bundled Silero model. The previous fixture was constant 0.05 DC —
-        // accepted by the energy rule on loudness alone, and correctly not speech to a model that
-        // reads structure. `SileroSegmenterIntegrationControl.test_fixtureEvidence_...` measures
-        // both directions. With a non-speech fixture no utterance can form, so "no turn" described
-        // the fixture rather than the provenance this control exists to carry.
-        let speech = Self.recordedSpeechSamples()
-        XCTAssertGreaterThan(
-            speech.count, frameSize * 5,
-            "no recorded speech fixture is available, so this control cannot supply speech to the "
-                + "real classifier and would prove nothing"
-        )
         // ONE FRAME PER CALL: `minSpeechFrames` (5) counts CALLS, not samples, so a single large
         // buffer is one frame and speech is never confirmed.
-        var offset = 0
-        while offset + frameSize <= speech.count {
-            capture.emit(samples: Array(speech[offset..<(offset + frameSize)]), at: nil)
-            offset += frameSize
+        let frameSize = 1_600                                              // 100 ms at 16 kHz
+        // The audio's classification is supplied by the injected classifier, not by its shape.
+        // The previous fixture relied on the model calling constant DC speech — it does not, so
+        // no utterance formed and "no turn" described the fixture. Requiring a recorded external
+        // file instead would make this control unreproducible on a clean checkout. Injecting the
+        // decision keeps the capture registration, routing and provenance path fully real.
+        for _ in 0..<20 {                                                  // 2s of speech
+            capture.emit(samples: [Float](repeating: 0.05, count: frameSize), at: nil)
         }
         // The silence window is WALL-CLOCK (`Date()` vs 500 ms), so quiet frames must be spread
         // across real time; back-to-back they elapse microseconds and the condition never fires.
@@ -227,43 +230,6 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
         try? await Task.sleep(nanoseconds: 300_000_000)
-    }
-
-    /// Recorded human speech at the model's rate, read in place from the host checkout.
-    ///
-    /// Never copied into the repository: it is an external Apache-2.0 fixture, and duplicating it
-    /// would make the test pass against a stale copy of something it does not own.
-    private static func recordedSpeechSamples() -> [Float] {
-        let hostHome = ProcessInfo.processInfo.environment["AURIS_HOST_HOME"] ?? "/Users/dev"
-        let url = URL(fileURLWithPath: hostHome)
-            .appendingPathComponent("code/auris/livekit-wakeword/swift/Tests/LiveKitWakeWordTests/Fixtures/positive.wav")
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        // Minimal RIFF parse, matching the integration control's reader.
-        func u32(_ o: Int) -> Int {
-            Int(data[o]) | Int(data[o + 1]) << 8 | Int(data[o + 2]) << 16 | Int(data[o + 3]) << 24
-        }
-        var index = 12
-        var dataRange: Range<Int>?
-        while index + 8 <= data.count {
-            let id = String(bytes: data[index..<(index + 4)], encoding: .ascii) ?? ""
-            let size = u32(index + 4)
-            let body = index + 8
-            if id == "data" {
-                dataRange = body..<min(body + size, data.count)
-                break
-            }
-            index = body + size + (size % 2)
-        }
-        guard let range = dataRange else { return [] }
-        var samples: [Float] = []
-        samples.reserveCapacity(range.count / 2)
-        var i = range.lowerBound
-        while i + 1 < range.upperBound {
-            let raw = Int16(bitPattern: UInt16(data[i]) | UInt16(data[i + 1]) << 8)
-            samples.append(Float(raw) / 32768.0)
-            i += 2
-        }
-        return samples
     }
 
     /// Acquisition is asynchronous: wait (bounded) for the gate to reach listening instead of
