@@ -262,6 +262,146 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         }
     }
 
+    /// If trimming cuts INSIDE a frame, the reported instant must be that sample's own, not the
+    /// frame boundary before it.
+    ///
+    /// One instant per frame is only correct while eviction happens to land on a frame boundary.
+    /// The pre-roll bound and the frame size are independent, so eviction can split a frame; the
+    /// utterance's start would then be reported early by up to one frame's duration.
+    func testEvictionInsideAFrameReportsTheSurvivingSamplesOwnInstant() {
+        // Frames of 300 samples against an 8,000-sample bound: 8,000 / 300 is not an integer, so
+        // the oldest retained sample is partway into a frame rather than at its start.
+        let frameSize = 300
+        let frame: (Int) -> [Float] = { i in
+            (0..<frameSize).map { Float(i * frameSize + $0) }
+        }
+        let silentFrames = 40   // 12,000 samples unconfirmed: exceeds the 8,000 bound
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: 0,
+            minSpeechFrames: 1,
+            classifier: ScriptedSpeechClassifier(silentFrames: silentFrames, speechFrames: 4)
+        )
+        var captured: [([Float], MonotonicTime?)] = []
+        segmenter.onUtterance = { utterance, instant in captured.append((utterance, instant)) }
+
+        // Second-resolution instants make the sample offset unambiguous.
+        for i in 0..<silentFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
+        for i in 0..<4 { segmenter.process(frame(silentFrames + i), capturedAt: MonotonicTime(silentFrames + i)) }
+        let deadline = Date().addingTimeInterval(0.12)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frameSize), capturedAt: MonotonicTime(silentFrames + 4))
+        }
+
+        guard let (utterance, instant) = captured.first, let instant else {
+            return XCTFail("nothing was emitted, so retention cannot be assessed")
+        }
+        // Identify the first emitted sample by value: each frame is an ascending ramp.
+        let firstValue = Int(utterance[0])
+        let expectedFrame = firstValue / frameSize
+        let offsetInFrame = firstValue % frameSize
+        let expectedInstant = MonotonicTime(expectedFrame) + Double(offsetInFrame) / 16_000.0
+        XCTAssertEqual(
+            instant, expectedInstant, accuracy: 1e-9,
+            "the utterance starts at sample \(firstValue) (frame \(expectedFrame), offset "
+                + "\(offsetInFrame)), but its instant reports \(instant); a per-frame timestamp "
+                + "names the frame start instead of the retained sample"
+        )
+        XCTAssertGreaterThan(
+            offsetInFrame, 0,
+            "eviction landed on a frame boundary, so this run cannot distinguish per-sample from "
+                + "per-frame timestamps and proves nothing"
+        )
+    }
+
+    /// Silence interrupted by speech must NOT accumulate into a fault clear.
+    ///
+    /// While faulted, a positive frame must reset the silence interval. Otherwise two brief gaps
+    /// separated by a long positive tail sum into one elapsed time and clear the fault from inside
+    /// the same still-speaking request.
+    func testInterruptedSilenceWhileFaultedDoesNotClearTheFault() {
+        let frame = [Float](repeating: 0.1, count: 320)
+        let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: 100,
+            classifier: script
+        )
+        var dispatched: [[Float]] = []
+        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onStuckActiveFault = { _ in }
+
+        for _ in 0..<((240_000 / 20) + 10) { segmenter.process(frame) }
+        XCTAssertTrue(segmenter.isStuckActive, "expected the ceiling to have tripped")
+
+        // A gap shorter than the timeout, then speech, then another short gap. Wall time across
+        // all three exceeds the timeout; the interval itself never should.
+        script.silenceAfterSpeech = true
+        segmenter.process([Float](repeating: 0, count: 320))
+        script.silenceAfterSpeech = false
+        let speechDeadline = Date().addingTimeInterval(0.15)
+        while Date() < speechDeadline { segmenter.process(frame) }
+        script.silenceAfterSpeech = true
+        segmenter.process([Float](repeating: 0, count: 320))
+
+        XCTAssertTrue(
+            segmenter.isStuckActive,
+            "the fault cleared during a still-speaking request: the silence interval spanned a "
+                + "speech gap, so interrupted silence was summed into one endpoint"
+        )
+        XCTAssertTrue(dispatched.isEmpty, "the fault dispatched audio instead of staying suppressed")
+
+        // A genuine, uninterrupted silence still clears it.
+        let realSilence = Date().addingTimeInterval(0.25)
+        while Date() < realSilence { segmenter.process([Float](repeating: 0, count: 320)) }
+        XCTAssertFalse(segmenter.isStuckActive, "a genuine silence boundary must clear the fault")
+    }
+
+    /// The ceiling must bound the RETAINED utterance, including pre-roll prepended on
+    /// confirmation.
+    ///
+    /// Counting only post-confirmation positives lets the emitted audio exceed the supported
+    /// ceiling, because pre-roll is audio the user actually spoke and it is prepended to the
+    /// utterance AFTER the count was accumulated.
+    func testCeilingBoundsTheRetainedUtteranceIncludingPrependedPreRoll() {
+        let framesToCeiling = 240_000 / 20
+        let frame = [Float](repeating: 0.1, count: 320)
+        // Start unconfirmed so genuine pre-roll accumulates, then confirm and run to the ceiling.
+        let script = ScriptedSpeechClassifier(silentFrames: 25, speechFrames: Int.max)
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: 500,
+            minSpeechFrames: 3,
+            classifier: script
+        )
+        var dispatched: [[Float]] = []
+        var faults: [NativeVadSegmenter.StuckActiveFault] = []
+        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onStuckActiveFault = { faults.append($0) }
+
+        // 25 unconfirmed frames (0.5 s, the pre-roll bound) are held, then positives run to the
+        // ceiling. The retained utterance reaches the ceiling; its post-confirmation positives
+        // alone remain just under it, which is what distinguishes the two counts.
+        let unconfirmedFrames = 25
+        for _ in 0..<(framesToCeiling + unconfirmedFrames) { segmenter.process(frame) }
+
+        XCTAssertTrue(
+            dispatched.isEmpty,
+            "the retained utterance exceeded the supported ceiling but was dispatched anyway "
+                + "(\(dispatched.count) utterance(s))"
+        )
+        guard let fault = faults.first else {
+            return XCTFail(
+                "no interruption was surfaced even though the retained utterance, including its "
+                    + "prepended pre-roll, passed the ceiling"
+            )
+        }
+        XCTAssertGreaterThanOrEqual(
+            fault.elapsedMs, 240_000,
+            "the interruption must account for the retained utterance including pre-roll"
+        )
+    }
+
     // MARK: - Classifier unavailability is surfaced, not degraded
 
     /// A missing classifier must be reported and must dispatch nothing.
@@ -496,7 +636,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
 /// Used to make pre-roll behaviour deterministic: the exact number of frames that arrive before
 /// confirmation is known, so ordering and duplication can be asserted by value rather than
 /// inferred from model latency.
-private final class ScriptedSpeechClassifier: SpeechFrameClassifier {
+final class ScriptedSpeechClassifier: SpeechFrameClassifier {
     private var remainingSilent: Int
     private var remainingSpeech: Int
     init(silentFrames: Int, speechFrames: Int) {

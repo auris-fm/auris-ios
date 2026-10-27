@@ -50,6 +50,9 @@ class NativeVadSegmenter {
     /// Retains at most this much pre-confirmation audio. 0.5 s covers the classifier's window
     /// plus `minSpeechDuration` with margin while bounding memory when a room never confirms.
     private static let maxPreRollSamples = 8000
+
+    /// Capture rate used to convert a sample index into an instant offset.
+    static let captureSampleRate = 16_000
     /// Capture instant of the first retained sample, preserved across the buffers that
     /// make up one utterance.
     private var utteranceCapturedAt: MonotonicTime?
@@ -166,6 +169,12 @@ class NativeVadSegmenter {
         if speechClassifier.isSpeech(samples) {
             if isStuckActive {
                 // Still the same unending request: keep discarding, do not accumulate.
+                //
+                // The silence interval must be cleared here. Leaving it running while speech
+                // continues would let two brief gaps, separated by a long positive tail, add up to
+                // one elapsed time and clear the fault from inside a still-speaking request —
+                // rearm through the back door, which is what this state exists to prevent.
+                silenceStart = nil
                 return
             }
             if buffer.isEmpty { utteranceCapturedAt = capturedAt }
@@ -192,8 +201,12 @@ class NativeVadSegmenter {
                 return
             }
             silenceStart = nil
+            // The supported ceiling bounds the RETAINED utterance: pre-roll prepended on
+            // confirmation and negative frames kept inside it are audio the user genuinely spoke
+            // through, so counting only post-confirmation positives would let the emitted
+            // utterance exceed the ceiling the platform promises.
             if speechActive {
-                activeSamples += samples.count
+                activeSamples = buffer.count
             }
             // A detector that keeps reporting speech is a fault, not a long command. Dispatch
             // nothing — a fragment must never reach ASR — report it, and rearm.
@@ -248,15 +261,28 @@ class NativeVadSegmenter {
     }
 
     /// Hold unconfirmed audio, keeping its capture instants aligned under eviction.
+    /// Holds unconfirmed audio with a per-sample capture instant.
+    ///
+    /// `capturedAt` is the instant of the buffer's FIRST sample, so each sample's instant is that
+    /// offset forward by its position at the capture rate. Storing one instant per frame would be
+    /// wrong as soon as trimming cuts inside a frame: the first retained sample would be reported
+    /// at the frame's start rather than its own position. Copying a value per sample costs memory
+    /// only inside the bounded pre-roll window.
     private func appendPreRoll(_ samples: [Float], capturedAt: MonotonicTime?) {
         preRoll.append(contentsOf: samples)
-        preRollInstants.append(contentsOf: repeatElement(capturedAt, count: samples.count))
+        if let base = capturedAt {
+            preRollInstants.append(contentsOf: (0..<samples.count).map { index in
+                base + Double(index) / Double(Self.captureSampleRate)
+            })
+        } else {
+            preRollInstants.append(contentsOf: repeatElement(nil, count: samples.count))
+        }
         if preRoll.count > Self.maxPreRollSamples {
             let excess = preRoll.count - Self.maxPreRollSamples
             preRoll.removeFirst(excess)
             preRollInstants.removeFirst(excess)
         }
-        // The buffer's start is whatever the oldest retained sample was captured at.
+        // The buffer's start is the instant of the oldest retained SAMPLE, not of its frame.
         preRollCapturedAt = preRollInstants.first ?? nil
     }
 

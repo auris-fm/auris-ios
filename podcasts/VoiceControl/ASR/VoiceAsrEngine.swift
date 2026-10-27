@@ -206,6 +206,36 @@ class VoiceAsrEngine {
     /// recognition-pipeline.md "Production Recognition Latency Metrics".
     var onStageTiming: ((PipelineStageTiming) -> Void)?
 
+    /// Surfaces a segmentation fault the user must be told about.
+    ///
+    /// `recognition-pipeline.md`: a detector stuck active is a **surfaced** segmentation fault,
+    /// and `arch/ios.md` requires an explicit duration-limit interruption with an inspectable
+    /// fault state. A flag private to the segmenter is not surfaced — nothing outside it could
+    /// observe the interruption, so the user would see silence with no explanation.
+    var onSegmentationFault: ((SegmentationFault) -> Void)?
+
+    /// Surfaces that speech classification cannot run at all.
+    ///
+    /// Distinct from a segmentation fault: no classifier means no trustworthy endpoint, so the
+    /// engine cannot capture. Reporting this as ordinary listening would present a broken
+    /// pipeline as a working one.
+    var onClassifierUnavailable: ((String) -> Void)?
+
+    /// A fault the user-facing layer can render.
+    struct SegmentationFault: Equatable {
+        public enum Kind: Equatable {
+            /// Reached the supported utterance-duration ceiling.
+            case durationLimitReached
+            /// No speech classifier available.
+            case classifierUnavailable
+        }
+
+        public let kind: Kind
+        public let discardedSamples: Int
+        public let elapsedMs: Int
+        public let reason: String?
+    }
+
     init(
         capture: any AudioCaptureSource = NativeAudioCapture(),
         segmenter: NativeVadSegmenter,
@@ -283,14 +313,45 @@ class VoiceAsrEngine {
     /// are reported rather than swallowed: the caller must not treat a failed
     /// start as listening, and must release any acquired input route.
     @discardableResult
-    func start() -> Bool {
-        FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
+    /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
+    /// control can prove a fault reaches an observer through the engine's own forwarding.
+    func installCaptureCallbacksForTesting() {
+        wireCaptureCallbacks()
+    }
+
+    /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
+    /// and be missing on another.
+    private func wireCaptureCallbacks() {
         segmenter.onUtterance = { [weak self] utterance, capturedAt in
             Task { await self?.processUtterance(utterance, capturedAt: capturedAt) }
+        }
+        // Segmentation faults are forwarded so the interruption is observable outside this
+        // component. A private flag would leave the user with unexplained silence.
+        segmenter.onStuckActiveFault = { [weak self] fault in
+            self?.onSegmentationFault?(SegmentationFault(
+                kind: .durationLimitReached,
+                discardedSamples: fault.discardedSamples,
+                elapsedMs: fault.elapsedMs,
+                reason: nil
+            ))
+        }
+        segmenter.onClassifierUnavailable = { [weak self] fault in
+            self?.onSegmentationFault?(SegmentationFault(
+                kind: .classifierUnavailable,
+                discardedSamples: 0,
+                elapsedMs: 0,
+                reason: fault.reason
+            ))
+            self?.onClassifierUnavailable?(fault.reason)
         }
         capture.onCapturedSamples = { [weak self] samples, capturedAt in
             self?.segmenter.process(samples, capturedAt: capturedAt)
         }
+    }
+
+    func start() -> Bool {
+        FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
+        wireCaptureCallbacks()
 
         preloadBackend()
 

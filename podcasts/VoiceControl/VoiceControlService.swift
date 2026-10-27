@@ -194,6 +194,10 @@ class VoiceControlService: ObservableObject {
     var micExposure: MicExposure { routeMonitor.micExposure }
 
     private var latestStageTiming: PipelineStageTiming?
+
+    /// The most recent segmentation fault, for diagnostics and any listener that renders the
+    /// interruption. Nil while the pipeline is healthy.
+    private(set) var latestSegmentationFault: VoiceAsrEngine.SegmentationFault?
     private var latestRouterMetrics: RouterClassificationMetrics?
 
     private var cancellables = Set<AnyCancellable>()
@@ -735,6 +739,17 @@ class VoiceControlService: ObservableObject {
 
         asrEngine.onStageTiming = { [weak self] timing in
             self?.latestStageTiming = timing
+        }
+        // The segmentation fault must reach something outside the audio component. Recording it
+        // here makes the interruption inspectable (a listener such as the UI can read
+        // `latestSegmentationFault`) and logs it alongside the other pipeline state, rather than
+        // leaving it as a flag private to the segmenter with no observer.
+        asrEngine.onSegmentationFault = { [weak self] fault in
+            self?.latestSegmentationFault = fault
+            FileLog.shared.addMessage(
+                "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
+                    + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"
+            )
         }
         intentRouter.onMetrics = { [weak self] metrics in
             self?.latestRouterMetrics = metrics
