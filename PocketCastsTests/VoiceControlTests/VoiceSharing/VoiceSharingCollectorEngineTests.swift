@@ -47,7 +47,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     private func makeCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -321,7 +321,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         var deliveredFromAudioQueue = [Bool]()
         let lock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -416,7 +416,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// A collector wired to record what it emits (no sink) — for observation-association controls.
     private func makeRecordingCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -1931,7 +1931,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             queue: queue, isEnabled: { policy.permitsCollection },
             encoderProvenance: { [self] in provenance }, observations: claims)
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },

@@ -19,6 +19,8 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        drain()
+        lastSink = nil
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -501,6 +503,233 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(fresh.readyEntries().count, 0, "legacy path must not serve either")
         XCTAssertFalse(fresh.hasAdmissionAllowance(forBytes: 1_000))
         XCTAssertThrowsError(try fresh.prepare(metadata: Data("{}".utf8), audio: Data([0, 0])))
+    }
+
+    func test_sinkIgnoresStartAndCancellationBeforeEncodingButAcceptsTerminalForSameCapture() throws {
+        var provenanceReads = 0
+        let frozen = provenance
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { true },
+            encoderProvenance: { provenanceReads += 1; return frozen })
+        lastSink = sink
+        let terminal = event()
+        for kind in [VoiceSharingCollector.SignalKind.started, .cancelled] {
+            sink.handle(.init(
+                kind: kind, captureID: terminal.captureID,
+                enrollmentEpoch: terminal.enrollmentEpoch, authorizationSession: terminal.authorizationSession,
+                retainedSamples: samples.count, truncated: false, droppedSpans: [],
+                originalSampleCount: samples.count, audio: samples, isGateControl: false))
+        }
+        // A gate-control record cannot contribute even if its kind is otherwise eligible.
+        let control = VoiceSharingCollector.SegmentEvent(kind: .completed, captureID: terminal.captureID,
+                        enrollmentEpoch: terminal.enrollmentEpoch, authorizationSession: terminal.authorizationSession,
+                        retainedSamples: samples.count, truncated: false, droppedSpans: [],
+                        originalSampleCount: samples.count, audio: samples, isGateControl: true)
+        sink.handle(control)
+        drain()
+        XCTAssertEqual(provenanceReads, 0, "rejected signals must never reach the encoding prerequisite")
+        XCTAssertEqual(queue.readyEntries().count, 0)
+        sink.handle(terminal)
+        let metadata = try readyMetadata()
+        XCTAssertEqual(provenanceReads, 1)
+        XCTAssertTrue(String(decoding: metadata, as: UTF8.self).contains(terminal.captureID.uuidString))
+    }
+
+    func test_wakeAndBleedRejectionsRemainRealAudioContributions() throws {
+        let frozen = provenance
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { true }, encoderProvenance: { frozen })
+        lastSink = sink
+        for kind in [VoiceSharingCollector.SignalKind.rejectedWake, .rejectedBleed] {
+            let contribution = VoiceSharingCollector.SegmentEvent(
+                kind: kind, captureID: UUID(), enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+                retainedSamples: samples.count, truncated: false, droppedSpans: [],
+                originalSampleCount: samples.count, audio: samples, isGateControl: false)
+            sink.handle(contribution)
+        }
+        drain()
+        let ready = queue.readyEntries()
+        XCTAssertEqual(ready.count, 2)
+        let expected = try VoiceSharingContributionEncoder.encode(
+            event: event(), provenance: frozen, observations: [:]).wav
+        for entry in ready {
+            let dir = root.appendingPathComponent(entry.name)
+            let audio = try Data(contentsOf: dir.appendingPathComponent("audio.wav"))
+            let metadata = try Data(contentsOf: dir.appendingPathComponent("metadata.json"))
+            XCTAssertEqual(audio, expected, "negative wake/bleed records retain the actual PCM conversion")
+            _ = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+        }
+    }
+
+    private final class OutcomeScheduler {
+        var now = DispatchTime(uptimeNanoseconds: 1_000_000_000)
+        var scheduled: [(DispatchTime, DispatchWorkItem)] = []
+
+        func fire() {
+            let batch = scheduled
+            scheduled.removeAll()
+            for (deadline, work) in batch {
+                now = deadline
+                work.perform()
+            }
+        }
+    }
+
+    private func deadlineCollector(_ scheduler: OutcomeScheduler,
+                                   limit: VoiceSharingCollector.OutcomeWaitLimit? = .init(milliseconds: 25, ceilingMilliseconds: 100),
+                                   sessionIdentity: @escaping () -> String? = { "sess-1" }) -> VoiceSharingCollector {
+        let policy = VoiceSharingPolicy(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true })
+        policy.identityBecameReadable()
+        XCTAssertNotNil(policy.refreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
+        var state = VoiceSharingEnrollmentStore.State()
+        state.localOptIn = true
+        state.hasAuthoritativeProjection = true
+        state.membership = VoiceSharingMembership(
+            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "synthetic", withdrawalState: .active)
+        let frozenProvenance = provenance
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { [weak self] in self?.enabled ?? false },
+            encoderProvenance: { frozenProvenance })
+        lastSink = sink
+        let collector = VoiceSharingCollector(
+            policy: policy, outcomeWaitLimit: limit,
+            monotonicNow: { scheduler.now },
+            scheduleOutcome: { scheduler.scheduled.append(($0, $1)) },
+            membership: { state }, epochProvider: { "epoch-1" }, sessionIdentity: sessionIdentity,
+            sink: { sink.handle($0) })
+        collector.deliversSynchronouslyForTesting = true
+        return collector
+    }
+
+    private func readyMetadata() throws -> Data {
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            throw NSError(domain: "unknown queue coverage", code: 1)
+        }
+        XCTAssertEqual(ready.count, 1)
+        let entry = try XCTUnwrap(ready.first)
+        let dir = root.appendingPathComponent(entry.name)
+        let meta = try Data(contentsOf: dir.appendingPathComponent("metadata.json"))
+        let audio = try Data(contentsOf: dir.appendingPathComponent("audio.wav"))
+        _ = try VoiceSharingRecordBinding.bind(envelope: meta, audio: audio)
+        return meta
+    }
+
+    func test_outcomeDeadlinePublishesReadyRecordBeforeDownstreamReturnsAndFencesLateCallbacks() throws {
+        let scheduler = OutcomeScheduler()
+        let collector = deadlineCollector(scheduler)
+        let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: samples.count))
+        collector.appendSamples(samples)
+        // The real engine calls this before its first readiness/backend await, before speechCompleted.
+        collector.segmentationEnded(context)
+        XCTAssertEqual(scheduler.scheduled.count, 1)
+        XCTAssertEqual(scheduler.scheduled.first?.0.uptimeNanoseconds, 1_025_000_000)
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+        collector.engineReported(stage: "wake", outcome: .init(state: "completed"), context: context)
+        scheduler.fire()
+        let frozen = try readyMetadata()
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: frozen) as? [String: Any])
+        let record = try XCTUnwrap(envelope["record"] as? [String: Any])
+        let observations = try XCTUnwrap(record["observations"] as? [String: [String: Any]])
+        XCTAssertEqual(observations["wake"]?["state"] as? String, "completed")
+        XCTAssertEqual(observations["asr"]?["reason"] as? String, "outcome_wait_expired")
+        collector.engineReported(stage: "asr", outcome: .init(state: "completed", text: "late"), context: context)
+        collector.speechCompleted(samples, context: context, deferEmission: true)
+        collector.finalizeDeferredCompletion(context: context)
+        XCTAssertEqual(try readyMetadata(), frozen, "late downstream results cannot amend or duplicate the winner")
+    }
+
+    func test_normalFinalizationIsImmediateAndDoesNotInventDeadlineExpiry() throws {
+        let scheduler = OutcomeScheduler()
+        let collector = deadlineCollector(scheduler)
+        let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: samples.count))
+        collector.appendSamples(samples)
+        collector.segmentationEnded(context)
+        collector.speechCompleted(samples, context: context, deferEmission: true)
+        collector.finalizeDeferredCompletion(context: context)
+        let frozen = try readyMetadata()
+        XCTAssertTrue(String(decoding: frozen, as: UTF8.self).contains("observation_unavailable"))
+        XCTAssertFalse(String(decoding: frozen, as: UTF8.self).contains("outcome_wait_expired"))
+        XCTAssertTrue(try XCTUnwrap(scheduler.scheduled.first).1.isCancelled)
+        scheduler.fire()
+        collector.engineReported(stage: "asr", outcome: .init(state: "completed", text: "late"), context: context)
+        XCTAssertEqual(try readyMetadata(), frozen)
+    }
+
+    func test_revocationBeforeOutcomeDeadlineDisposesCaptureAndCannotPublish() throws {
+        let scheduler = OutcomeScheduler()
+        let collector = deadlineCollector(scheduler)
+        let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: samples.count))
+        collector.appendSamples(samples)
+        collector.segmentationEnded(context)
+        collector.gateLost()
+        XCTAssertTrue(try XCTUnwrap(scheduler.scheduled.first).1.isCancelled)
+        scheduler.fire()
+        collector.speechCompleted(samples, context: context, deferEmission: true)
+        collector.finalizeDeferredCompletion(context: context)
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
+    }
+
+    func test_identityChangeWithoutGateLossRefusesDeadlineAndReleasesAudio() throws {
+        let scheduler = OutcomeScheduler()
+        var session = "sess-1"
+        let collector = deadlineCollector(scheduler, sessionIdentity: { session })
+        let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: samples.count))
+        collector.appendSamples(samples)
+        collector.segmentationEnded(context)
+        XCTAssertFalse(try XCTUnwrap(scheduler.scheduled.first).1.isCancelled)
+        session = "sess-2"
+        scheduler.fire()
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
+        collector.speechCompleted(samples, context: context, deferEmission: true)
+        collector.finalizeDeferredCompletion(context: context)
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+    }
+
+    func test_evictedAndDeallocatedOutcomeTimersCannotPublish() throws {
+        let scheduler = OutcomeScheduler()
+        var collector: VoiceSharingCollector? = deadlineCollector(scheduler)
+        for _ in 0..<33 {
+            let context = try XCTUnwrap(collector?.speechStarted(confirmationFrameSamples: samples.count))
+            collector?.appendSamples(samples)
+            collector?.segmentationEnded(context)
+        }
+        let evicted = scheduler.scheduled.filter { $0.1.isCancelled }
+        XCTAssertFalse(evicted.isEmpty, "bounded ring eviction must retire a timer")
+        for (_, work) in evicted { work.perform() }
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+        weak var released = collector
+        collector = nil
+        XCTAssertNil(released, "scheduled work must not own the collector or its PCM")
+        XCTAssertTrue(scheduler.scheduled.allSatisfy { $0.1.isCancelled })
+        scheduler.fire()
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
+    }
+
+    func test_missingOrInvalidOutcomeLimitClosesAdmissionBeforeRetainingAudio() {
+        XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 0, ceilingMilliseconds: 100))
+        XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: -1, ceilingMilliseconds: 100))
+        XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: Int.max, ceilingMilliseconds: 100))
+        XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 101, ceilingMilliseconds: 100))
+        XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 25))
+        let collector = deadlineCollector(OutcomeScheduler(), limit: nil)
+        XCTAssertNil(collector.speechStarted(confirmationFrameSamples: samples.count))
+        collector.appendSamples(samples)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 0)
     }
 
     private func drain() {

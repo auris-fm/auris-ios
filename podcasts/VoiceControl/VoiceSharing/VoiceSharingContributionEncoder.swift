@@ -133,7 +133,7 @@ enum VoiceSharingContributionEncoder {
             "capture_session_id": provenance.captureSessionID,
             "audio": audioBlock(event: event, wav: wav, provenance: provenance),
             "models": modelsBlock(provenance.models),
-            "observations": observationsBlock(observations),
+            "observations": observationsBlock(observations, outcomeWaitExpired: event.outcomeWaitExpired),
         ]
         let canonical = try VoiceSharingRecordBinding.canonicalize(record)
         let recordJSON = Data(canonical.utf8)
@@ -230,12 +230,12 @@ enum VoiceSharingContributionEncoder {
         ]
     }
 
-    private static func observationsBlock(_ observations: [String: StageOutcome]) -> [String: Any] {
+    private static func observationsBlock(_ observations: [String: StageOutcome], outcomeWaitExpired: Bool) -> [String: Any] {
         var block: [String: Any] = [:]
         for stage in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
             guard let outcome = observations[stage] else {
                 // A missing stage is an unstated claim — the caller must state every stage.
-                block[stage] = ["state": "unknown", "reason": "outcome_wait_expired"]
+                block[stage] = ["state": "unknown", "reason": outcomeWaitExpired ? "outcome_wait_expired" : "observation_unavailable"]
                 continue
             }
             var entry: [String: Any] = ["state": outcome.state]

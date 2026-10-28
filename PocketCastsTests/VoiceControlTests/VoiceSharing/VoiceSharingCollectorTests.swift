@@ -58,7 +58,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// use the test-only inline mode rather than racing a scheduler.
     private func makeCollector(sink: ((VoiceSharingCollector.SegmentEvent) -> Void)? = nil) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -271,7 +271,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -329,7 +329,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -432,7 +432,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -487,7 +487,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -524,7 +524,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechStarted(confirmationFrameSamples: 320)
         let ctxA = collector.currentCaptureContextForTesting
         collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)   // A completes normally
+        collector.segmentationEnded(ctxA)   // A closes before its asynchronous outcome runs
 
         collector.speechStarted(confirmationFrameSamples: 320)                        // B opens
         let ctxB = collector.currentCaptureContextForTesting
@@ -538,6 +538,22 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(got.last?.captureID, ctxA?.id, "attributed to A, exactly")
         XCTAssertEqual(got.last?.audio.count, 640, "A's detached audio rides with its late record")
         XCTAssertEqual(collector.currentCaptureContextForTesting?.id, ctxB?.id, "B untouched and still open")
+    }
+
+    func test_directCompletionCannotPublishAgainThroughLateRejection() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let context = collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: context)
+        let completed = snapshot().filter { $0.kind == .completed }
+        XCTAssertEqual(completed.count, 1)
+        collector.segmentRejected(kind: .rejectedWake, samples: 640, context: context)
+        collector.speechCompleted([Float](repeating: 1, count: 640), context: context)
+        XCTAssertEqual(snapshot().filter { $0.kind != .started }, completed,
+                       "a terminal record cannot be rewritten or duplicated by late outcomes")
     }
 
     /// A confirmed start while a stale partial lingers records the partial (ring + cancellation record)
@@ -617,7 +633,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var seen = false
         let stateLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -671,7 +687,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -706,7 +722,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -805,7 +821,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let stateLock = NSLock()
         let enteredWaitLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -881,7 +897,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let holdState = NSLock()
         var alreadyHeld = false
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -1004,7 +1020,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let occupied = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy,
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -1216,7 +1232,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertTrue(permissive.permitsCollection, "premise: the POLICY side is fully open")
 
         let collector = VoiceSharingCollector(
-            policy: permissive,
+            policy: permissive, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },

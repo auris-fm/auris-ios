@@ -182,7 +182,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .active
         )
-        let collector = VoiceSharingCollector(policy: policy, membership: { enrolled },
+        let collector = VoiceSharingCollector(policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000), membership: { enrolled },
                                               epochProvider: { "epoch-1" },
                                               sessionIdentity: { "gen-A" })
         collector.deliversSynchronouslyForTesting = true

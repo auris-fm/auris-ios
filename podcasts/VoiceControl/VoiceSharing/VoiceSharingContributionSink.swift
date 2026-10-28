@@ -84,6 +84,13 @@ final class VoiceSharingContributionSink {
 
     /// Audio-callback safe: slot reservation under lock, then enqueue. No disk, no encode.
     func handle(_ event: VoiceSharingCollector.SegmentEvent) {
+        // Start and cancellation are collector bookkeeping, not completed audio contributions.
+        // Encoding them would publish an empty immutable record before the actual outcome.
+        guard !event.isGateControl else { return }
+        switch event.kind {
+        case .completed, .rejectedWake, .rejectedBleed: break
+        case .started, .cancelled: return
+        }
         slotLock.lock()
         guard pendingSlots < Self.maxPendingEvents else {
             slotLock.unlock()

@@ -709,7 +709,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
         func makePipelineCollector(sink: @escaping (VoiceSharingCollector.SegmentEvent) -> Void)
             -> VoiceSharingCollector {
             VoiceSharingCollector(
-                policy: coordinator.policy,
+                policy: coordinator.policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
                 membership: { enrolledProjection },
                 epochProvider: { "e1" },
                 sessionIdentity: { "gen-A" },
@@ -801,7 +801,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
             membershipRevision: "r1", plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active)
         let collector = VoiceSharingCollector(
-            policy: coordinator.policy,
+            policy: coordinator.policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { state },
             epochProvider: { "e1" },
             sessionIdentity: { "gen-A" },
@@ -1273,7 +1273,7 @@ final class VoiceSharingPolicyTests: XCTestCase {
         var deliveredAfterLoss: [VoiceSharingCollector.SegmentEvent] = []
         let afterLossLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: coordinator.policy,
+            policy: coordinator.policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { enrolledState() },
             epochProvider: { "e1" },
             sessionIdentity: { "gen-A" },

@@ -102,7 +102,30 @@ final class VoiceSharingCollector {
         /// observations carried on the event, so downstream claims describe observations that really
         /// happened rather than claims a caller supplied. Empty for legacy/gate-control events.
         var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
+        var outcomeWaitExpired = false
     }
+
+    /// Validated scheduling input, not an activation default. Missing limits close admission.
+    struct OutcomeWaitLimit {
+        let nanoseconds: Int
+
+        init?(milliseconds: Int, ceilingMilliseconds: Int? = nil) {
+            guard let ceilingMilliseconds, ceilingMilliseconds > 0,
+                  ceilingMilliseconds <= Int.max / 1_000_000,
+                  milliseconds > 0, milliseconds <= ceilingMilliseconds else { return nil }
+            nanoseconds = milliseconds * 1_000_000
+        }
+    }
+
+    private struct OutcomeDeadline {
+        let time: DispatchTime
+        let work: DispatchWorkItem
+    }
+
+    private var outcomeDeadlines: [UUID: OutcomeDeadline] = [:]
+    private let outcomeWaitLimit: OutcomeWaitLimit?
+    private let monotonicNow: () -> DispatchTime
+    private let scheduleOutcome: (DispatchTime, DispatchWorkItem) -> Void
 
     private struct FrozenCapture {
         let id: UUID
@@ -152,16 +175,28 @@ final class VoiceSharingCollector {
 
     init(
         policy: VoiceSharingPolicy,
+        outcomeWaitLimit: OutcomeWaitLimit? = nil,
+        monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
+        scheduleOutcome: @escaping (DispatchTime, DispatchWorkItem) -> Void = {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: $0, execute: $1)
+        },
         membership: @escaping () -> VoiceSharingEnrollmentStore.State = { VoiceSharingEnrollmentStore.shared.currentState },
         epochProvider: @escaping () -> String? = { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
         sessionIdentity: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
         sink: @escaping (SegmentEvent) -> Void = { _ in }
     ) {
+        self.outcomeWaitLimit = outcomeWaitLimit
+        self.monotonicNow = monotonicNow
+        self.scheduleOutcome = scheduleOutcome
         self.policy = policy
         self.membership = membership
         self.epochProvider = epochProvider
         self.sessionIdentity = sessionIdentity
         self.sink = sink
+    }
+
+    deinit {
+        for deadline in outcomeDeadlines.values { deadline.work.cancel() }
     }
 
     // MARK: - Gate
@@ -170,7 +205,7 @@ final class VoiceSharingCollector {
     /// Called WITHOUT `lock` held. Returns the epoch when collection is permitted, so the value frozen into
     /// the capture is the same one that authorized it.
     private func permittedEpoch() -> String? {
-        guard policy.permitsCollection else { return nil }
+        guard outcomeWaitLimit != nil, policy.permitsCollection else { return nil }
         let state = membership()
         // Unknown membership (no projection accepted this session) is NOT permission. Stale likewise.
         guard state.hasAuthoritativeProjection, state.effectiveEnrolled else { return nil }
@@ -237,7 +272,9 @@ final class VoiceSharingCollector {
         current = nil
         aggregateAudioSamples -= done.retained.count
         markTerminal(done)
+        let deadline = registerOutcomeDeadlineLocked(for: done.id)
         lock.unlock()
+        if let deadline { scheduleOutcome(deadline.time, deadline.work) }
     }
 
     /// The context of the capture currently open, for the engine to freeze into its utterance Task. Nil when
@@ -385,9 +422,13 @@ final class VoiceSharingCollector {
             // DOWNSTREAM STAGES STILL RUN (spec 2dcf8c5b, review 6fe6d773): ASR/translation/routing
             // decisions happen AFTER the segment closes, so emitting here would publish a record that can
             // never carry them. The capture stays ring-resident until the engine finalizes it.
+            let deadline = registerOutcomeDeadlineLocked(for: c.id)
             lock.unlock()
+            if let deadline { scheduleOutcome(deadline.time, deadline.work) }
             return
         }
+        terminalRing[c.id]?.emitted = true
+        cancelOutcomeDeadlineLocked(c.id)
         let event = makeEvent(kind: .completed, from: c)
         lock.unlock()
         submit(event)
@@ -407,6 +448,7 @@ final class VoiceSharingCollector {
         guard rec.capture.deferEmissionUntilFinalized else { lock.unlock(); return }
         if rec.noContribution {
             // A capture that can never contribute is CONSUMED, never resurrected.
+            cancelOutcomeDeadlineLocked(context.id)
             rec.emitted = true
             terminalRing[context.id] = rec
             lock.unlock()
@@ -417,6 +459,7 @@ final class VoiceSharingCollector {
             && policy.permitsCollection
             && membership().effectiveEnrolled
         guard sameConsent else { lock.unlock(); return }
+        cancelOutcomeDeadlineLocked(context.id)
         rec.emitted = true
         terminalRing[context.id] = rec
         let event = makeEvent(kind: .completed, from: rec.capture)
@@ -448,6 +491,7 @@ final class VoiceSharingCollector {
         // revive it (review 859dac4c).
         if var deferred = deferredRingEntryAwaitingCancellationLocked(preferring: nil) {
             deferred.capture = consumed(deferred.capture)
+            cancelOutcomeDeadlineLocked(deferred.capture.id)
             deferred.emitted = true
             deferred.noContribution = true
             terminalRing[deferred.capture.id] = deferred
@@ -460,7 +504,8 @@ final class VoiceSharingCollector {
     /// Cancellation for a NAMED capture. The engine knows which capture it froze; when it says so, that
     /// binding wins outright and no recency heuristic is consulted.
     func speechCancelled(context: CaptureContext?) {
-        guard let context else { return speechCancelled() }
+        guard let context else { speechCancelled()
+return }
         lock.lock()
         // The named capture may still be OPEN; cancel it where it lives rather than only looking in the ring.
         if let open = current, open.id == context.id, !open.terminal, open.sawStart {
@@ -479,6 +524,7 @@ final class VoiceSharingCollector {
             return
         }
         rec.capture = consumed(rec.capture)
+        cancelOutcomeDeadlineLocked(context.id)
         rec.emitted = true
         rec.noContribution = true
         terminalRing[rec.capture.id] = rec
@@ -500,19 +546,20 @@ final class VoiceSharingCollector {
         // never cancelled. Named lookup therefore returns its own entry or nothing at all.
         if let context {
             guard let named = terminalRing[context.id],
-                named.capture.deferEmissionUntilFinalized, !named.emitted else { return nil }
+                named.capture.deferEmissionUntilFinalized || outcomeDeadlines[context.id] != nil, !named.emitted else { return nil }
             return named
         }
         // Unnamed: the caller did not say which capture, so the most recent one is the best available
         // evidence. Recency is an explicit stamp, never dictionary iteration order.
         return terminalRing.values
-            .filter { $0.capture.deferEmissionUntilFinalized && !$0.emitted }
+            .filter { ($0.capture.deferEmissionUntilFinalized || outcomeDeadlines[$0.capture.id] != nil) && !$0.emitted }
             .max { $0.deferredOrder < $1.deferredOrder }
     }
 
     /// Strips audio ownership from a capture that can no longer contribute.
     private func consumed(_ c: FrozenCapture) -> FrozenCapture {
         var identityOnly = c
+        cancelOutcomeDeadlineLocked(c.id)
         aggregateAudioSamples -= identityOnly.retained.count
         identityOnly.retained = []
         return identityOnly
@@ -536,6 +583,8 @@ final class VoiceSharingCollector {
         current = nil
         aggregateAudioSamples -= c.retained.count
         markTerminal(c)
+        terminalRing[c.id]?.emitted = true
+        cancelOutcomeDeadlineLocked(c.id)
         let event = makeEvent(kind: kind, from: c)
         lock.unlock()
         submit(event)
@@ -616,12 +665,59 @@ final class VoiceSharingCollector {
         while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
             guard let oldest = terminalRing.first else { break }
             aggregateAudioSamples -= oldest.value.capture.retained.count
+            cancelOutcomeDeadlineLocked(oldest.key)
             terminalRing.removeValue(forKey: oldest.key)
+        }
+    }
+
+    /// Caller holds the observation lock. Work retains identity only, never PCM or the collector.
+    private func registerOutcomeDeadlineLocked(for id: UUID) -> OutcomeDeadline? {
+        guard outcomeDeadlines[id] == nil, let limit = outcomeWaitLimit,
+              let record = terminalRing[id], !record.emitted, !record.noContribution else { return nil }
+        let deadline = OutcomeDeadline(
+            time: monotonicNow() + .nanoseconds(limit.nanoseconds),
+            work: DispatchWorkItem { [weak self] in self?.outcomeDeadlineReached(id) })
+        outcomeDeadlines[id] = deadline
+        return deadline
+    }
+
+    private func cancelOutcomeDeadlineLocked(_ id: UUID) {
+        outcomeDeadlines.removeValue(forKey: id)?.work.cancel()
+    }
+
+    private func outcomeDeadlineReached(_ id: UUID) {
+        lock.lock()
+        guard let deadline = outcomeDeadlines[id] else { lock.unlock(); return }
+        // An injected scheduler may wake early; expiry is always measured by the monotonic clock.
+        guard monotonicNow() >= deadline.time else {
+            lock.unlock()
+            scheduleOutcome(deadline.time, deadline.work)
+            return
+        }
+        cancelOutcomeDeadlineLocked(id)
+        guard var rec = terminalRing[id], !rec.emitted, !rec.noContribution else {
+            lock.unlock()
+            return
+        }
+        rec.emitted = true
+        let allowed = stillPermitted(for: rec.capture)
+        let event = makeEvent(kind: .completed, from: rec.capture)
+        // The immutable event owns any deliverable PCM from here; the timer/ring release theirs.
+        rec.capture = consumed(rec.capture)
+        rec.noContribution = !allowed
+        terminalRing[id] = rec
+        lock.unlock()
+        if allowed {
+            var expired = event
+            expired.outcomeWaitExpired = true
+            submit(expired)
         }
     }
 
     /// Disposes ALL retained audio in the ring (withdrawal path). Identity bookkeeping stays; bytes go.
     private func disposeRingAudio() {
+        for deadline in outcomeDeadlines.values { deadline.work.cancel() }
+        outcomeDeadlines.removeAll()
         for key in terminalRing.keys {
             guard var rec = terminalRing[key] else { continue }
             aggregateAudioSamples -= rec.capture.retained.count
@@ -662,6 +758,7 @@ final class VoiceSharingCollector {
         // A capture that can never contribute (genuine cancel, withdrawal) is consumed, never
         // resurrected: no late callback may turn it back into a deliverable record.
         if rec.noContribution {
+            cancelOutcomeDeadlineLocked(context.id)
             rec.emitted = true
             terminalRing[context.id] = rec
             lock.unlock()
@@ -683,6 +780,7 @@ final class VoiceSharingCollector {
             lock.unlock()
             return true
         }
+        cancelOutcomeDeadlineLocked(context.id)
         rec.emitted = true
         terminalRing[context.id] = rec
         let event = makeEvent(kind: kind, from: rec.capture)
