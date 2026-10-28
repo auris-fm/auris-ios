@@ -34,21 +34,28 @@ public class SyncManager {
         guard Thread.isMainThread else {
             // Invalidate the intent immediately, then fence delayed effects so they cannot
             // clear a newer login. No auth lock is held while handing work to main.
-            let invalidation = ServerSettings.invalidateAuthentication {}
+            let invalidation = ServerSettings.invalidateAuthentication { clearSignoutState() }
             DispatchQueue.main.async {
-                ServerSettings.ifAuthenticationIsCurrent(invalidation) { performSignout(userInitiated: userInitiated) }
+                ServerSettings.ifAuthenticationIsCurrent(invalidation) { performSignout(userInitiated: userInitiated, clearState: false) }
             }
             return
         }
         ServerSettings.invalidateAuthentication { performSignout(userInitiated: userInitiated) }
     }
 
-    private class func performSignout(userInitiated: Bool) {
+    private class func performSignout(userInitiated: Bool, clearState: Bool = true) {
         FileLog.shared.addMessage("SyncManager.signout – userInitiated: \(userInitiated)")
 
         // Notify any listeners that the user login state will be changing
         NotificationCenter.postOnMainThread(notification: .serverUserWillBeSignedOut, userInfo: ["user_initiated": userInitiated])
 
+        if clearState { clearSignoutState() }
+        ServerConfig.shared.syncDelegate?.cleanupCloudOnlyFiles()
+    }
+
+    /// Credentials and account defaults must be cleared before signout returns, including on
+    /// watchOS where no launch-time clear can recover an interrupted queued signout.
+    private class func clearSignoutState() {
         clearTokensFromKeyChain()
         FileLog.shared.addMessage("SyncManager.signout clearTokensFromKeyChain")
 
@@ -75,8 +82,6 @@ public class SyncManager {
         UserDefaults.standard.removeObject(forKey: ServerConstants.UserDefaults.subscriptionCreateDate)
         ServerSettings.liveAnalyticsUrl = nil
         UserDefaults.standard.synchronize()
-
-        ServerConfig.shared.syncDelegate?.cleanupCloudOnlyFiles()
     }
 
     public class func clearTokensFromKeyChain() {

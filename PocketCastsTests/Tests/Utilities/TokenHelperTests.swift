@@ -43,6 +43,37 @@ class TokenHelperTests: XCTestCase {
 
 
     @MainActor
+    func testBackgroundSignoutCompletesCredentialClearBeforeMainAndPreservesWatchRestore() async throws {
+        ServerSettings.setSyncingEmail(email: "old@example.com")
+        ServerSettings.saveSyncingPassword("old-password")
+        ServerSettings.setRefreshToken("old-refresh")
+        ServerSettings.syncingV2Token = "old-access"
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            SyncManager.signout()
+            returned.signal()
+        }
+        let completed = returned.wait(timeout: .now() + 1)
+        XCTAssertEqual(completed, .success)
+        guard completed == .success else { return }
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: "AurisIncompleteCredentialWrite"),
+                       "a successful clear must not depend on a future main-queue block or next launch")
+        for key in credentialKeys { XCTAssertNil(try KeychainHelper.string(for: key)) }
+
+        // WCSession can restore these plain fields immediately after signout returns.
+        ServerSettings.setSyncingEmail(email: "watch@example.com")
+        ServerSettings.saveSyncingPassword("watch-password")
+        ServerSettings.setRefreshToken("watch-refresh")
+        XCTAssertEqual(ServerSettings.syncingEmail(), "watch@example.com")
+        let drained = expectation(description: "main notification effects completed")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(ServerSettings.syncingEmail(), "watch@example.com")
+        XCTAssertEqual(ServerSettings.syncingPassword(), "watch-password")
+        XCTAssertEqual(try ServerSettings.refreshToken(), "watch-refresh", "queued effects must not clear restored credentials again")
+    }
+
+    @MainActor
     func testBackgroundSignoutImmediatelyRejectsLateLoginAndSkipsEffectsAfterNewLogin() async throws {
         let pending = try XCTUnwrap(ServerSettings.beginAuthentication(email: "old@example.com"))
         let returned = DispatchSemaphore(value: 0)
