@@ -5,6 +5,96 @@ import XCTest
 /// quiescent — exactly the stopped identity, never a promotion onto a cancel-bumped identity
 /// that was never physically stopped, and never a regression from a delayed stale delivery.
 final class CloudAudioPlayerStopIdentityTests: XCTestCase {
+    @MainActor
+    func testQueuedCoalescedFinishBindsToTheNotifiableStopWithoutPromotingItsRequest() async throws {
+        let player = CloudAudioPlayer()
+        player.capturedStopNotification = { _, confirm in confirm() }
+        addTeardownBlock { @MainActor in await self.cleanupBindingPlayer(player) }
+        player.setDrainHoldForTesting(true)
+        for _ in 0..<5 { player.enqueue(CloudAudioFrame(data: Data(repeating: 0, count: 480))) }
+        try await waitForBindingCondition { player.isPlayingForTesting && player.bufferedFrameCountForTesting > 0 }
+        let first = player.finishWithStopBinding()
+        let coalesced = player.finishWithStopBinding()
+        XCTAssertGreaterThan(coalesced.requestEpoch, first.requestEpoch)
+        XCTAssertEqual(coalesced.stopEpoch, first.requestEpoch, "a queued finish must bind the shared physical stop")
+        player.setDrainHoldForTesting(false)
+        try await waitForBindingCondition { player.confirmedStopEpochForTesting == first.requestEpoch }
+        let settled = await player.awaitActualStop(after: coalesced.requestEpoch)
+        XCTAssertTrue(settled, "a coalesced request settles without acquiring physical confirmation")
+        XCTAssertLessThan(player.confirmedStopEpochForTesting, coalesced.requestEpoch,
+                          "settlement must not relabel a superseded request as physically stopped")
+    }
+
+    @MainActor
+    func testClaimedDrainBindingFollowsALaterCancelWithoutRelabellingTheRequest() async throws {
+        let player = CloudAudioPlayer()
+        player.capturedStopNotification = { _, confirm in confirm() }
+        let reached = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        player.claimReached = reached
+        player.claimRelease = release
+        addTeardownBlock { @MainActor in release.signal(); await self.cleanupBindingPlayer(player) }
+        let first = player.finishWithStopBinding()
+        XCTAssertEqual(reached.wait(timeout: .now() + 2), .success)
+        let coalesced = player.finishWithStopBinding()
+        XCTAssertEqual(coalesced.stopEpoch, first.requestEpoch)
+        let cancelled = player.cancel()
+        release.signal()
+        try await waitForBindingCondition { player.confirmedStopEpochForTesting == cancelled }
+        XCTAssertGreaterThanOrEqual(cancelled, coalesced.stopEpoch)
+        let coalescedSettled = await player.awaitActualStop(after: coalesced.requestEpoch)
+        let firstSettled = await player.awaitActualStop(after: first.requestEpoch)
+        XCTAssertTrue(coalescedSettled)
+        XCTAssertTrue(firstSettled)
+        XCTAssertEqual(player.confirmedStopEpochForTesting, cancelled, "only the cancelling owner physically stopped")
+    }
+
+    @MainActor
+    func testFinishDuringPhysicalStopBindsANewStopAndRejectsTheOlderNotification() async throws {
+        let player = CloudAudioPlayer()
+        var notifications: [Int: () -> Void] = [:]
+        player.capturedStopNotification = { epoch, confirm in notifications[epoch] = confirm }
+        addTeardownBlock { @MainActor in await self.cleanupBindingPlayer(player) }
+        player.armPhysicalStopGateForTesting(allow: 0)
+        let first = player.finishWithStopBinding()
+        try await waitForBindingCondition { player.physicalStopGateArrivalsForTesting == 1 }
+        // The runner has cleared its claimed owner but has not physically stopped or notified.
+        let later = player.finishWithStopBinding()
+        XCTAssertEqual(later.stopEpoch, later.requestEpoch)
+        XCTAssertGreaterThan(later.stopEpoch, first.stopEpoch)
+        player.openPhysicalStopGateForTesting()
+        try await waitForBindingCondition { notifications[first.stopEpoch] != nil && notifications[later.stopEpoch] != nil }
+        try XCTUnwrap(notifications[first.stopEpoch])()
+        XCTAssertEqual(player.confirmedStopEpochForTesting, first.stopEpoch)
+        XCTAssertLessThan(player.confirmedStopEpochForTesting, later.stopEpoch,
+                          "a withheld older notification cannot release the later binding")
+        try XCTUnwrap(notifications[later.stopEpoch])()
+        XCTAssertEqual(player.confirmedStopEpochForTesting, later.stopEpoch)
+    }
+
+    @MainActor
+    private func waitForBindingCondition(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(2)
+        while !condition() && Date() < deadline {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) { continuation.resume() }
+            }
+        }
+        if !condition() { throw BindingConditionNotReached() }
+    }
+
+    private struct BindingConditionNotReached: Error {}
+
+    @MainActor
+    private func cleanupBindingPlayer(_ player: CloudAudioPlayer) async {
+        player.capturedStopNotification = { _, confirm in confirm() }
+        player.openPhysicalStopGateForTesting()
+        player.setDrainHoldForTesting(false)
+        let stop = player.cancel()
+        let settled = await player.awaitActualStop(after: stop)
+        XCTAssertTrue(settled, "cleanup must confirm the requested stop")
+    }
+
     /// Withheld A stop, then B's cancel stops the engine: B's identity is confirmed EXACTLY.
     /// Delivering A's stale notification afterwards must neither regress the record nor
     /// promote anything; a waiter parked on an UNPERFORMED identity stays unconfirmed.

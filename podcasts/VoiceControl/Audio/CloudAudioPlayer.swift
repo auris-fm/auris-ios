@@ -83,6 +83,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// schedule, so the deferral would wait on an identity that is not its own.
     @discardableResult
     func finish() -> Int {
+        finishWithStopBinding().requestEpoch
+    }
+
+    struct DrainRequest {
+        let requestEpoch: Int
+        /// A physical stop at or after this epoch quiesces this request. A later cancel may
+        /// supersede that owner; the request itself still settles separately as superseded.
+        let stopEpoch: Int
+    }
+
+    /// Publishes the request and captures its notifiable stop binding under the SAME lock.
+    /// If a physical stop has already claimed/cleared its owner, this schedules a new drain,
+    /// rather than binding to zero or borrowing an older pending notification.
+    func finishWithStopBinding() -> DrainRequest {
         runnerLock.lock()
         // Same atomic coalescing as cancel(): the check and the publication share one
         // critical section, so the runner cannot complete a decrement before the increment.
@@ -113,9 +127,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
         runnerRunning = true
         if !sharesNotification { pendingStopNotifications += 1 }
+        let request = DrainRequest(requestEpoch: allocated, stopEpoch: stopOwnerEpoch)
         runnerLock.signal()
         runnerLock.unlock()
-        return allocated
+        return request
     }
 
     /// Reset state immediately (e.g. on cancellation).
@@ -859,6 +874,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
 
         do {
+            // A test can supply an offline output while retaining this real engine/node graph.
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+                try Self.configureEngineForTesting?(engine)
+            }
             try engine.start()
         } catch {
             os_log(.error, "CloudAudioPlayer: engine start failed: %@", error.localizedDescription)
@@ -1120,6 +1139,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// position still comes from `renderPosition(of:)`. Production never sets it, so production
     /// behaviour is unchanged.
     static var audioOutputAvailabilityOverrideForTesting: Bool? = nil
+
+    /// Test-host-only output setup, applied to the real graph before starting it.
+    static var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
     /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
     /// whether the process reported itself as a test host at all (the override is consulted only
     /// then) and what availability was decided. A control asserts this instead of assuming the
@@ -1267,6 +1289,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
         while true {
             guard let frame = dequeueFrame() else { break }
             playFrame(frame)
+        }
+        // Scheduling the last buffer is not playback completion. Keep this node alive until
+        // its measured position reaches the scheduled end. A stalled/unreadable engine is
+        // bounded, and cancel/shutdown can wake this wait and take ownership of the stop.
+        let renderDeadline = Date().addingTimeInterval(nodeIncarnationFrames / negotiatedSampleRate * 2 + 1)
+        while pendingAudibleOrUnverified && Date() < renderDeadline {
+            runnerLock.lock()
+            if stopRequested || shutdownRequested {
+                runnerLock.unlock()
+                break
+            }
+            _ = runnerLock.wait(until: min(renderDeadline, Date().addingTimeInterval(0.05)))
+            let interrupted = stopRequested || shutdownRequested
+            runnerLock.unlock()
+            if interrupted { break }
         }
         // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
         // request time — the drain claim when nothing displaced it, the cancel that landed

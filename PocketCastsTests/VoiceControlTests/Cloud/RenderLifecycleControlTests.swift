@@ -12,7 +12,133 @@ final class RenderLifecycleControlTests: XCTestCase {
 
     override func tearDown() {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        CloudAudioPlayer.configureEngineForTesting = nil
         super.tearDown()
+    }
+
+    /// `done` ends network delivery, not scheduled playback. The real engine renders offline so
+    /// its counter advances only when this fixture renders actual scheduled PCM, without hardware.
+    @MainActor
+    func testServerDoneWaitsForScheduledAudioBeforeStoppingTheEngine() throws {
+        try withPendingOfflineAudio { player, engine, node, output, scheduledSamples in
+            player.armPhysicalStopGateForTesting(allow: 0)
+            let drainClaimed = DispatchSemaphore(value: 0)
+            player.claimReached = drainClaimed
+            player.finish()
+            XCTAssertEqual(drainClaimed.wait(timeout: .now() + 2), .success, "premise: the runner claimed this finish")
+            let pendingDeadline = Date().addingTimeInterval(0.1)
+            while Date() < pendingDeadline && player.physicalStopGateArrivalsForTesting == 0 {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 0,
+                           "server done attempted to stop with scheduled audio still unheard")
+            // Advance the SAME production node through its remaining PCM, not a synthetic counter.
+            let renderDeadline = Date().addingTimeInterval(2)
+            while (player.renderPosition(of: node)?.renderedFrames ?? 0) < Double(scheduledSamples)
+                && Date() < renderDeadline {
+                XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+            }
+            let stopDeadline = Date().addingTimeInterval(2)
+            while player.physicalStopGateArrivalsForTesting == 0 && Date() < stopDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 1, "the completed render must reach a physical stop")
+            let atStop = try XCTUnwrap(player.renderPosition(of: node))
+            XCTAssertGreaterThanOrEqual(atStop.renderedFrames, Double(scheduledSamples))
+            player.openPhysicalStopGateForTesting()
+        }
+    }
+
+    @MainActor
+    func testCancelPreemptsFinishWhileScheduledAudioHasNotRendered() throws {
+        try withPendingOfflineAudio { player, _, _, _, _ in
+            player.armPhysicalStopGateForTesting(allow: 0)
+            let claimed = DispatchSemaphore(value: 0)
+            player.claimReached = claimed
+            let finished = player.finish()
+            XCTAssertEqual(claimed.wait(timeout: .now() + 2), .success)
+            let cancelled = player.cancel()
+            let deadline = Date().addingTimeInterval(1)
+            while player.physicalStopGateArrivalsForTesting == 0 && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 1, "cancel must preempt held render progress promptly")
+            player.openPhysicalStopGateForTesting()
+            while player.confirmedStopEpochForTesting < cancelled && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertGreaterThan(cancelled, finished)
+            XCTAssertEqual(player.confirmedStopEpochForTesting, cancelled, "cancel arriving during catch-up owns the actual stop")
+            XCTAssertEqual(player.pendingStopNotificationsForTesting, 0)
+        }
+    }
+
+    @MainActor
+    func testFinishHasAFiniteDeadlineWhenTheRendererMakesNoProgress() throws {
+        try withPendingOfflineAudio { player, _, node, _, scheduledSamples in
+            player.armPhysicalStopGateForTesting(allow: 0)
+            let claimed = DispatchSemaphore(value: 0)
+            player.claimReached = claimed
+            player.finish()
+            XCTAssertEqual(claimed.wait(timeout: .now() + 2), .success)
+            let deadline = Date().addingTimeInterval(4.5)
+            while player.physicalStopGateArrivalsForTesting == 0 && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 1, "a renderer with no progress must not retain the drain forever")
+            XCTAssertLessThan(try XCTUnwrap(player.renderPosition(of: node)).renderedFrames, Double(scheduledSamples),
+                              "the fixture must genuinely leave render progress held")
+            player.openPhysicalStopGateForTesting()
+        }
+    }
+
+    @MainActor
+    private func withPendingOfflineAudio(
+        _ body: (CloudAudioPlayer, AVAudioEngine, AVAudioPlayerNode, AVAudioPCMBuffer, Int) throws -> Void
+    ) throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let outputFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4_096)
+        }
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        defer { withExtendedLifetime(handoff) {} }
+        let player = CloudAudioPlayer()
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff // Production assembly retains and wires both halves.
+        // Retain the actual stop notification path so confirmation is observable without a sink.
+        player.capturedStopNotification = { _, confirm in confirm() }
+        player.setNegotiatedCodec(CloudAudioCodec(name: "pcm_s16le@16k")!)
+        defer {
+            player.openPhysicalStopGateForTesting()
+            let cancelled = player.cancel()
+            let cleanupDeadline = Date().addingTimeInterval(2)
+            while player.confirmedStopEpochForTesting < cancelled && Date() < cleanupDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertGreaterThanOrEqual(player.confirmedStopEpochForTesting, cancelled, "cleanup must settle before shared hooks reset")
+        }
+        let scheduledSamples = 22_400
+        var data = Data()
+        withUnsafeBytes(of: Int16(2_000)) { raw in
+            for _ in 0..<3_200 { data.append(contentsOf: raw) }
+        }
+        for _ in 0..<7 { player.enqueue(CloudAudioFrame(data: data)) }
+        let scheduledDeadline = Date().addingTimeInterval(3)
+        while Date() < scheduledDeadline && reference.streamIndex < scheduledSamples {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+        XCTAssertEqual(reference.streamIndex, scheduledSamples, "premise: the real runner scheduled every sample")
+        let engine = try XCTUnwrap(player.engineForTesting)
+        let node = try XCTUnwrap(player.playerNodeForTesting)
+        XCTAssertEqual(engine.manualRenderingMode, .offline)
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4_096))
+        XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
+        let initial = try XCTUnwrap(player.renderPosition(of: node), "premise: the real node rendered the initial quantum")
+        XCTAssertLessThan(initial.renderedFrames, Double(scheduledSamples - 8_000),
+                          "premise: scheduled audio remains at done")
+        try body(player, engine, node, output, scheduledSamples)
     }
 
     /// The fixture feeds a real burst, waits for the appends, then measures: while the node still

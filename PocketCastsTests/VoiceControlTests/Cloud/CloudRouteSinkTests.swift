@@ -10,6 +10,7 @@ private func testConversationManager() -> CloudConversationManager {
 }
 
 import XCTest
+import AVFoundation
 @testable import podcasts
 
 final class CloudRouteSinkTests: SocketCapturingTestCase {
@@ -2328,6 +2329,92 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         CloudRouteTestURLProtocol.reset()
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
+    }
+
+    @MainActor
+    func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
+        try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
+    }
+
+    @MainActor
+    func testCoalescedDoneReleasesTheHoldOnItsBoundPhysicalStop() async throws {
+        try await exerciseScheduledOnlyDone(coalesceBeforeDone: true)
+    }
+
+    @MainActor
+    private func exerciseScheduledOnlyDone(coalesceBeforeDone: Bool) async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease) // Seven binary PCM messages, then park before done.
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        playback.setPlaying(true)
+        let sink = makeSink(withHoldCounters: true)
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            let settled = await player.awaitActualStop(after: stop)
+            XCTAssertTrue(settled, "cleanup must settle before resetting the shared offline hook")
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+        let turn = Task {
+            await sink.routeToCloud(request: "scheduled audio", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "scheduled-only")
+        }
+        try await waitUntil("audio reached the real player before done", timeout: 3) {
+            reference.streamIndex == 22_400 && player.bufferedFrameCountForTesting == 0
+        }
+        let engine = try XCTUnwrap(player.engineForTesting)
+        let node = try XCTUnwrap(player.playerNodeForTesting)
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_096))
+        XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
+        XCTAssertLessThan(try XCTUnwrap(player.renderPosition(of: node)).renderedFrames, 33_600)
+        XCTAssertFalse(player.hasPendingAudio, "premise: no Swift buffer remains; the pending audio is already scheduled")
+        XCTAssertTrue(player.hasOutstandingOutput)
+        XCTAssertEqual(holdCounters?.begin.value, 1)
+        let releasesBeforeDone = try XCTUnwrap(holdCounters?.end.value) // Admission also reports an absent predecessor.
+        let priorDrain = coalesceBeforeDone ? player.finishWithStopBinding() : nil
+        producerRelease.signal()
+        let result = await turn.value
+        XCTAssertEqual(result.outcome, .completed)
+        if let priorDrain {
+            XCTAssertEqual(player.currentDrainEpoch, priorDrain.requestEpoch + 1,
+                           "premise: done allocated a distinct request coalesced on the pending drain")
+        }
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "done must not resume host playback over the queued response tail")
+        XCTAssertEqual(holdCounters?.end.value, releasesBeforeDone, "done must retain its existing grace playback hold")
+        let deadline = Date().addingTimeInterval(2)
+        while (player.renderPosition(of: node)?.renderedFrames ?? 0) < 33_600 && Date() < deadline {
+            XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+        }
+        do {
+            try await waitUntil("the actual owned stop releases the hold") {
+                playback.calls.filter { $0 == .resume }.count == 1 && holdCounters?.end.value == releasesBeforeDone + 1
+            }
+        } catch {
+            XCTFail("the notifiable physical stop did not release the retained hold: \(error)")
+        }
+        if let priorDrain {
+            XCTAssertEqual(player.confirmedStopEpochForTesting, priorDrain.stopEpoch,
+                           "the superseded done request must not be relabelled as a physical stop")
+        }
     }
 
     /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a

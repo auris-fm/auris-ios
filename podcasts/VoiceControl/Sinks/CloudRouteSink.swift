@@ -1292,17 +1292,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // not that the client has finished playing, so restoring here
                     // would resume the episode under the answer's tail. With nothing
                     // left to play the drain is a no-op and the restore is immediate.
-                    // The turn's own drain is scheduled by `finish()`, and that is when the drain's
-                    // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
-                    // that `finish()` just assigned. Recording before would capture the PREVIOUS
-                    // cycle's identity and reject this turn's own notification.
-                    let needsDeferral = audioPlayer.hasPendingAudio
-                    // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
-                    // current value could pick up a later schedule, leaving this turn waiting on an
-                    // identity that is not its own.
-                    let scheduledEpoch = audioPlayer.finish()
+                    // The Swift queue can already be empty while the node still has scheduled audio.
+                    let needsDeferral = audioPlayer.hasOutstandingOutput
+                    // A coalesced request has no notification of its own. Bind the hold to the
+                    // stop owner captured atomically with this request, not its superseded epoch.
+                    let scheduledDrain = audioPlayer.finishWithStopBinding()
                     if needsDeferral {
-                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledEpoch)
+                        restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledDrain.stopEpoch)
                         // The hold was acquired at this turn's admitted dispatch; it RETAINS
                         // through done into the actual drain and releases at the real stop.
                     } else {
