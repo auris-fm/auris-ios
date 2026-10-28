@@ -963,6 +963,50 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 1)
     }
 
+    func test_identityMoveWhileActualTransferChildIsHeldSendsNothing() async throws {
+        let admitted = try XCTUnwrap(VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-A"))
+        let replacements: [VoiceSharingUploadIdentity?] = [
+            VoiceSharingUploadIdentity(accountScope: "account-B", enrollmentEpoch: "epoch-A"),
+            VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-B"),
+            nil
+        ]
+        for replacement in replacements {
+            await assertHeldTransferIdentity(admitted: admitted, replacement: replacement, expectedRequests: 0)
+        }
+    }
+
+    func test_unchangedIdentityWhileActualTransferChildIsHeldStillLaunches() async throws {
+        let admitted = try XCTUnwrap(VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-A"))
+        await assertHeldTransferIdentity(admitted: admitted, replacement: admitted, expectedRequests: 1)
+    }
+
+    private func assertHeldTransferIdentity(admitted: VoiceSharingUploadIdentity,
+                                           replacement: VoiceSharingUploadIdentity?, expectedRequests: Int) async {
+        UploadRecordingURLProtocol.reset()
+        UploadRecordingURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let entered = expectation(description: "actual transfer child held before URLSession launch")
+        let release = NetworkCredentialGate()
+        let identity = IdentityBoxHolder(admitted)
+        let provider = NetworkClosureTokenProvider { "synthetic" }
+        let transport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
+            session: session, bodyDeadline: 3)
+        transport.beforeTransferLaunchForTesting = { entered.fulfill(); _ = await release.wait() }
+        let request = makeRequest()
+        let task = Task {
+            await transport.send(request: request, admittedIdentity: admitted, identityFence: { identity.current })
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0, "premise: child has not launched")
+        identity.current = replacement
+        // No task cancellation, network transition or attempt-registry action may hide the identity guard.
+        await release.open()
+        let result = await task.value
+        XCTAssertEqual(result, expectedRequests == 0 ? .transportFailure : .response(statusCode: 503, body: Data()))
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, expectedRequests)
+    }
+
     func test_networkLossAtTransferPublicationSendsNothing() async throws {
         let entered = expectation(description: "transfer published but not launched")
         let release = NetworkCredentialGate()

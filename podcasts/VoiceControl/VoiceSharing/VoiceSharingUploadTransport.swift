@@ -30,7 +30,8 @@ final class VoiceSharingUploadTransport {
     /// transfer is cancelled through the session task handle, not just abandoned.
     private static func receive(
         session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval,
-        networkFence: (() -> Bool)?, beforeLaunch: (() async -> Void)?
+        networkFence: (() -> Bool)?, admittedIdentity: VoiceSharingUploadIdentity?,
+        identityFence: (() -> VoiceSharingUploadIdentity?)?, beforeLaunch: (() async -> Void)?
     ) async throws -> (HTTPURLResponse, Data)? {
         let cancellation = VoiceSharingTransferCancellation()
         return try await withTaskCancellationHandler(operation: {
@@ -40,6 +41,11 @@ final class VoiceSharingUploadTransport {
             await beforeLaunch?()
             try Task.checkCancellation()
             guard !cancellation.isCancelled, networkFence?() ?? true else { throw CancellationError() }
+            // The parent fence precedes an unstructured-child scheduling boundary. Revalidate the
+            // admitted identity here, after suspension and immediately before the actual transfer.
+            if let identityFence, let admittedIdentity {
+                guard identityFence() == admittedIdentity else { throw CancellationError() }
+            }
             let (bytes, response) = try await session.bytes(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
             var data = Data()
@@ -148,7 +154,7 @@ final class VoiceSharingUploadTransport {
     ///   - admittedIdentity: the identity snapshot this attempt was ADMITTED under (reviewer
     ///     78f23dca — per SEND, never transport-initialization state). Supplied together with
     ///     `identityFence`, the live reader.
-    ///   - identityFence: re-reads the live identity at the credential boundary.
+    ///   - identityFence: re-reads the live identity at credential and actual transfer-launch boundaries.
     func send(
         request built: URLRequest,
         admittedIdentity: VoiceSharingUploadIdentity? = nil,
@@ -206,7 +212,8 @@ final class VoiceSharingUploadTransport {
             let transfer = try await Self.receive(
                 session: session, request: request,
                 byteLimit: Self.maxResponseBytes, deadline: bodyDeadline,
-                networkFence: networkFence, beforeLaunch: beforeTransferLaunchForTesting)
+                networkFence: networkFence, admittedIdentity: admittedIdentity,
+                identityFence: identityFence, beforeLaunch: beforeTransferLaunchForTesting)
             guard let (http, data) = transfer else { return .transportFailure }
 
             if http.statusCode == 401 {
