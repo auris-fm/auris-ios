@@ -160,6 +160,145 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         )
     }
 
+    private func activationCoordinator(store: VoiceSharingEnrollmentStore) -> VoiceSharingCoordinator {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
+            lastFetchTime: { nil }, enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in }
+        coordinator.policy.identityBecameReadable()
+        return coordinator
+    }
+
+    func test_activationLookupChangesMembershipThenRequiresANewAuthoritativeActivation() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("lookup-1", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        let followUp = expectation(description: "one authoritative follow-up requested")
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = {
+            refreshes += 1
+            followUp.fulfill()
+        }
+        let first = coordinator.beginEnrollmentLookup()
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: first, accountClient: makeClient())
+        await fulfillment(of: [followUp], timeout: 2)
+        XCTAssertTrue(testStore.currentEffectiveEnrolled, "real GET must apply authoritative membership")
+        XCTAssertFalse(coordinator.policy.permitsCollection, "changed membership cannot reuse activation authority")
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+
+        // A failed follow-up supplies no authority and must not start another lookup or loop.
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: false, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+        XCTAssertEqual(refreshes, 1)
+
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertTrue(coordinator.policy.permitsCollection, "unchanged membership may use the NEW activation token")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 2)
+        XCTAssertEqual(refreshes, 1, "unchanged authoritative membership must not create a refresh loop")
+    }
+
+    func test_activationLookupRejectsRepliesRetiredByNewerFetchOrAccountIntent() async {
+        for retirement in ["newer-fetch", "signout", "account-switch", "withdrawal"] {
+            identity = "gen-A"
+            let suite = "lookup-retirement-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = VoiceSharingEnrollmentStore(
+                defaults: defaults, accountScopeProvider: { "account-a" },
+                sessionIdentityProvider: { [weak self] in self?.identity })
+            store.setLocalOptIn(true)
+            let coordinator = activationCoordinator(store: store)
+            let client = VoiceSharingAccountClient(
+                baseURLProvider: { "https://api.example.test" }, tokenProvider: tokens,
+                session: session, sessionIdentity: { [weak self] in self?.identity }, membershipStore: store)
+            VoiceSharingStubProtocol.reset()
+            VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+                Reply(status: 200, body: projection("old", enrolled: true, epoch: "old-epoch", withdrawal: "active"))
+            var refreshes = 0
+            coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+            VoiceSharingStubProtocol.onRequest = { [weak self] in
+                switch retirement {
+                case "newer-fetch": _ = coordinator.beginEnrollmentLookup()
+                case "signout": self?.identity = nil
+                case "account-switch": self?.identity = "gen-B"
+                default: store.setLocalOptIn(false)
+                }
+            }
+            await coordinator.completeActivationWithEnrollment(
+                freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: client)
+            XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1, retirement)
+            XCTAssertNil(store.currentEnrollmentAnswer, "\(retirement): stale reply must not apply")
+            XCTAssertFalse(coordinator.policy.permitsCollection, retirement)
+            XCTAssertEqual(refreshes, 0, retirement)
+            VoiceSharingStubProtocol.onRequest = nil
+        }
+    }
+
+    func test_activationLookupFailureDoesNotApplyOrRequestAnotherRefresh() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = Reply(status: 503, body: [:])
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+        XCTAssertNil(testStore.currentEnrollmentAnswer)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0)
+    }
+
+    func test_newLookupDuringApplicationRetiresTheDispatchedFollowUp() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("accepted", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        let observer = testStore.addObserver { state in
+            if state.hasAuthoritativeProjection { _ = coordinator.beginEnrollmentLookup() }
+        }
+        defer { testStore.removeObserver(observer) }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        let dispatched = expectation(description: "main follow-up dispatch has drained")
+        DispatchQueue.main.async { dispatched.fulfill() }
+        await fulfillment(of: [dispatched], timeout: 2)
+        XCTAssertTrue(testStore.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0, "accepted but superseded intent cannot dispatch an obsolete refresh")
+    }
+
+    func test_withdrawalAtMainDispatchRetiresAnAcceptedLookupsFollowUp() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("accepted", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        let retired = expectation(description: "withdrawal before queued follow-up intent check")
+        coordinator.beforeEnrollmentFollowUpForTesting = { [self] in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertTrue(testStore.currentEffectiveEnrolled, "premise: GET applied successfully before dispatch")
+            testStore.setLocalOptIn(false)
+            retired.fulfill()
+        }
+        defer { coordinator.beforeEnrollmentFollowUpForTesting = nil }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        await fulfillment(of: [retired], timeout: 2)
+        XCTAssertNotNil(testStore.currentEnrollmentAnswer, "authoritative projection remains applied")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0, "withdrawn intent cannot dispatch an authoritative follow-up")
+    }
+
     // MARK: - Production generation registry (the object the client actually reads by default)
 
     /// The lifecycle object is the state production mutates at sign-in/sign-out. Driving it here (rather

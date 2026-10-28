@@ -36,9 +36,13 @@ struct FirebaseManager {
         // cached lastFetchTime still greater than our start, so comparing against only one of them can
         // be fooled — the exchange must move the SDK timestamp from its previous value AND land past
         // our start.
-        let fetchStartedAt = VoiceSharingCoordinator.shared.nowForFreshnessCheck()
-        let sdkTimeBeforeFetch = VoiceSharingCoordinator.shared.lastFetchTime()
-        let fetchToken = VoiceSharingCoordinator.shared.policy.tokenForFetchStart()
+        let sharingCoordinator = VoiceSharingCoordinator.shared
+        sharingCoordinator.initiateIdentityRecoveryRefresh = {
+            FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
+        }
+        let fetchStartedAt = sharingCoordinator.nowForFreshnessCheck()
+        let sdkTimeBeforeFetch = sharingCoordinator.lastFetchTime()
+        let enrollmentLookup = sharingCoordinator.beginEnrollmentLookup()
         #endif
         remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
             guard status == .success, error == nil else {
@@ -63,14 +67,15 @@ struct FirebaseManager {
                 // correct for surfaces that cannot capture voice.
                 #if os(iOS) && !APPCLIP
                 let didActivate = activationError == nil
-                let provedFreshExchange = VoiceSharingCoordinator.shared.lastFetchAdvancedPast(
+                let provedFreshExchange = sharingCoordinator.lastFetchAdvancedPast(
                     fetchStartedAt,
                     previousSDKTime: sdkTimeBeforeFetch
                 )
-                VoiceSharingCoordinator.shared.policyRefreshAfterActivation(
-                    freshActivationSucceeded: didActivate && provedFreshExchange,
-                    fetchToken: fetchToken
-                )
+                Task {
+                    await sharingCoordinator.completeActivationWithEnrollment(
+                        freshActivationSucceeded: didActivate && provedFreshExchange,
+                        lookup: enrollmentLookup)
+                }
                 #endif
                 completion?(status)
             }

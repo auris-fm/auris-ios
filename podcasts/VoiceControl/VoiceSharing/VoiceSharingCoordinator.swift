@@ -186,6 +186,80 @@ final class VoiceSharingCoordinator {
         for handler in snapshot { handler() }
     }
 
+    /// A newer remote fetch supersedes enrollment work from every older activation.
+    struct EnrollmentLookup {
+        fileprivate let generation: Int
+        fileprivate let policyToken: VoiceSharingPolicy.FetchToken
+        fileprivate let projectionToken: VoiceSharingEnrollmentStore.ProjectionToken?
+    }
+
+    // apply() notifies observers synchronously after releasing the store lock. A callback may
+    // begin a newer lookup on this same thread; it must supersede us rather than deadlock.
+    private let enrollmentLookupLock = NSRecursiveLock()
+    private var enrollmentLookupGeneration = 0
+    /// Holds the queued follow-up immediately before its intent check; unset in production.
+    var beforeEnrollmentFollowUpForTesting: (() -> Void)?
+
+    func beginEnrollmentLookup() -> EnrollmentLookup {
+        enrollmentLookupLock.lock()
+        defer { enrollmentLookupLock.unlock() }
+        enrollmentLookupGeneration += 1
+        return EnrollmentLookup(
+            generation: enrollmentLookupGeneration,
+            policyToken: policy.tokenForFetchStart(),
+            projectionToken: enrollmentStore.projectionToken())
+    }
+
+    private func lookupIsCurrent(_ lookup: EnrollmentLookup) -> Bool {
+        lookup.generation == enrollmentLookupGeneration
+            && lookup.projectionToken != nil
+            && lookup.projectionToken == enrollmentStore.projectionToken()
+            && lookup.policyToken == policy.tokenForFetchStart()
+    }
+
+    /// Production activation completion: authoritative membership must be read before renewing
+    /// permission. A changed projection invalidates this activation and needs one fresh exchange.
+    func completeActivationWithEnrollment(
+        freshActivationSucceeded: Bool,
+        lookup: EnrollmentLookup,
+        accountClient: VoiceSharingAccountClient? = nil
+    ) async {
+        guard freshActivationSucceeded else { return }
+        let mayFetch = enrollmentLookupLock.withLock { lookupIsCurrent(lookup) }
+        guard mayFetch else { return }
+        let client = accountClient ?? VoiceSharingAccountClient(
+            tokenProvider: CloudTokenProviderRouter.provider(), membershipStore: enrollmentStore)
+        guard let fetched = await client.fetchProjection() else { return }
+
+        let changed: Bool = enrollmentLookupLock.withLock {
+            guard lookupIsCurrent(lookup), fetched.issuedUnder == lookup.projectionToken else { return false }
+            let membershipChanged = enrollmentStore.currentState.membership != fetched.membership
+            guard enrollmentStore.apply(authoritative: fetched.membership, readUnder: fetched.issuedUnder) else {
+                return false
+            }
+            if !membershipChanged {
+                // No new token: only the original, still-current activation can renew the lease.
+                guard lookupIsCurrent(lookup) else { return false }
+                policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: lookup.policyToken)
+            }
+            return membershipChanged
+        }
+        guard changed else { return }
+        // Dispatch outside application/observer locks. Local intent or a newer lookup can retire
+        // this follow-up before it runs. The next fetch captures its own authority from scratch.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.beforeEnrollmentFollowUpForTesting?()
+            let stillCurrent = self.enrollmentLookupLock.withLock {
+                lookup.generation == self.enrollmentLookupGeneration
+                    && fetched.issuedUnder == self.enrollmentStore.projectionToken()
+                    && self.enrollmentStore.currentState.membership == fetched.membership
+            }
+            guard stillCurrent else { return }
+            self.initiateIdentityRecoveryRefresh()
+        }
+    }
+
     /// Called from the fetch→activate completion path with the caller's evidence about that
     /// specific callback pair plus the token captured at fetch start. A cached or no-network
     /// outcome passes `freshActivationSucceeded: false` and cannot renew the lease; a token from
