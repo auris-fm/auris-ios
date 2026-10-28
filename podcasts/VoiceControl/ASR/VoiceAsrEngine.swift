@@ -274,7 +274,9 @@ class VoiceAsrEngine {
         }
 
         // The detector observes every segment in both listening modes.
-        let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
+        let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000) { [weak contributionCollector] identity in
+            contributionCollector?.engineUsedModel(slot: "wakeword", reference: identity, context: utteranceContext)
+        }
         stageTimer.mark() // wake result
 
         let score = wakeScore(of: result)
@@ -375,7 +377,12 @@ class VoiceAsrEngine {
         }
         stageTimer.mark() // ASR start
         let asrStartedAt = Date()
-        let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000)
+        let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000) { [weak contributionCollector] identity, translates in
+            contributionCollector?.engineUsedModel(slot: "asr", reference: identity, context: utteranceContext)
+            if translates {
+                contributionCollector?.engineUsedModel(slot: "translation", reference: identity, context: utteranceContext)
+            }
+        }
         let asrMs = Int(Date().timeIntervalSince(asrStartedAt) * 1000)
         stageTimer.mark() // ASR result
         emitStageTiming(detectedConfidence: detectedConfidence)

@@ -2160,3 +2160,243 @@ private final class NotDetectedWake: WakeWordDetectorProtocol {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult { .notDetected(confidence: 0.05) }
     func release() {}
 }
+
+/// Actual engine invocation callbacks → capture snapshot → canonical durable queue records.
+final class VoiceSharingModelProvenanceTests: XCTestCase {
+    private var root: URL!
+    private var queue: VoiceSharingUploadQueue!
+    private var sink: VoiceSharingContributionSink!
+    private let pcm = [Float](repeating: 0.1, count: 640)
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("model-provenance-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        queue = VoiceSharingUploadQueue(rootDirectory: root)
+    }
+
+    override func tearDownWithError() throws {
+        sink?.waitForIdleForTesting()
+        sink = nil
+        queue = nil
+        try FileManager.default.removeItem(at: root)
+    }
+
+    private final class Scheduler {
+        var now = DispatchTime(uptimeNanoseconds: 1_000_000_000)
+        var work: [(DispatchTime, DispatchWorkItem)] = []
+        func fire() {
+            let pending = work
+            work.removeAll()
+            for (time, item) in pending { now = time; item.perform() }
+        }
+    }
+
+    private func collector(_ scheduler: Scheduler = Scheduler()) -> VoiceSharingCollector {
+        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
+                                        readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
+        policy.identityBecameReadable()
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
+        var membership = VoiceSharingEnrollmentStore.State()
+        membership.localOptIn = true
+        membership.hasAuthoritativeProjection = true
+        membership.membership = VoiceSharingMembership(
+            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "epoch", acceptedDisclosureVersion: "synthetic", withdrawalState: .active)
+        let latest = VoiceSharingContributionEncoder.ModelRef(id: "encode-time-global", version: "B")
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "test", build: "1", captureSessionID: "session",
+            models: .init(vad: latest, wakeword: latest, asr: latest, translation: latest, router: latest), conversionVersion: "v1")
+        let sink = VoiceSharingContributionSink(queue: queue, isEnabled: { true }, encoderProvenance: { provenance })
+        self.sink = sink
+        let collector = VoiceSharingCollector(
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
+            monotonicNow: { scheduler.now }, scheduleOutcome: { scheduler.work.append(($0, $1)) },
+            membership: { membership }, epochProvider: { "epoch" }, sessionIdentity: { "session" }, sink: { sink.handle($0) })
+        collector.deliversSynchronouslyForTesting = true
+        return collector
+    }
+
+    private func begin(_ collector: VoiceSharingCollector) throws -> VoiceSharingCollector.CaptureContext {
+        let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: pcm.count))
+        collector.appendSamples(pcm, reportedTotal: pcm.count)
+        collector.segmentationEnded(context)
+        return context
+    }
+
+    private func records() throws -> [String: Data] {
+        sink.waitForIdleForTesting()
+        var records: [String: Data] = [:]
+        for entry in queue.readyEntries() {
+            let directory = root.appendingPathComponent(entry.name)
+            let data = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
+            let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
+            let bound = try VoiceSharingRecordBinding.bind(envelope: data, audio: audio)
+            XCTAssertNil(records.updateValue(data, forKey: bound.captureID), "one immutable record per capture")
+        }
+        return records
+    }
+
+    private func models(_ data: Data) throws -> [String: Any] {
+        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let record = try XCTUnwrap(envelope["record"] as? [String: Any])
+        return try XCTUnwrap(record["models"] as? [String: Any])
+    }
+
+    func test_heldEngineInvocationKeepsLoadedAAtDeadlineAndSuccessorUsesB() async throws {
+        let scheduler = Scheduler()
+        let collector = collector(scheduler)
+        let entered = expectation(description: "A's actual ASR invocation is held")
+        let backend = InvocationBackend(entered: entered)
+        defer { backend.releaseHeld() }
+        let engine = VoiceAsrEngine(capture: NativeAudioCapture(), segmenter: NativeVadSegmenter(),
+                                    backend: backend, signalFilter: SignalFilter(), wakeWordDetector: IdentityWake(),
+                                    gracePeriodSignal: GracePeriodSignal(), translationStage: nil)
+        engine.contributionCollector = collector
+        let a = try begin(collector)
+        let pending = Task { await engine.processUtterance(pcm, frozenContext: a) }
+        await fulfillment(of: [entered], timeout: 2)
+        backend.replaceIdentity(.init(id: "asr", version: "B"))
+        scheduler.fire()
+        let whileHeld = try records()[a.id.uuidString]
+        let b = try begin(collector)
+        await engine.processUtterance(pcm, frozenContext: b)
+        backend.releaseHeld()
+        await pending.value
+        let final = try records()
+        let frozen = try XCTUnwrap(whileHeld, "deadline must publish while real engine work remains held")
+        XCTAssertEqual(final[a.id.uuidString], frozen, "late A cannot rewrite or duplicate its deadline winner")
+        XCTAssertEqual(final.count, 2)
+        let aModels = try models(frozen)
+        let bModels = try models(XCTUnwrap(final[b.id.uuidString]))
+        XCTAssertEqual((aModels["asr"] as? [String: String])?["version"], "A")
+        XCTAssertEqual((bModels["asr"] as? [String: String])?["version"], "B")
+        XCTAssertEqual((aModels["translation"] as? [String: String])?["version"], "A")
+        XCTAssertEqual((aModels["wakeword"] as? [String: String])?["version"], "wake-A")
+        XCTAssertTrue(aModels["vad"] is NSNull, "unknown frontend cannot inherit an encode-time global")
+        XCTAssertTrue(aModels["router"] is NSNull, "unused router remains null")
+    }
+
+    func test_conflictingAndUnknownInvocationsCannotBecomeASingleVersionClaim() throws {
+        let collector = collector()
+        let invocations: [VoiceSharingContributionEncoder.ModelRef?] = [.init(id: "asr", version: "A"), nil]
+        for first in invocations {
+            let context = try begin(collector)
+            collector.engineUsedModel(slot: "asr", reference: first, context: context)
+            collector.engineUsedModel(slot: "asr", reference: .init(id: "asr", version: "B"), context: context)
+            collector.engineUsedModel(slot: "asr", reference: first, context: context)
+            collector.speechCompleted(pcm, context: context, deferEmission: true)
+            collector.finalizeDeferredCompletion(context: context)
+            let data = try XCTUnwrap(records()[context.id.uuidString])
+            let models = try models(data)
+            XCTAssertTrue(models["asr"] is NSNull)
+            XCTAssertTrue(models["translation"] is NSNull)
+        }
+    }
+
+    func test_loadedAssetIdentityIsStableAcrossPathsAndChangesOnlyWithActualContent() async throws {
+        let a = root.appendingPathComponent("a")
+        let b = root.appendingPathComponent("b")
+        try Data("loaded-A".utf8).write(to: a)
+        try Data("loaded-A".utf8).write(to: b)
+        let result = await Task.detached {
+            let first = LoadedModelAssets.load(id: "asr", assets: [("model.onnx", a)]) { !Thread.isMainThread }
+            let same = LoadedModelAssets.load(id: "asr", assets: [("model.onnx", b)]) { true }
+            try? Data("loaded-B".utf8).write(to: b)
+            let next = LoadedModelAssets.load(id: "asr", assets: [("model.onnx", b)]) { true }
+            return (first, same, next)
+        }.value
+        XCTAssertTrue(result.0.component)
+        XCTAssertNotNil(result.0.identity)
+        XCTAssertEqual(result.0.identity, result.1.identity, "absolute path is not part of content identity")
+        XCTAssertNotEqual(result.0.identity, result.2.identity)
+    }
+
+    func test_mutatedOrUnreadableAssetsStayUnknownWithoutPreventingConstruction() async throws {
+        let asset = root.appendingPathComponent("asset")
+        try Data("before".utf8).write(to: asset)
+        let result = await Task.detached {
+            let mutated = LoadedModelAssets.load(id: "asr", assets: [("model.onnx", asset)]) {
+                try? Data("after".utf8).write(to: asset)
+                return "usable component"
+            }
+            let unknown = LoadedModelAssets.load(id: "asr", assets: [("missing.onnx", asset.appendingPathComponent("missing"))]) {
+                "usable component"
+            }
+            return (mutated, unknown)
+        }.value
+        XCTAssertEqual(result.0.component, "usable component")
+        XCTAssertEqual(result.1.component, "usable component")
+        XCTAssertNil(result.0.identity)
+        XCTAssertNil(result.1.identity)
+    }
+
+    func test_canaryTranslationClaimFollowsNativeDecoderLanguagePair() throws {
+        XCTAssertEqual(getSherpaOnnxVersion(), "1.13.6", "task trace is pinned to the linked native runtime")
+        for source in ["en", "de", "es", "fr"] {
+            let config = sherpaOnnxOfflineCanaryModelConfig(srcLang: source, tgtLang: "en")
+            XCTAssertEqual(String(cString: try XCTUnwrap(config.src_lang)), source)
+            XCTAssertEqual(String(cString: try XCTUnwrap(config.tgt_lang)), "en")
+            XCTAssertEqual(CanaryFlashBackend.performsTranslation(config), source != "en")
+        }
+    }
+
+    func test_unloadedConcreteBackendsNeverClaimModelOrTranslationUse() async {
+        let missing = root.appendingPathComponent("never-loaded").path
+        let backends: [AsrBackend] = [SenseVoiceBackend(modelDir: missing), CanaryFlashBackend(modelDir: missing, srcLang: "de")]
+        for backend in backends {
+            let lock = NSLock()
+            var reports: [(VoiceSharingContributionEncoder.ModelRef?, Bool)] = []
+            let result = await backend.transcribe(samples: pcm, sampleRateHz: 16_000) { identity, translates in
+                lock.withLock { reports.append((identity, translates)) }
+            }
+            let reported = lock.withLock { reports }
+            XCTAssertEqual(reported.count, 1)
+            XCTAssertNil(reported.first?.0)
+            XCTAssertEqual(reported.first?.1, false)
+            XCTAssertEqual(result.text, "")
+        }
+    }
+
+    private final class InvocationBackend: AsrBackend {
+        let capabilities = AsrCapabilities(languages: ["en"], canTranslateToEnglish: true, requiresHardwareAccel: false)
+        let requiredModel = ModelSpec(id: "asr", files: [], targetDir: "unused")
+        private let lock = NSLock()
+        private var identity: VoiceSharingContributionEncoder.ModelRef? = .init(id: "asr", version: "A")
+        private var calls = 0
+        private var held: CheckedContinuation<AsrResult, Never>?
+        private let entered: XCTestExpectation
+        init(entered: XCTestExpectation) { self.entered = entered }
+        func ensureReady() async -> Result<Void, Error> { .success(()) }
+        func release() { releaseHeld() }
+        func replaceIdentity(_ value: VoiceSharingContributionEncoder.ModelRef?) { lock.withLock { identity = value } }
+        func releaseHeld() {
+            let pending = lock.withLock { let value = held; held = nil; return value }
+            pending?.resume(returning: .init(text: "", detectedLanguage: "de"))
+        }
+        func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+            await transcribe(samples: samples, sampleRateHz: sampleRateHz, modelUsed: { _, _ in })
+        }
+        func transcribe(samples: [Float], sampleRateHz: Int,
+                        modelUsed: @escaping (VoiceSharingContributionEncoder.ModelRef?, Bool) -> Void) async -> AsrResult {
+            let snapshot = lock.withLock { calls += 1; return (identity, calls == 1) }
+            modelUsed(snapshot.0, true)
+            if snapshot.1 {
+                return await withCheckedContinuation { continuation in
+                    lock.withLock { held = continuation }
+                    entered.fulfill()
+                }
+            }
+            return .init(text: "", detectedLanguage: "de")
+        }
+    }
+
+    private final class IdentityWake: WakeWordDetectorProtocol {
+        func detect(samples: [Float], sampleRate: Int) -> WakeWordResult { .detected(confidence: 0.95, completionSample: 0) }
+        func detect(samples: [Float], sampleRate: Int,
+                    modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> WakeWordResult {
+            modelUsed(.init(id: "auris", version: "wake-A"))
+            return detect(samples: samples, sampleRate: sampleRate)
+        }
+        func release() {}
+    }
+}

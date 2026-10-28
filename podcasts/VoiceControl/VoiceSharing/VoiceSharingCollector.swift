@@ -103,6 +103,8 @@ final class VoiceSharingCollector {
         /// happened rather than claims a caller supplied. Empty for legacy/gate-control events.
         var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
         var outcomeWaitExpired = false
+        /// A collector event freezes actual invocation identities, including explicit unknown slots.
+        var reportedModels: VoiceSharingContributionEncoder.Models? = nil
     }
 
     /// Validated scheduling input, not an activation default. Missing limits close admission.
@@ -133,6 +135,9 @@ final class VoiceSharingCollector {
         var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
         let epoch: String
         let session: String?
+        var modelReferences: [String: VoiceSharingContributionEncoder.ModelRef] = [:]
+        var observedModelSlots: Set<String> = []
+        var conflictingModelSlots: Set<String> = []
         var retained: [Float] = []
         var sawStart = false
         var droppedFrom: Int? = nil
@@ -314,6 +319,31 @@ final class VoiceSharingCollector {
         aggregateAudioSamples += take
         current = c
         lock.unlock()
+    }
+
+    /// Called by the actual loaded component immediately before invocation. Unknown or conflicting
+    /// instances cannot be represented as one known version. Matching uses the capture argument only.
+    func engineUsedModel(slot: String, reference: VoiceSharingContributionEncoder.ModelRef?, context: CaptureContext?) {
+        guard ["vad", "wakeword", "asr", "translation", "router"].contains(slot), let context else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        func record(_ capture: inout FrozenCapture) {
+            guard !capture.conflictingModelSlots.contains(slot) else { return }
+            if capture.observedModelSlots.contains(slot), capture.modelReferences[slot] != reference {
+                capture.modelReferences.removeValue(forKey: slot)
+                capture.conflictingModelSlots.insert(slot)
+            } else {
+                capture.observedModelSlots.insert(slot)
+                capture.modelReferences[slot] = reference
+            }
+        }
+        if var capture = current, capture.id == context.id, !capture.terminal {
+            record(&capture)
+            current = capture
+        } else if var entry = terminalRing[context.id], !entry.emitted, !entry.noContribution {
+            record(&entry.capture)
+            terminalRing[context.id] = entry
+        }
     }
 
     /// The ENGINE's own report about a stage it actually evaluated for this capture (review bc692f91).
@@ -843,7 +873,10 @@ return }
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
                             originalSampleCount: c.original, audio: audio,
                             isGateControl: kind == .cancelled,
-                            reportedStages: c.reportedStages)
+                            reportedStages: c.reportedStages,
+                            reportedModels: .init(vad: c.modelReferences["vad"], wakeword: c.modelReferences["wakeword"],
+                                                  asr: c.modelReferences["asr"], translation: c.modelReferences["translation"],
+                                                  router: c.modelReferences["router"]))
     }
 
     // MARK: - Bounded non-blocking handoff

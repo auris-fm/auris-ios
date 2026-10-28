@@ -132,7 +132,7 @@ enum VoiceSharingContributionEncoder {
             "build": provenance.build,
             "capture_session_id": provenance.captureSessionID,
             "audio": audioBlock(event: event, wav: wav, provenance: provenance),
-            "models": modelsBlock(provenance.models),
+            "models": modelsBlock(event.reportedModels ?? provenance.models),
             "observations": observationsBlock(observations, outcomeWaitExpired: event.outcomeWaitExpired),
         ]
         let canonical = try VoiceSharingRecordBinding.canonicalize(record)

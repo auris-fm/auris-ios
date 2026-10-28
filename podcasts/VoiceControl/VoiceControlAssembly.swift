@@ -33,8 +33,8 @@ class VoiceControlAssembly {
         // "Threshold"). A missing manifest or hash mismatch disables voice control.
         let wakewordDir = bundleURL("melspectrogram.ort").deletingLastPathComponent()
         let manifestURL = wakewordDir.appendingPathComponent("auris_eval.json")
-        let thresholdResult = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: wakewordDir)
-        guard case .success(let threshold) = thresholdResult else {
+        let thresholdResult = WakeWordThresholdLoader.loadDeployment(manifestURL: manifestURL, modelDirectory: wakewordDir)
+        guard case .success(let deployment) = thresholdResult else {
             if case .failure(let error) = thresholdResult {
                 FileLog.shared.addMessage("[VoicePipeline] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
             }
@@ -45,7 +45,8 @@ class VoiceControlAssembly {
             melModel: bundleURL("melspectrogram.ort"),
             embedModel: bundleURL("embedding_model.ort"),
             classifierModel: bundleURL("auris.ort"),
-            threshold: threshold
+            threshold: deployment.threshold,
+            verifiedModelIdentity: deployment.identity
         )
 
         let asrEngine = VoiceAsrEngine(
@@ -56,7 +57,7 @@ class VoiceControlAssembly {
             wakeWordDetector: wakeWordDetector,
             gracePeriodSignal: gracePeriodSignal,
             clock: SystemMonotonicClock(),
-            wakeThreshold: threshold,
+            wakeThreshold: deployment.threshold,
             translationStage: AppleTranslationTranslator()
         )
         // Voice-sharing composition (production). The collector observes the engine with production

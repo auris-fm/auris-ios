@@ -487,7 +487,9 @@ class VoiceControlService: ObservableObject {
         case .route:
             break
         }
-        let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
+        let result = intentRouter.classify(input: input, pendingDialog: dialogContext) { [weak contributionCollector] identity in
+            contributionCollector?.engineUsedModel(slot: "router", reference: identity, context: captureContext)
+        }
         // Snapshot before recording: `recordPipelineLatency` consumes and clears
         // `latestRouterMetrics`, and the escalation policy must read *this* turn's
         // reason rather than nil — a cleared reason escalates even the reasons that
