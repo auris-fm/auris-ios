@@ -206,6 +206,39 @@ class VoiceAsrEngine {
     /// recognition-pipeline.md "Production Recognition Latency Metrics".
     var onStageTiming: ((PipelineStageTiming) -> Void)?
 
+    /// Surfaces a segmentation fault the user must be told about.
+    ///
+    /// `recognition-pipeline.md`: a detector stuck active is a **surfaced** segmentation fault,
+    /// and `arch/ios.md` requires an explicit duration-limit interruption with an inspectable
+    /// fault state. A flag private to the segmenter is not surfaced — nothing outside it could
+    /// observe the interruption, so the user would see silence with no explanation.
+    var onSegmentationFault: ((SegmentationFault) -> Void)?
+
+    /// Announces that the surfaced fault ended, so a listener can clear the interruption.
+    var onSegmentationFaultRecovered: (() -> Void)?
+
+    /// Surfaces that speech classification cannot run at all.
+    ///
+    /// Distinct from a segmentation fault: no classifier means no trustworthy endpoint, so the
+    /// engine cannot capture. Reporting this as ordinary listening would present a broken
+    /// pipeline as a working one.
+    var onClassifierUnavailable: ((String) -> Void)?
+
+    /// A fault the user-facing layer can render.
+    struct SegmentationFault: Equatable {
+        public enum Kind: Equatable {
+            /// Reached the supported utterance-duration ceiling.
+            case durationLimitReached
+            /// No speech classifier available.
+            case classifierUnavailable
+        }
+
+        public let kind: Kind
+        public let discardedSamples: Int
+        public let elapsedMs: Int
+        public let reason: String?
+    }
+
     init(
         capture: any AudioCaptureSource = NativeAudioCapture(),
         segmenter: NativeVadSegmenter,
@@ -279,17 +312,208 @@ class VoiceAsrEngine {
         backendReadyBox.task = nil
     }
 
+    /// Current classifier availability, so a caller can refuse listening instead of presenting
+    /// a pipeline that cannot produce an utterance.
+    var isClassifierUnavailable: Bool { segmenter.isClassifierUnavailable }
+
+    /// Identifies the current capture session.
+    ///
+    /// `capture.stop()` does not drain callbacks already queued by the capture, so a stopped
+    /// session's samples and the faults they produce can arrive AFTER a restart. Main-queue
+    /// delivery does not order events produced on different threads, so the fence has to be a
+    /// generation: notifications carrying an older generation are dropped instead of reviving
+    /// state that a stop or restart already cleared.
+    private var sessionGeneration = 0
+    private let sessionLock = NSLock()
+
+    /// Serializes segmenter mutation between queued capture processing and stop()/start().
+    private let segmenterLock = NSLock()
+
+    private func currentSession() -> Int {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return sessionGeneration
+    }
+
+    /// Invalidates queued work from the previous session.
+    @discardableResult
+    private func beginNewSession() -> Int {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        sessionGeneration += 1
+        return sessionGeneration
+    }
+
+    /// Runs `body` on the main actor, preserving order with previously queued deliveries.
+    ///
+    /// Capture callbacks arrive on an audio thread; the consumers mutate published state that
+    /// views read, so the transition must be applied where those are valid. Sequential hops keep
+    /// a fault and the recovery that follows it in the order they were produced.
+    private func deliverOnMain(session: Int? = nil, fenced: Bool = true, _ body: @escaping (VoiceAsrEngine) -> Void) {
+        let generation = session ?? currentSession()
+        deliveryQueueForTesting.async { [weak self] in
+            guard let self else { return }
+            guard fenced else {
+                body(self)
+                return
+            }
+            // Drop notifications produced by a session that has since been stopped or replaced:
+            // otherwise a fault queued by the old session reappears after the restart's recovery
+            // already cleared it. Main-queue delivery alone cannot order events produced on
+            // different threads, so the session is what has to be compared.
+            guard generation == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped stale session notification generation=\(generation) current=\(self.currentSession())")
+                return
+            }
+            body(self)
+        }
+    }
+
+    /// TEST SEAM: the main queue deliveries are posted to. Passing a queue whose blocks the
+    /// control releases by hand lets it place a `stop()`/`start()` BETWEEN a delivery being
+    /// enqueued and that delivery running — the real interleave, forced rather than hoped for.
+    var deliveryQueueForTesting: DispatchQueue = .main
+
+    /// The single recovery-delivery path, shared by the silence boundary and an explicit stop.
+    ///
+    /// Delivered WITHOUT a session fence: recovery reports that the fault state is gone, not work
+    /// owned by a capture session, and a restart bumping the generation after this is queued must
+    /// not suppress it — `stop()` sees `isStuckActive == false` once silence already cleared it and
+    /// would queue no replacement, leaving the interruption presented forever.
+    ///
+    /// Because it is unfenced, it must not clear a NEWER fault. That state is read under
+    /// `segmenterLock`, the same lock capture processing mutates it under: reading it unlocked on
+    /// the delivery queue is a data race with the audio thread.
+    private func queueRecoveryNotification() {
+        deliverOnMain(fenced: false) { [weak self] engine in
+            guard let self else { return }
+            self.segmenterLock.lock()
+            let stillFaulted = self.segmenter.isStuckActive
+            self.segmenterLock.unlock()
+            guard !stillFaulted else {
+                FileLog.shared.addMessage("[VoicePipeline] recovery dropped: a newer fault is active")
+                return
+            }
+            engine.onSegmentationFaultRecovered?()
+        }
+    }
+
+    /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
+    /// control can prove a fault reaches an observer through the engine's own forwarding.
+    func installCaptureCallbacksForTesting() {
+        wireCaptureCallbacks()
+    }
+
+    /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
+    /// and be missing on another.
+    private func wireCaptureCallbacks() {
+        segmenter.onUtterance = { [weak self] utterance, capturedAt in
+            guard let self else { return }
+            // Fenced as well as the notifications: an utterance emitted from a stopped session
+            // is stale PCM, and suppressing only its UI event would still let that audio reach
+            // ASR and change the next turn.
+            let session = self.segmenter.currentSession ?? self.currentSession()
+            guard session == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped utterance from stale session=\(session) current=\(self.currentSession())")
+                return
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                // Re-check when the task actually runs: a stop() can land between enqueue and
+                // execution, and the check above only proves the session was valid then.
+                guard session == self.currentSession() else {
+                    FileLog.shared.addMessage("[VoicePipeline] dropped utterance queued before a session change session=\(session) current=\(self.currentSession())")
+                    return
+                }
+                await self.processUtterance(utterance, capturedAt: capturedAt)
+            }
+        }
+        // Segmentation faults are forwarded so the interruption is observable outside this
+        // component. A private flag would leave the user with unexplained silence.
+        segmenter.onStuckActiveFault = { [weak self] fault in
+            guard let self else { return }
+            // Attribute the fault to the session whose samples raised it, not to whatever session
+            // happens to be current when the delivery runs.
+            let session = self.segmenter.currentSession ?? self.currentSession()
+            self.deliverOnMain(session: session) { engine in
+                engine.onSegmentationFault?(SegmentationFault(
+                    kind: .durationLimitReached,
+                    discardedSamples: fault.discardedSamples,
+                    elapsedMs: fault.elapsedMs,
+                    reason: nil
+                ))
+            }
+        }
+        // These fire from capture processing on an audio thread, and their consumers mutate
+        // published UI state. Hops are queued rather than dispatched synchronously so transitions
+        // cannot interleave: a recovery announced while a fault is still being delivered would
+        // otherwise clear the interruption before it was ever shown.
+        segmenter.onRecoveredFromFault = { [weak self] in
+            guard let self else { return }
+            // Recovery is a statement about segmenter state, not work owned by a capture session,
+            // so it is delivered UNFENCED. It must not be suppressible by an unrelated session
+            // change: if a stop/restart lands while this is queued, it would be dropped and —
+            // `isStuckActive` already being false — stop() would queue no replacement, leaving the
+            // interruption presented with nothing left to clear it.
+            //
+            // It is still delivered in order, and it must not report recovery over a NEWER fault:
+            // if one was raised after this silence boundary, the interruption is real and stays.
+            self.queueRecoveryNotification()
+        }
+        segmenter.onClassifierUnavailable = { [weak self] fault in
+            self?.deliverOnMain { engine in
+                engine.onSegmentationFault?(SegmentationFault(
+                    kind: .classifierUnavailable,
+                    discardedSamples: 0,
+                    elapsedMs: 0,
+                    reason: fault.reason
+                ))
+                engine.onClassifierUnavailable?(fault.reason)
+            }
+        }
+        capture.onCapturedSamples = { [weak self] samples, capturedAt, tapSession in
+            guard let self else { return }
+            // Ownership is the session carried WITH the buffer — stamped when the tap was
+            // installed — never the session current at delivery.
+            // Segmenter mutation is serialized against start()'s wiring and stop()'s reset, which
+            // run on other threads. Without this the two would interleave and stale PCM could
+            // change the next utterance even though its notification was suppressed.
+            self.segmenterLock.lock()
+            defer { self.segmenterLock.unlock() }
+            guard tapSession == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped capture buffer from stale tap session=\(tapSession) current=\(self.currentSession())")
+                return
+            }
+            self.segmenter.process(samples, capturedAt: capturedAt, session: tapSession)
+        }
+    }
+
     /// Starts capture and returns whether it actually started. Capture errors
     /// are reported rather than swallowed: the caller must not treat a failed
     /// start as listening, and must release any acquired input route.
     @discardableResult
     func start() -> Bool {
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        segmenter.onUtterance = { [weak self] utterance, capturedAt in
-            Task { await self?.processUtterance(utterance, capturedAt: capturedAt) }
-        }
-        capture.onCapturedSamples = { [weak self] samples, capturedAt in
-            self?.segmenter.process(samples, capturedAt: capturedAt)
+        // The new session must exist BEFORE callbacks are installed: installing them replays
+        // current state (a missing classifier) through the delivery fence, and a replay tagged
+        // with the previous generation would be dropped as stale — losing the very fault that
+        // explains why capture is about to be refused.
+        // The tap is stamped with the value `beginNewSession()` RETURNED: re-reading the property
+        // here would race a concurrent stop() and could stamp the tap with a superseded session.
+        let session = beginNewSession()
+        capture.tapSession = session
+        // Mutates the segmenter (installs callbacks, replays state), so it is serialized against
+        // capture processing and stop() on other threads.
+        segmenterLock.lock()
+        wireCaptureCallbacks()
+        segmenterLock.unlock()
+
+        // Never present a pipeline that cannot segment. Without a classifier there is no
+        // trustworthy endpoint, so opening the microphone would capture audio the engine can
+        // never close into an utterance — listening that looks active and can never work.
+        if segmenter.isClassifierUnavailable {
+            FileLog.shared.addMessage("[VoicePipeline] engine start refused: no speech classifier; capture not opened")
+            return false
         }
 
         preloadBackend()
@@ -311,6 +535,23 @@ class VoiceAsrEngine {
     func stop() {
         FileLog.shared.addMessage("[VoicePipeline] engine stopped")
         capture.stop()
+        beginNewSession()
+        // Clearing the segmenter races queued capture processing on another thread; serialize
+        // against it so a stale buffer cannot mutate the segmenter while it is being reset.
+        segmenterLock.lock()
+        defer { segmenterLock.unlock() }
+        // An explicit stop is the advertised escape from a surfaced fault, so the faulty state
+        // must not survive it. Routine frames never clear it — only this deliberate restart and a
+        // genuine silence boundary do, so the tail of a still-spoken request cannot be dispatched.
+        if segmenter.isStuckActive {
+            FileLog.shared.addMessage("[VoicePipeline] explicit stop clearing the fault state")
+            segmenter.clearStuckActiveFault()
+            queueRecoveryNotification()
+        }
+        // Reset ALL remaining segmentation state at the boundary. A partially buffered utterance
+        // is not a fault, so the block above does not cover it; leaving it in place would
+        // concatenate old-session PCM with the new session's and dispatch them as one command.
+        segmenter.resetForNewSession()
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).

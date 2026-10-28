@@ -46,7 +46,12 @@ class VoiceControlAssembly {
         onInputTerminal: (@Sendable (IntentRoutingInput, VoiceControlService.InputTerminalOutcome) -> Void)? = nil,
         parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil,
         preparedObserverFactory: (@Sendable (IntentRoutingInput) -> CloudRouteSink.PreparedObserver?)? = nil,
-        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse }
+        isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse },
+        // Test-only injection: a control replaces the MODEL's decision while keeping the rest of
+        // the pipeline (capture registration, routing, provenance) real. Without this a control
+        // must supply audio the real model happens to classify as speech, which makes the test
+        // depend on an external recording that a clean checkout does not have.
+        injectedSpeechClassifier: SpeechFrameClassifier? = nil
     ) -> VoiceControlService? {
         // Test-only injection: a controlled (short) clock lets a control hold actual playback
         // PAST the grace timeout without real sleeps of 30s.
@@ -114,9 +119,26 @@ class VoiceControlAssembly {
 
         let cloudAudioPlayer = CloudAudioPlayer()
 
+        // Classified speech, not a fixed energy level. A room whose ambient noise sits above
+        // 0.020 makes every frame "speech" under the energy rule, so no silence endpoint arrives
+        // and the utterance never closes — measured as a single utterance growing without limit.
+        //
+        // No fallback: if the model cannot be loaded the segmenter is told so and dispatches
+        // nothing, because the energy rule is precisely the failure being removed. Reporting
+        // normal listening while running it would hide the defect behind a working-looking UI.
+        let speechClassifier = injectedSpeechClassifier ?? SileroSpeechFrameClassifier.bundled()
+        let vadSegmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            classifier: speechClassifier
+        )
+        if speechClassifier == nil {
+            vadSegmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded from the app bundle")
+        } else if injectedSpeechClassifier != nil {
+            FileLog.shared.addMessage("[VoicePipeline] speech classifier injected by a control")
+        }
         let asrEngine = VoiceAsrEngine(
             capture: injectedCapture ?? NativeAudioCapture(isPlaybackActive: isPlaybackActive),
-            segmenter: NativeVadSegmenter(threshold: 0.020),
+            segmenter: vadSegmenter,
             backend: asrBackend,
             signalFilter: SignalFilter(),
             wakeWordDetector: wakeWordDetector,

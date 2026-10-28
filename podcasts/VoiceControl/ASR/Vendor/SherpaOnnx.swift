@@ -967,11 +967,18 @@ public class SherpaOnnxVoiceActivityDetectorWrapper {
   /// A pointer to the underlying counterpart in C
   private let vad: OpaquePointer
 
-  public init(config: UnsafePointer<SherpaOnnxVadModelConfig>, buffer_size_in_seconds: Float) {
-    guard let vad = SherpaOnnxCreateVoiceActivityDetector(config, buffer_size_in_seconds) else {
-      fatalError("SherpaOnnxCreateVoiceActivityDetector returned nil")
+  /// Failable: a model that exists but cannot load makes the C API throw a C++ exception
+  /// (uncatchable in Swift) or return NULL. Creation therefore goes through the ObjC++
+  /// `AurisSafeCreateVoiceActivityDetector` shim, which converts every failure — throw or
+  /// NULL — into nil, so callers surface classifier unavailability instead of crashing.
+  public init?(config: UnsafePointer<SherpaOnnxVadModelConfig>, buffer_size_in_seconds: Float) {
+    guard let vad = AurisSafeCreateVoiceActivityDetector(
+      UnsafeRawPointer(config),
+      buffer_size_in_seconds
+    ) else {
+      return nil
     }
-    self.vad = vad
+    self.vad = OpaquePointer(vad)
   }
 
   deinit {
@@ -1429,7 +1436,7 @@ public class SherpaOnnxOfflineTtsWrapper {
 
     let pair = SherpaOnnxCallbackPair(cb: callback, arg: arg)
     let unmanaged = Unmanaged.passRetained(pair)
-    let wrapper: TtsProgressCallbackWithArg = { samples, n, progress, rawArg in
+    let wrapper: TtsProgressCallbackWithArg = { samples, n, _, rawArg in
       let p = Unmanaged<SherpaOnnxCallbackPair>.fromOpaque(rawArg!).takeUnretainedValue()
       return p.cb!(samples, n, p.arg)
     }
@@ -1460,7 +1467,6 @@ public class SherpaOnnxOfflineTtsWrapper {
 
     return SherpaOnnxGeneratedAudioWrapper(audio: audio)
   }
-
 }
 
 // spoken language identification
@@ -1531,8 +1537,7 @@ public class SherpaOnnxSpokenLanguageIdentificationWrapper {
   }
 
   public func decode(samples: [Float], sampleRate: Int = 16000)
-    -> SherpaOnnxSpokenLanguageIdentificationResultWrapper
-  {
+    -> SherpaOnnxSpokenLanguageIdentificationResultWrapper {
     let stream: OpaquePointer! = SherpaOnnxSpokenLanguageIdentificationCreateOfflineStream(slid)
     SherpaOnnxAcceptWaveformOffline(stream, Int32(sampleRate), samples, Int32(samples.count))
 
@@ -1781,8 +1786,7 @@ public func sherpaOnnxOfflineSpeakerSegmentationModelConfig(
 }
 
 public func sherpaOnnxFastClusteringConfig(numClusters: Int = -1, threshold: Float = 0.5)
-  -> SherpaOnnxFastClusteringConfig
-{
+  -> SherpaOnnxFastClusteringConfig {
   return SherpaOnnxFastClusteringConfig(num_clusters: Int32(numClusters), threshold: threshold)
 }
 
@@ -1949,8 +1953,7 @@ public class SherpaOnnxSpeakerEmbeddingExtractorWrapper {
 }
 
 public func sherpaOnnxOfflineSpeechDenoiserGtcrnModelConfig(model: String = "")
-  -> SherpaOnnxOfflineSpeechDenoiserGtcrnModelConfig
-{
+  -> SherpaOnnxOfflineSpeechDenoiserGtcrnModelConfig {
   return SherpaOnnxOfflineSpeechDenoiserGtcrnModelConfig(model: toCPointer(model))
 }
 
@@ -2218,7 +2221,7 @@ public struct SourceSeparationConfig {
 
     var s: [String: [Int8]] = [:]
     func b(_ k: String, _ v: String?) -> UnsafePointer<Int8>? {
-      guard let v = v else { return nil }
+      guard let v else { return nil }
       s[k] = Array(v.utf8CString)
       return s[k]!.withUnsafeBufferPointer { $0.baseAddress }
     }
@@ -2248,7 +2251,7 @@ public class SourceSeparator {
   }
 
   public func process(buffer: AudioData) -> [AudioData]? {
-    guard let engine = engine else { return nil }
+    guard let engine else { return nil }
 
     return buffer.withUnsafeBufferPointer { flatBuf in
       guard let base = flatBuf.baseAddress else { return nil }

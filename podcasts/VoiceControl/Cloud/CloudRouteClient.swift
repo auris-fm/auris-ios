@@ -578,6 +578,7 @@ final class CloudRouteClient {
             if !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: wsTask) {
                 retireSocket(requestId: turn.requestId, identity: socketRegistration)
                 wsTask.cancel(with: .goingAway, reason: nil)
+                FileLog.shared.addMessage("[CloudRoute] connection_lost: the socket closed before the turn was submitted")
                 continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
                 continuation.finish()
                 return true
@@ -675,6 +676,7 @@ final class CloudRouteClient {
                     return // cancelled: a frame arrived, the main loop owns the stream
                 }
                 if !terminalFlag.isSet {
+                    FileLog.shared.addMessage("[CloudRoute] connection_lost: no first frame within \(Int(self.requestTimeoutSeconds))s — the turn never started")
                     continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
                     continuation.finish()
                 }
@@ -716,11 +718,11 @@ final class CloudRouteClient {
 
             // WebSocket closed.
             if !terminalFlag.isSet {
+                FileLog.shared.addMessage("[CloudRoute] connection_lost: socket closed before a terminal event")
                 continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             }
             continuation.finish()
             return true
-
         } catch is CancellationError {
             continuation.finish()
             return true
@@ -736,6 +738,12 @@ final class CloudRouteClient {
             // speaks a non-empty message verbatim, so it reached the user as
             // English prose in whatever locale they had set, instead of the
             // localized template or the error earcon.
+            //
+            // The diagnostic is not discarded though: it goes to the log, where it is
+            // diagnostics rather than user-facing text. Without it a failed cloud turn was
+            // indistinguishable from a timeout or an early socket close, so no run could
+            // say which of the three happened.
+            FileLog.shared.addMessage("[CloudRoute] connection_lost: transport error — \(error)")
             continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             continuation.finish()
             return true
@@ -758,6 +766,11 @@ final class CloudRouteClient {
         sourceLanguage: String?
     ) async -> [String: Any]? {
         guard let credential = await tokenProvider.token() else {
+            // Name the failure. A missing credential surfaced only as a generic `unauthorized`
+            // terminal, so a turn that never dialled was indistinguishable from a server
+            // rejecting the token — and nothing recorded which provider was consulted.
+            // The token value is never logged; only which provider answered and whether it had one.
+            FileLog.shared.addMessage("[CloudRoute] unauthorized: token provider \(type(of: tokenProvider)) returned no credential — the turn was not submitted")
             return nil
         }
         var frame = CloudRouteRequestBuilder.envelope(

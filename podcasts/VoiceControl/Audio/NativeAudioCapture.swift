@@ -22,7 +22,16 @@ protocol CaptureAudioSession: AnyObject {
 /// behaviourally what the production object does; nothing about the listening or provenance
 /// semantics changes.
 protocol AudioCaptureSource: AnyObject {
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)? { get set }
+    /// Session the next installed tap belongs to; set by the engine when capture starts.
+    var tapSession: Int { get set }
+
+    /// Carries the session of the tap that produced these samples.
+    ///
+    /// The session must travel WITH the buffer rather than be read from a property at delivery:
+    /// capture `stop()` does not drain buffers the tap already queued, so a property would hold
+    /// the restarted session's value by the time an old buffer is delivered and the old audio
+    /// would pass as new.
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)? { get set }
     func start() throws
     func stop()
 }
@@ -61,14 +70,30 @@ class NativeAudioCapture: AudioCaptureSource {
     private let sampleRate = 16000.0
     private var energyLogged = false
     private var tapInstalled = false
+    /// Periodic capture telemetry.
+    ///
+    /// `First buffer` is logged once per process and the VAD logs only when an utterance is
+    /// emitted, so after the first buffer nothing reports whether samples still arrive. A user
+    /// reporting "everything is ready but still no wake word" could not be diagnosed from the log
+    /// at all: a quiet room, a level under the VAD threshold, and a dead tap all produce silence
+    /// (#core:25b91a1b `98ba5c48`). This reports buffer arrival and the peak level against the
+    /// threshold, throttled so a healthy pipeline does not flood the log.
+    ///
+    /// Observability only: it does not gate, alter or delay sample delivery.
+    private var telemetry = CaptureTelemetry()
+    private static let telemetryInterval: TimeInterval = 5
     private let session: CaptureAudioSession
     /// Live playback-ownership signal, re-read at teardown. Deactivating a
     /// session playback owns would stop the user's podcast, so only a session
     /// capture itself activated may be deactivated.
     private let isPlaybackActive: () -> Bool
     /// Delivers converted samples with the instant the hardware captured them (from the
-    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route.
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    /// buffer's own `AVAudioTime`), or nil when that host time is invalid on the route, plus the
+    /// session of the tap that produced them.
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)?
+
+    /// Session of the currently installed tap; see `AudioCaptureSource.onCapturedSamples`.
+    var tapSession: Int = 0
 
     init(
         session: CaptureAudioSession = RealCaptureAudioSession(),
@@ -85,14 +110,19 @@ class NativeAudioCapture: AudioCaptureSource {
         when.isHostTimeValid ? AVAudioTime.seconds(forHostTime: when.hostTime) : nil
     }
 
-    /// Delivers one tap buffer to the subscribed consumer with its capture instant.
+    /// Delivers one tap buffer to the subscribed consumer with its capture instant and the
+    /// session of the tap that produced it.
     ///
     /// The tap calls THIS, and a control observes the same function, so the boundary under test
     /// is the one production runs — not a parallel copy of its arithmetic. `when` is the
     /// buffer's own capture time, not this call's arrival; on a route whose host time is invalid
     /// the instant is nil and the echo filter declines to align rather than guessing.
-    func deliver(_ samples: [Float], when: AVAudioTime) {
-        onCapturedSamples?(samples, Self.captureInstant(when: when))
+    ///
+    /// `tapSession` must be the value captured when the tap was installed. Reading the mutable
+    /// property here would report whatever session is current at delivery, which is precisely the
+    /// relabelling the fence exists to prevent.
+    func deliver(_ samples: [Float], when: AVAudioTime, tapSession: Int) {
+        onCapturedSamples?(samples, Self.captureInstant(when: when), tapSession)
     }
 
     func start() throws {
@@ -116,6 +146,10 @@ class NativeAudioCapture: AudioCaptureSource {
         // may deliver Int16 PCM from the Mac's audio hardware. When floatChannelData
         // is nil (non-float format), fall back to int16ChannelData and convert.
         var formatWarningLogged = false
+        // Capture the session ONCE, when this tap is installed. Every buffer this tap queues
+        // carries it, so a buffer released after a restart still reports the session that
+        // produced it rather than the session that happens to be current.
+        let tapSessionCapturedAtInstall = self.tapSession
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
@@ -161,7 +195,21 @@ class NativeAudioCapture: AudioCaptureSource {
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
-                self.deliver(converted, when: when)
+                self.telemetry.record(rms: CaptureTelemetry.rms(of: converted))
+                if let report = self.telemetry.takeReport(
+                    now: Date(),
+                    interval: Self.telemetryInterval
+                ) {
+                    FileLog.shared.addMessage(report)
+                    // FORCE THE FLUSH. `FileLog` holds entries in memory until 100 accumulate
+                    // (`bufferThreshold`), so a buffered line is invisible for minutes and is lost
+                    // entirely if the process is terminated first. The whole point of this line is
+                    // to be readable WHILE capture is running — a buffered diagnostic is no better
+                    // than the silence it replaces. `First buffer` already forces its flush for
+                    // exactly this reason.
+                    FileLog.shared.forceFlush()
+                }
+                self.deliver(converted, when: when, tapSession: tapSessionCapturedAtInstall)
             }
         }
         tapInstalled = true

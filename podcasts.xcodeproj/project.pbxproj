@@ -1074,6 +1074,7 @@
 		C7FF7715291D45B50082A464 /* SingleSignOn.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C7FF7714291D45B50082A464 /* SingleSignOn.xcassets */; };
 		D154061D6430303F58BCE31F /* sherpa-onnx.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4ABE52B1D5E3D6F7DAEC41BD /* sherpa-onnx.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		DC78A07ABF8335E251AEB862 /* wakeword in Resources */ = {isa = PBXBuildFile; fileRef = D99A81818908CF52FD1AB6B3 /* wakeword */; };
+		B1A0C0DE00000000000000A2 /* vad in Resources */ = {isa = PBXBuildFile; fileRef = B1A0C0DE00000000000000A1 /* vad */; };
 		E3F37446291F0DD1005916ED /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F37445291F0DD1005916ED /* Chapters.swift */; };
 		E3F37447291F0DD1005916ED /* Chapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F37445291F0DD1005916ED /* Chapters.swift */; };
 		E5A9E099D92DAA8B082904B9 /* BuildFile in Embed Frameworks */ = {isa = PBXBuildFile; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -2675,6 +2676,7 @@
 		C7FF7714291D45B50082A464 /* SingleSignOn.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = SingleSignOn.xcassets; sourceTree = "<group>"; };
 		D8E383688E61147A131F7A03 /* SenseVoiceBackend.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SenseVoiceBackend.swift; path = podcasts/VoiceControl/ASR/SenseVoiceBackend.swift; sourceTree = "<group>"; };
 		D99A81818908CF52FD1AB6B3 /* wakeword */ = {isa = PBXFileReference; includeInIndex = 1; name = wakeword; path = podcasts/VoiceControl/Resources/wakeword; sourceTree = "<group>"; };
+		B1A0C0DE00000000000000A1 /* vad */ = {isa = PBXFileReference; includeInIndex = 1; name = vad; path = podcasts/VoiceControl/Resources/vad; sourceTree = "<group>"; };
 		E009424046B3494626A6F3F6 /* CanaryFlashBackend.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CanaryFlashBackend.swift; path = podcasts/VoiceControl/ASR/CanaryFlashBackend.swift; sourceTree = "<group>"; };
 		E3F37445291F0DD1005916ED /* Chapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chapters.swift; sourceTree = "<group>"; };
 		F26CC62D2FACD5D400C1F8F7 /* ShareProfileCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareProfileCardView.swift; sourceTree = "<group>"; };
@@ -5306,6 +5308,7 @@
 				BDBD53EE17019B2A0048C8C5 /* Frameworks */,
 				BDBD53ED17019B2A0048C8C5 /* Products */,
 				D99A81818908CF52FD1AB6B3 /* wakeword */,
+				B1A0C0DE00000000000000A1 /* vad */,
 				4513212AAE49FAAE39E911E0 /* podcasts */,
 				4ABE52B1D5E3D6F7DAEC41BD /* sherpa-onnx.xcframework */,
 				6199AE52266892884F76CB39 /* SherpaOnnx.swift */,
@@ -7288,6 +7291,7 @@
 				105A6C452BAA0B410025B855 /* PrivacyInfo.xcprivacy in Resources */,
 				408426332134CBE60076D82E /* SmallListCell.xib in Resources */,
 				DC78A07ABF8335E251AEB862 /* wakeword in Resources */,
+				B1A0C0DE00000000000000A2 /* vad in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,16 +1,29 @@
 import XCTest
 @testable import podcasts
 
+/// Classifies every frame as speech, supplying the DECISION deterministically.
+///
+/// The control under test keeps the real capture registration, routing and provenance path; only
+/// the model's verdict is substituted, so the test does not depend on a recording that a clean
+/// checkout does not carry.
+final class ConstantSpeechClassifier: SpeechFrameClassifier {
+    /// The fixture's quiet frames are all-zero; treating those as non-speech is what lets the
+    /// segmenter reach an endpoint. Everything else is speech.
+    func isSpeech(_ samples: [Float]) -> Bool { samples.contains { $0 != 0 } }
+    func reset() {}
+}
+
 /// A capture substitute: records that capture was requested, opens no microphone, and can deliver
 /// a buffer as the real capture would.
 final class FakeAudioCapture: AudioCaptureSource {
-    var onCapturedSamples: (([Float], MonotonicTime?) -> Void)?
+    var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)?
+    var tapSession: Int = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
     func start() throws { startCount += 1 }
     func stop() { stopCount += 1 }
     func emit(samples: [Float], at time: MonotonicTime? = nil) {
-        onCapturedSamples?(samples, time)
+        onCapturedSamples?(samples, time, tapSession)
     }
 }
 
@@ -155,7 +168,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let backend = TranscribingAsrBackend(text: "what did the host mean by that remark")
         let capture = FakeAudioCapture()
-        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager, asrBackend: { backend }) else {
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioSession: provenanceAudioSession(), conditionMonitor: provenanceConditionMonitor(), capture: capture, inference: inference, modelManager: modelManager, asrBackend: { backend }, injectedSpeechClassifier: ConstantSpeechClassifier()) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
@@ -202,6 +215,11 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // ONE FRAME PER CALL: `minSpeechFrames` (5) counts CALLS, not samples, so a single large
         // buffer is one frame and speech is never confirmed.
         let frameSize = 1_600                                              // 100 ms at 16 kHz
+        // The audio's classification is supplied by the injected classifier, not by its shape.
+        // The previous fixture relied on the model calling constant DC speech — it does not, so
+        // no utterance formed and "no turn" described the fixture. Requiring a recorded external
+        // file instead would make this control unreproducible on a clean checkout. Injecting the
+        // decision keeps the capture registration, routing and provenance path fully real.
         for _ in 0..<20 {                                                  // 2s of speech
             capture.emit(samples: [Float](repeating: 0.05, count: frameSize), at: nil)
         }

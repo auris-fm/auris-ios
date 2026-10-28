@@ -33,7 +33,15 @@ final class NativeAudioCaptureTests: XCTestCase {
         XCTAssertFalse(utteranceReceived, "Utterance should not fire without silence timeout")
     }
 
-    func test_vadSegmenter_requiresConsecutiveSpeechFrames() {
+    /// Confirmation still requires CONSECUTIVE speech frames, but the audio of an interrupted
+    /// burst is no longer thrown away.
+    ///
+    /// The expectation here used to be `[[1, 1, 1, 1, 0, 0]]`: interrupted bursts discarded. That
+    /// encoded the defect this change removes — dropping the frames before confirmation cost the
+    /// start of every command (a measured 240 ms attack). Interrupted frames are now held as
+    /// bounded pre-roll and prepended on confirmation, so the utterance also contains them while
+    /// the CONSECUTIVE rule still decides when it activates.
+    func test_vadSegmenter_requiresConsecutiveSpeechFrames_andKeepsThePreRollAudio() {
         let segmenter = NativeVadSegmenter(
             threshold: 0.5,
             silenceTimeoutMs: -1,
@@ -47,13 +55,22 @@ final class NativeAudioCaptureTests: XCTestCase {
         segmenter.process([1, 1])
         segmenter.process([0, 0])
 
-        XCTAssertTrue(utterances.isEmpty, "Interrupted energy bursts must not activate the VAD")
+        XCTAssertTrue(
+            utterances.isEmpty,
+            "interrupted bursts must not activate the VAD, however much audio they held"
+        )
 
         segmenter.process([1, 1])
         segmenter.process([1, 1])
         segmenter.process([0, 0])
 
-        XCTAssertEqual(utterances, [[1, 1, 1, 1, 0, 0]])
+        // The two consecutive frames confirm; the held pre-roll precedes them in order, and the
+        // trailing sub-threshold frame is retained as part of the utterance.
+        XCTAssertEqual(
+            utterances,
+            [[1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0]],
+            "the confirmed utterance must carry the pre-roll audio in capture order"
+        )
     }
 
     // MARK: - Retention contract (recognition-pipeline.md "Utterance lifecycle")
@@ -184,7 +201,13 @@ final class NativeAudioCaptureTests: XCTestCase {
     /// sub-threshold energy as speech — and is **not** the retention defect, which concerns
     /// audio already accepted as speech. Pinned so it is not loosened while chasing that
     /// clause, which would trade a correct rejection for false triggers.
-    func test_interruptionBeforeConfirmation_discardsPendingFrames_andIsNotTheRetentionDefect() {
+    /// Audio from an interrupted, unconfirmed run is RETAINED as bounded pre-roll.
+    ///
+    /// The previous expectation (5 * 320 + 320, the unconfirmed run discarded) asserted the very
+    /// defect this change removes: discarding the frames before confirmation loses the opening of
+    /// the command — measured at 240 ms of attack. The retention itself was never the defect; the
+    /// UNBOUNDED retention was, and that is what the pre-roll bound now prevents.
+    func test_interruptionBeforeConfirmation_keepsPendingFramesWithinThePreRollBound() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
         segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
@@ -197,11 +220,17 @@ final class NativeAudioCaptureTests: XCTestCase {
         segmenter.process([Float](repeating: 0, count: 320))
 
         XCTAssertEqual(utterances.count, 1)
-        // Exactly the confirmed run plus its endpoint frame: the four unconfirmed frames
-        // were discarded by the interruption branch, as designed.
+        // The interrupted run, the interrupting frame and the confirmed run all precede the
+        // command, so all of it is kept and the utterance starts when the audio did.
+        let expected = 4 * 320 + 320 + 5 * 320 + 320
         XCTAssertEqual(
-            utterances.first?.count, 5 * 320 + 320,
-            "Expected pre-confirmation frames to be discarded; got \(utterances.first?.count ?? -1) samples"
+            utterances.first?.count, expected,
+            "Expected the interrupted run to be retained as pre-roll; got \(utterances.first?.count ?? -1) samples"
+        )
+        XCTAssertLessThanOrEqual(
+            utterances.first?.count ?? 0,
+            NativeVadSegmenter.maxPreRollSamples + 6 * 320,
+            "retained audio must stay within the pre-roll bound rather than growing without limit"
         )
     }
 }
@@ -281,14 +310,14 @@ extension NativeAudioCaptureTests {
     func test_validHostTime_deliversTheHardwareCaptureInstantToASubscriber() throws {
         let capture = NativeAudioCapture()
         var received: [([Float], MonotonicTime?)] = []
-        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+        capture.onCapturedSamples = { samples, instant, _ in received.append((samples, instant)) }
 
         let hostTime: UInt64 = 987_654_321
         let when = AVAudioTime(hostTime: hostTime, sampleTime: 0, atRate: 16_000)
         XCTAssertTrue(when.isHostTimeValid, "fixture must carry a valid host time")
 
         // The SAME function the tap calls — not a parallel copy of its arithmetic.
-        capture.deliver([0.25, -0.25], when: when)
+        capture.deliver([0.25, -0.25], when: when, tapSession: 0)
 
         XCTAssertEqual(received.count, 1, "the subscriber must observe the tap's delivery")
         XCTAssertEqual(received.first?.0, [0.25, -0.25], "the samples must reach the subscriber")
@@ -297,17 +326,41 @@ extension NativeAudioCaptureTests {
                        "the delivered instant must be the buffer's own host time, not arrival time")
     }
 
+    /// `deliver` must report the session it is GIVEN, not whatever is current at delivery.
+    ///
+    /// This is the wire the fake capture concealed: production passed the mutable property
+    /// instead of the value captured when the tap was installed, so a buffer queued before a
+    /// restart would report the new session and pass the fence.
+    func test_deliverCarriesTheSessionItIsGivenRatherThanTheCurrentTapSession() {
+        let capture = NativeAudioCapture()
+        var deliveredSession: Int?
+        capture.onCapturedSamples = { _, _, session in deliveredSession = session }
+
+        // The current tap has moved on, as it would after a restart.
+        capture.tapSession = 2
+        let when = AVAudioTime(hostTime: 987_654_321, sampleTime: 0, atRate: 16_000)
+
+        // A buffer from the OLD tap is released.
+        capture.deliver([0.1], when: when, tapSession: 1)
+
+        XCTAssertEqual(
+            deliveredSession, 1,
+            "deliver reported the current tap's session instead of the session the buffer was "
+                + "captured in, so stale audio passes as new-session audio"
+        )
+    }
+
     func test_invalidHostTime_deliversNilToASubscriberSoTheConsumerDoesNotGuess() {
         let capture = NativeAudioCapture()
         var received: [([Float], MonotonicTime?)] = []
-        capture.onCapturedSamples = { samples, instant in received.append((samples, instant)) }
+        capture.onCapturedSamples = { samples, instant, _ in received.append((samples, instant)) }
 
         // A sample-time-only AVAudioTime has no valid host time — the shape the tap
         // sees on routes where the hardware clock is unavailable.
         let when = AVAudioTime(sampleTime: 512, atRate: 16_000)
         XCTAssertFalse(when.isHostTimeValid, "fixture must carry an INVALID host time")
 
-        capture.deliver([0.25], when: when)
+        capture.deliver([0.25], when: when, tapSession: 0)
 
         XCTAssertEqual(received.count, 1, "the subscriber must observe the delivery")
         XCTAssertNil(received.first?.1,
