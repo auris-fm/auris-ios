@@ -1,4 +1,5 @@
 import AVFoundation
+import Network
 import XCTest
 
 @testable import podcasts
@@ -371,6 +372,142 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
     }
 
+    /// Actual enrollment completion feeds the production upload builder after assembly release.
+    func test_enrollmentAndConfiguredUploadRetryThroughTheServiceOwnedComposition() async throws {
+        let authority = try SharingLocalAuthority()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        configuration.timeoutIntervalForRequest = 2
+        configuration.timeoutIntervalForResource = 3
+        let session = URLSession(configuration: configuration)
+        addTeardownBlock {
+            session.invalidateAndCancel()
+            authority.stop()
+            await self.fulfillment(of: [authority.stopped], timeout: 2)
+        }
+        await fulfillment(of: [authority.ready], timeout: 2)
+        let endpoint = authority.baseURL
+        XCTAssertFalse(endpoint.hasSuffix(":0"))
+        let suite = "configured-sharing-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "local-account" }, sessionIdentityProvider: { "local-session" })
+        store.setLocalOptIn(true)
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
+            lastFetchTime: { nil }, enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in }
+        coordinator.policy.identityBecameReadable()
+        let identity: () -> VoiceSharingUploadIdentity? = {
+            VoiceSharingUploadIdentity(accountScope: "local-account", enrollmentEpoch: store.activeEnrollmentEpoch)
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("configured-sharing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); queue = nil }
+        var now = Date()
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now }, currentIdentity: identity)
+        let tokens = LocalSharingToken()
+        let accountClient = VoiceSharingAccountClient(
+            baseURLProvider: { endpoint }, tokenProvider: tokens, session: session,
+            sessionIdentity: { "local-session" }, membershipStore: store)
+        var service: VoiceControlService?
+        weak var weakAssembly: VoiceControlAssembly?
+        weak var weakTrigger: VoiceSharingUploadTrigger?
+        do {
+            let assembly = VoiceControlAssembly()
+            weakAssembly = assembly
+            let trigger = assembly.makeVoiceSharingUploadTrigger(
+                queue: queue, isAuthorized: { coordinator.policy.permitsCollection }, currentIdentity: identity,
+                baseURLProvider: { endpoint }, tokenProvider: tokens, session: session, clock: { now },
+                retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 0 }),
+                surfaceEnabled: { true })
+            weakTrigger = trigger
+            let model = VoiceSharingSettingsModel(
+                queue: queue, isCollectionPermitted: { coordinator.policy.permitsCollection },
+                isAccountEnrolled: { store.currentEnrollmentAnswer },
+                isLocallyOptedIn: { store.currentState.localOptIn }, coherenceAccount: { "local-account" })
+            service = assembly.installVoiceSharingLifetime(
+                on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: makeCollector()).service,
+                settingsModel: model, uploadTrigger: trigger, enrollmentStore: store,
+                policy: coordinator.policy, queue: queue)
+        }
+        defer { weakTrigger?.stop(); service = nil }
+        XCTAssertNil(weakAssembly)
+        XCTAssertNotNil(weakTrigger)
+        XCTAssertEqual(tokens.value, "local-test-bearer")
+        XCTAssertNil(store.currentEnrollmentAnswer)
+        let followUp = expectation(description: "changed enrollment requests fresh authority")
+        coordinator.initiateIdentityRecoveryRefresh = { followUp.fulfill() }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: accountClient)
+        await fulfillment(of: [followUp], timeout: 2)
+        XCTAssertTrue(store.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let metadata = try queue.metadata(of: entry)
+        let audio = try queue.audio(of: entry)
+        let bound = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+        let ownerURL = root.appendingPathComponent(entry.name).appendingPathComponent("owner.account")
+        XCTAssertEqual(try String(contentsOf: ownerURL, encoding: .utf8), "local-account")
+        weakTrigger?.triggerDrainIfPermitted()
+        await joinLocalSharingDrain(weakTrigger)
+        XCTAssertEqual(authority.received.count, 0, "accepted enrollment without a new lease cannot upload")
+
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: accountClient)
+        XCTAssertTrue(coordinator.policy.permitsCollection)
+        XCTAssertEqual(authority.lookupCount, 2)
+        weakTrigger?.triggerDrainIfPermitted()
+        await joinLocalSharingDrain(weakTrigger)
+        XCTAssertEqual(authority.received.count, 1)
+        XCTAssertEqual(try queue.metadata(of: entry), metadata, "503 retains exact immutable metadata")
+        XCTAssertEqual(try queue.audio(of: entry), audio, "503 retains exact immutable WAV")
+        XCTAssertEqual(try String(contentsOf: ownerURL, encoding: .utf8), "local-account")
+        XCTAssertEqual(queue.readyEntries().count, 1)
+        now = now.addingTimeInterval(2)
+        weakTrigger?.triggerDrainIfPermitted()
+        await joinLocalSharingDrain(weakTrigger)
+        let attempts = authority.received
+        XCTAssertEqual(attempts.count, 2)
+        for attempt in attempts {
+            XCTAssertEqual(attempt.metadata, metadata)
+            XCTAssertEqual(attempt.audio, audio)
+            XCTAssertEqual(attempt.binding, bound)
+            XCTAssertEqual(attempt.binding.enrollmentEpoch, "epoch-1")
+            XCTAssertEqual(attempt.bearer, "Bearer local-test-bearer")
+        }
+        XCTAssertTrue(queue.readyEntries().isEmpty, "matching received-body-derived receipt settles the entry")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(entry.name).path))
+
+        _ = try AudioFixture.makeReadyEntry(in: queue)
+        XCTAssertEqual(queue.readyEntries().count, 1)
+        store.setLocalOptIn(false)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        weakTrigger?.triggerDrainIfPermitted()
+        await joinLocalSharingDrain(weakTrigger)
+        XCTAssertEqual(authority.received.count, 2, "configured work cannot send after local withdrawal")
+        XCTAssertEqual(queue.readyEntries().count, 1, "negative is not explained by an empty queue")
+        service = nil
+        XCTAssertNil(weakTrigger)
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+    }
+
+    private func joinLocalSharingDrain(_ trigger: VoiceSharingUploadTrigger?) async {
+        let task = trigger?.drainTaskForTesting
+        let joined = expectation(description: "configured drain joined")
+        Task { await task?.value; joined.fulfill() }
+        await fulfillment(of: [joined], timeout: 4)
+        if trigger?.isDrainingForTesting == true {
+            trigger?.stop()
+            task?.cancel()
+            let cancelled = expectation(description: "timed-out configured drain cancelled and joined")
+            Task { await task?.value; cancelled.fulfill() }
+            await fulfillment(of: [cancelled], timeout: 2)
+        }
+        XCTAssertFalse(trigger?.isDrainingForTesting ?? false)
+    }
+
     /// Produces a REAL open capture the way production does — the engine's own `speechStarted` — because
     /// an observation can only land on a capture that exists. Reports on a context the collector never
     /// minted are dropped by design, and a control that used a made-up context would prove nothing.
@@ -609,4 +746,161 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertEqual(stages["execution"]?.state, "not_run",
                        "execution must record that it did not run")
     }
+}
+/// Loopback-only account/intake authority. All network state lives on one serial queue.
+private final class SharingLocalAuthority {
+    struct Upload {
+        let metadata: Data
+        let audio: Data
+        let binding: VoiceSharingRecordBinding.BoundEntry
+        let bearer: String?
+    }
+    let ready = XCTestExpectation(description: "local authority listening")
+    let stopped = XCTestExpectation(description: "local authority stopped and connections joined")
+    private let listener: NWListener
+    private let work = DispatchQueue(label: "sharing-local-authority")
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var cancelled = false
+    private var stopReported = false
+    private var uploads: [Upload] = []
+    private var gets = 0
+    private var port: UInt16 = 0
+
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.port = self.listener.port?.rawValue ?? 0
+                self.ready.fulfill()
+            }
+            if case .cancelled = state { self.cancelled = true; self.reportStop() }
+        }
+        listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
+        listener.start(queue: work)
+    }
+
+    var baseURL: String { work.sync { "http://127.0.0.1:\(port)" } }
+    var received: [Upload] { work.sync { uploads } }
+    var lookupCount: Int { work.sync { gets } }
+
+    func stop() {
+        work.async {
+            self.listener.cancel()
+            for connection in self.connections.values { connection.cancel() }
+            self.reportStop()
+        }
+    }
+
+    private func reportStop() {
+        if cancelled && connections.isEmpty && !stopReported {
+            stopReported = true
+            stopped.fulfill()
+        }
+    }
+
+    private func accept(_ connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        connections[id] = connection
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self else { return }
+            if case .ready = state, let connection { self.receive(connection, accumulated: Data()) }
+            if case .cancelled = state { self.connections[id] = nil; self.reportStop() }
+            if case .failed = state { connection?.cancel() }
+        }
+        connection.start(queue: work)
+    }
+
+    private func receive(_ connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self, weak connection] bytes, _, complete, error in
+            guard let self, let connection else { return }
+            var raw = accumulated
+            if let bytes { raw.append(bytes) }
+            guard raw.count <= 2 << 20 else { connection.cancel(); return }
+            if let split = raw.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: raw[..<split.lowerBound], as: UTF8.self)
+                let isGet = head.hasPrefix("GET ")
+                if isGet || (VoiceSharingAssemblyWiringTests.declaredContentLength(raw).map { raw.count >= $0 } ?? false) {
+                    let response = self.respond(head: head, body: Data(raw[split.upperBound...]))
+                    connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
+            }
+            if complete || error != nil { connection.cancel() }
+            else { self.receive(connection, accumulated: raw) }
+        }
+    }
+
+    private func respond(head: String, body: Data) -> Data {
+        do {
+            func header(_ name: String) -> String? {
+                head.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix(name.lowercased() + ":") }
+                    .map { String($0.dropFirst(name.count + 1)).trimmingCharacters(in: .whitespaces) }
+            }
+            guard header("Authorization") == "Bearer local-test-bearer" else {
+                return try response(401, object: [:])
+            }
+            if head.hasPrefix("GET /api/v1/account/voice-sharing ") {
+                gets += 1
+                return try response(200, object: [
+                    "schema_version": 1, "membership_revision": "local-1", "plan": "pro",
+                    "voice_sharing_enrolled": true, "enrollment_epoch": "epoch-1",
+                    "accepted_disclosure_version": "2026-09", "withdrawal_state": "active"
+                ])
+            }
+            guard head.hasPrefix("POST /api/v1/voice-recordings ") else { return try response(404, object: [:]) }
+            let contentType = try XCTUnwrap(header("Content-Type"))
+            let boundary = try XCTUnwrap(contentType.components(separatedBy: "boundary=").last)
+            let delimiter = Data("\r\n--\(boundary)".utf8)
+            var parts: [String: Data] = [:]
+            var cursor = Data("--\(boundary)\r\n".utf8).count
+            while cursor < body.count, let headerEnd = body.range(of: Data("\r\n\r\n".utf8), in: cursor..<body.count),
+                  let end = body.range(of: delimiter, in: headerEnd.upperBound..<body.count) {
+                let partHead = String(decoding: body[cursor..<headerEnd.lowerBound], as: UTF8.self)
+                let name = partHead.contains("name=\"metadata\"") ? "metadata" : "audio"
+                guard parts[name] == nil else { throw URLError(.cannotParseResponse) }
+                parts[name] = Data(body[headerEnd.upperBound..<end.lowerBound])
+                cursor = end.upperBound
+                if body[cursor...].starts(with: Data("--".utf8)) { break }
+                cursor += 2 // CRLF after the boundary
+            }
+            let metadata = try XCTUnwrap(parts["metadata"])
+            let audio = try XCTUnwrap(parts["audio"])
+            let binding = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+            // Reuse the strict existing multipart identity extractor as an independent identity check.
+            var request = URLRequest(url: URL(string: baseURLForRequest)!)
+            request.httpBody = body
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            let extracted = try VoiceSharingAssemblyWiringTests.attemptedIdentity(from: request)
+            guard extracted.captureID == binding.captureID, extracted.sha == binding.recordSHA256 else {
+                throw URLError(.cannotParseResponse)
+            }
+            uploads.append(Upload(metadata: metadata, audio: audio, binding: binding, bearer: header("Authorization")))
+            if uploads.count == 1 { return try response(503, object: [:]) }
+            return try response(201, object: [
+                "schema_version": 1, "capture_id": binding.captureID, "record_sha256": binding.recordSHA256,
+                "status": "accepted", "receipt_id": "local-receipt", "accepted_at": "2026-10-28T14:00:00Z",
+                "retention_expires_at": "2026-11-28T14:00:00Z"
+            ])
+        } catch {
+            XCTFail("local authority rejected request: \(error)")
+            return Data("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+        }
+    }
+    private var baseURLForRequest: String { "http://127.0.0.1:\(port)/api/v1/voice-recordings" }
+    private func response(_ code: Int, object: [String: Any]) throws -> Data {
+        let body = try JSONSerialization.data(withJSONObject: object)
+        var response = Data("HTTP/1.1 \(code) Response\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        response.append(body)
+        return response
+    }
+}
+
+private final class LocalSharingToken: CloudTokenProviding {
+    let value = "local-test-bearer"
+    func token() async -> String? { value }
+    func prepare() async {}
+    func handleUnauthorized(rejectedToken: String?) async {}
 }

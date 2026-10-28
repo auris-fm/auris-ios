@@ -109,43 +109,8 @@ class VoiceControlAssembly {
                 accountScope: ServerSettings.userId,
                 enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
         }
-        let uploadTransport = VoiceSharingUploadTransport(
-            baseURLProvider: { CloudConfig.shared.baseUrl },
-            tokenProvider: CloudTokenProviderRouter.provider())
-        let uploadUploader = VoiceSharingUploader(
-            queue: contributionQueue,
-            retryPolicy: VoiceSharingRetryPolicy(
-                retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
-                retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
-                random: { Double.random(in: 0...1) }),
-            isAuthorized: uploadAuthorized,
-            // SAME live reader the queue uses: the attempt is fenced to the identity it was
-            // admitted under for its whole lifetime, not just at admission.
-            currentIdentity: {
-                VoiceSharingUploadIdentity(
-                    accountScope: ServerSettings.userId,
-                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
-            },
-            endpoint: { uploadTransport.endpoint },
-            transport: { [uploadTransport] request, admitted, fence in
-                // The transport fences at its OWN credential boundary with this attempt's
-                // admitted snapshot: an identity move during token acquisition sends nothing.
-                await uploadTransport.send(request: request,
-                                           admittedIdentity: admitted, identityFence: fence)
-            })
-        let uploadScheduler = VoiceSharingUploadScheduler(
-            queue: contributionQueue,
-            uploader: uploadUploader,
-            isAuthorized: uploadAuthorized)
-        // GUARDED TRIGGER WIRING (spec 55f636fe): the lifecycle trigger is the production caller,
-        // but it is unreachable while `VoiceSharingSettingsModel.surfaceEnabled` is false — and
-        // the live policy gate is re-read at every trigger. Flipping the constant is an owner
-        // activation decision, not something this wiring does. No capture-path lock is held:
-        // the trigger only spawns a task and the scheduler serializes its own drains.
-        let uploadTrigger = VoiceSharingUploadTrigger(
-            scheduler: uploadScheduler,
-            surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
-            isAuthorized: uploadAuthorized)
+        let uploadTrigger = makeVoiceSharingUploadTrigger(
+            queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity)
         // The settings MODEL is wired here, in production, with the real live reads (reviewer
         // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
         // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
@@ -284,6 +249,34 @@ class VoiceControlAssembly {
             on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
             enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
             queue: contributionQueue)
+    }
+
+    /// The production upload chain. Injection changes sources, not the wiring under test.
+    func makeVoiceSharingUploadTrigger(
+        queue: VoiceSharingUploadQueue,
+        isAuthorized: @escaping () -> Bool,
+        currentIdentity: @escaping () -> VoiceSharingUploadIdentity?,
+        baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
+        tokenProvider: CloudTokenProviding = CloudTokenProviderRouter.provider(),
+        session: URLSession = .shared,
+        clock: @escaping () -> Date = Date.init,
+        retryPolicy: VoiceSharingRetryPolicy = VoiceSharingRetryPolicy(
+            retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
+            retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
+            random: { Double.random(in: 0...1) }),
+        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled }
+    ) -> VoiceSharingUploadTrigger {
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: baseURLProvider, tokenProvider: tokenProvider, session: session)
+        let uploader = VoiceSharingUploader(
+            queue: queue, retryPolicy: retryPolicy, isAuthorized: isAuthorized,
+            currentIdentity: currentIdentity, endpoint: { transport.endpoint }, clock: clock,
+            transport: { [transport] request, admitted, fence in
+                await transport.send(request: request, admittedIdentity: admitted, identityFence: fence)
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader, isAuthorized: isAuthorized)
+        return VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized)
     }
 
     /// Keep revocation subscribed for as long as the collector can retain contribution audio.
