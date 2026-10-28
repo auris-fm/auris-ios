@@ -1296,7 +1296,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // identity is pinned — so the deferral must be recorded AFTER it, with the epoch
                     // that `finish()` just assigned. Recording before would capture the PREVIOUS
                     // cycle's identity and reject this turn's own notification.
-                    let needsDeferral = audioPlayer.hasPendingAudio
+                    // The Swift queue can already be empty while the node still has scheduled audio.
+                    let needsDeferral = audioPlayer.hasOutstandingOutput
                     // Record the identity `finish()` ALLOCATED for this turn's drain. Re-reading the
                     // current value could pick up a later schedule, leaving this turn waiting on an
                     // identity that is not its own.

@@ -859,6 +859,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
 
         do {
+            // A test can supply an offline output while retaining this real engine/node graph.
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+                try Self.configureEngineForTesting?(engine)
+            }
             try engine.start()
         } catch {
             os_log(.error, "CloudAudioPlayer: engine start failed: %@", error.localizedDescription)
@@ -1119,6 +1123,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// still comes from `startEngine`, the buffer still goes through `scheduleBuffer`, and the
     /// position still comes from `renderPosition(of:)`. Production never sets it, so production
     /// behaviour is unchanged.
+    static var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
+
     static var audioOutputAvailabilityOverrideForTesting: Bool? = nil
     /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
     /// whether the process reported itself as a test host at all (the override is consulted only
@@ -1267,6 +1273,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
         while true {
             guard let frame = dequeueFrame() else { break }
             playFrame(frame)
+        }
+        // Scheduling the last buffer is not playback completion. Keep this node alive until
+        // its measured position reaches the scheduled end. A stalled/unreadable engine is
+        // bounded, and cancel/shutdown can wake this wait and take ownership of the stop.
+        let renderDeadline = Date().addingTimeInterval(nodeIncarnationFrames / negotiatedSampleRate * 2 + 1)
+        while pendingAudibleOrUnverified && Date() < renderDeadline {
+            runnerLock.lock()
+            if stopRequested || shutdownRequested {
+                runnerLock.unlock()
+                break
+            }
+            _ = runnerLock.wait(until: min(renderDeadline, Date().addingTimeInterval(0.05)))
+            let interrupted = stopRequested || shutdownRequested
+            runnerLock.unlock()
+            if interrupted { break }
         }
         // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
         // request time — the drain claim when nothing displaced it, the cancel that landed
