@@ -264,19 +264,23 @@ class VoiceControlAssembly {
             retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
             retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
             random: { Double.random(in: 0...1) }),
-        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled }
+        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
+        networkGate: VoiceSharingUploadNetworkGate = VoiceSharingUploadNetworkGate(),
+        beforeNetworkRetryForTesting: (() async -> Void)? = nil
     ) -> VoiceSharingUploadTrigger {
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: baseURLProvider, tokenProvider: tokenProvider, session: session)
         let uploader = VoiceSharingUploader(
-            queue: queue, retryPolicy: retryPolicy, isAuthorized: isAuthorized,
+            queue: queue, networkGate: networkGate, retryPolicy: retryPolicy, isAuthorized: isAuthorized,
             currentIdentity: currentIdentity, endpoint: { transport.endpoint }, clock: clock,
-            transport: { [transport] request, admitted, fence in
-                await transport.send(request: request, admittedIdentity: admitted, identityFence: fence)
+            networkFenceTransport: { [transport] request, admitted, fence, networkFence in
+                return await transport.send(request: request, admittedIdentity: admitted, identityFence: fence,
+                                            networkFence: networkFence, networkAllowance: networkGate.allowance)
             })
+        uploader.beforeNetworkRetryForTesting = beforeNetworkRetryForTesting
         let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader, isAuthorized: isAuthorized)
         return VoiceSharingUploadTrigger(
-            scheduler: scheduler, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized)
+            scheduler: scheduler, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized, networkGate: networkGate)
     }
 
     /// Keep revocation subscribed for as long as the collector can retain contribution audio.

@@ -417,11 +417,14 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         do {
             let assembly = VoiceControlAssembly()
             weakAssembly = assembly
+            let network = VoiceSharingUploadNetworkGate(allowance: VoiceSharingUploadNetworkAllowance(
+                interfaces: [.wifi, .wired], allowsExpensive: false, allowsConstrained: false), monitorPath: false)
+            network.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
             let trigger = assembly.makeVoiceSharingUploadTrigger(
                 queue: queue, isAuthorized: { coordinator.policy.permitsCollection }, currentIdentity: identity,
                 baseURLProvider: { endpoint }, tokenProvider: tokens, session: session, clock: { now },
                 retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 0 }),
-                surfaceEnabled: { true })
+                surfaceEnabled: { true }, networkGate: network)
             weakTrigger = trigger
             let model = VoiceSharingSettingsModel(
                 queue: queue, isCollectionPermitted: { coordinator.policy.permitsCollection },

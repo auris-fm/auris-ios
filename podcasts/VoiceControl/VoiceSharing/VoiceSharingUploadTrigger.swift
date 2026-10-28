@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import PocketCastsUtils
 
 /// The GUARDED production trigger for contribution uploads (task73 wiring): observes app
@@ -14,6 +15,7 @@ import PocketCastsUtils
 /// turning it on is an owner decision in a future build. It adds no locks around capture paths —
 /// the drain runs on its own task and the scheduler serializes itself.
 final class VoiceSharingUploadTrigger {
+    private let networkGate: VoiceSharingUploadNetworkGate?
     private let scheduler: VoiceSharingUploadScheduler
     private let surfaceEnabled: () -> Bool
     private let isAuthorized: () -> Bool
@@ -47,11 +49,18 @@ final class VoiceSharingUploadTrigger {
     init(
         scheduler: VoiceSharingUploadScheduler,
         surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
-        isAuthorized: @escaping () -> Bool
+        isAuthorized: @escaping () -> Bool,
+        networkGate: VoiceSharingUploadNetworkGate? = nil
     ) {
+        self.networkGate = networkGate
         self.scheduler = scheduler
         self.surfaceEnabled = surfaceEnabled
         self.isAuthorized = isAuthorized
+        networkGate?.onChange = { [weak self] allowed in
+            guard let self else { return }
+            if allowed { self.triggerDrainIfPermitted() }
+            else { self.stop() } // Transient cancellation only; never consent purge.
+        }
         // The trigger rides the SAME lifecycle signal the rest of the app uses; a foreground
         // transition is when connectivity and credentials are most likely healthy.
         NotificationCenter.default.addObserver(
@@ -60,6 +69,8 @@ final class VoiceSharingUploadTrigger {
     }
 
     deinit {
+        networkGate?.onChange = nil
+        networkGate?.stopMonitoring()
         NotificationCenter.default.removeObserver(self)
         // TEARDOWN UNDER ONE HOLD (reviewer 4377e2bd): the live registration is REMOVED from the
         // scheduler (so a completion can never fire into a dying object), the slot and pending
@@ -152,6 +163,7 @@ final class VoiceSharingUploadTrigger {
         // Gate 1: compiled-off surface ⇒ literal no-op. This is what keeps the feature
         // unreachable in shipped builds regardless of policy or network state.
         guard surfaceEnabled() else { return }
+        guard networkGate?.isAllowed ?? true else { return }
         // Gate 2: live collection policy.
         guard isAuthorized() else { return }
         stateLock.lock()
@@ -312,4 +324,98 @@ final class VoiceSharingUploadTrigger {
     @objc private func appBecameActive() {
         triggerDrainIfPermitted()
     }
+}
+/// Validated client input; unavailable is the production default until activation selects allowances.
+struct VoiceSharingUploadNetworkAllowance {
+    enum Interface: Hashable { case wifi, cellular, wired }
+    let interfaces: Set<Interface>
+    let allowsExpensive: Bool
+    let allowsConstrained: Bool
+
+    init?(interfaces: Set<Interface>, allowsExpensive: Bool, allowsConstrained: Bool) {
+        // URLSession can prohibit cellular, expense and constrained paths, not require Wi-Fi alone.
+        guard interfaces == [.wifi, .wired] || interfaces == [.wifi, .wired, .cellular] else { return nil }
+        self.interfaces = interfaces
+        self.allowsExpensive = allowsExpensive
+        self.allowsConstrained = allowsConstrained
+    }
+}
+
+/// Upload-only path gate. Losing permission retires admitted generations even after recovery.
+final class VoiceSharingUploadNetworkGate {
+    struct Path {
+        let satisfied: Bool
+        let interfaces: Set<VoiceSharingUploadNetworkAllowance.Interface>
+        let expensive: Bool
+        let constrained: Bool
+    }
+
+    private let lock = NSLock()
+    let allowance: VoiceSharingUploadNetworkAllowance?
+    private var allowed = false
+    private var generation = 0
+    private var callback: ((Bool) -> Void)?
+    private var monitor: NWPathMonitor?
+
+    init(allowance: VoiceSharingUploadNetworkAllowance? = nil, monitorPath: Bool = true) {
+        self.allowance = allowance
+        if monitorPath {
+            let monitor = NWPathMonitor()
+            self.monitor = monitor
+            monitor.pathUpdateHandler = { [weak self] path in
+                var interfaces = Set<VoiceSharingUploadNetworkAllowance.Interface>()
+                if path.usesInterfaceType(.wifi) { interfaces.insert(.wifi) }
+                if path.usesInterfaceType(.cellular) { interfaces.insert(.cellular) }
+                if path.usesInterfaceType(.wiredEthernet) { interfaces.insert(.wired) }
+                self?.update(Path(satisfied: path.status == .satisfied, interfaces: interfaces,
+                                  expensive: path.isExpensive, constrained: path.isConstrained))
+            }
+            monitor.start(queue: DispatchQueue(label: "fm.auris.sharing.network"))
+        }
+    }
+
+    var onChange: ((Bool) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return callback }
+        set { lock.lock(); callback = newValue; lock.unlock() }
+    }
+
+    var isAllowed: Bool { lock.lock(); defer { lock.unlock() }; return allowed }
+
+    func admissionToken() -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return allowed ? generation : nil
+    }
+
+    func isCurrent(_ token: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return allowed && token == generation
+    }
+
+    func update(_ path: Path) {
+        lock.lock()
+        let next = allowance.map {
+            path.satisfied && !path.interfaces.isDisjoint(with: $0.interfaces)
+                && (!path.expensive || $0.allowsExpensive)
+                && (!path.constrained || $0.allowsConstrained)
+        } ?? false
+        let changed = next != allowed
+        if changed { generation += 1 }
+        allowed = next
+        let notify = changed ? callback : nil
+        lock.unlock()
+        notify?(next)
+    }
+
+    func stopMonitoring() {
+        lock.lock()
+        let old = monitor
+        monitor = nil
+        callback = nil
+        allowed = false
+        generation += 1
+        lock.unlock()
+        old?.cancel()
+    }
+
+    deinit { stopMonitoring() }
 }

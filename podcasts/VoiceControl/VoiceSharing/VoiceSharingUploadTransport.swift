@@ -29,10 +29,17 @@ final class VoiceSharingUploadTransport {
     /// starts BEFORE the request is issued — stalled headers count against it too. The underlying
     /// transfer is cancelled through the session task handle, not just abandoned.
     private static func receive(
-        session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval
+        session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval,
+        networkFence: (() -> Bool)?, beforeLaunch: (() async -> Void)?
     ) async throws -> (HTTPURLResponse, Data)? {
-        // The REAL task handle: cancelling it tears down the actual URL transfer.
+        let cancellation = VoiceSharingTransferCancellation()
+        return try await withTaskCancellationHandler(operation: {
+        try Task.checkCancellation()
+        // Cancellation owns publication before either unstructured child can start.
         let transferTask = Task<(HTTPURLResponse, Data)?, Error> {
+            await beforeLaunch?()
+            try Task.checkCancellation()
+            guard !cancellation.isCancelled, networkFence?() ?? true else { throw CancellationError() }
             let (bytes, response) = try await session.bytes(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
             var data = Data()
@@ -55,56 +62,57 @@ final class VoiceSharingUploadTransport {
             try await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
             throw URLError(.timedOut)
         }
+        cancellation.install { transferTask.cancel(); deadlineTask.cancel() }
         defer {
             transferTask.cancel()
             deadlineTask.cancel()
+            cancellation.clear()
         }
         return try await withThrowingTaskGroup(
-            of: (HTTPURLResponse, Data)?.self
-        ) { group in
-            group.addTask { [transferTask, deadlineTask] () -> (HTTPURLResponse, Data)? in
-                let outcome = try await transferTask.value
-                // Transfer decided: release the deadline sleeper immediately. It is a SEPARATE
-                // top-level task, so group cancellation cannot reach it — only this explicit
-                // cancel can, and without it every completed transfer would still wait out the
-                // full deadline before returning.
-                deadlineTask.cancel()
-                return outcome
-            }
-            group.addTask { [transferTask] () -> (HTTPURLResponse, Data)? in
-                var timedOut = true
-                do {
-                    _ = try await deadlineTask.value
-                } catch is CancellationError {
-                    // The LOSER's cancellation (the transfer finished first and released the
-                    // timer) is NOT a timeout (reviewer a29e62a2): a successful transfer must
-                    // never race into transportFailure through this child.
-                    timedOut = false
-                } catch {
-                    // REAL deadline expiry: kill the underlying URL transfer FIRST so the
-                    // transfer child can actually finish, then report the timeout.
-                    transferTask.cancel()
-                    timedOut = true
+                of: (HTTPURLResponse, Data)?.self
+            ) { group in
+                group.addTask { [transferTask, deadlineTask] () -> (HTTPURLResponse, Data)? in
+                    defer { deadlineTask.cancel() }
+                    let outcome = try await transferTask.value
+                    return outcome
                 }
-                if timedOut { throw URLError(.timedOut) }
-                return nil
-            }
-            // ONE AUTHORITATIVE RESULT (reviewer c9416bf7): the timer's loser notification
-            // (nil from a cancelled timer child) must never WIN the race over a successful
-            // transfer. Only a non-nil transfer result or a REAL timeout throw decides; loser
-            // notifications are consumed and ignored.
-            var decided: (HTTPURLResponse, Data)?
-            while let notification = try await group.next() {
-                if let notification {
-                    decided = notification
-                    break
+                group.addTask { [transferTask] () -> (HTTPURLResponse, Data)? in
+                    var timedOut = true
+                    do {
+                        _ = try await deadlineTask.value
+                    } catch is CancellationError {
+                        // The LOSER's cancellation (the transfer finished first and released the
+                        // timer) is NOT a timeout (reviewer a29e62a2): a successful transfer must
+                        // never race into transportFailure through this child.
+                        timedOut = false
+                    } catch {
+                        // REAL deadline expiry: kill the underlying URL transfer FIRST so the
+                        // transfer child can actually finish, then report the timeout.
+                        transferTask.cancel()
+                        timedOut = true
+                    }
+                    if timedOut { throw URLError(.timedOut) }
+                    return nil
                 }
-                // nil = the cancelled timer child finished: keep waiting for the transfer child.
+                // ONE AUTHORITATIVE RESULT (reviewer c9416bf7): the timer's loser notification
+                // (nil from a cancelled timer child) must never WIN the race over a successful
+                // transfer. Only a non-nil transfer result or a REAL timeout throw decides; loser
+                // notifications are consumed and ignored.
+                var decided: (HTTPURLResponse, Data)?
+                while let notification = try await group.next() {
+                    if let notification {
+                        decided = notification
+                        break
+                    }
+                    // nil = the cancelled timer child finished: keep waiting for the transfer child.
+                }
+                group.cancelAll()
+                return decided // nil here means a genuine violation, never a lost race
             }
-            group.cancelAll()
-            return decided // nil here means a genuine violation, never a lost race
-        }
+        }, onCancel: { cancellation.cancel() })
     }
+
+    var beforeTransferLaunchForTesting: (() async -> Void)?
 
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
@@ -144,12 +152,16 @@ final class VoiceSharingUploadTransport {
     func send(
         request built: URLRequest,
         admittedIdentity: VoiceSharingUploadIdentity? = nil,
-        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil
+        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil,
+        networkFence: (() -> Bool)? = nil,
+        networkAllowance: VoiceSharingUploadNetworkAllowance? = nil
     ) async -> VoiceSharingUploader.TransportResult {
+        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
         // No bearer, no call — nothing is created, nothing is sent.
         guard let credential = await tokenProvider.token(), !credential.isEmpty else {
             return .transportFailure
         }
+        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
         // CREDENTIAL-BOUNDARY FENCE (reviewer ee5b4547): the identity may have moved WHILE the
         // credential was being acquired. The declared admitted snapshot must still be live before
         // a single byte leaves; A's bytes are never sent under B's credential. Checking after the
@@ -158,6 +170,11 @@ final class VoiceSharingUploadTransport {
             guard let live = fence(), live == admitted else { return .transportFailure }
         }
         var request = built
+        if let allowance = networkAllowance {
+            request.allowsCellularAccess = allowance.interfaces.contains(.cellular)
+            request.allowsExpensiveNetworkAccess = allowance.allowsExpensive
+            request.allowsConstrainedNetworkAccess = allowance.allowsConstrained
+        }
         // The CONFIGURED endpoint decides, not anything the caller supplied: a build with no base
         // URL must upload nowhere, even if it was handed a well-formed request.
         guard let endpoint else { return .transportFailure }
@@ -180,6 +197,7 @@ final class VoiceSharingUploadTransport {
             guard let live = fence(), live == admitted else { return .transportFailure }
         }
 
+        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
         do {
             // STREAMING bound (reviewer 8ba9c45f): `session.data` allocates the WHOLE body before
             // this code runs, so a post-hoc count check is a parse bound, not a memory bound. The
@@ -187,7 +205,8 @@ final class VoiceSharingUploadTransport {
             // is exceeded. A full-body deadline bounds the transfer's total lifetime as well.
             let transfer = try await Self.receive(
                 session: session, request: request,
-                byteLimit: Self.maxResponseBytes, deadline: bodyDeadline)
+                byteLimit: Self.maxResponseBytes, deadline: bodyDeadline,
+                networkFence: networkFence, beforeLaunch: beforeTransferLaunchForTesting)
             guard let (http, data) = transfer else { return .transportFailure }
 
             if http.statusCode == 401 {
@@ -202,5 +221,27 @@ final class VoiceSharingUploadTransport {
             return .transportFailure
         }
     }
+}
 
+/// Publishes cancellation before task handles exist; a late handle is cancelled on installation.
+private final class VoiceSharingTransferCancellation {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var cancelTasks: (() -> Void)?
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func install(_ body: @escaping () -> Void) {
+        lock.lock()
+        cancelTasks = body
+        let cancelNow = cancelled
+        lock.unlock()
+        if cancelNow { body() }
+    }
+    func clear() { lock.lock(); cancelTasks = nil; lock.unlock() }
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let body = cancelTasks
+        lock.unlock()
+        body?()
+    }
 }

@@ -64,6 +64,8 @@ final class VoiceSharingUploader {
         case identityMismatch
     }
 
+    var beforeNetworkRetryForTesting: (() async -> Void)?
+    private let networkGate: VoiceSharingUploadNetworkGate?
     private let queue: VoiceSharingUploadQueue
     private let retryPolicy: VoiceSharingRetryPolicy
     private let isAuthorized: () -> Bool
@@ -72,32 +74,39 @@ final class VoiceSharingUploader {
     private let currentIdentity: () -> VoiceSharingUploadIdentity?
     /// The transport receives the admitted identity snapshot and the live reader so IT can fence
     /// at the credential boundary (the token await is a window the uploader cannot see).
-    private let transport: (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult
+    private let transport: (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?, @escaping () -> Bool) async -> TransportResult
     private let endpoint: () -> URL?
     private let clock: () -> Date
 
     init(
         queue: VoiceSharingUploadQueue,
+        networkGate: VoiceSharingUploadNetworkGate? = nil,
         retryPolicy: VoiceSharingRetryPolicy,
         isAuthorized: @escaping () -> Bool,
         currentIdentity: @escaping () -> VoiceSharingUploadIdentity? = { nil },
         endpoint: @escaping () -> URL?,
         clock: @escaping () -> Date = Date.init,
-        transport: @escaping (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult
+        transport: @escaping (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult = { _, _, _ in .transportFailure },
+        networkFenceTransport: ((URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?, @escaping () -> Bool) async -> TransportResult)? = nil
     ) {
+        self.networkGate = networkGate
         self.queue = queue
         self.retryPolicy = retryPolicy
         self.isAuthorized = isAuthorized
         self.currentIdentity = currentIdentity
         self.endpoint = endpoint
         self.clock = clock
-        self.transport = transport
+        self.transport = networkFenceTransport ?? { request, identity, fence, _ in await transport(request, identity, fence) }
     }
 
     /// Uploads one ready entry. Returns what happened; never throws into the caller's pipeline.
     func upload(_ entry: VoiceSharingUploadQueue.Entry) async -> Outcome {
         // AUTHORIZATION FIRST: no request is ever issued without a live permission.
         guard isAuthorized() else { return .revoked }
+        let networkToken = networkGate?.admissionToken()
+        guard !Task.isCancelled, networkGate == nil || networkToken != nil else {
+            return .unavailable(reason: "network blocked")
+        }
         // Ownership: taking the lease is what makes this attempt OURS. Note beginAttempt also
         // enforces the strict owner-wide coverage hold, so an unreconciled owner uploads nothing.
         // Ownership: ONE atomic admission yields the lease AND the attempt number together
@@ -140,7 +149,17 @@ final class VoiceSharingUploader {
         // snapshot: the token await inside is the one window the uploader-side fence cannot see.
         // When the queue carries no identity (unbound), the fence parameters stay nil and the
         // uploader-side checks are the only enforcement — same as before this seam existed.
-        let result = await transport(request, admitted.identity, currentIdentity)
+        guard !Task.isCancelled, networkGate == nil || networkToken.map({ networkGate!.isCurrent($0) }) == true else {
+            await beforeNetworkRetryForTesting?()
+            return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
+        }
+        let result = await transport(request, admitted.identity, currentIdentity, { [networkGate] in
+            networkGate == nil || networkToken.map { networkGate!.isCurrent($0) } == true
+        })
+        guard !Task.isCancelled, networkGate == nil || networkToken.map({ networkGate!.isCurrent($0) }) == true else {
+            await beforeNetworkRetryForTesting?()
+            return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
+        }
 
         // ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the identity this attempt was ADMITTED under must
         // still be the live one. Admission-time binding alone cannot see an account/epoch move that

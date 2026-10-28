@@ -1,4 +1,5 @@
 import XCTest
+import Network
 @testable import podcasts
 
 /// Controls for the PRODUCTION upload transport: real request construction, credential lifetime and
@@ -867,4 +868,255 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         // Signaled OUTSIDE the lock: the waiter may immediately read the statics above.
         semaphore?.signal()
     }
+}
+extension VoiceSharingUploadTransportTests {
+    private func permittedNetwork() -> VoiceSharingUploadNetworkGate {
+        let gate = VoiceSharingUploadNetworkGate(allowance: VoiceSharingUploadNetworkAllowance(
+            interfaces: [.wifi, .wired], allowsExpensive: false, allowsConstrained: false), monitorPath: false)
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        return gate
+    }
+
+    func test_networkAdmissionRefusesUnknownAndDisallowedWithoutSpendingAttempt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        XCTAssertNil(VoiceSharingUploadNetworkAllowance(interfaces: [.wifi], allowsExpensive: false, allowsConstrained: false))
+        XCTAssertNil(VoiceSharingUploadNetworkAllowance(interfaces: [.wired], allowsExpensive: false, allowsConstrained: false))
+        let gate = VoiceSharingUploadNetworkGate(monitorPath: false)
+        var sends = 0
+        let uploader = VoiceSharingUploader(queue: queue, networkGate: gate,
+            retryPolicy: .init(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 1 }), isAuthorized: { true },
+            endpoint: { URL(string: "https://unit.test") }, transport: { _, _, _ in sends += 1; return .transportFailure })
+        _ = await uploader.upload(entry)
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        _ = await uploader.upload(entry)
+        XCTAssertEqual(sends, 0)
+        XCTAssertEqual(try queue.attemptCount(for: entry), 0)
+        XCTAssertEqual(queue.readyEntries(), [entry])
+        let selected = permittedNetwork()
+        var credentials = 0
+        let counted = NetworkClosureTokenProvider { credentials += 1; return "synthetic" }
+        let actualTransport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: counted, session: session)
+        let selectedUploader = VoiceSharingUploader(queue: queue, networkGate: selected,
+            retryPolicy: .init(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 1 }), isAuthorized: { true },
+            endpoint: { URL(string: "https://unit.test") }, networkFenceTransport: { request, _, _, fence in
+                await actualTransport.send(request: request, networkFence: fence)
+            })
+        XCTAssertTrue(selected.isAllowed)
+        for path in [VoiceSharingUploadNetworkGate.Path(satisfied: false, interfaces: [.wifi], expensive: false, constrained: false),
+                     .init(satisfied: true, interfaces: [.cellular], expensive: false, constrained: false),
+                     .init(satisfied: true, interfaces: [.wifi], expensive: true, constrained: false),
+                     .init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: true)] {
+            selected.update(path)
+            XCTAssertFalse(selected.isAllowed)
+            _ = await selectedUploader.upload(entry)
+            XCTAssertEqual(try queue.attemptCount(for: entry), 0)
+            XCTAssertEqual(credentials, 0)
+            XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0)
+        }
+    }
+
+    func test_networkLossRecoveryWhileCredentialWaitsCannotLaunchOldGeneration() async throws {
+        let entered = expectation(description: "credential entered")
+        let release = NetworkCredentialGate()
+        let provider = NetworkClosureTokenProvider { entered.fulfill(); return await release.wait() }
+        let gate = permittedNetwork()
+        let token = try XCTUnwrap(gate.admissionToken())
+        let transport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        let request = makeRequest()
+        let task = Task { await transport.send(request: request, networkFence: { gate.isCurrent(token) }) }
+        await fulfillment(of: [entered], timeout: 3)
+        gate.update(.init(satisfied: false, interfaces: [], expensive: false, constrained: false))
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        XCTAssertTrue(gate.isAllowed)
+        await release.open()
+        let result = await task.value
+        XCTAssertEqual(result, .transportFailure)
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0)
+    }
+
+    func test_preHeaderFailureReleasesLongDeadlinePromptly() async {
+        // The URLProtocol's absent handler fails before headers. Keep the production 90s deadline.
+        let provider = NetworkClosureTokenProvider { "synthetic" }
+        let transport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        let request = makeRequest()
+        let completed = expectation(description: "pre-header failure releases deadline waiter")
+        let task = Task { let result = await transport.send(request: request); XCTAssertEqual(result, .transportFailure); completed.fulfill() }
+        await fulfillment(of: [completed], timeout: 3)
+        task.cancel()
+        await task.value // cancel/join even after a failed bound, before URLProtocol teardown
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 1, "failure exercised the real URLSession path")
+    }
+
+    func test_networkAllowanceRestrictsActualURLRequest() async throws {
+        UploadRecordingURLProtocol.handler = { request in
+            XCTAssertFalse(request.allowsCellularAccess)
+            XCTAssertFalse(request.allowsExpensiveNetworkAccess)
+            XCTAssertFalse(request.allowsConstrainedNetworkAccess)
+            return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let provider = NetworkClosureTokenProvider { "synthetic" }
+        let transport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        _ = await transport.send(request: makeRequest(), networkAllowance: permittedNetwork().allowance)
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 1)
+    }
+
+    func test_networkLossAtTransferPublicationSendsNothing() async throws {
+        let entered = expectation(description: "transfer published but not launched")
+        let release = NetworkCredentialGate()
+        let gate = permittedNetwork()
+        let token = try XCTUnwrap(gate.admissionToken())
+        let provider = NetworkClosureTokenProvider { "synthetic" }
+        let transport = VoiceSharingUploadTransport(baseURLProvider: { "https://unit.test" }, tokenProvider: provider, session: session)
+        transport.beforeTransferLaunchForTesting = { entered.fulfill(); _ = await release.wait() }
+        let request = makeRequest()
+        let task = Task { await transport.send(request: request, networkFence: { gate.isCurrent(token) }) }
+        await fulfillment(of: [entered], timeout: 3)
+        gate.update(.init(satisfied: false, interfaces: [], expensive: false, constrained: false))
+        task.cancel()
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        await release.open()
+        let completed = expectation(description: "prelaunch cancellation completed")
+        Task { let result = await task.value; XCTAssertEqual(result, .transportFailure); completed.fulfill() }
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0)
+    }
+
+    func test_networkLossCancelsRealTransferAndRetainsImmutableRetry() async throws {
+        let listening = expectation(description: "listening")
+        let received = expectation(description: "first request")
+        let disconnected = expectation(description: "actual connection closed")
+        let retried = expectation(description: "retry request")
+        let listener = try NWListener(using: .tcp, on: .any)
+        let serverQueue = DispatchQueue(label: "sharing-network-control")
+        let bodies = NetworkBodyRecorder()
+        listener.stateUpdateHandler = { state in if case .ready = state { listening.fulfill() } }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: serverQueue)
+            var accumulated = Data()
+            var requestComplete = false
+            func receive() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, complete, error in
+                    if let data { accumulated.append(data) }
+                    if !requestComplete, let split = accumulated.range(of: Data("\r\n\r\n".utf8)),
+                       let header = String(data: accumulated[..<split.lowerBound], encoding: .utf8),
+                       let line = header.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("content-length:") }),
+                       let length = Int(line.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)),
+                       accumulated.count - split.upperBound >= length {
+                        requestComplete = true
+                        let index = bodies.append(Data(accumulated[split.upperBound...]))
+                        if index == 1 { received.fulfill() } // deliberately no response: cancellation must close TCP
+                        else {
+                            retried.fulfill()
+                            connection.send(content: Data("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in connection.cancel() })
+                            return
+                        }
+                    }
+                    if complete || error != nil {
+                        if requestComplete && bodies.count == 1 { disconnected.fulfill() }
+                        connection.cancel()
+                    } else { receive() }
+                }
+            }
+            receive()
+        }
+        listener.start(queue: serverQueue)
+        defer { listener.cancel() }
+        await fulfillment(of: [listening], timeout: 3)
+        let port = try XCTUnwrap(listener.port?.rawValue)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var now = Date()
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let audio = try queue.audio(of: entry)
+        let metadata = try queue.metadata(of: entry)
+        let gate = permittedNetwork()
+        let heldSettlement = expectation(description: "cancelled owner held before retry settlement")
+        let settlementReached = NetworkBodyRecorder()
+        let settlementGate = NetworkCredentialGate()
+        let provider = NetworkClosureTokenProvider { "synthetic" }
+        let realSession = URLSession(configuration: .ephemeral)
+        defer { realSession.invalidateAndCancel() }
+        let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(queue: queue, isAuthorized: { true }, currentIdentity: { nil },
+            baseURLProvider: { "http://127.0.0.1:\(port)" }, tokenProvider: provider, session: realSession, clock: { now },
+            retryPolicy: .init(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 1 }), surfaceEnabled: { true }, networkGate: gate, beforeNetworkRetryForTesting: {
+                _ = settlementReached.append(Data())
+                heldSettlement.fulfill(); _ = await settlementGate.wait()
+            })
+        defer { trigger.stop() }
+        trigger.triggerDrainIfPermitted()
+        let oldTask = try XCTUnwrap(trigger.drainTaskForTesting)
+        await fulfillment(of: [received], timeout: 5)
+        gate.update(.init(satisfied: false, interfaces: [], expensive: false, constrained: false))
+        await fulfillment(of: [disconnected, heldSettlement], timeout: 3)
+        guard settlementReached.count == 1 else {
+            // A failed cancellation variant must not leave a transfer alive or crash later assertions.
+            realSession.invalidateAndCancel()
+            await settlementGate.open()
+            await oldTask.value
+            _ = await XCTWaiter.fulfillment(of: [retried], timeout: 0)
+            return
+        }
+        let completed = expectation(description: "cancelled owner completed")
+        Task { await oldTask.value; completed.fulfill() }
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        let recoveryTask = try XCTUnwrap(trigger.drainTaskForTesting)
+        await recoveryTask.value // refuses busy and registers owner completion, without a second POST
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(try queue.attemptCount(for: entry), 1)
+        await settlementGate.open()
+        await fulfillment(of: [completed], timeout: 3)
+        await trigger.drainTaskForTesting?.value
+        XCTAssertEqual(bodies.count, 1, "recovery handoff must honor the newly published not-before")
+        XCTAssertEqual(queue.readyEntries(), [entry])
+        XCTAssertEqual(try queue.audio(of: entry), audio)
+        XCTAssertEqual(try queue.metadata(of: entry), metadata)
+        XCTAssertEqual(try queue.attemptCount(for: entry), 1)
+        now = now.addingTimeInterval(2)
+        trigger.triggerDrainIfPermitted() // later foreground opportunity, after existing backoff
+        let retryTask = try XCTUnwrap(trigger.drainTaskForTesting)
+        await fulfillment(of: [retried], timeout: 5)
+        await retryTask.value
+        XCTAssertEqual(try queue.attemptCount(for: entry), 2)
+        XCTAssertEqual(bodies.values.count, 2)
+        guard bodies.values.count == 2 else { return }
+        func normalized(_ data: Data) -> Data {
+            guard let end = data.range(of: Data("\r\n".utf8)) else { return data }
+            let delimiter = data[..<end.lowerBound]
+            // MIME framing is per request; canonical metadata/WAV and capture identity are immutable.
+            var result = data
+            while let match = result.range(of: delimiter) { result.replaceSubrange(match, with: Data("--boundary".utf8)) }
+            return result
+        }
+        XCTAssertEqual(normalized(bodies.values[0]), normalized(bodies.values[1]), "retry keeps metadata/WAV identity; only MIME boundary may change")
+        XCTAssertEqual(queue.readyEntries(), [entry])
+    }
+}
+
+private final class NetworkClosureTokenProvider: CloudTokenProviding {
+    let body: () async -> String?
+    init(_ body: @escaping () async -> String?) { self.body = body }
+    func token() async -> String? { await body() }
+    func handleUnauthorized(rejectedToken: String?) async {}
+}
+
+private actor NetworkCredentialGate {
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var opened = false
+    func wait() async -> String? {
+        if opened { return "synthetic" }
+        return await withCheckedContinuation { continuation = $0 }
+    }
+    func open() { opened = true; continuation?.resume(returning: "synthetic"); continuation = nil }
+}
+
+private final class NetworkBodyRecorder {
+    private let lock = NSLock()
+    private var storage: [Data] = []
+    var values: [Data] { lock.lock(); defer { lock.unlock() }; return storage }
+    var count: Int { values.count }
+    func append(_ data: Data) -> Int { lock.lock(); defer { lock.unlock() }; storage.append(data); return storage.count }
 }
