@@ -10,10 +10,13 @@ class TokenHelper {
 
     static let shared = TokenHelper(urlConnection: URLConnection(handler: URLSession.shared))
 
+    private static let renewalLock = NSLock()
+    private let backgroundState: (() -> Bool)?
     private let urlConnection: URLConnection
 
-    init(urlConnection: URLConnection) {
+    init(urlConnection: URLConnection, backgroundState: (() -> Bool)? = nil) {
         self.urlConnection = urlConnection
+        self.backgroundState = backgroundState
     }
 
     func callSecureUrl(request: URLRequest, completion: @escaping ((HTTPURLResponse?, Data?, Error?) -> Void)) {
@@ -47,7 +50,7 @@ class TokenHelper {
 
         if SyncManager.isUserLoggedIn() {
             let token: String
-            if let storedToken = try? KeychainHelper.string(for: ServerConstants.Values.syncingV2TokenKey) {
+            if let storedToken = ServerSettings.syncingV2Token {
                 token = storedToken
             } else if let newToken = acquireToken() {
                 token = newToken
@@ -67,7 +70,7 @@ class TokenHelper {
 
             if httpResponse.statusCode == ServerConstants.HttpConstants.unauthorized {
                 if SyncManager.isUserLoggedIn(), retryOnUnauthorized {
-                    KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
+                    ServerSettings.invalidateAccessToken(mutableRequest.value(forHTTPHeaderField: ServerConstants.HttpHeaders.authorization)?.replacingOccurrences(of: "Bearer ", with: ""))
                     FileLog.shared.addMessage("TokenHelper: Removed syncingV2TokenKey due to 401 unauthorized retrying url: \(request.url?.absoluteString ?? "unknown")")
                     self?.performCallSecureUrl(request: request, retryOnUnauthorized: false, completion: completion)
                 } else {
@@ -81,17 +84,27 @@ class TokenHelper {
         }
     }
 
-    func acquireToken() -> String? {
+    func acquireToken(onlyIfMissingRefresh: Bool = false) -> String? {
+        // Query main before the renewal lock: a main-thread credential lookup may
+        // need that lock while another renewal is failing. Never wait on main holding it.
+        let wasBackgrounded = backgroundState?() ?? isApplicationBackgrounded()
+        let observedToken = ServerSettings.syncingV2Token
+        Self.renewalLock.lock()
+        defer { Self.renewalLock.unlock() }
+        if !onlyIfMissingRefresh, let current = ServerSettings.syncingV2Token, current != observedToken { return current }
+        if onlyIfMissingRefresh, (try? ServerSettings.refreshToken()) != nil { return ServerSettings.syncingV2Token }
+        guard let attempt = ServerSettings.beginAuthentication(explicit: false) else { return nil }
+        defer { ServerSettings.finishAuthentication(attempt) }
         let semaphore = DispatchSemaphore(value: 0)
         var refreshedToken: String? = nil
-        var refreshedRefreshToken: String? = nil
+        var authentication: AuthenticationResponse?
         var error: Error? = nil
 
         asyncAcquireToken { result in
             switch result {
             case .success(let authenticationResponse):
                 refreshedToken = authenticationResponse?.token
-                refreshedRefreshToken = authenticationResponse?.refreshToken
+                authentication = authenticationResponse
             case .failure(let resultError):
                 refreshedToken = nil
                 error = resultError
@@ -102,17 +115,20 @@ class TokenHelper {
         semaphore.wait()
 
         if let token = refreshedToken, !token.isEmpty {
-            ServerSettings.syncingV2Token = token
-            ServerSettings.setRefreshToken(refreshedRefreshToken)
+            guard let authentication, ServerSettings.commitAuthentication(authentication, for: attempt) else { return nil }
         }
         else {
-            if isApplicationBackgrounded() {
+            if wasBackgrounded {
                 FileLog.shared.addMessage("TokenHelper: Skipped logout in background due to error: \(String(describing: error))")
             } else {
                 // if the user doesn't have an email and password or SSO token, they aren't going to be able to acquire a sync token
                 switch error as? APIError {
-                case APIError.TOKEN_DEAUTH?, APIError.PERMISSION_DENIED?:
-                    tokenCleanUp()
+                case APIError.TOKEN_DEAUTH?, APIError.PERMISSION_DENIED?, APIError.INCORRECT_PASSWORD?, APIError.EMAIL_NOT_FOUND?:
+                    let cleanup = { ServerSettings.ifAuthenticationIsCurrent(attempt) { self.tokenCleanUp() } }
+                    // Never wait on main while owning renewalLock. Revalidate when the queued
+                    // effect runs so a newer login cannot be signed out by this old failure.
+                    if Thread.isMainThread { cleanup() }
+                    else { DispatchQueue.main.async(execute: cleanup) }
                 default:
                     // Do nothing so the user is not disrupted in the case of non-auth errors
                     FileLog.shared.addMessage("TokenHelper: Unable to acquire token but avoided logout due to error: \(String(describing: error))")
@@ -126,6 +142,13 @@ class TokenHelper {
     }
 
     private func isApplicationBackgrounded() -> Bool {
+        if Thread.isMainThread {
+            #if os(iOS)
+            return UIApplication.shared.applicationState == .background
+            #elseif os(watchOS)
+            return WKExtension.shared().applicationState == .background
+            #endif
+        }
         let semaphore = DispatchSemaphore(value: 0)
         var isBackgrounded = false
 
@@ -151,54 +174,16 @@ class TokenHelper {
             return nil
         }
 
-        let url = ServerHelper.asUrl(ServerConstants.Urls.api() + "user/login")
-        do {
-            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30.seconds)
-            request.httpMethod = "POST"
-            request.addValue("application/octet-stream", forHTTPHeaderField: ServerConstants.HttpHeaders.accept)
-            request.setValue("application/octet-stream", forHTTPHeaderField: ServerConstants.HttpHeaders.contentType)
-            request.addLocalizationHeaders()
-            if let privateUserAgent = ServerConfig.shared.syncDelegate?.privateUserAgent() {
-                request.setValue(privateUserAgent, forHTTPHeaderField: ServerConstants.HttpHeaders.userAgent)
-            }
-
-            var loginRequest = Api_UserLoginRequest()
-            loginRequest.email = email
-            loginRequest.password = password
-            loginRequest.scope = ServerConstants.Values.apiScope
-            let data = try loginRequest.serializedData()
-            request.httpBody = data
-
-            let (responseData, response) = try urlConnection.sendSynchronousRequest(with: request)
-            guard let validData = responseData, let httpResponse = response as? HTTPURLResponse else {
-                FileLog.shared.addMessage("TokenHelper: Unable to acquire token")
-                return nil
-            }
-
-            if httpResponse.statusCode == ServerConstants.HttpConstants.ok {
-                let userLoginResponse = try Api_UserLoginResponse(serializedBytes: validData)
-                return AuthenticationResponse(from: userLoginResponse)
-            }
-
-            if httpResponse.statusCode == ServerConstants.HttpConstants.unauthorized {
-                FileLog.shared.addMessage("TokenHelper logging user out, invalid password")
-                SyncManager.signout()
-            }
-
-            let errorResponse = ApiServerHandler.extractErrorResponse(data: responseData, response: response, error: nil)
-            throw errorResponse ?? .UNKNOWN
-        } catch {
-            FileLog.shared.addMessage("TokenHelper acquireToken failed \(error.localizedDescription)")
-            throw error
-        }
+        let request = try ApiServerHandler.shared.passwordLoginRequest(username: email, password: password, scope: ServerConstants.Values.apiScope)
+        let (data, response) = try urlConnection.sendSynchronousRequest(with: request)
+        return try ApiServerHandler.shared.decodePasswordLogin(data: data, response: response)
     }
-
 
     // MARK: - Email / Password Token
 
     func asyncAcquireToken(completion: @escaping (Result<AuthenticationResponse?, Error>) -> Void) {
         do {
-            if let authenticationResponse = try acquirePasswordToken() {
+            if (try? ServerSettings.refreshToken()) == nil, let authenticationResponse = try acquirePasswordToken() {
                 completion(.success(authenticationResponse))
                 return
             }
@@ -220,7 +205,7 @@ class TokenHelper {
     // MARK: - SSO Identity Token
 
     private func acquireIdentityToken() async throws -> AuthenticationResponse {
-        return try await ApiServerHandler.shared.refreshIdentityToken()
+        return try await ApiServerHandler.shared.refreshIdentityToken(connection: urlConnection)
     }
 
     // MARK: Cleanup

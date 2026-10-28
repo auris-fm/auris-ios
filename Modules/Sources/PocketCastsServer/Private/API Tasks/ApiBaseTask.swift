@@ -34,7 +34,7 @@ class ApiBaseTask: Operation, @unchecked Sendable {
     }
 
     func acquiredToken() -> String? {
-        if let token = try? KeychainHelper.string(for: ServerConstants.Values.syncingV2TokenKey) {
+        if let token = ServerSettings.syncingV2Token {
             return token
         } else if let token = tokenHelper.acquireToken() {
             return token
@@ -62,7 +62,7 @@ class ApiBaseTask: Operation, @unchecked Sendable {
                 }
 
                 // our token may have expired, remove it so next time a sync happens we'll acquire a new one
-                KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
+                ServerSettings.invalidateAccessToken(token)
                 FileLog.shared.addMessage("ApiBaseTask: Removed syncingV2TokenKey due to 401 unauthorized POST from \(url)")
                 return (nil, httpResponse.statusCode)
             }
@@ -99,7 +99,7 @@ class ApiBaseTask: Operation, @unchecked Sendable {
                 }
 
                 // our token may have expired, remove it so next time a sync happens we'll acquire a new one
-                KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
+                ServerSettings.invalidateAccessToken(token)
                 FileLog.shared.addMessage("ApiBaseTask: Removed syncingV2TokenKey due to 401 unauthorized GET from \(url)")
                 return (nil, httpResponse)
             }
@@ -123,7 +123,7 @@ class ApiBaseTask: Operation, @unchecked Sendable {
             guard let httpResponse = response as? HTTPURLResponse else { return (nil, ServerConstants.HttpConstants.serverError) }
             if httpResponse.statusCode == ServerConstants.HttpConstants.unauthorized {
                 // our token may have expired, remove it so next time a sync happens we'll acquire a new one
-                KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
+                ServerSettings.invalidateAccessToken(token)
                 FileLog.shared.addMessage("ApiBaseTask: Removed syncingV2TokenKey due to 401 unauthorized DELETE from \(url)")
                 return (nil, httpResponse.statusCode)
             }

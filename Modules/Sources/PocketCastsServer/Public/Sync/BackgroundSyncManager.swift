@@ -52,7 +52,7 @@ public class BackgroundSyncManager: NSObject {
         // we also need to perform all these on the same URLSession as download tasks, so the app can be put to sleep and woken up when they are done later
 
         let urlSession = createUrlSession(identifier: BackgroundSyncManager.sessionIdPrefix + UUID().uuidString)
-        guard let token = try? KeychainHelper.string(for: ServerConstants.Values.syncingV2TokenKey),
+        guard let token = ServerSettings.syncingV2Token,
               let refreshTask = refreshDownloadTask(subscribedPodcasts: subscribedPodcasts, urlSession: urlSession),
               let upNextTask = upNextDownloadTask(token: token, urlSession: urlSession),
               let syncTask = syncDownloadTask(token: token, urlSession: urlSession) else {

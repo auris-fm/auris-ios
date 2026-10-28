@@ -24,15 +24,7 @@ class AuthenticationHelper {
 
     static func validateLogin(username: String, password: String, scope: AuthenticationScope = .default) async throws -> AuthenticationResponse {
         let response = try await ApiServerHandler.shared.validateLogin(username: username, password: password, scope: scope.rawValue)
-        handleSuccessfulSignIn(response)
-
-        // If the server didn't return a new email, and the call was successful, then reset the email to the one used to
-        // validate the login
-        if ServerSettings.syncingEmail() == nil {
-            ServerSettings.setSyncingEmail(email: username)
-        }
-
-        ServerSettings.saveSyncingPassword(password)
+        await handleSuccessfulSignIn(response)
 
         return response
     }
@@ -40,50 +32,48 @@ class AuthenticationHelper {
     // MARK: Apple SSO
 
     static func validateLogin(identityToken: String, scope: AuthenticationScope = .default)  async throws -> AuthenticationResponse {
-        let response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, scope: scope)
-        handleSuccessfulSignIn(response)
-
-        ServerSettings.setRefreshToken(response.refreshToken)
+        guard let attempt = ServerSettings.beginAuthentication() else { throw APIError.UNKNOWN }
+        defer { ServerSettings.finishAuthentication(attempt) }
+        var response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, scope: scope)
+        guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
+        response.localAttempt = attempt
+        await handleSuccessfulSignIn(response)
 
         return response
     }
 
     static func validateLogin(identityToken: String, provider: SocialAuthProvider)  async throws -> AuthenticationResponse {
-        let response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, provider: provider)
-        handleSuccessfulSignIn(response)
+        guard let attempt = ServerSettings.beginAuthentication() else { throw APIError.UNKNOWN }
+        defer { ServerSettings.finishAuthentication(attempt) }
+        var response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, provider: provider)
+        guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
+        response.localAttempt = attempt
+        await handleSuccessfulSignIn(response)
 
         return response
     }
 
     // MARK: Common
 
+    @MainActor
     private static func handleSuccessfulSignIn(_ response: AuthenticationResponse) {
-        SyncManager.clearTokensFromKeyChain()
-        FileLog.shared.addMessage("AuthenticationHelper.handleSuccessfulSignIn clearTokensFromKeyChain")
+        guard let attempt = response.localAttempt else { return }
+        ServerSettings.withCommittedAuthentication(attempt) {
+            // we've signed in, set all our existing podcasts to
+            // be non synced if the user never logged in before
+            if ServerSettings.lastSyncTime == nil {
+                DataManager.sharedManager.markAllPodcastsUnsynced()
+            }
 
-        ServerSettings.userId = response.uuid
-        ServerSettings.syncingV2Token = response.token
-        ServerSettings.setRefreshToken(response.refreshToken)
+            SyncManager.syncReason = .login
+            ServerSettings.clearLastSyncTime()
 
-        // we've signed in, set all our existing podcasts to
-        // be non synced if the user never logged in before
-        if ServerSettings.lastSyncTime == nil {
-            DataManager.sharedManager.markAllPodcastsUnsynced()
+            NotificationCenter.postOnMainThread(notification: .userLoginDidChange)
+
+            RefreshManager.shared.refreshPodcasts(forceEvenIfRefreshedRecently: true)
+            Settings.setPromotionFinishedAcknowledged(true)
+            Settings.setLoginDetailsUpdated()
         }
-
-        SyncManager.syncReason = .login
-        ServerSettings.clearLastSyncTime()
-
-        // This check may not be necessary in the long run see: https://github.com/Automattic/pocket-casts-ios/issues/412
-        if let email = response.email, !email.isEmpty {
-            ServerSettings.setSyncingEmail(email: response.email)
-        }
-
-        NotificationCenter.postOnMainThread(notification: .userLoginDidChange)
-
-        RefreshManager.shared.refreshPodcasts(forceEvenIfRefreshedRecently: true)
-        Settings.setPromotionFinishedAcknowledged(true)
-        Settings.setLoginDetailsUpdated()
     }
 
     // MARK: Code Login - For tv login using a QR Code
@@ -96,8 +86,12 @@ class AuthenticationHelper {
 
     @discardableResult
     static func deviceGetToken(deviceCode: String, scope: AuthenticationScope = .default) async throws -> AuthenticationResponse {
-        let response = try await ApiServerHandler.shared.deviceGetToken(deviceCode: deviceCode, scope: scope)
-        handleSuccessfulSignIn(response)
+        guard let attempt = ServerSettings.beginAuthentication() else { throw APIError.UNKNOWN }
+        defer { ServerSettings.finishAuthentication(attempt) }
+        var response = try await ApiServerHandler.shared.deviceGetToken(deviceCode: deviceCode, scope: scope)
+        guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
+        response.localAttempt = attempt
+        await handleSuccessfulSignIn(response)
 
         return response
     }

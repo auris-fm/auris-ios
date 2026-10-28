@@ -258,7 +258,7 @@ final class SyncSigninViewModel: ObservableObject {
 
         // show "signing in..." spinner inline; progress HUD appears *after* success like the original
         ApiServerHandler.shared.validateLogin(username: username, password: password) { [weak self] success, userId, error in
-            DispatchQueue.main.async {
+            MainActor.assumeIsolated {
                 guard let self else { return }
                 if !success {
                     Analytics.track(.userSignInFailed, properties: [
@@ -284,9 +284,6 @@ final class SyncSigninViewModel: ObservableObject {
                     self.progressAlert?.showAlert(navigationController, hasProgress: false, completion: nil)
                 }
 
-                // Clear any previously stored tokens
-                SyncManager.clearTokensFromKeyChain()
-                FileLog.shared.addMessage("SyncSigninViewController.startSignIn clearTokensFromKeyChain")
 
                 self.handleSuccessfulSignIn(username: username, password: password, userId: userId)
 
@@ -308,8 +305,6 @@ final class SyncSigninViewModel: ObservableObject {
     }
 
     private func handleSuccessfulSignIn(username: String, password: String, userId: String?) {
-        ServerSettings.userId = userId
-        ServerSettings.saveSyncingPassword(password)
 
         if ServerSettings.lastSyncTime == nil {
             DataManager.sharedManager.markAllPodcastsUnsynced()
@@ -317,7 +312,6 @@ final class SyncSigninViewModel: ObservableObject {
 
         SyncManager.syncReason = .login
         ServerSettings.clearLastSyncTime()
-        ServerSettings.setSyncingEmail(email: username)
 
         NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
 
