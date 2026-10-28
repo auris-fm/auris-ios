@@ -541,7 +541,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // to re-check measured render progress — queue emptiness alone must not stop or
             // rotate away still-pending audible work.
             while !runnerRunning && !drainRemaining && !stopRequested && !shutdownRequested {
-                runnerLock.wait(until: renderCatchUpWake ?? .distantFuture)
+                // A timer expiry is work too: recheck rendered output without waiting for
+                // another socket frame. Reusing the expired date here spins under runnerLock.
+                if !runnerLock.wait(until: renderCatchUpWake ?? .distantFuture) { break }
             }
             renderCatchUpWake = nil
 
@@ -615,9 +617,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // *before* processing so an `enqueue` that lands mid-processing is
             // not lost — it sets the flag again and the next iteration runs.
             runnerRunning = false
+            let recheck = renderCatchUpRecheckForTesting
+            renderCatchUpRecheckForTesting = nil
             runnerLock.unlock()
 
             processFrames()
+            recheck?()
         }
     }
 
@@ -717,7 +722,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 }
             } else {
                 renderStopDeadline = deadline
+                runnerLock.lock()
                 renderCatchUpWake = Date().addingTimeInterval(0.05)
+                runnerLock.unlock()
             }
         }
     }
@@ -732,7 +739,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return position < nodeIncarnationFrames
     }
 
-    /// When the runner should wake to re-check render catch-up. Runner-thread only; nil means
+    /// When the runner should wake to re-check render catch-up. Guarded by runnerLock; nil means
     /// wait for the next event.
     private var renderCatchUpWake: Date?
 
@@ -1146,6 +1153,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     // MARK: - Testing seams
+
+    // Guarded by runnerLock. Observes a real runner pass without requiring an audio device.
+    private var renderCatchUpRecheckForTesting: (() -> Void)?
+
+    /// Arm the same deadline that pending render progress sets, without publishing new work.
+    /// The callback fires only after the runner returns through processFrames.
+    func scheduleRenderCatchUpForTesting(after delay: TimeInterval, recheck: @escaping () -> Void) {
+        runnerLock.lock()
+        renderCatchUpRecheckForTesting = recheck
+        renderCatchUpWake = Date().addingTimeInterval(delay)
+        runnerLock.signal()
+        runnerLock.unlock()
+    }
 
     /// Buffered frame count, for tests that assert the runner actually consumes
     /// frames (a player that buffers forever plays nothing).
