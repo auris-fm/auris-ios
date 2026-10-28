@@ -3333,3 +3333,117 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
         XCTAssertTrue(ready.isEmpty, "an hour in the future is skew, not freshness")
     }
 }
+
+final class VoiceSharingBackupPolicyTests: XCTestCase {
+    private var parent: URL!
+    private var root: URL { parent.appendingPathComponent("VoiceContributions", isDirectory: true) }
+
+    override func setUpWithError() throws {
+        parent = FileManager.default.temporaryDirectory.appendingPathComponent("sharing-backup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try FileManager.default.removeItem(at: parent)
+    }
+
+    private func excluded(_ url: URL) throws -> Bool? {
+        var fresh = URL(fileURLWithPath: url.path, isDirectory: true)
+        fresh.removeAllCachedResourceValues()
+        return try fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+    }
+
+    private func setExcluded(_ url: URL, _ excluded: Bool) throws {
+        var target = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = excluded
+        try target.setResourceValues(values)
+    }
+
+    func test_newAndRecoveredRootsAreExcludedWithoutChangingParent() throws {
+        let parentBefore = try excluded(parent)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        XCTAssertEqual(try excluded(root), true)
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let metadata = try queue.metadata(of: entry)
+        let audio = try queue.audio(of: entry)
+        try setExcluded(root, false)
+        XCTAssertEqual(try excluded(root), false, "premise: existing legacy root is not excluded")
+        let recovered = VoiceSharingUploadQueue(rootDirectory: root)
+        XCTAssertEqual(try excluded(root), true)
+        XCTAssertEqual(recovered.readyEntries(), [entry])
+        XCTAssertEqual(try recovered.metadata(of: entry), metadata)
+        XCTAssertEqual(try recovered.audio(of: entry), audio)
+        XCTAssertEqual(try excluded(parent), parentBefore)
+    }
+
+    func test_recreatedRootIsExcludedBeforeNewRetention() throws {
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        try FileManager.default.removeItem(at: root) // empty test root; live queue must not cache approval
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        _ = try AudioFixture.makeReadyEntry(in: queue)
+        XCTAssertEqual(try excluded(root), true)
+        XCTAssertEqual(queue.readyEntries().count, 1)
+    }
+
+    func test_failedOrUnverifiedPolicyHoldsBytesAndResumesRecoveryAfterRepair() throws {
+        for failure in ["throws", "no-op"] {
+            let location = root.appendingPathComponent(failure, isDirectory: true)
+            let healthy = VoiceSharingUploadQueue(rootDirectory: location)
+            let entry = try AudioFixture.makeReadyEntry(in: healthy)
+            let metadata = try healthy.metadata(of: entry)
+            let audio = try healthy.audio(of: entry)
+            let unready = try healthy.prepare(metadata: metadata, audio: audio)
+            let directory = location.appendingPathComponent(entry.name)
+            let unreadyDirectory = location.appendingPathComponent(unready.name)
+            let filesBefore = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+            try setExcluded(location, false)
+            XCTAssertEqual(try excluded(location), false)
+            var repair = false
+            var setterCalls = 0
+            let blocked = VoiceSharingUploadQueue(rootDirectory: location, backupExcluder: { [self] url in
+                setterCalls += 1
+                if repair { try setExcluded(url, true) }
+                else if failure == "throws" { throw CocoaError(.fileWriteNoPermission) }
+                // Successful no-op is not proof: real property readback must refuse it.
+            })
+            XCTAssertGreaterThan(setterCalls, 0)
+            XCTAssertThrowsError(try blocked.prepare(metadata: metadata, audio: audio)) {
+                XCTAssertEqual($0 as? VoiceSharingUploadQueue.PrepareError, .storagePolicyUnavailable)
+            }
+            XCTAssertThrowsError(try blocked.finalize(unready)) {
+                XCTAssertEqual($0 as? VoiceSharingUploadQueue.PrepareError, .storagePolicyUnavailable)
+            }
+            XCTAssertFalse(blocked.hasAdmissionAllowance(forBytes: 1))
+            XCTAssertTrue(blocked.readyEntries().isEmpty)
+            if case .unknownCoverage = blocked.readyEntriesReportingUnknownCoverage() {} else {
+                XCTFail("unverified backup policy must report unknown coverage, not known zero")
+            }
+            XCTAssertThrowsError(try blocked.admitAttempt(entry)) {
+                XCTAssertEqual($0 as? VoiceSharingUploadQueue.PrepareError, .storagePolicyUnavailable)
+            }
+            XCTAssertThrowsError(try blocked.metadata(of: entry))
+            XCTAssertThrowsError(try blocked.audio(of: entry))
+            XCTAssertEqual(blocked.reconcilePublication(entry), .uncertain)
+            XCTAssertEqual(try excluded(location), false)
+            XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("metadata.json")), metadata)
+            XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("audio.wav")), audio)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), filesBefore)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: unreadyDirectory.path), "failed policy must defer recovery")
+            repair = true
+            XCTAssertEqual(blocked.readyEntries(), [entry], "same owner resumes deferred recovery after establishing policy")
+            XCTAssertEqual(try excluded(location), true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: unreadyDirectory.path), "recovery cleans abandoned preparation only after policy succeeds")
+            XCTAssertEqual(try blocked.metadata(of: entry), metadata)
+            XCTAssertEqual(try blocked.audio(of: entry), audio)
+
+            // Cleanup remains available even when the required storage policy cannot be established.
+            repair = false
+            try setExcluded(location, false)
+            if case .reconciled = blocked.purgeAll() {} else { XCTFail("safe purge must remain available") }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            XCTAssertEqual(try excluded(location), false, "purge must not require exclusion to succeed")
+        }
+    }
+}

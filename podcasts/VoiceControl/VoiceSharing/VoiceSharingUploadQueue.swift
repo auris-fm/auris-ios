@@ -136,6 +136,8 @@ final class VoiceSharingUploadQueue {
         /// Stored usage could not be determined, so admission is refused rather than assuming the
         /// unknown space is free.
         case accountingUnavailable
+        /// Required queue-root backup policy could not be established and read back.
+        case storagePolicyUnavailable
         /// An increment path was asked to spend an attempt the entry does not have.
         case attemptsExhausted
         /// Another owner holds the attempt lease.
@@ -477,6 +479,8 @@ final class VoiceSharingUploadQueue {
     /// so a discovery FAILURE is observable in isolation — a real POSIX stat failure on the intent
     /// path is always accompanied by an unreadable root, which would mask the hold's effect.
     private let intentDiscovery: (URL) -> StatKind
+    private let backupExcluder: (URL) throws -> Void
+    private var recoveryPending = true
     private let serialQueue = DispatchQueue(label: "fm.auris.voicesharing.uploadqueue")
 
     /// Creates the queue over `rootDirectory` and runs recovery: entries that are not complete
@@ -502,7 +506,8 @@ final class VoiceSharingUploadQueue {
             -> (urls: [URL], overflowed: Bool) = VoiceSharingUploadQueue.defaultBoundedLister
     ,
         intentDiscovery: @escaping (URL) -> StatKind = { VoiceSharingUploadQueue.statKind(of: $0) },
-        currentIdentity: (() -> VoiceSharingUploadIdentity?)? = nil
+        currentIdentity: (() -> VoiceSharingUploadIdentity?)? = nil,
+        backupExcluder: @escaping (URL) throws -> Void = VoiceSharingUploadQueue.defaultBackupExcluder
     ) {
         self.rootDirectory = rootDirectory
         self.fileManager = fileManager
@@ -516,10 +521,38 @@ final class VoiceSharingUploadQueue {
         self.listDirectoryBounded = listDirectoryBounded
         self.intentDiscovery = intentDiscovery
         self.currentIdentityLocked = currentIdentity
-        try? fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
-        // Serialize recovery with any future mutations; construction happens before the queue is
-        // shared, but the same discipline keeps restart accounting on the owning queue.
-        serialQueue.sync { recoverLocked() }
+        self.backupExcluder = backupExcluder
+        // Recovery can publish state too, so establish storage policy before touching retained entries.
+        serialQueue.sync { _ = try? establishStoragePolicyLocked() }
+    }
+
+    private static func defaultBackupExcluder(_ root: URL) throws {
+        var root = root
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try root.setResourceValues(values)
+    }
+
+    /// Root-only and checked before use: a deleted/recreated root cannot inherit cached approval.
+    private func establishStoragePolicyLocked() throws {
+        do {
+            try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+            var root = URL(fileURLWithPath: rootDirectory.path, isDirectory: true)
+            root.removeAllCachedResourceValues()
+            if try root.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup != true {
+                try backupExcluder(root)
+                root.removeAllCachedResourceValues()
+                guard try root.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
+                    throw PrepareError.storagePolicyUnavailable
+                }
+            }
+        } catch {
+            throw PrepareError.storagePolicyUnavailable
+        }
+        if recoveryPending {
+            recoveryPending = false
+            recoverLocked()
+        }
     }
 
     /// Test seam: the REAL bounded listing, so injected wrappers can fail selectively.
@@ -560,6 +593,7 @@ final class VoiceSharingUploadQueue {
     /// nothing behind.
     func prepare(metadata: Data, audio: Data) throws -> Entry {
         try serialQueue.sync {
+            try establishStoragePolicyLocked()
             // AUTHORITATIVE admission path: a held owner admits nothing. Preflight refusal alone
             // is not enough (reviewer 35e67a87) — callers that never ask for preflight exist.
             guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
@@ -618,6 +652,7 @@ final class VoiceSharingUploadQueue {
     /// entry). `prepare` remains the exact authority at write time.
     func hasAdmissionAllowance(forBytes: Int) -> Bool {
         serialQueue.sync {
+            guard (try? establishStoragePolicyLocked()) != nil else { return false }
             // The owner-wide hold also blocks admission: a purge that could not reconcile means
             // storage may still hold entries we cannot account for.
             guard !revocationHoldLocked else { return false }
@@ -827,6 +862,7 @@ final class VoiceSharingUploadQueue {
     /// recovery removes.
     func finalize(_ entry: Entry) throws {
         try serialQueue.sync {
+            try establishStoragePolicyLocked()
             defer { bumpHoldGenerationForContentChange() }
             let directory = try validatedEntryDirectoryLocked(entry)
             // Publication must not launder an over-age preparation into a fresh lifetime: the
@@ -1044,7 +1080,10 @@ final class VoiceSharingUploadQueue {
 
     /// Whether the entry has attempts remaining.
     func isAttemptable(_ entry: Entry) throws -> Bool {
-        try serialQueue.sync { try isAttemptableLocked(entry) }
+        try serialQueue.sync {
+            try establishStoragePolicyLocked()
+            return try isAttemptableLocked(entry)
+        }
     }
 
     /// The admitted attempt: the lease AND the attempt number, returned TOGETHER. Reviewer
@@ -1866,7 +1905,10 @@ final class VoiceSharingUploadQueue {
 
     /// Records an attempt without taking ownership. Prefer `beginAttempt`, which does both atomically.
     func recordAttempt(_ entry: Entry) throws {
-        try serialQueue.sync { try recordAttemptLocked(entry) }
+        try serialQueue.sync {
+            try establishStoragePolicyLocked()
+            return try recordAttemptLocked(entry)
+        }
     }
 
     /// `Entry.root` is the QUEUE root, not the entry's own directory. The attempt record must live
@@ -2222,6 +2264,7 @@ final class VoiceSharingUploadQueue {
     @discardableResult
     func reconcilePublication(_ entry: Entry) -> PublicationOutcome {
         serialQueue.sync {
+            guard (try? establishStoragePolicyLocked()) != nil else { return .uncertain }
             let directory = entryDirectoryLocked(for: entry)
             guard fileManager.fileExists(atPath: directory.path) else { return .uncommitted }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
@@ -2263,6 +2306,7 @@ final class VoiceSharingUploadQueue {
     /// every ready entry's durability confirmation must be KNOWN. Serving queries and attempt
     /// gates share this one implementation so neither can hold a weaker standard than the other.
     private func strictOwnerCoverageLocked() throws -> [Entry] {
+        try establishStoragePolicyLocked()
         let all = try entriesStrictLocked()
         for entry in all {
             let state = try entryStateLocked(at: entry)
@@ -2290,6 +2334,7 @@ final class VoiceSharingUploadQueue {
 
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
+            guard (try? establishStoragePolicyLocked()) != nil else { return .unknownCoverage }
             // OWNER-WIDE HOLD: an unreconciled purge means the on-disk set is not provable, so
             // NOTHING may serve. Reported as unknown coverage (the same all-or-nothing channel
             // every caller already handles), never as an empty known set.
@@ -2342,6 +2387,7 @@ final class VoiceSharingUploadQueue {
 
     func readyEntries() -> [Entry] {
         serialQueue.sync {
+            guard (try? establishStoragePolicyLocked()) != nil else { return [] }
             // LEGACY serving path also honors the owner-wide hold (reviewer 35e67a87): an empty
             // list, never a stale one — this path has no unknown-coverage channel. ADOPTION
             // (ce001b9a follow-through): it honors the retry hold too — a failed attempt barrier
@@ -2378,7 +2424,10 @@ final class VoiceSharingUploadQueue {
     /// uploader uses this to check a receipt against what was actually queued — never against a
     /// value carried in memory that may not match disk.
     func boundIdentity(of entry: Entry) throws -> VoiceSharingRecordBinding.BoundEntry {
-        try serialQueue.sync { try boundIdentityLocked(of: entry) }
+        try serialQueue.sync {
+            try establishStoragePolicyLocked()
+            return try boundIdentityLocked(of: entry)
+        }
     }
 
     /// Lock-held variant: REENTRANT-SAFE. `admitAttempt` already runs inside `serialQueue`, so it
@@ -2399,13 +2448,15 @@ final class VoiceSharingUploadQueue {
 
     func metadata(of entry: Entry) throws -> Data {
         try serialQueue.sync {
-            try Data(contentsOf: try validatedEntryDirectoryLocked(entry).appendingPathComponent(Self.metadataName))
+            try establishStoragePolicyLocked()
+            return try Data(contentsOf: try validatedEntryDirectoryLocked(entry).appendingPathComponent(Self.metadataName))
         }
     }
 
     func audio(of entry: Entry) throws -> Data {
         try serialQueue.sync {
-            try Data(contentsOf: try validatedEntryDirectoryLocked(entry).appendingPathComponent(Self.audioName))
+            try establishStoragePolicyLocked()
+            return try Data(contentsOf: try validatedEntryDirectoryLocked(entry).appendingPathComponent(Self.audioName))
         }
     }
 
