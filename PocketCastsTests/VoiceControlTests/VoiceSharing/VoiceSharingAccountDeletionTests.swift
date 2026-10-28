@@ -378,7 +378,13 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
         defer {
             ServerConfig.shared.syncDelegate = previousDelegate
             for (key, value) in zip(keys, previousCredentials) {
-                XCTAssertTrue(KeychainHelper.save(string: value, key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
+                if let value {
+                    XCTAssertTrue(KeychainHelper.save(string: value, key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
+                } else {
+                    // Deleting an already-absent key returns false; verify the restored state instead.
+                    KeychainHelper.removeKey(key)
+                }
+                XCTAssertEqual(try KeychainHelper.string(for: key), value)
             }
             if let previousDefaults { UserDefaults.standard.setPersistentDomain(previousDefaults, forName: domain) }
             else { UserDefaults.standard.removePersistentDomain(forName: domain) }
