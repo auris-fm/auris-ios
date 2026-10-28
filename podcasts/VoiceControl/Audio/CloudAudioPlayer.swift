@@ -722,7 +722,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 }
             } else {
                 renderStopDeadline = deadline
+                runnerLock.lock()
                 renderCatchUpWake = Date().addingTimeInterval(0.05)
+                runnerLock.unlock()
             }
         }
     }
@@ -737,7 +739,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return position < nodeIncarnationFrames
     }
 
-    /// When the runner should wake to re-check render catch-up. Runner-thread only; nil means
+    /// When the runner should wake to re-check render catch-up. Guarded by runnerLock; nil means
     /// wait for the next event.
     private var renderCatchUpWake: Date?
 
