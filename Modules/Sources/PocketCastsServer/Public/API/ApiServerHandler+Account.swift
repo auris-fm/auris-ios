@@ -132,9 +132,9 @@ public extension ApiServerHandler {
         }
     }
 
-    func obtainToken(request: URLRequest, usingRefreshToken: Bool) async throws -> AuthenticationResponse {
+    func obtainToken(request: URLRequest, usingRefreshToken: Bool, connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
         try await withUnsafeThrowingContinuation { continuation in
-            URLSession.shared.dataTask(with: request) { data, response, error in
+            connection.send(request: request) { data, response, error in
                 guard let responseData = data, error == nil, response?.extractStatusCode() == ServerConstants.HttpConstants.ok else {
                     let errorResponse = ApiServerHandler.extractErrorResponse(data: data, response: response, error: error)
                     FileLog.shared.addMessage("Unable to obtain token, status code: \(response?.extractStatusCode() ?? -1), server error: \(errorResponse?.rawValue ?? "none")")
@@ -154,7 +154,7 @@ public extension ApiServerHandler {
                     FileLog.shared.addMessage("Error occurred while trying to unpack token request \(error.localizedDescription)")
                     continuation.resume(throwing: APIError.UNKNOWN)
                 }
-            }.resume()
+            }
         }
     }
 

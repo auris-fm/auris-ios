@@ -11,10 +11,12 @@ class TokenHelper {
     static let shared = TokenHelper(urlConnection: URLConnection(handler: URLSession.shared))
 
     private static let renewalLock = NSLock()
+    private let backgroundState: (() -> Bool)?
     private let urlConnection: URLConnection
 
-    init(urlConnection: URLConnection) {
+    init(urlConnection: URLConnection, backgroundState: (() -> Bool)? = nil) {
         self.urlConnection = urlConnection
+        self.backgroundState = backgroundState
     }
 
     func callSecureUrl(request: URLRequest, completion: @escaping ((HTTPURLResponse?, Data?, Error?) -> Void)) {
@@ -83,6 +85,9 @@ class TokenHelper {
     }
 
     func acquireToken(onlyIfMissingRefresh: Bool = false) -> String? {
+        // Query main before the renewal lock: a main-thread credential lookup may
+        // need that lock while another renewal is failing. Never wait on main holding it.
+        let wasBackgrounded = backgroundState?() ?? isApplicationBackgrounded()
         let observedToken = ServerSettings.syncingV2Token
         Self.renewalLock.lock()
         defer { Self.renewalLock.unlock() }
@@ -113,7 +118,7 @@ class TokenHelper {
             guard let authentication, ServerSettings.commitAuthentication(authentication, for: attempt) else { return nil }
         }
         else {
-            if isApplicationBackgrounded() {
+            if wasBackgrounded {
                 FileLog.shared.addMessage("TokenHelper: Skipped logout in background due to error: \(String(describing: error))")
             } else {
                 // if the user doesn't have an email and password or SSO token, they aren't going to be able to acquire a sync token
@@ -196,7 +201,7 @@ class TokenHelper {
     // MARK: - SSO Identity Token
 
     private func acquireIdentityToken() async throws -> AuthenticationResponse {
-        return try await ApiServerHandler.shared.refreshIdentityToken()
+        return try await ApiServerHandler.shared.refreshIdentityToken(connection: urlConnection)
     }
 
     // MARK: Cleanup

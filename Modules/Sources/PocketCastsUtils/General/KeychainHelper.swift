@@ -74,7 +74,7 @@ public class KeychainHelper {
         if status == errSecDuplicateItem {
             let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                         kSecAttrService as String: fullKey]
-            let attributes: [String: Any] = [kSecValueData as String: value.data(using: .utf8) as Any,
+            let attributes: [String: Any] = [kSecValueData as String: Data(value.utf8),
                                              kSecAttrAccessible as String: accessibility]
             status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         }

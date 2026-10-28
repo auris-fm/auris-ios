@@ -485,8 +485,10 @@ public extension ServerSettings {
                 + (attempt.explicit ? [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey] : [])
             let previous: [String?]
             do { previous = try keys.map(read) } catch { return false }
-            let values: [String?] = [refresh ?? previous[0], access] + (attempt.explicit ? [email, password] : [])
+            guard let finalRefresh = refresh ?? previous[0], !finalRefresh.isEmpty else { return false }
+            let values: [String?] = [finalRefresh, access] + (attempt.explicit ? [email, password] : [])
             let save = write ?? { KeychainHelper.save(string: $0, key: $1, accessibility: kSecAttrAccessibleAfterFirstUnlock) }
+            let previouslyUnavailable = defaults.bool(forKey: incompleteCredentialWriteKey)
             defaults.set(true, forKey: incompleteCredentialWriteKey)
             for (key, value) in zip(keys, values) {
                 guard save(value, key) else {
@@ -494,7 +496,7 @@ public extension ServerSettings {
                     for (oldKey, oldValue) in zip(keys, previous) {
                         if !save(oldValue, oldKey) { restored = false }
                     }
-                    if restored { defaults.set(false, forKey: incompleteCredentialWriteKey) }
+                    if restored { defaults.set(previouslyUnavailable, forKey: incompleteCredentialWriteKey) }
                     return false
                 }
             }

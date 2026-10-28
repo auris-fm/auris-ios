@@ -14,6 +14,7 @@ final class SessionAuthenticationTests: XCTestCase {
         suiteName = "session-auth-tests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         ServerSettings.invalidateAuthentication(defaults: defaults) {}
+        defaults.set(false, forKey: marker)
         values = [accessKey: "old-access", refreshKey: "old-refresh"]
     }
 
@@ -72,11 +73,29 @@ final class SessionAuthenticationTests: XCTestCase {
         XCTAssertFalse(ServerSettings.withCommittedAuthentication(attempt) { XCTFail("failed write reported success") })
     }
 
+    func testFailedLoginAfterSignoutDoesNotMakeOldCredentialsReadableAgain() throws {
+        ServerSettings.invalidateAuthentication(defaults: defaults) {}
+        let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(email: "b@example.com"))
+        XCTAssertFalse(commit(response(), attempt, failAt: 2))
+        XCTAssertTrue(defaults.bool(forKey: marker), "rollback must preserve the prior signed-out state")
+    }
+
     func testFailedRollbackLeavesPersistentUnavailableMarker() throws {
         let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(email: "b@example.com"))
         XCTAssertFalse(commit(response(), attempt, alwaysFail: true))
         XCTAssertTrue(defaults.bool(forKey: marker))
         XCTAssertTrue(try XCTUnwrap(UserDefaults(suiteName: suiteName)).bool(forKey: marker))
+    }
+
+    func testMigrationWithValidAccessButNoRefreshCannotCommitAnotherAccessOnlyResponse() throws {
+        values[refreshKey] = nil
+        let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(explicit: false))
+        let email = ServerSettings.syncingEmail() ?? "existing@example.com"
+        let uuid = ServerSettings.userId ?? "existing-account"
+        XCTAssertFalse(commit(response(refresh: nil, email: email, uuid: uuid), attempt))
+        XCTAssertEqual(values[accessKey], "old-access")
+        XCTAssertNil(values[refreshKey])
+        XCTAssertFalse(ServerSettings.withCommittedAuthentication(attempt) { XCTFail("incomplete migration reported success") })
     }
 
     func testRenewalWithoutRefreshPreservesSameAccountsStoredCredential() throws {

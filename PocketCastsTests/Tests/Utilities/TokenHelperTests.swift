@@ -41,6 +41,61 @@ class TokenHelperTests: XCTestCase {
     }
 
 
+    @MainActor
+    func testMainThreadMigrationDoesNotWaitOnRenewalsMainThreadStateQuery() {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.saveSyncingPassword("1234")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = expectation(description: "background renewal finished")
+        let stateLock = NSLock()
+        var queryTimedOut = false
+        let helper = TokenHelper(urlConnection: URLConnection { request in
+            (nil, HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil))
+        }, backgroundState: {
+            if Thread.isMainThread { return true }
+            entered.signal()
+            let timedOut = release.wait(timeout: .now() + 2) == .timedOut
+            stateLock.withLock { queryTimedOut = timedOut }
+            return true
+        })
+        DispatchQueue.global().async {
+            _ = helper.acquireToken()
+            finished.fulfill()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+        // The background caller is deliberately parked in its main-state query. This
+        // main-thread migration must acquire/release the renewal lock before we unpark it.
+        XCTAssertNil(helper.acquireToken(onlyIfMissingRefresh: true))
+        release.signal()
+        wait(for: [finished], timeout: 3)
+        XCTAssertFalse(stateLock.withLock { queryTimedOut }, "renewal held its lock while waiting on main")
+    }
+
+    func testSSORenewalUsesRefreshGrantAndPreservesAnOmittedRefreshToken() throws {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.userId = "uuid-test"
+        ServerSettings.setRefreshToken("refresh-existing")
+        ServerSettings.syncingV2Token = "access-existing"
+        var requests = 0
+        let helper = TokenHelper(urlConnection: URLConnection { request in
+            requests += 1
+            XCTAssertEqual(request.url, ServerHelper.asUrl(ServerConstants.Urls.api() + "user/token"))
+            let body = try Api_UserTokenRequest(serializedBytes: XCTUnwrap(request.httpBody))
+            XCTAssertEqual(body.refreshToken, "refresh-existing")
+            XCTAssertEqual(body.grantType, "refresh_token")
+            var response = Api_TokenLoginResponse()
+            response.accessToken = "access-renewed"
+            response.uuid = "uuid-test"
+            response.email = "test@test.com"
+            return (try response.serializedData(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil))
+        }, backgroundState: { true })
+        XCTAssertEqual(helper.acquireToken(), "access-renewed")
+        XCTAssertEqual(try ServerSettings.refreshToken(), "refresh-existing")
+        XCTAssertEqual(ServerSettings.syncingV2Token, "access-renewed")
+        XCTAssertEqual(requests, 1)
+    }
+
     /// Tests the acquirePasswordToken function
     func testAcquirePasswordToken() {
         ServerSettings.setSyncingEmail(email: "test@test.com")
