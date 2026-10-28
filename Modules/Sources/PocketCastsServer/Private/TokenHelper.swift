@@ -123,7 +123,7 @@ class TokenHelper {
             } else {
                 // if the user doesn't have an email and password or SSO token, they aren't going to be able to acquire a sync token
                 switch error as? APIError {
-                case APIError.TOKEN_DEAUTH?, APIError.PERMISSION_DENIED?:
+                case APIError.TOKEN_DEAUTH?, APIError.PERMISSION_DENIED?, APIError.INCORRECT_PASSWORD?, APIError.EMAIL_NOT_FOUND?:
                     ServerSettings.ifAuthenticationIsCurrent(attempt) { tokenCleanUp() }
                 default:
                     // Do nothing so the user is not disrupted in the case of non-auth errors

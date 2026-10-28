@@ -71,15 +71,7 @@ public class SyncManager {
     }
 
     public class func clearTokensFromKeyChain() {
-        ServerSettings.invalidateAuthentication { clearCredentialKeys() }
-    }
-
-    private class func clearCredentialKeys() {
-        KeychainHelper.removeKey(ServerConstants.Values.syncingEmailKey)
-        KeychainHelper.removeKey(ServerConstants.Values.syncingPasswordKey)
-        KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
-        KeychainHelper.removeKey(ServerConstants.Values.refreshTokenKey)
-        KeychainHelper.removeKey(ServerConstants.Values.appleAuthUserIDKey)
+        ServerSettings.clearAuthentication()
     }
 
     /// Clears the server "last modified" watermarks so the next sync is a full re-fetch,

@@ -18,7 +18,7 @@ class TokenHelperTests: XCTestCase {
     private var previousUserID: String?
     private var previousIncompleteWrite = false
     private let credentialKeys = [ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
-                                  ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey]
+                                  ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey, ServerConstants.Values.appleAuthUserIDKey]
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -40,6 +40,47 @@ class TokenHelperTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+
+    func testFirstLaunchClearAllowsPlainAccountRegistration() {
+        SyncManager.clearTokensFromKeyChain()
+        ServerSettings.setSyncingEmail(email: "registered@example.com")
+        ServerSettings.saveSyncingPassword("registered-password")
+        XCTAssertEqual(ServerSettings.syncingEmail(), "registered@example.com")
+        XCTAssertEqual(ServerSettings.syncingPassword(), "registered-password")
+        XCTAssertTrue(SyncManager.isUserLoggedIn())
+    }
+
+    func testRejectedStoredPasswordSignsOutForDefinitiveAccountErrors() {
+        for error in [APIError.INCORRECT_PASSWORD, .EMAIL_NOT_FOUND] {
+            ServerSettings.setSyncingEmail(email: "test@test.com")
+            ServerSettings.saveSyncingPassword("rejected-password")
+            UserDefaults.standard.set(false, forKey: "AurisIncompleteCredentialWrite")
+            XCTAssertTrue(SyncManager.isUserLoggedIn(), "test premise: an existing password session")
+            let helper = TokenHelper(urlConnection: URLConnection { request in
+                let data = try JSONSerialization.data(withJSONObject: ["errorMessageId": error.rawValue])
+                return (data, HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil))
+            }, backgroundState: { false })
+            XCTAssertNil(helper.acquireToken())
+            XCTAssertFalse(SyncManager.isUserLoggedIn())
+            XCTAssertNil(ServerSettings.syncingPassword())
+        }
+    }
+
+    func testRejectedPasswordResponseCannotSignOutASupersedingLogin() throws {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.saveSyncingPassword("old-password")
+        let helper = TokenHelper(urlConnection: URLConnection { request in
+            let login = try XCTUnwrap(ServerSettings.beginAuthentication(email: "new@example.com"))
+            let response = AuthenticationResponse(token: "new-access", uuid: "new-account", email: "new@example.com", refreshToken: "new-refresh")
+            XCTAssertTrue(ServerSettings.commitAuthentication(response, for: login, password: "new-password"))
+            let data = try JSONSerialization.data(withJSONObject: ["errorMessageId": APIError.INCORRECT_PASSWORD.rawValue])
+            return (data, HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil))
+        }, backgroundState: { false })
+        XCTAssertNil(helper.acquireToken())
+        XCTAssertEqual(ServerSettings.syncingEmail(), "new@example.com")
+        XCTAssertEqual(ServerSettings.syncingV2Token, "new-access")
+        XCTAssertEqual(try ServerSettings.refreshToken(), "new-refresh")
+    }
 
     @MainActor
     func testMainThreadMigrationDoesNotWaitOnRenewalsMainThreadStateQuery() {
@@ -73,10 +114,14 @@ class TokenHelperTests: XCTestCase {
     }
 
     func testSSORenewalUsesRefreshGrantAndPreservesAnOmittedRefreshToken() throws {
+        // The watch restores credentials through these plain setters after signout.
+        SyncManager.clearTokensFromKeyChain()
         ServerSettings.setSyncingEmail(email: "test@test.com")
         ServerSettings.userId = "uuid-test"
         ServerSettings.setRefreshToken("refresh-existing")
         ServerSettings.syncingV2Token = "access-existing"
+        XCTAssertTrue(SyncManager.isUserLoggedIn())
+        XCTAssertEqual(try ServerSettings.refreshToken(), "refresh-existing")
         var requests = 0
         let helper = TokenHelper(urlConnection: URLConnection { request in
             requests += 1

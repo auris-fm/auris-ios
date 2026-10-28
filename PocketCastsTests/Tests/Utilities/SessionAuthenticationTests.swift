@@ -73,6 +73,27 @@ final class SessionAuthenticationTests: XCTestCase {
         XCTAssertFalse(ServerSettings.withCommittedAuthentication(attempt) { XCTFail("failed write reported success") })
     }
 
+    func testCheckedClearReleasesUnavailableMarkerOnlyAfterEveryRemovalSucceeds() {
+        ServerSettings.clearAuthentication(defaults: defaults, remove: { key in
+            self.values[key] = nil
+            return true
+        })
+        XCTAssertFalse(defaults.bool(forKey: marker))
+        XCTAssertNil(values[accessKey])
+        XCTAssertNil(values[refreshKey])
+    }
+
+    func testFailedClearRemainsUnavailableInANewDefaultsInstance() throws {
+        var removals = 0
+        ServerSettings.clearAuthentication(defaults: defaults, remove: { key in
+            removals += 1
+            return key != self.refreshKey
+        })
+        XCTAssertEqual(removals, 5, "attempt every removal even when one fails")
+        XCTAssertTrue(defaults.bool(forKey: marker))
+        XCTAssertTrue(try XCTUnwrap(UserDefaults(suiteName: suiteName)).bool(forKey: marker))
+    }
+
     func testFailedLoginAfterSignoutDoesNotMakeOldCredentialsReadableAgain() throws {
         ServerSettings.invalidateAuthentication(defaults: defaults) {}
         let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(email: "b@example.com"))

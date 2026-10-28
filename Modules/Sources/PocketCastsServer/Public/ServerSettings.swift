@@ -543,6 +543,22 @@ public extension ServerSettings {
         }
     }
 
+    /// Successful clears leave the existing registration/watch restore setters usable.
+    /// Failed clears retain the unavailable marker instead of exposing leftover credentials.
+    static func clearAuthentication(defaults: UserDefaults = .standard,
+                                    remove: (String) -> Bool = { KeychainHelper.removeKey($0) }) {
+        invalidateAuthentication(defaults: defaults) {
+            let keys = [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey,
+                        ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
+                        ServerConstants.Values.appleAuthUserIDKey]
+            var cleared = true
+            for key in keys {
+                if !remove(key) { cleared = false }
+            }
+            if cleared { defaults.set(false, forKey: incompleteCredentialWriteKey) }
+        }
+    }
+
     static func ifAuthenticationIsCurrent(_ attempt: AuthenticationAttempt, _ action: () -> Void) {
         authenticationLock.withLock {
             guard attempt.generation == authenticationGeneration else { return }

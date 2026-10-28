@@ -5,17 +5,14 @@ import PocketCastsServer
 /// password session with no refresh token first renews through the normal account path.
 struct CloudAccountSessionCredentialProvider {
     private let refreshTokenReader: () -> String?
-    private let accessTokenReader: () -> String?
     private let migrate: () -> Void
 
     init(
         refreshTokenReader: (() -> String?)? = nil,
-        accessTokenReader: @escaping () -> String? = { ServerSettings.syncingV2Token },
         migrate: (() -> Void)? = nil
     ) {
         self.refreshTokenReader = refreshTokenReader ?? { try? ServerSettings.refreshToken() }
         self.migrate = migrate ?? (refreshTokenReader == nil ? { ServerSettings.refreshPasswordSessionIfNeeded() } : {})
-        self.accessTokenReader = accessTokenReader
     }
 
     /// The credential to present, or nil when the user is not signed in — in

@@ -265,7 +265,7 @@ final class CloudAccountSessionCredentialProviderTests: XCTestCase {
 
     func testFailedMigrationStillPresentsNoAccessToken() {
         var migrations = 0
-        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }, accessTokenReader: { "access-only" }, migrate: { migrations += 1 })
+        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }, migrate: { migrations += 1 })
         XCTAssertNil(provider.credential())
         XCTAssertEqual(migrations, 1)
     }
@@ -273,22 +273,6 @@ final class CloudAccountSessionCredentialProviderTests: XCTestCase {
     func testPresentsTheAccountRefreshToken() {
         let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { "refresh-1" })
         XCTAssertEqual(provider.credential(), "refresh-1")
-    }
-
-    /// An ACCESS token must never be presented as the refresh credential. The verifier puts
-    /// whatever it is given into a `refresh_token` field and asks the upstream to refresh it,
-    /// so an access token there is relabelled — the server has one field and cannot tell the
-    /// difference, and the upstream answers `invalid_grant`, which is the client's own doing.
-    /// Failing closed locally is the honest outcome, not a server round trip.
-    func testAnAccessTokenIsNeverPresentedAsTheRefreshCredential() {
-        let provider = CloudAccountSessionCredentialProvider(
-            refreshTokenReader: { nil },
-            accessTokenReader: { "access-1" }
-        )
-        XCTAssertNil(
-            provider.credential(),
-            "an access token was relabelled as a refresh token"
-        )
     }
 
     func testEmptyOrMissingRefreshTokenYieldsNil() {
