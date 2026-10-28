@@ -37,6 +37,7 @@ struct FirebaseManager {
         // be fooled — the exchange must move the SDK timestamp from its previous value AND land past
         // our start.
         let sharingCoordinator = VoiceSharingCoordinator.shared
+        sharingCoordinator.refreshCohortAttributes()
         sharingCoordinator.initiateIdentityRecoveryRefresh = {
             FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
         }

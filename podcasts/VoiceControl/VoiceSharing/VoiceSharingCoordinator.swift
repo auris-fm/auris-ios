@@ -2,6 +2,7 @@ import Foundation
 import Firebase
 import PocketCastsServer
 import FirebaseRemoteConfig
+import FirebaseAnalytics
 
 /// Composition point for the Voice Sharing feature on iOS.
 ///
@@ -31,7 +32,8 @@ final class VoiceSharingCoordinator {
         now: @escaping () -> Date = Date.init,
         lastFetchTime: @escaping () -> Date? = { RemoteConfig.remoteConfig().lastFetchTime },
         valueSource: (() -> RemoteValueSource)? = nil,
-        enrollmentStore: VoiceSharingEnrollmentStore? = nil
+        enrollmentStore: VoiceSharingEnrollmentStore? = nil,
+        cohortPublisher: VoiceSharingCohortPublisher? = nil
     ) {
         self.nowProvider = now
         self.monotonicClock = clock
@@ -39,6 +41,7 @@ final class VoiceSharingCoordinator {
         self.valueSource = valueSource ?? Self.readSDKValue
         let store = enrollmentStore ?? VoiceSharingEnrollmentStore.shared
         self.enrollmentStore = store
+        self.cohortPublisher = cohortPublisher ?? VoiceSharingCohortPublisher(store: store)
         self.applyingMembershipInvalidation = false
         self.policy = VoiceSharingPolicy(
             clock: clock,
@@ -63,7 +66,9 @@ final class VoiceSharingCoordinator {
         // departed state's permission when that fetch returns. Registered for ANY store this coordinator
         // was handed — gating it on ownership left injected stores with no invalidation at all.
         membershipObserverToken = store.addObserver { [weak self] _ in
-            guard let self, !self.applyingMembershipInvalidation else { return }
+            guard let self else { return }
+            self.refreshCohortAttributes()
+            guard !self.applyingMembershipInvalidation else { return }
             self.applyingMembershipInvalidation = true
             defer { self.applyingMembershipInvalidation = false }
             // Membership moves inside the current session must NOT raise the identity fence: a successful
@@ -73,8 +78,11 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    /// The authoritative membership state, read by the settings UI and the mutation caller alike so no
-    /// component keeps its own idea of enrollment.
+    private let cohortPublisher: VoiceSharingCohortPublisher
+
+    func refreshCohortAttributes() { cohortPublisher.refresh() }
+
+    /// Authoritative membership shared by policy and account operations.
     let enrollmentStore: VoiceSharingEnrollmentStore
     private var membershipObserverToken: UUID?
     /// Re-entrancy latch: the coordinator's lifecycle handlers call the store, whose observer calls back
@@ -474,3 +482,39 @@ final class VoiceSharingCoordinator {
 
 
 extension NotificationCenter: VoiceSharingCoordinator.NotificationRegistering {}
+
+/// Advisory targeting attributes only. SDK calls do not acknowledge targeting or authorize collection.
+final class VoiceSharingCohortPublisher {
+    private let store: VoiceSharingEnrollmentStore
+    private let configured: () -> Bool
+    private let privacyAllows: () -> Bool
+    private let schedule: (@escaping () -> Void) -> Void
+    private let setProperty: (String?, String) -> Void
+
+    init(store: VoiceSharingEnrollmentStore,
+         configured: @escaping () -> Bool = { FirebaseApp.app() != nil },
+         privacyAllows: @escaping () -> Bool = { !Settings.analyticsOptOut() },
+         schedule: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+         setProperty: @escaping (String?, String) -> Void = { FirebaseAnalytics.Analytics.setUserProperty($0, forName: $1) }) {
+        self.store = store
+        self.configured = configured
+        self.privacyAllows = privacyAllows
+        self.schedule = schedule
+        self.setProperty = setProperty
+    }
+
+    func refresh() {
+        schedule { [weak self] in
+            guard let self, self.configured() else { return } // No SDK call, no clearing claim.
+            guard self.privacyAllows() else {
+                self.setProperty(nil, "plan")
+                self.setProperty(nil, "voice_sharing_enrolled")
+                return
+            }
+            self.store.publishCurrentCohortAttributes { plan, enrolled in
+                self.setProperty(plan, "plan")
+                self.setProperty(enrolled, "voice_sharing_enrolled")
+            }
+        }
+    }
+}

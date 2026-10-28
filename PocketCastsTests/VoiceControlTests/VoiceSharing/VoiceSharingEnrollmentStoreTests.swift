@@ -552,3 +552,93 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
                         "login clears the fence")
     }
 }
+
+final class VoiceSharingCohortPublisherTests: XCTestCase {
+    func test_publicationReadsCurrentAccountAndPrivacyAtExecution() throws {
+        let suite = "cohort-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var session: String? = "A"
+        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { session ?? "out" }, sessionIdentityProvider: { session })
+        var pending: [() -> Void] = []
+        var properties: [String: String] = [:]
+        var configured = true
+        var allowed = true
+        var calls = 0
+        let publisher = VoiceSharingCohortPublisher(store: store, configured: { configured }, privacyAllows: { allowed }, schedule: { pending.append($0) }, setProperty: { value, key in
+            calls += 1
+            properties[key] = value
+        })
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store, cohortPublisher: publisher)
+        func drain() { while !pending.isEmpty { pending.removeFirst()() } }
+        func projection(_ plan: VoiceSharingMembership.Plan, _ enrolled: Bool) -> VoiceSharingMembership {
+            VoiceSharingMembership(membershipRevision: UUID().uuidString, plan: plan, voiceSharingEnrolled: enrolled, enrollmentEpoch: enrolled ? "epoch" : nil, acceptedDisclosureVersion: enrolled ? "disclosure" : nil, withdrawalState: enrolled ? .active : .notEnrolled)
+        }
+        store.setLocalOptIn(true)
+        XCTAssertTrue(store.apply(authoritative: projection(.free, true), readUnder: try XCTUnwrap(store.projectionToken())))
+        drain()
+        XCTAssertEqual(properties, ["plan": "free", "voice_sharing_enrolled": "true"])
+        let stale = try XCTUnwrap(store.projectionToken())
+        _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
+        XCTAssertFalse(store.currentEffectiveEnrolled)
+        drain()
+        XCTAssertEqual(properties, ["plan": "free", "voice_sharing_enrolled": "false"])
+        XCTAssertFalse(store.apply(authoritative: projection(.pro, true), readUnder: stale))
+        publisher.refresh() // queued A publication must never replay A after switching.
+        session = "B"
+        store.transitionToAccount(signedIn: true)
+        XCTAssertTrue(store.apply(authoritative: projection(.pro, false), readUnder: try XCTUnwrap(store.projectionToken())))
+        drain()
+        XCTAssertEqual(properties, ["plan": "pro", "voice_sharing_enrolled": "false"])
+        session = "unapplied-session"
+        publisher.refresh()
+        drain()
+        XCTAssertTrue(properties.isEmpty, "a lifecycle without its own projection must not publish old authority")
+        publisher.refresh()
+        session = nil
+        store.transitionToAccount(signedIn: false)
+        drain()
+        XCTAssertTrue(properties.isEmpty)
+        session = "C"
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        XCTAssertTrue(store.apply(authoritative: projection(.pro, true), readUnder: try XCTUnwrap(store.projectionToken())))
+        drain()
+        XCTAssertEqual(properties["voice_sharing_enrolled"], "true")
+        publisher.refresh()
+        allowed = false
+        drain()
+        XCTAssertTrue(properties.isEmpty)
+        let before = calls
+        configured = false
+        publisher.refresh()
+        drain()
+        XCTAssertEqual(calls, before, "unconfigured SDK refuses publication; no clearing claim")
+        withExtendedLifetime(coordinator) {}
+    }
+
+    func test_identicalPersistedProjectionPublishesAuthorityWithoutOpeningPolicy() throws {
+        let suite = "cohort-authority-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let membership = VoiceSharingMembership(membershipRevision: "same", plan: .free, voiceSharingEnrolled: true, enrollmentEpoch: "e", acceptedDisclosureVersion: "d", withdrawalState: .active)
+        let first = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "A" }, sessionIdentityProvider: { "session" })
+        first.setLocalOptIn(true)
+        XCTAssertTrue(first.apply(authoritative: membership, readUnder: try XCTUnwrap(first.projectionToken())))
+        let restored = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "A" }, sessionIdentityProvider: { "session" })
+        var values: [String: String] = [:]
+        let publisher = VoiceSharingCohortPublisher(store: restored, configured: { true }, privacyAllows: { true }, schedule: { $0() }, setProperty: { values[$1] = $0 })
+        let coordinator = VoiceSharingCoordinator(readRemoteSwitch: { .valid(true) }, enrollmentStore: restored, cohortPublisher: publisher)
+        publisher.refresh()
+        XCTAssertTrue(values.isEmpty)
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
+        XCTAssertNotNil(coordinator.policy.installedLeaseExpiry, "premise: fresh enabled snapshot exists while enrollment is unknown")
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertTrue(restored.apply(authoritative: membership, readUnder: try XCTUnwrap(restored.projectionToken())))
+        XCTAssertEqual(values, ["plan": "free", "voice_sharing_enrolled": "true"])
+        XCTAssertFalse(coordinator.policy.permitsCollection, "attributes and restored authority cannot replace a fresh policy activation")
+        XCTAssertNil(coordinator.policy.installedLeaseExpiry, "authority publication must invalidate the earlier snapshot")
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
+        XCTAssertTrue(coordinator.policy.permitsCollection, "a subsequent fresh activation can reopen collection")
+    }
+}

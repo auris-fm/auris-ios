@@ -57,6 +57,7 @@ final class VoiceSharingEnrollmentStore {
     private let lock = NSLock()
     private let defaults: UserDefaults
     private var state = State()
+    private var authoritativeLifecycle: String?
     private var observers: [UUID: (State) -> Void] = [:]
 
     private enum Key {
@@ -122,6 +123,22 @@ final class VoiceSharingEnrollmentStore {
         return state.membership.enrollmentEpoch
     }
 
+    /// Executes a bounded synchronous publication against one lock-held state/session snapshot.
+    /// The callback must not reenter the store. No captured observer payload may publish later.
+    func publishCurrentCohortAttributes(_ publish: (String?, String?) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        let lifecycle = sessionIdentityProvider()
+        let operation = operationGeneration
+        let snapshot = state
+        guard lifecycle != nil, lifecycle == authoritativeLifecycle, snapshot.hasAuthoritativeProjection,
+              lifecycle == sessionIdentityProvider(), operation == operationGeneration else {
+            publish(nil, nil)
+            return
+        }
+        publish(snapshot.membership.plan.rawValue, snapshot.effectiveEnrolled ? "true" : "false")
+    }
+
     // MARK: - Observing
 
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate
@@ -180,12 +197,13 @@ final class VoiceSharingEnrollmentStore {
             lock.unlock()
             return false
         }
-        let changed = state.membership != projection
+        let changed = state.membership != projection || !state.hasAuthoritativeProjection
         state.membership = projection
         state.hasAuthoritativeProjection = true
+        authoritativeLifecycle = token.lifecycleGeneration
         persist(projection)
         lock.unlock()
-        // An identical replay announces nothing: a retried request must not look like a second transition.
+        // Identical authoritative replays announce nothing; first authority in this session must publish.
         if changed { notify() }
         return true
     }
