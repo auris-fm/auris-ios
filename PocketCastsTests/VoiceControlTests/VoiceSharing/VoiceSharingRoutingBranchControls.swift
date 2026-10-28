@@ -170,6 +170,72 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         return Harness(service: service, engine: engine, collector: collector)
     }
 
+    /// Calls the production final composition step, then drops the builder and every local owner.
+    /// Backend/router/audio are fixtures; no model loading, microphone or network is exercised.
+    func test_serviceKeepsSharingAliveAfterTheAssemblyIsReleased() throws {
+        let suite = "sharing-lifetime-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
+        store.setLocalOptIn(false)
+        let collector = makeCollector()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sharing-lifetime-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); queue = nil }
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let policy = openGate()
+        var service: VoiceControlService?
+        weak var weakAssembly: VoiceControlAssembly?
+        weak var weakModel: VoiceSharingSettingsModel?
+        weak var weakTrigger: VoiceSharingUploadTrigger?
+        weak var weakLifetime: VoiceSharingLifetime?
+        var published: [VoiceSharingSettingsModel.LiveState] = []
+        do {
+            let assembly = VoiceControlAssembly()
+            weakAssembly = assembly
+            let model = VoiceSharingSettingsModel(
+                queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { false },
+                isLocallyOptedIn: { store.currentState.localOptIn },
+                coherenceAccount: { "account-a" })
+            model.refreshLiveState() // baseline only; no refresh after source mutation
+            _ = model.addStateObserver { published.append($0.state) }
+            weakModel = model
+            let uploader = VoiceSharingUploader(
+                queue: queue,
+                retryPolicy: VoiceSharingRetryPolicy(
+                    retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+                isAuthorized: { false }, endpoint: { nil },
+                transport: { _, _, _ in XCTFail("no upload permitted"); return .transportFailure })
+            let trigger = VoiceSharingUploadTrigger(
+                scheduler: VoiceSharingUploadScheduler(
+                    queue: queue, uploader: uploader, isAuthorized: { false }),
+                isAuthorized: { false })
+            weakTrigger = trigger
+            service = assembly.installVoiceSharingLifetime(
+                on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
+                settingsModel: model, uploadTrigger: trigger,
+                enrollmentStore: store, policy: policy, queue: queue)
+            weakLifetime = service?.voiceSharingLifetime
+        }
+        XCTAssertNil(weakAssembly)
+        XCTAssertNotNil(weakModel)
+        XCTAssertNotNil(weakTrigger)
+        XCTAssertNotNil(weakLifetime)
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+        store.setLocalOptIn(true)
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(published.last?.localOptIn, true)
+        var retainedModel = weakModel
+        service = nil
+        XCTAssertNil(weakLifetime, "service must not cycle with its sharing dependencies")
+        XCTAssertNil(weakTrigger)
+        store.setLocalOptIn(false)
+        XCTAssertEqual(published.count, 1, "service teardown must remove the enrollment observer")
+        XCTAssertNotNil(retainedModel, "retain the model so a leaked weak observer would still publish")
+        retainedModel = nil
+        XCTAssertNil(weakModel)
+    }
+
     /// Produces a REAL open capture the way production does — the engine's own `speechStarted` — because
     /// an observation can only land on a capture that exists. Reports on a context the collector never
     /// minted are dropped by design, and a control that used a made-up context would prove nothing.

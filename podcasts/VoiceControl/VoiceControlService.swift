@@ -30,6 +30,7 @@ class VoiceControlService: ObservableObject {
     /// The collector that records this capture's observations. Optional so tests and any caller that
     /// does not run voice-sharing work unchanged; routing/execution are reported through it when present.
     private let contributionCollector: VoiceSharingCollector?
+    var voiceSharingLifetime: VoiceSharingLifetime?
     /// Injected for the routing/execution provenance controls; production uses `contributionCollector`.
     var contributionCollectorForTesting: VoiceSharingCollector? { contributionCollector }
     private let analytics: VoiceAnalytics

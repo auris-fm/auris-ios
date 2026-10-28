@@ -4,15 +4,6 @@ import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
-    /// Strong reference to the upload lifecycle trigger so its notification observer survives;
-    /// creation happens inside `buildVoiceControlService` when the upload chain is built.
-    private var voiceSharingUploadTrigger: VoiceSharingUploadTrigger?
-    /// Production settings model, wired with live reads. Retained so the surface can be handed a
-    /// real dependency rather than a stub; the surface itself stays compiled OFF.
-    private(set) var voiceSharingSettingsModel: VoiceSharingSettingsModel?
-    private var voiceSharingSettingsModelObserver: UUID?
-    private var voiceSharingPolicyObserver: UUID?
-    private var voiceSharingQueueObserver: UUID?
     /// Returns nil when the wake-word deployment manifest is missing or
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
@@ -155,8 +146,6 @@ class VoiceControlAssembly {
             scheduler: uploadScheduler,
             surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
             isAuthorized: uploadAuthorized)
-        // A retained reference keeps the notification observer alive for the app's lifetime.
-        self.voiceSharingUploadTrigger = uploadTrigger
         // The settings MODEL is wired here, in production, with the real live reads (reviewer
         // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
         // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
@@ -185,23 +174,6 @@ class VoiceControlAssembly {
         settingsModel.scheduleTimeDrivenRefresh = { delay, body in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
         }
-        self.voiceSharingSettingsModel = settingsModel
-        // EVERY authoritative update source, not just enrollment (spec fc93e27a / reviewer
-        // f62b19a4): opt-in and projection acceptance, lease install/expiry/fence/withdrawal, and
-        // queue hold/count changes. Each one pushes; a rendered view cannot go stale waiting for
-        // the next read.
-        self.voiceSharingSettingsModelObserver =
-            VoiceSharingEnrollmentStore.shared.addObserver { [weak settingsModel] _ in
-                settingsModel?.refreshLiveState()
-            }
-        self.voiceSharingPolicyObserver =
-            VoiceSharingCoordinator.shared.policy.addChangeObserver { [weak settingsModel] in
-                settingsModel?.refreshLiveState()
-            }
-        self.voiceSharingQueueObserver =
-            contributionQueue.addContentObserver { [weak settingsModel] in
-                settingsModel?.refreshLiveState()
-            }
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
             isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },
@@ -305,7 +277,7 @@ class VoiceControlAssembly {
         let language = Locale.current.language.languageCode?.identifier ?? "en"
         ttsEngine.warmUp(language: language)
 
-        return VoiceControlService(
+        let service = VoiceControlService(
             conditionMonitor: conditionMonitor,
             routeMonitor: routeMonitor,
             interruptionHandler: interruptionHandler,
@@ -320,6 +292,27 @@ class VoiceControlAssembly {
             contributionCollector: contributionCollector,
             isPlaybackActive: isPlaybackActive
         )
+        return installVoiceSharingLifetime(
+            on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
+            enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
+            queue: contributionQueue)
+    }
+
+    /// The service outlives this builder; subscriptions and their dependencies must do so too.
+    @discardableResult
+    func installVoiceSharingLifetime(
+        on service: VoiceControlService,
+        settingsModel: VoiceSharingSettingsModel,
+        uploadTrigger: VoiceSharingUploadTrigger,
+        enrollmentStore: VoiceSharingEnrollmentStore,
+        policy: VoiceSharingPolicy,
+        queue: VoiceSharingUploadQueue
+    ) -> VoiceControlService {
+        service.voiceSharingLifetime = nil
+        service.voiceSharingLifetime = VoiceSharingLifetime(
+            settingsModel: settingsModel, uploadTrigger: uploadTrigger,
+            enrollmentStore: enrollmentStore, policy: policy, queue: queue)
+        return service
     }
 
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
@@ -369,5 +362,44 @@ private class DefaultAnalyticsService: AnalyticsService {
             return String(describing: value)
         }
         Analytics.track(analyticsEvent, properties: sendableProperties)
+    }
+}
+
+/// Keeps the existing sharing objects and their source registrations alive with the service.
+final class VoiceSharingLifetime {
+    let settingsModel: VoiceSharingSettingsModel
+    let uploadTrigger: VoiceSharingUploadTrigger
+    private let enrollmentStore: VoiceSharingEnrollmentStore
+    private let policy: VoiceSharingPolicy
+    private let queue: VoiceSharingUploadQueue
+    private let enrollmentObserver: UUID
+    private let policyObserver: UUID
+    private let queueObserver: UUID
+
+    init(settingsModel: VoiceSharingSettingsModel,
+         uploadTrigger: VoiceSharingUploadTrigger,
+         enrollmentStore: VoiceSharingEnrollmentStore,
+         policy: VoiceSharingPolicy,
+         queue: VoiceSharingUploadQueue) {
+        self.settingsModel = settingsModel
+        self.uploadTrigger = uploadTrigger
+        self.enrollmentStore = enrollmentStore
+        self.policy = policy
+        self.queue = queue
+        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
+            settingsModel?.refreshLiveState()
+        }
+        policyObserver = policy.addChangeObserver { [weak settingsModel] in
+            settingsModel?.refreshLiveState()
+        }
+        queueObserver = queue.addContentObserver { [weak settingsModel] in
+            settingsModel?.refreshLiveState()
+        }
+    }
+
+    deinit {
+        enrollmentStore.removeObserver(enrollmentObserver)
+        policy.removeChangeObserver(policyObserver)
+        queue.removeContentObserver(queueObserver)
     }
 }
