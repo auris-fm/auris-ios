@@ -5,11 +5,21 @@ Format all code using the linter formatter:
 make format
 ```
 
+Both SwiftLint build phases (`PreBuildActions/SwiftLint` and the app target's lenient phase) are
+unconditional and run on *every* build. Set `SKIP_LINT=1` to short-circuit them for a local
+iteration — `make build_fast` / `make test_fast` already do. `make lint` and CI still enforce the
+rules, so nothing reaches review unlinted.
+
 ## Building and Running
 
 ```bash
-make build_staging
+make build_staging        # trustworthy build (what verification before a PR should use)
+make build_fast           # local iteration: no dSYM, no code signing, no lint, no package re-resolution
 ```
+
+Build output is tee'd into `artifacts/*.log` (gitignored) and the recipes run under
+`set -o pipefail`, so a failed build still exits non-zero and a killed one still leaves its
+partial log behind.
 
 ### Simulator install (voice / ASR testing)
 
@@ -56,6 +66,53 @@ make test_staging ONLY_TESTING=PocketCastsServerTests
 # Utils module tests
 make test_staging ONLY_TESTING=PocketCastsUtilsTests
 ```
+
+## Build and test invocation discipline
+
+These rules exist because one lane session was measured spending **154 minutes inside xcodebuild**,
+roughly 114 of them avoidable. Each rule names the failure it prevents.
+
+**Always go through `make`.** The `build*` / `test*` targets depend on `ensure_llama_ios`, which
+produces `ThirdParty/llama-cpp-build/*/lfm/liblfm_runtime.a`. A bare `xcodebuild` skips that
+prerequisite and dies with `Library 'lfm_runtime' not found` — on the Share Extension first,
+because the llama link flags are inherited project-wide. That cost ~14 minutes of failed builds
+in the session above, in a worktree whose `ThirdParty/llama-cpp-build` had not been built yet.
+
+**Never add `-destination 'generic/platform=iOS Simulator'` yourself.** A generic simulator
+destination has no active arch, so `ONLY_ACTIVE_ARCH` cannot narrow `ARCHS`: every source file is
+compiled twice and the x86_64 link then fails anyway, because `liblfm_runtime.a` is arm64-only.
+The Makefile passes `ARCHS=arm64` on Apple Silicon hosts via `$(SIM_ARCH)` and stays empty on
+Intel; the test targets use concrete destinations (`name=` / `id=`), which already resolve to the
+host arch.
+
+**Log to a file; never `xcodebuild ... | grep ... | tail`.** `tail` buffers until EOF, so a hung
+run prints nothing at all and the kill throws away whatever it had produced. The make targets tee
+into `artifacts/*.log` for exactly this reason.
+
+**Narrow `-only-testing` to the class or method under change.** `-only-testing:PocketCastsTests`
+means the whole bundle (~150 test files). Two such runs hit their 50-minute outer timeout without
+ever producing a verdict, even though the failures being hunted had already printed within
+seconds of the run starting.
+
+**Size the outer timeout to the work.** The test targets pass `-test-timeouts-enabled YES
+-default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 120`, so a stuck
+test fails in about a minute and names itself. Wrapping that in `timeout 3000` converts a fast
+answer into 50 blind minutes.
+
+**Do not hardcode DerivedData paths across worktrees.** DerivedData is keyed by project path, so
+every worktree (and every `/tmp` scratch clone) has its own. One session installed
+`podcasts-bmth…` — a `/tmp/rev-pres` clone — while working in a different worktree, i.e. it put
+the wrong app on the simulator. Read `CODESIGNING_FOLDER_PATH` from `xcodebuild -showBuildSettings`,
+or use `make launch_mac`, which resolves *this* checkout's DerivedData by matching `WorkspacePath`
+in each `info.plist` and fails instead of guessing.
+
+**`build_fast` / `test_fast` are for the local loop only.** They add
+`-disableAutomaticPackageResolution`, `DEBUG_INFORMATION_FORMAT=dwarf`, `CODE_SIGNING_ALLOWED=NO`
+and `SKIP_LINT=1`. Measured on an M1 Max: one-file rebuild 89s → ~50s, no-op build 60s → ~25s.
+The unsigned `.app` still installs and launches on a simulator (verified), but do not use these
+flags for anything you intend to trust, archive, or put on a device — and do not alternate fast
+and normal flags on the same worktree, because each change to the build description invalidates
+the cache and costs one full rebuild.
 
 ## Architecture
 

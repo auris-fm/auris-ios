@@ -1,3 +1,8 @@
+# bash, so the recipes below can `set -o pipefail`: `xcodebuild ... | tee <log>` must report
+# xcodebuild's status, not tee's, or a failed build would look like a pass. pipefail is set
+# per recipe rather than via .SHELLFLAGS because macOS ships GNU Make 3.81, which ignores it.
+SHELL := /bin/bash
+
 BUNDLE=rbenv exec bundle
 LANG_VAR=LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 FASTLANE=$(LANG_VAR) $(BUNDLE) exec fastlane
@@ -9,7 +14,35 @@ SIMULATOR_NAME = $(shell xcrun simctl list devices available \
 	| grep "iPhone" \
 	| tail -1 | sed 's/^[[:space:]]*//' | sed 's/ *(.*) *$$//')
 
-.PHONY: help build clean test lint lint_lenient format install_dependencies build_mac launch_mac debug debug_all
+# Never build the x86_64 simulator slice on Apple Silicon. A `generic/platform=iOS Simulator`
+# destination has no active arch, so ONLY_ACTIVE_ARCH cannot narrow ARCHS: every source is
+# compiled twice and the x86_64 link then fails anyway, because the prebuilt
+# ThirdParty/llama-cpp-build/*/lfm/liblfm_runtime.a is arm64-only. Concrete destinations
+# (`name=`/`id=`) already resolve ARCHS to the host arch, so this only costs on Intel hosts,
+# where it deliberately stays empty.
+HOST_ARCH = $(shell uname -m)
+SIM_ARCH = $(if $(filter arm64,$(HOST_ARCH)),ARCHS=arm64,)
+
+# Bound a hung test. PocketCastsTests/UnitTests.xctestplan sets `testTimeoutsEnabled` but no
+# allowance, so without this a stuck test burns the caller's whole outer timeout.
+TEST_TIMEOUT_FLAGS = -test-timeouts-enabled YES \
+	-default-test-execution-time-allowance 60 \
+	-maximum-test-execution-time-allowance 120
+
+# Local iteration only. dwarf skips dsymutil, CODE_SIGNING_ALLOWED=NO skips CodeSign and the
+# seven ValidateEmbeddedBinary tasks (the unsigned .app still installs and launches on a
+# simulator), -disableAutomaticPackageResolution skips re-resolving 23 packages per
+# invocation, and SKIP_LINT short-circuits the two always-run SwiftLint build phases.
+# Do not use these for archives, device builds, or CI verification.
+FAST_FLAGS = -disableAutomaticPackageResolution $(SIM_ARCH) \
+	DEBUG_INFORMATION_FORMAT=dwarf CODE_SIGNING_ALLOWED=NO
+FAST_ENV = SKIP_LINT=1
+
+# Build logs land here (gitignored) so a killed or timed-out run still leaves its output
+# behind instead of being swallowed by a `| grep | tail` pipeline.
+LOG_DIR = artifacts
+
+.PHONY: help build clean test lint lint_lenient format install_dependencies build_mac launch_mac debug debug_all build_fast test_fast
 
 define run_in_buildtools
 	@pushd BuildTools && \
@@ -40,11 +73,12 @@ lint_lenient:
 	$(call run_in_buildtools,$(SWIFTLINT_FROM_BUILDTOOLS) --lenient)
 
 build: ensure_llama_ios ## Builds the Debug configuration using Xcode
-	xcodebuild -project podcasts.xcodeproj \
+	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild -project podcasts.xcodeproj \
        -scheme pocketcasts \
        -configuration Debug \
        -destination 'generic/platform=iOS Simulator' \
-       build
+       $(SIM_ARCH) \
+       build 2>&1 | tee $(LOG_DIR)/build.log
 
 clean: ## Cleans the build artifacts
 	xcodebuild -project podcasts.xcodeproj \
@@ -55,27 +89,66 @@ clean: ## Cleans the build artifacts
 ONLY_TESTING ?= PocketCastsTests
 
 test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
-	xcodebuild test -project podcasts.xcodeproj \
+	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest'
+        $(TEST_TIMEOUT_FLAGS) \
+        $(SIM_ARCH) \
+        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        2>&1 | tee $(LOG_DIR)/test.log
 
 build_staging: build ## Build the Debug app using the staging gateway
 
 test_staging: test ## Run Debug unit tests using the staging gateway
 
+build_fast: ensure_llama_ios ## Fast local Debug build (no dSYM/signing/lint); not for CI
+	# The shared "Pocket Casts Staging" scheme was removed with the staging-gateway work,
+	# so main's StagingDebug _fast targets are carried over on the pocketcasts scheme at
+	# Debug configuration instead; the point of the target is the FAST_FLAGS savings.
+	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild -project podcasts.xcodeproj \
+       -scheme pocketcasts \
+       -configuration Debug \
+       -destination 'generic/platform=iOS Simulator' \
+       $(FAST_FLAGS) \
+       build 2>&1 | tee $(LOG_DIR)/build_fast.log
+
+test_fast: ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
+	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild test -project podcasts.xcodeproj \
+	    -scheme pocketcasts \
+        -only-testing:$(ONLY_TESTING) \
+        $(TEST_TIMEOUT_FLAGS) \
+        $(FAST_FLAGS) \
+        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        2>&1 | tee $(LOG_DIR)/test_fast.log
+
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
+	# $(SIM_ARCH), not a hardcoded ARCHS=arm64: Intel hosts are not supported, and
+	# scripts/build-llama-ios.sh builds the simulator slice arm64-only ("no x86_64 simulator
+	# slice"), so an Intel build fails loudly at the x86_64 link. That is deliberate — the
+	# previous arm64 pin made it "succeed" into an arm64 simulator app an Intel Mac cannot run.
 	xcodebuild -project podcasts.xcodeproj \
 	       -scheme pocketcasts \
 	       -configuration Debug \
 	       -destination 'generic/platform=iOS Simulator' \
-	       ARCHS=arm64 \
+	       $(SIM_ARCH) \
 	       build
 
 launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	killall podcasts 2>/dev/null || true; \
-	APP="$$(find ~/Library/Developer/Xcode/DerivedData -name podcasts.app -path '*/Debug-iphonesimulator/*' -maxdepth 5 2>/dev/null | head -1)"; \
-	if [ -n "$$APP" ] && [ -d podcasts/VoiceControl/Resources/earcons ]; then \
+	APP="$$(ROOT="$$(pwd -P)"; for d in "$$HOME"/Library/Developer/Xcode/DerivedData/podcasts-*; do \
+		ws="$$(plutil -extract WorkspacePath raw "$$d/info.plist" 2>/dev/null)"; \
+		[ -n "$$ws" ] || continue; \
+		[ "$$(cd "$$(dirname "$$ws")" 2>/dev/null && pwd -P)" = "$$ROOT" ] || continue; \
+		app="$$d/Build/Products/Debug-iphonesimulator/podcasts.app"; \
+		[ -d "$$app" ] || continue; \
+		echo "$$app"; \
+		break; \
+	done)"; \
+	if [ ! -d "$$APP" ]; then \
+		echo "error: no Debug-iphonesimulator podcasts.app in DerivedData for $$PWD"; \
+		exit 1; \
+	fi; \
+	if [ -d podcasts/VoiceControl/Resources/earcons ]; then \
 		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
 	fi; \
 	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \

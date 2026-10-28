@@ -33,9 +33,14 @@ export async function prepare({event, name, repo, api}) {
   if (name === 'pull_request' && event.pull_request.head.sha !== pr.head.sha) return {run: false};
   const statuses = await api(`repos/${repo}/commits/${pr.head.sha}/statuses?per_page=100`, true);
   if (completed(statuses)) return {run: false};
-  const files = await api(`repos/${repo}/pulls/${number}/files?per_page=100`, true);
-  if (files.some(f => f.filename === '.github/workflows/claude-code-review.yml' ||
-    f.filename.startsWith('.github/scripts/claude-review'))) return {run: false};
+  // FILENAMES ONLY (core PR #131, reviewed delta 8c98e97a): the paginated files
+  // payload carries every file's full patch, and execFileSync's 1 MiB buffer
+  // overflows (spawnSync gh ENOBUFS) on a large-diff PR before the guard even
+  // runs. The guard needs names, not patches — project them server-side with
+  // --jq so the buffer sees kilobytes.
+  const filenames = await api(`repos/${repo}/pulls/${number}/files?per_page=100`, true, null, '.[].filename');
+  if (filenames.some(n => n === '.github/workflows/claude-code-review.yml' ||
+    n.startsWith('.github/scripts/claude-review'))) return {run: false};
   return {run: true, number, head: pr.head.sha, base: pr.base.sha};
 }
 export function completion(pr, head, outcome, conclusion) {
@@ -69,12 +74,21 @@ export function completion(pr, head, outcome, conclusion) {
 export function skippedNotice(pr, reason) {
   return {comment: `The Claude review was skipped: ${reason}. No review was performed and no status was recorded.`};
 }
-function api(path, paginate = false, body) {
+export function api(path, paginate = false, body, jq) {
   const args = ['api', path];
-  if (paginate) args.push('--paginate', '--slurp');
+  if (paginate) args.push('--paginate');
+  if (jq) args.push('--jq', jq);
+  else if (paginate) args.push('--slurp');
   if (body) args.push('--method', 'POST', '--input', '-');
-  const result = JSON.parse(execFileSync('gh', args, {encoding: 'utf8', input: body && JSON.stringify(body)}));
-  return paginate ? result.flat() : result;
+  const out = execFileSync('gh', args,
+    {encoding: 'utf8', input: body && JSON.stringify(body), maxBuffer: 32 * 1024 * 1024});
+  if (jq) {
+    // --jq output is PLAIN LINES across all pages, not JSON: parse the line
+    // shape explicitly (the projection compares fixed repo paths, which
+    // cannot contain newlines).
+    return out.split('\n').filter(line => line !== '');
+  }
+  return paginate ? JSON.parse(out).flat() : JSON.parse(out);
 }
 function output(values) {
   for (const [key, value] of Object.entries(values)) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
