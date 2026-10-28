@@ -105,6 +105,7 @@ final class VoiceSharingCollector {
         var outcomeWaitExpired = false
         /// A collector event freezes actual invocation identities, including explicit unknown slots.
         var reportedModels: VoiceSharingContributionEncoder.Models? = nil
+        var metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
     }
 
     /// Validated scheduling input, not an activation default. Missing limits close admission.
@@ -138,6 +139,8 @@ final class VoiceSharingCollector {
         var modelReferences: [String: VoiceSharingContributionEncoder.ModelRef] = [:]
         var observedModelSlots: Set<String> = []
         var conflictingModelSlots: Set<String> = []
+        var clipSampleCeiling = VoiceSharingCollector.maxRetainedSamples
+        var metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
         var retained: [Float] = []
         var sawStart = false
         var droppedFrom: Int? = nil
@@ -149,6 +152,7 @@ final class VoiceSharingCollector {
         var deferEmissionUntilFinalized = false
     }
 
+    private let captureAllowance: VoiceSharingCaptureAdmitting?
     private let policy: VoiceSharingPolicy
     private let membership: () -> VoiceSharingEnrollmentStore.State
     private let epochProvider: () -> String?
@@ -180,6 +184,7 @@ final class VoiceSharingCollector {
 
     init(
         policy: VoiceSharingPolicy,
+        captureAllowance: VoiceSharingCaptureAdmitting? = nil,
         outcomeWaitLimit: OutcomeWaitLimit? = nil,
         monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
         scheduleOutcome: @escaping (DispatchTime, DispatchWorkItem) -> Void = {
@@ -190,6 +195,7 @@ final class VoiceSharingCollector {
         sessionIdentity: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
         sink: @escaping (SegmentEvent) -> Void = { _ in }
     ) {
+        self.captureAllowance = captureAllowance
         self.outcomeWaitLimit = outcomeWaitLimit
         self.monotonicNow = monotonicNow
         self.scheduleOutcome = scheduleOutcome
@@ -233,12 +239,27 @@ final class VoiceSharingCollector {
     @discardableResult
     func speechStarted(confirmationFrameSamples: Int) -> CaptureContext? {
         guard let epoch = permittedEpoch() else {
-            lock.lock(); current = nil; lock.unlock()
+            abandonForGateMove(context: currentCaptureContext())
             return nil
         }
-        let frozen = FrozenCapture(id: UUID(), epoch: epoch, session: sessionIdentity(),
+        let session = sessionIdentity()
+        let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: policy.currentLeaseGeneration)
+        // The first contribution-owned PCM copy occurs only after taking this prepaid, single-use token.
+        let admission = captureAllowance?.take(for: stamp)
+        captureAllowance?.requestPreparation()
+        guard let admission else {
+            abandonForGateMove(context: currentCaptureContext())
+            return nil
+        }
+        var frozen = FrozenCapture(id: UUID(), epoch: epoch, session: session,
                                    retained: [], sawStart: true, original: confirmationFrameSamples)
+        frozen.clipSampleCeiling = min(Self.maxRetainedSamples, admission.clipSamples)
+        frozen.metadataByteCeiling = min(VoiceSharingUploadQueue.maxMetadataBytes, admission.metadataBytes)
         lock.lock()
+        guard stillPermitted(for: frozen), policy.currentLeaseGeneration == stamp.policyGeneration else {
+            lock.unlock()
+            return nil
+        }
         // The segmenter owns one capture at a time, so a confirmed start while a partial still lingers
         // means the partial can never complete. Record it (bounded ring + cancellation record) instead of
         // silently overwriting it — a silent overwrite would strand its audio with no terminal record.
@@ -295,9 +316,17 @@ final class VoiceSharingCollector {
     /// deliberately does not reach for the live one by accident.
     var currentCaptureContextForTesting: CaptureContext? { currentCaptureContext() }
 
+    /// Pointer metadata only; nil in production. Detects an accidental pre-admission PCM copy.
+    var borrowedSampleAddressForTesting: ((UInt?) -> Void)?
+
     /// Appends the REAL PCM the segmenter just produced. `samples` is authoritative; `reportedTotal` only
     /// documents the segmenter's buffer size so the original duration can be stated.
-    func appendSamples(_ samples: [Float], reportedTotal: Int? = nil) {
+    func appendSamples<Samples: Collection>(_ samples: Samples, reportedTotal: Int? = nil) where Samples.Element == Float {
+        if let probe = borrowedSampleAddressForTesting {
+            _ = samples.withContiguousStorageIfAvailable { buffer in
+                probe(buffer.baseAddress.map { UInt(bitPattern: $0) })
+            }
+        }
         lock.lock()
         guard var c = current, !c.terminal, c.sawStart else { lock.unlock(); return }
         guard stillPermitted(for: c) else { lock.unlock(); return }
@@ -308,7 +337,7 @@ final class VoiceSharingCollector {
         // Reserve BEFORE growth: the open capture may not push the aggregate over budget even though
         // its own per-capture cap still has room — otherwise open growth could exceed the budget and
         // wait for a later submit/evict to notice.
-        let perCaptureRoom = Self.maxRetainedSamples - c.retained.count
+        let perCaptureRoom = c.clipSampleCeiling - c.retained.count
         let aggregateRoom = Self.maxAggregateRetainedSamples - aggregateAudioSamples
         let take = min(samples.count, max(perCaptureRoom, 0), max(aggregateRoom, 0))
         if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
@@ -622,7 +651,12 @@ return }
 
     /// The pipeline stopped. A partial owned by this collector is released — it can never complete. Completed
     /// contributions are untouched: closing listening is not implicit withdrawal.
-    func pipelineStopped() { speechCancelled() }
+    func pipelineStarting() { captureAllowance?.requestPreparation() }
+
+    func pipelineStopped() {
+        captureAllowance?.invalidate()
+        speechCancelled()
+    }
 
     /// Explicit gate-loss: remote switch off, lease expired, or permission withdrawn, with identity UNCHANGED
     /// (so the dequeue-time epoch/session check alone would wave the queued work through). Cancels any open
@@ -630,6 +664,7 @@ return }
     /// gone, so nothing already in the FIFO may reach the sink either. Without this, "disable" only took
     /// effect at the next segmentation signal, and a stalled sink could hold stale work for the whole wait.
     func gateLost() {
+        captureAllowance?.invalidate()
         lock.lock()
         // WITHDRAWAL DISPOSAL. Every retained byte dies here, synchronously:
         //   * queued events (each holds a full audio copy) — purged;
@@ -659,6 +694,7 @@ return }
     /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
     /// A's late completion would be finalized under B's identity.
     func invalidateForAccountTransition(expectedSession: String?) {
+        captureAllowance?.invalidate()
         speechCancelled()
         _ = expectedSession
     }
@@ -876,7 +912,8 @@ return }
                             reportedStages: c.reportedStages,
                             reportedModels: .init(vad: c.modelReferences["vad"], wakeword: c.modelReferences["wakeword"],
                                                   asr: c.modelReferences["asr"], translation: c.modelReferences["translation"],
-                                                  router: c.modelReferences["router"]))
+                                                  router: c.modelReferences["router"]),
+                            metadataByteCeiling: c.metadataByteCeiling)
     }
 
     // MARK: - Bounded non-blocking handoff

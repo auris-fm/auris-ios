@@ -64,3 +64,19 @@ final class FakeLfmInference: LfmInference {
 
     func release() {}
 }
+
+/// A finite synthetic capture allowance for controls of other boundaries. No storage/daily claim.
+final class FiniteCaptureAdmission: VoiceSharingCaptureAdmitting {
+    private let lock = NSLock()
+    private var remaining = 4_096
+    func take(for stamp: VoiceSharingCaptureStamp) -> VoiceSharingCaptureReservation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remaining > 0 else { return nil }
+        remaining -= 1
+        return .init(clipSamples: VoiceSharingCollector.maxRetainedSamples,
+                     metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes)
+    }
+    func requestPreparation() {}
+    func invalidate() {}
+}

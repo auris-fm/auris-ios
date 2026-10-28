@@ -58,7 +58,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// use the test-only inline mode rather than racing a scheduler.
     private func makeCollector(sink: ((VoiceSharingCollector.SegmentEvent) -> Void)? = nil) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -271,7 +271,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -329,7 +329,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -432,7 +432,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -487,7 +487,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -633,7 +633,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var seen = false
         let stateLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -687,7 +687,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -722,7 +722,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -821,7 +821,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let stateLock = NSLock()
         let enteredWaitLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -897,7 +897,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let holdState = NSLock()
         var alreadyHeld = false
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -1020,7 +1020,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let occupied = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -1232,7 +1232,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertTrue(permissive.permitsCollection, "premise: the POLICY side is fully open")
 
         let collector = VoiceSharingCollector(
-            policy: permissive, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: permissive, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },

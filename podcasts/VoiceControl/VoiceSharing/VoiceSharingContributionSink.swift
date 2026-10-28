@@ -160,6 +160,7 @@ final class VoiceSharingContributionSink {
             }
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: pending.event, provenance: provenance, observations: claims)
+            guard encoded.metadataEnvelope.count <= pending.event.metadataByteCeiling else { return }
             // Gate check 2: the encoded bytes must not become a queue entry under a closed gate.
             guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)

@@ -129,6 +129,7 @@ class VoiceAsrEngine {
     /// start as listening, and must release any acquired input route.
     @discardableResult
     func start() -> Bool {
+        contributionCollector?.pipelineStarting()
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         segmenter.onUtterance = { [weak self] utterance in
             guard let self else { return }
@@ -148,10 +149,10 @@ class VoiceAsrEngine {
         segmenter.onSpeechAccumulated = { [weak self] newSamples, bufferCount in
             // Byte-for-byte handoff of the ACTUAL new PCM. No placeholder synthesis, no count-only path:
             // the collector's retained buffer grows by exactly the samples the segmenter produced.
-            // The Array conversion happens only when a collector is attached — with the feature disabled
-            // this callback must not allocate per frame.
+            // Borrow the recognition-owned slice. The collector checks prepaid admission before copying;
+            // an attached but unauthorized collector must not allocate a contribution prefix.
             guard let collector = self?.contributionCollector else { return }
-            collector.appendSamples(Array(newSamples), reportedTotal: bufferCount)
+            collector.appendSamples(newSamples, reportedTotal: bufferCount)
         }
         segmenter.onSpeechCancelled = { [weak self] in
             self?.contributionCollector?.speechCancelled()

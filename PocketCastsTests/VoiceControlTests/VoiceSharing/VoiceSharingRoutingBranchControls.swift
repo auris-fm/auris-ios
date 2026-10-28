@@ -101,7 +101,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     private func makeCollector() -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: openGate(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: openGate(), captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.state ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -293,7 +293,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             }
             XCTAssertEqual(admitted.count, 2, "premise: this event is admitted while policy permits")
             let collector = VoiceSharingCollector(
-                policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000), membership: { self.state }, epochProvider: { "epoch-1" },
+                policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000), membership: { self.state }, epochProvider: { "epoch-1" },
                 sessionIdentity: { "gen-A" }, sink: { sink.handle($0) })
             weakCollector = collector
 

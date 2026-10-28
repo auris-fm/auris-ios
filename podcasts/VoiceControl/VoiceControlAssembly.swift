@@ -152,8 +152,14 @@ class VoiceControlAssembly {
                     models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
                     conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
             })
+        let allowanceRoot = queueRoot.deletingLastPathComponent().appendingPathComponent("CaptureUsage", isDirectory: true)
+        let captureAllowance = VoiceSharingCaptureAllowance(
+            ledger: VoiceSharingCaptureLedger(root: allowanceRoot),
+            // Activation has no approved daily limits/ceilings or trustworthy window authority yet.
+            currentAuthorization: { nil })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
+            captureAllowance: captureAllowance,
             sink: { event in
                 contributionSink.handle(event)
             }

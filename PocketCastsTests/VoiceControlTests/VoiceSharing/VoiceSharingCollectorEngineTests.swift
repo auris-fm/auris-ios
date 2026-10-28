@@ -47,7 +47,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     private func makeCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -188,6 +188,100 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertFalse(bTouched, "B untouched by A's late body; got \(observed)")
     }
 
+    /// Closed capture admission must preserve the borrowed slice across the actual engine callback.
+    /// Comparing addresses kills Array(newSamples), even when the collector subsequently retains zero.
+    func test_missingCaptureAllowanceBorrowsPCMWithoutCopyAndPreservesNaturalRecognitionSegment() {
+        let policy = openGate(enrolled: true)
+        let collector = VoiceSharingCollector(
+            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "epoch-1" }, sessionIdentity: { "gen-A" }, sink: { _ in }
+        )
+        let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
+        let engine = VoiceAsrEngine(capture: AdmissionSilentCapture(), segmenter: segmenter,
+            backend: EngineStubBackend(), signalFilter: SignalFilter(), wakeWordDetector: NotDetectedWake(),
+            gracePeriodSignal: GracePeriodSignal(), translationStage: nil)
+        engine.contributionCollector = collector
+        XCTAssertTrue(engine.start())
+        defer { engine.stop() }
+        var expectedAddress: UInt?
+        var observedSlices = 0
+        collector.borrowedSampleAddressForTesting = { address in
+            observedSlices += 1
+            XCTAssertNotNil(address)
+            XCTAssertEqual(address, expectedAddress, "engine copied PCM before admission")
+        }
+        let installed = segmenter.onSpeechAccumulated
+        segmenter.onSpeechAccumulated = { samples, total in
+            samples.withUnsafeBufferPointer { buffer in
+                expectedAddress = buffer.baseAddress.map { UInt(bitPattern: $0) }
+                installed?(samples, total)
+            }
+        }
+        var recognizedSegments: [[Float]] = []
+        // Observe the ordinary natural-end segment, without scheduling a backend task.
+        segmenter.onUtterance = { recognizedSegments.append($0) }
+        let speech = [Float](repeating: 0.8, count: 320)
+        let silence = [Float](repeating: 0, count: 320)
+        segmenter.process(speech)
+        segmenter.process(speech)
+        segmenter.process(silence)
+        XCTAssertGreaterThan(observedSlices, 0)
+        XCTAssertEqual(recognizedSegments, [speech + speech + silence])
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
+        XCTAssertNil(collector.currentCaptureIDForTesting)
+    }
+
+    func test_heldCaptureStorageDoesNotWaitOnSegmenterPCM() throws {
+        let policy = openGate(enrolled: true)
+        let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 1, dailyBytes: 100_000,
+            compiledRecordsCeiling: 1, compiledBytesCeiling: 100_000,
+            clipSamples: 16, metadataBytes: 128, compiledClipSamples: 16, compiledMetadataBytes: 128))
+        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one",
+            limits: limits, consent: .init(session: "gen-A", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        XCTAssertTrue(VoiceSharingCaptureLedger(root: root).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one")!))
+        let allowance = VoiceSharingCaptureAllowance(ledger: .init(root: root, barrier: { phase in
+            if phase == .intentDurable {
+                entered.signal()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+            }
+        }), currentAuthorization: { authority })
+        let collector = VoiceSharingCollector(policy: policy, captureAllowance: allowance,
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "epoch-1" }, sessionIdentity: { "gen-A" }, sink: { _ in })
+        let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
+        let engine = VoiceAsrEngine(capture: AdmissionSilentCapture(), segmenter: segmenter,
+            backend: EngineStubBackend(), signalFilter: SignalFilter(), wakeWordDetector: NotDetectedWake(),
+            gracePeriodSignal: GracePeriodSignal(), translationStage: nil)
+        engine.contributionCollector = collector
+        XCTAssertTrue(engine.start())
+        defer { engine.stop() }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        let progressed = DispatchSemaphore(value: 0)
+        var ordinarySamples = 0
+        segmenter.onUtterance = { ordinarySamples = $0.count }
+        DispatchQueue.global().async {
+            segmenter.process([Float](repeating: 0.8, count: 320))
+            segmenter.process([Float](repeating: 0.8, count: 320))
+            segmenter.process([Float](repeating: 0, count: 320))
+            progressed.signal()
+        }
+        let completedWhileStorageHeld = progressed.wait(timeout: .now() + 1)
+        release.signal()
+        allowance.waitForPreparationForTesting()
+        if completedWhileStorageHeld != .success {
+            XCTAssertEqual(progressed.wait(timeout: .now() + 2), .success, "join callback before teardown")
+        }
+        XCTAssertEqual(completedWhileStorageHeld, .success, "recognition waited for storage")
+        XCTAssertEqual(ordinarySamples, 960)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
+    }
+
     // MARK: - Production path: start/stop own the subscription
 
     /// `start()` must attach the three observation hooks to the segmenter the pipeline already drives, and
@@ -321,7 +415,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         var deliveredFromAudioQueue = [Bool]()
         let lock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -416,7 +510,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// A collector wired to record what it emits (no sink) — for observation-association controls.
     private func makeRecordingCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -1931,7 +2025,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             queue: queue, isEnabled: { policy.permitsCollection },
             encoderProvenance: { [self] in provenance }, observations: claims)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -2209,7 +2303,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         let sink = VoiceSharingContributionSink(queue: queue, isEnabled: { true }, encoderProvenance: { provenance })
         self.sink = sink
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
+            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
             monotonicNow: { scheduler.now }, scheduleOutcome: { scheduler.work.append(($0, $1)) },
             membership: { membership }, epochProvider: { "epoch" }, sessionIdentity: { "session" }, sink: { sink.handle($0) })
         collector.deliversSynchronouslyForTesting = true
@@ -2399,4 +2493,9 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         }
         func release() {}
     }
+}
+
+private final class AdmissionSilentCapture: NativeAudioCapture {
+    override func start() throws {}
+    override func stop() {}
 }
