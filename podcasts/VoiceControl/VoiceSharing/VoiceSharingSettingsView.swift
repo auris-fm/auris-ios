@@ -190,3 +190,184 @@ struct VoiceSharingSettingsView: View {
         }
     }
 }
+/// Account operations remain distinct from the existing device-only recording controls.
+@MainActor
+struct VoiceSharingAccountView: View {
+    @ObservedObject var accountModel: VoiceSharingAccountModel
+    let localModel: VoiceSharingSettingsModel?
+    let surfaceEnabled: () -> Bool
+    let originatingSession: String?
+    init(accountModel: VoiceSharingAccountModel, localModel: VoiceSharingSettingsModel?, surfaceEnabled: @escaping () -> Bool) {
+        self.accountModel = accountModel
+        self.localModel = localModel
+        self.surfaceEnabled = surfaceEnabled
+        self.originatingSession = accountModel.accountActionSession
+    }
+    private var controlsAvailable: Bool { surfaceEnabled() && accountModel.canAct(in: originatingSession) }
+    @State private var disclosureConfirmation = false
+    @State private var deletionConfirmation = false
+
+    var body: some View {
+        Group {
+            if controlsAvailable {
+                accountContent
+            } else {
+                Text(L10n.voiceSharingAccountUnavailable)
+            }
+        }
+        .navigationTitle(L10n.voiceSharingAccountTitle)
+    }
+
+    private var accountContent: some View {
+        List {
+            Section(L10n.voiceSharingSectionTitle) {
+                LabeledContent(L10n.voiceSharingAccountPlan, value: accountModel.membership.map { $0.plan == .pro ? "Pro" : "Free" } ?? L10n.voiceSharingValueUnknown)
+                LabeledContent(L10n.voiceSharingAccountMembership, value: accountModel.membership.map { $0.voiceSharingEnrolled ? L10n.voiceSharingValueActive : L10n.voiceSharingValueNotActive } ?? L10n.voiceSharingValueUnknown)
+                Text(L10n.voiceSharingAccountPurpose)
+                Text(L10n.voiceSharingAccountBackgroundSpeech).font(.caption).foregroundStyle(.secondary)
+                if !accountModel.enrollmentAvailable {
+                    Text(L10n.voiceSharingAccountDisclosureUnavailable).font(.caption)
+                }
+                Button(L10n.voiceSharingAccountEnroll) { disclosureConfirmation = true }
+                    .disabled(!accountModel.enrollmentAvailable || accountModel.busy)
+                    .confirmationDialog(L10n.voiceSharingAccountEnroll, isPresented: $disclosureConfirmation, titleVisibility: .visible) {
+                        Button(L10n.voiceSharingAccountConfirmDisclosure) { enroll(confirmed: true) }
+                        Button(L10n.cancel, role: .cancel) { enroll(confirmed: false) }
+                    } message: {
+                        Text(L10n.voiceSharingAccountPurpose + " " + L10n.voiceSharingAccountBackgroundSpeech)
+                    }
+                // Local stop is available even while enrollment or refresh is waiting.
+                Button(L10n.voiceSharingAccountWithdraw, role: .destructive) {
+                    guard controlsAvailable else { return }
+                    Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.withdraw() }
+                }
+                if !membershipSummary.isEmpty { Text(membershipSummary).font(.caption) }
+                if accountModel.refreshUnavailable { Text(L10n.voiceSharingAccountRefreshFailed).font(.caption) }
+                Button(L10n.voiceSharingAccountRefresh) {
+                    guard controlsAvailable else { return }
+                    Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.refresh() }
+                }.disabled(accountModel.busy)
+                Button(L10n.voiceSharingAccountRetry) {
+                    guard controlsAvailable else { return }
+                    Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.retryMembership() }
+                }.disabled(accountModel.busy)
+                if cleanupNeedsAttention {
+                    Text(accountModel.localCleanupUnavailable ? L10n.voiceSharingAccountCleanupUnavailable : L10n.voiceSharingAccountCleanupUnresolved).font(.caption)
+                    Button(L10n.voiceSharingAccountRetryCleanup) {
+                        guard controlsAvailable else { return }
+                        accountModel.retryLocalCleanup()
+                    }
+                }
+            }
+            Section {
+                Button(L10n.voiceSharingAccountDeleteAccepted, role: .destructive) { deletionConfirmation = true }
+                    .disabled(accountModel.deletionStatus == .sending)
+                    .confirmationDialog(L10n.voiceSharingAccountDeleteAccepted, isPresented: $deletionConfirmation, titleVisibility: .visible) {
+                        Button(L10n.voiceSharingAccountDeleteAccepted, role: .destructive) { deleteAccepted(confirmed: true) }
+                        Button(L10n.cancel, role: .cancel) { deleteAccepted(confirmed: false) }
+                    } message: { Text(L10n.voiceSharingAccountDeleteScope) }
+                if !deletionSummary.isEmpty { Text(deletionSummary).font(.caption) }
+                if accountModel.deletionStatus == .unavailable || accountModel.deletionStatus == .unauthorized {
+                    Button(L10n.voiceSharingAccountRetry) {
+                        guard controlsAvailable else { return }
+                        Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.retryDeletion() }
+                    }
+                }
+            } footer: { Text(L10n.voiceSharingAccountDeleteScope) }
+            if let localModel {
+                NavigationLink(L10n.voiceSharingAccountLocalRecordings) {
+                    VoiceSharingAccountLocalView(accountModel: accountModel, localModel: localModel,
+                                                 originatingSession: originatingSession, surfaceEnabled: surfaceEnabled)
+                }
+            }
+        }
+        .task {
+            guard controlsAvailable else { return }
+            await accountModel.refresh()
+        }
+    }
+
+    /// The confirmation callbacks used by the real buttons; declining never changes local intent.
+    @discardableResult
+    func enroll(confirmed: Bool) -> Task<Void, Never>? {
+        guard confirmed, controlsAvailable else { return nil }
+        return Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.enroll(disclosureConfirmed: true) }
+    }
+    @discardableResult
+    func deleteAccepted(confirmed: Bool) -> Task<Void, Never>? {
+        guard confirmed, controlsAvailable else { return nil }
+        return Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.deleteAcceptedData(confirmed: true) }
+    }
+
+    private var cleanupNeedsAttention: Bool {
+        guard let result = accountModel.localCleanup else { return accountModel.localCleanupUnavailable }
+        switch result.disposition {
+        case .reconciled(_, let disqualified): return disqualified > 0
+        case .incomplete, .refused: return true
+        }
+    }
+
+    private var membershipSummary: String {
+        switch accountModel.membershipStatus {
+        case .idle: return ""
+        case .loading: return L10n.voiceSharingAccountChecking
+        case .disclosureUnavailable: return L10n.voiceSharingAccountDisclosureUnavailable
+        case .confirmationRequired: return L10n.voiceSharingAccountConfirmDisclosure
+        case .unavailable: return L10n.voiceSharingAccountOperationFailed
+        case .conflict: return L10n.voiceSharingAccountConflict
+        case .unauthorized: return L10n.voiceSharingAccountSignInAgain
+        case .refused: return L10n.voiceSharingAccountRefused
+        case .enrolled: return L10n.voiceSharingAccountEnrolled
+        case .withdrawnServerConfirmed: return L10n.voiceSharingAccountWithdrawn
+        case .withdrawalUnconfirmed: return L10n.voiceSharingAccountWithdrawalPending
+        }
+    }
+    private var deletionSummary: String {
+        switch accountModel.deletionStatus {
+        case .idle: return ""
+        case .sending: return L10n.voiceSharingAccountChecking
+        case .unavailable: return L10n.voiceSharingAccountOperationFailed
+        case .unauthorized: return L10n.voiceSharingAccountSignInAgain
+        case .refused: return L10n.voiceSharingAccountRefused
+        case .pending: return L10n.voiceSharingAccountDeletionPending
+        }
+    }
+}
+
+@MainActor
+final class VoiceSharingAccountController: PCHostingController<VoiceSharingAccountView> {
+    let accountModel: VoiceSharingAccountModel
+    let localModel: VoiceSharingSettingsModel?
+    init(accountModel: VoiceSharingAccountModel, localModel: VoiceSharingSettingsModel?, surfaceEnabled: @escaping () -> Bool) {
+        self.accountModel = accountModel
+        self.localModel = localModel
+        super.init(rootView: VoiceSharingAccountView(accountModel: accountModel, localModel: localModel, surfaceEnabled: surfaceEnabled))
+    }
+    @MainActor dynamic required init?(coder aDecoder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+/// A pushed local-recording destination retains the original account binding too.
+@MainActor
+private struct VoiceSharingAccountLocalView: View {
+    @ObservedObject var accountModel: VoiceSharingAccountModel
+    let localModel: VoiceSharingSettingsModel
+    let originatingSession: String?
+    let surfaceEnabled: () -> Bool
+    var body: some View {
+        if surfaceEnabled() && accountModel.canAct(in: originatingSession) {
+            VoiceSharingSettingsView(model: localModel)
+        } else { Text(L10n.voiceSharingAccountUnavailable) }
+    }
+}

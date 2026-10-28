@@ -3,7 +3,7 @@ import PocketCastsUtils
 import UIKit
 
 class AccountViewController: UIViewController, ChangeEmailDelegate {
-    enum TableRow { case upgradeView, changeAvatar, changeEmail, changePassword, upgradeAccount, newsletter, cancelSubscription, logout, deleteAccount, privacyPolicy, termsOfUse, supporterContributions }
+    enum TableRow { case voiceSharing, upgradeView, changeAvatar, changeEmail, changePassword, upgradeAccount, newsletter, cancelSubscription, logout, deleteAccount, privacyPolicy, termsOfUse, supporterContributions }
     var tableData: [[TableRow]] = [[.changeEmail, .changePassword, .newsletter], [.privacyPolicy, .termsOfUse], [.logout], [.deleteAccount]]
 
     static let newsletterCellId = "NewsletterCellId"
@@ -111,6 +111,7 @@ class AccountViewController: UIViewController, ChangeEmailDelegate {
         }
         if headerViewModel.profile.isLoggedIn {
             accountOptions.insert(.changeAvatar, safelyAt: 0)
+            if VoiceSharingSettingsModel.surfaceEnabled { accountOptions.append(.voiceSharing) }
         }
         if SubscriptionHelper.hasActiveSubscription() {
             var newTableRows: [[TableRow]] = [accountOptions, [.privacyPolicy, .termsOfUse], [.logout], [.deleteAccount]]
@@ -175,5 +176,23 @@ class AccountViewController: UIViewController, ChangeEmailDelegate {
         DispatchQueue.main.async {
             self.headerViewModel.update()
         }
+    }
+}
+
+extension AccountViewController {
+    /// Row selection rechecks permission before constructing account dependencies; never builds voice/queue.
+    @MainActor
+    static func makeVoiceSharingController(
+        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
+        signedIn: () -> Bool = { SyncManager.isUserLoggedIn() },
+        accountModel: (() -> VoiceSharingAccountModel)? = nil,
+        localModel: () -> VoiceSharingSettingsModel? = { VoiceControlService.shared?.voiceSharingLifetime?.settingsModel }
+    ) -> VoiceSharingAccountController? {
+        guard surfaceEnabled(), signedIn() else { return nil }
+        let local = localModel()
+        let account = accountModel?() ?? VoiceSharingAccountModel(
+            client: VoiceSharingAccountClient(tokenProvider: CloudTokenProviderRouter.provider()),
+            purgeLocal: local.map { model in { model.deletePendingRecordingsOnThisDevice() } })
+        return VoiceSharingAccountController(accountModel: account, localModel: local, surfaceEnabled: surfaceEnabled)
     }
 }

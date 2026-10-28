@@ -1,4 +1,6 @@
 import XCTest
+import SwiftUI
+import UIKit
 import PocketCastsServer
 @testable import podcasts
 
@@ -1523,5 +1525,134 @@ extension VoiceSharingAccountModelTests {
         XCTAssertEqual(body["accepted_disclosure_version"] as? String, "synthetic")
         XCTAssertNil(body["plan"], "enrollment cannot choose a paid plan")
         XCTAssertFalse(model.busy)
+    }
+}
+
+final class VoiceSharingAccountNavigationTests: XCTestCase {
+    @MainActor
+    func test_factoryGatesBeforeConstructionAndRetainsExactInjectedModels() throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        var built = 0
+        let makeModel = { built += 1; return harness.model() }
+        XCTAssertNil(AccountViewController.makeVoiceSharingController(signedIn: { true }, accountModel: makeModel))
+        XCTAssertNil(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { false }, accountModel: makeModel))
+        XCTAssertEqual(built, 0)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        var local: VoiceSharingSettingsModel? = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { true }, isLocallyOptedIn: { true })
+        var account: VoiceSharingAccountModel? = harness.model()
+        weak var weakAccount = account
+        weak var weakLocal = local
+        var controller = try XCTUnwrap(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { true }, accountModel: { account! }, localModel: { local })) as VoiceSharingAccountController?
+        XCTAssertTrue(controller?.accountModel === account)
+        XCTAssertTrue(controller?.localModel === local)
+        account = nil
+        local = nil
+        XCTAssertNotNil(weakAccount)
+        XCTAssertNotNil(weakLocal)
+        controller = nil
+        XCTAssertNil(weakAccount)
+        XCTAssertNil(weakLocal)
+    }
+
+    @MainActor
+    func test_realConfirmationCallbacksDeclineWithoutActionAndRetainedScreenClosesOnSignout() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        var enabled = true
+        let view = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { enabled })
+        view.enroll(confirmed: false)
+        view.deleteAccepted(confirmed: false)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        enabled = false
+        view.enroll(confirmed: true)
+        view.deleteAccepted(confirmed: true)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        enabled = true
+        harness.switchAccount(nil)
+        await model.refresh()
+        XCTAssertFalse(model.accountControlsAvailable)
+        view.enroll(confirmed: true)
+        view.deleteAccepted(confirmed: true)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+    }
+
+    @MainActor
+    func test_renderRealAccountScreenWithUnavailableEnrollmentAndIndependentWithdrawalDeletion() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: true, epoch: "old-epoch", withdrawal: "active"))
+        let model = harness.model(version: nil)
+        let controller = try XCTUnwrap(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { true }, accountModel: { model }, localModel: { nil }))
+        let navigation = UINavigationController(rootViewController: controller)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 1200)
+        window.backgroundColor = .systemBackground
+        window.rootViewController = navigation
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+        let laidOut = expectation(description: "SwiftUI layout opportunity")
+        DispatchQueue.main.async { window.layoutIfNeeded(); laidOut.fulfill() }
+        await fulfillment(of: [laidOut], timeout: 3)
+        controller.view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true), "a failed draw is not render evidence")
+        }
+        let pixels = try XCTUnwrap(image.cgImage?.dataProvider?.data) as Data
+        XCTAssertGreaterThan(Set(pixels).count, 8, "empty/solid render must fail")
+        XCTAssertEqual(image.size.width, 393)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "voice-sharing-account-unavailable-enrollment"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        harness.switchAccount(nil)
+        await model.refresh()
+        XCTAssertFalse(model.accountControlsAvailable)
+        let closedLayout = expectation(description: "signed-out SwiftUI layout opportunity")
+        DispatchQueue.main.async { window.layoutIfNeeded(); closedLayout.fulfill() }
+        await fulfillment(of: [closedLayout], timeout: 3)
+        let signedOut = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let closed = XCTAttachment(image: signedOut)
+        closed.name = "voice-sharing-account-signed-out"
+        closed.lifetime = .keepAlways
+        add(closed)
+    }
+}
+
+extension VoiceSharingAccountNavigationTests {
+    @MainActor
+    func test_queuedConfirmationAndOldDialogCannotActForReplacementAccount() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        let screenA = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { true })
+        let queuedEnrollment = screenA.enroll(confirmed: true)
+        let queuedDeletion = screenA.deleteAccepted(confirmed: true)
+        // Still on the same actor turn: queued action Tasks have not started.
+        harness.switchAccount("session-B")
+        harness.seed()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("B", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        await model.refresh()
+        await queuedEnrollment?.value
+        await queuedDeletion?.value
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.allSatisfy { $0.httpMethod == "GET" }, "A's queued confirmations cannot mutate B")
+        // The same confirmation can also arrive from a dialog retained across the replacement.
+        let dialogEnrollment = screenA.enroll(confirmed: true)
+        let dialogDeletion = screenA.deleteAccepted(confirmed: true)
+        await dialogEnrollment?.value
+        await dialogDeletion?.value
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.allSatisfy { $0.httpMethod == "GET" })
     }
 }

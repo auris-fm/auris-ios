@@ -565,6 +565,11 @@ final class VoiceSharingAccountModel: ObservableObject {
     @Published private(set) var refreshUnavailable = false
     @Published private(set) var busy = false
     var enrollmentAvailable: Bool { disclosureVersion != nil }
+    var accountControlsAvailable: Bool { account != nil && account == session() }
+    var accountActionSession: String? { accountControlsAvailable ? account : nil }
+    func canAct(in originatingSession: String?) -> Bool {
+        originatingSession != nil && originatingSession == account && originatingSession == session()
+    }
 
     private let store: VoiceSharingEnrollmentStore
     private let client: VoiceSharingAccountClient
