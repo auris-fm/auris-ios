@@ -251,6 +251,25 @@ final class CloudAuthTokenProviderTests: XCTestCase {
 /// The credential presented for the exchange is the session the app already
 /// holds, with the refresh token preferred (the verifier's refresh-exchange mode).
 final class CloudAccountSessionCredentialProviderTests: XCTestCase {
+    func testExistingPasswordSessionObtainsRefreshAtCredentialBoundary() {
+        var refresh: String?
+        var migrations = 0
+        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { refresh }, migrate: {
+            migrations += 1
+            refresh = "migrated-refresh"
+        })
+        XCTAssertEqual(provider.credential(), "migrated-refresh")
+        XCTAssertEqual(provider.credential(), "migrated-refresh")
+        XCTAssertEqual(migrations, 1)
+    }
+
+    func testFailedMigrationStillPresentsNoAccessToken() {
+        var migrations = 0
+        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }, accessTokenReader: { "access-only" }, migrate: { migrations += 1 })
+        XCTAssertNil(provider.credential())
+        XCTAssertEqual(migrations, 1)
+    }
+
     func testPresentsTheAccountRefreshToken() {
         let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { "refresh-1" })
         XCTAssertEqual(provider.credential(), "refresh-1")

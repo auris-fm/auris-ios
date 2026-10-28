@@ -273,7 +273,10 @@ public class ServerSettings {
     }
 
     public class func syncingEmail() -> String? {
-        try? KeychainHelper.string(for: ServerConstants.Values.syncingEmailKey)
+        authenticationLock.withLock {
+            guard !UserDefaults.standard.bool(forKey: incompleteCredentialWriteKey) else { return nil }
+            return try? KeychainHelper.string(for: ServerConstants.Values.syncingEmailKey)
+        }
     }
 
     public class func setSyncingEmail(email: String?) {
@@ -298,7 +301,10 @@ public class ServerSettings {
     }
 
     public class func syncingPassword() -> String? {
-        try? KeychainHelper.string(for: ServerConstants.Values.syncingPasswordKey)
+        authenticationLock.withLock {
+            guard !UserDefaults.standard.bool(forKey: incompleteCredentialWriteKey) else { return nil }
+            return try? KeychainHelper.string(for: ServerConstants.Values.syncingPasswordKey)
+        }
     }
 
     public class func lastRefreshStartTime() -> Date? {
@@ -374,7 +380,10 @@ public extension ServerSettings {
 
     class var syncingV2Token: String? {
         get {
-            try? KeychainHelper.string(for: ServerConstants.Values.syncingV2TokenKey)
+            authenticationLock.withLock {
+                guard !UserDefaults.standard.bool(forKey: incompleteCredentialWriteKey) else { return nil }
+                return try? KeychainHelper.string(for: ServerConstants.Values.syncingV2TokenKey)
+            }
         }
 
         set {
@@ -383,7 +392,10 @@ public extension ServerSettings {
     }
 
     class func refreshToken() throws -> String? {
-        try KeychainHelper.string(for: ServerConstants.Values.refreshTokenKey)
+        try authenticationLock.withLock {
+            guard !UserDefaults.standard.bool(forKey: incompleteCredentialWriteKey) else { return nil }
+            return try KeychainHelper.string(for: ServerConstants.Values.refreshTokenKey).flatMap { $0.isEmpty ? nil : $0 }
+        }
     }
 
     class func setRefreshToken(_ newValue: String?) {
@@ -408,6 +420,138 @@ public extension ServerSettings {
             } else {
                 UserDefaults.standard.removeObject(forKey: liveAnalyticsUrlKey)
             }
+        }
+    }
+}
+
+
+/// A request's right to change the current session. Created before networking.
+public struct AuthenticationAttempt {
+    fileprivate let id = UUID()
+    fileprivate let generation: Int
+    fileprivate let email: String?
+    fileprivate let uuid: String?
+    fileprivate let explicit: Bool
+}
+
+public extension ServerSettings {
+    private static let authenticationLock = NSRecursiveLock()
+    private static var authenticationGeneration = 0
+    private static var explicitAuthentication: UUID?
+    private static var committedAuthentication: UUID?
+    private static let incompleteCredentialWriteKey = "AurisIncompleteCredentialWrite"
+
+    static func refreshPasswordSessionIfNeeded() {
+        guard (try? refreshToken()) == nil, syncingEmail() != nil, syncingPassword() != nil else { return }
+        _ = TokenHelper.shared.acquireToken(onlyIfMissingRefresh: true)
+    }
+
+    static func beginAuthentication(email: String? = nil, explicit: Bool = true) -> AuthenticationAttempt? {
+        authenticationLock.withLock {
+            if !explicit, explicitAuthentication != nil { return nil }
+            if explicit { authenticationGeneration += 1 }
+            let attempt = AuthenticationAttempt(generation: authenticationGeneration,
+                email: explicit ? email : syncingEmail(), uuid: explicit ? nil : userId, explicit: explicit)
+            if explicit { explicitAuthentication = attempt.id }
+            return attempt
+        }
+    }
+
+    static func finishAuthentication(_ attempt: AuthenticationAttempt) {
+        authenticationLock.withLock {
+            if explicitAuthentication == attempt.id { explicitAuthentication = nil }
+        }
+    }
+
+    /// The existing two keychain items are not a crash-atomic pair. A persisted marker makes
+    /// a failed rollback unavailable to readers. This is not a durable cross-process
+    /// transaction: a crash before the defaults marker persists can still interrupt the pair.
+    /// `write` is injectable so controls can exercise failures without changing user credentials.
+    static func commitAuthentication(_ response: AuthenticationResponse, for attempt: AuthenticationAttempt,
+                                     password: String? = nil,
+                                     read: (String) throws -> String? = { try KeychainHelper.string(for: $0) },
+                                     write: ((String?, String) -> Bool)? = nil,
+                                     defaults: UserDefaults = .standard) -> Bool {
+        authenticationLock.withLock {
+            guard attempt.generation == authenticationGeneration,
+                  let access = response.token, !access.isEmpty,
+                  let email = response.email, !email.isEmpty,
+                  let uuid = response.uuid, !uuid.isEmpty,
+                  attempt.email == nil || attempt.email?.lowercased() == email.lowercased(),
+                  attempt.uuid == nil || attempt.uuid == uuid else { return false }
+            let refresh = response.refreshToken.flatMap { $0.isEmpty ? nil : $0 }
+            guard !attempt.explicit || refresh != nil else { return false }
+            let keys = [ServerConstants.Values.refreshTokenKey, ServerConstants.Values.syncingV2TokenKey]
+                + (attempt.explicit ? [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey] : [])
+            let previous: [String?]
+            do { previous = try keys.map(read) } catch { return false }
+            let values: [String?] = [refresh ?? previous[0], access] + (attempt.explicit ? [email, password] : [])
+            let save = write ?? { KeychainHelper.save(string: $0, key: $1, accessibility: kSecAttrAccessibleAfterFirstUnlock) }
+            defaults.set(true, forKey: incompleteCredentialWriteKey)
+            for (key, value) in zip(keys, values) {
+                guard save(value, key) else {
+                    var restored = true
+                    for (oldKey, oldValue) in zip(keys, previous) {
+                        if !save(oldValue, oldKey) { restored = false }
+                    }
+                    if restored { defaults.set(false, forKey: incompleteCredentialWriteKey) }
+                    return false
+                }
+            }
+            if attempt.explicit { defaults.set(uuid, forKey: ServerConstants.UserDefaults.userId) }
+            defaults.set(false, forKey: incompleteCredentialWriteKey)
+            authenticationGeneration += 1
+            explicitAuthentication = nil
+            committedAuthentication = attempt.id
+            return true
+        }
+    }
+
+    static func committedAuthenticationID() -> UUID? {
+        authenticationLock.withLock { committedAuthentication }
+    }
+
+    @discardableResult
+    static func withCommittedAuthenticationID(_ id: UUID?, _ action: () -> Void) -> Bool {
+        authenticationLock.withLock {
+            guard let id, committedAuthentication == id else { return false }
+            action()
+            return true
+        }
+    }
+
+    /// Delayed success/UI effects must still belong to this exact committed login.
+    @discardableResult
+    static func withCommittedAuthentication(_ attempt: AuthenticationAttempt, _ action: () -> Void) -> Bool {
+        authenticationLock.withLock {
+            guard committedAuthentication == attempt.id else { return false }
+            action()
+            return true
+        }
+    }
+
+    /// Signout and account-field clears share the same lock as commits.
+    static func invalidateAuthentication(defaults: UserDefaults = .standard, _ action: () -> Void) {
+        authenticationLock.withLock {
+            authenticationGeneration += 1
+            explicitAuthentication = nil
+            committedAuthentication = nil
+            defaults.set(true, forKey: incompleteCredentialWriteKey)
+            action()
+        }
+    }
+
+    static func ifAuthenticationIsCurrent(_ attempt: AuthenticationAttempt, _ action: () -> Void) {
+        authenticationLock.withLock {
+            guard attempt.generation == authenticationGeneration else { return }
+            action()
+        }
+    }
+
+    static func invalidateAccessToken(_ rejected: String?) {
+        authenticationLock.withLock {
+            guard let rejected, syncingV2Token == rejected else { return }
+            KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
         }
     }
 }

@@ -31,6 +31,10 @@ public class SyncManager {
     /// Signs the user out
     /// - Parameter userInitiated: Whether the user initiated the sign out or not
     public class func signout(userInitiated: Bool = false) {
+        ServerSettings.invalidateAuthentication { performSignout(userInitiated: userInitiated) }
+    }
+
+    private class func performSignout(userInitiated: Bool) {
         FileLog.shared.addMessage("SyncManager.signout – userInitiated: \(userInitiated)")
 
         // Notify any listeners that the user login state will be changing
@@ -67,6 +71,10 @@ public class SyncManager {
     }
 
     public class func clearTokensFromKeyChain() {
+        ServerSettings.invalidateAuthentication { clearCredentialKeys() }
+    }
+
+    private class func clearCredentialKeys() {
         KeychainHelper.removeKey(ServerConstants.Values.syncingEmailKey)
         KeychainHelper.removeKey(ServerConstants.Values.syncingPasswordKey)
         KeychainHelper.removeKey(ServerConstants.Values.syncingV2TokenKey)
