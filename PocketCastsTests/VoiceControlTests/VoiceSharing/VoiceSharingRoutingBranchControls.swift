@@ -236,6 +236,141 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNil(weakModel)
     }
 
+    /// Real refresh → production registration → purge/cancel, after the builder is gone.
+    func test_policyDisablePurgesAndCancelsAfterTheAssemblyIsReleased() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sharing-disable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); queue = nil }
+        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let suite = "sharing-disable-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
+        var remoteEnabled = true
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(remoteEnabled) }, isAccountEnrolled: { true },
+            lastFetchTime: { nil }, enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in } // no real timer; drive the real refresh below
+        coordinator.policy.identityBecameReadable()
+        coordinator.policyRefreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: live lease before disable")
+        let registryBaseline = coordinator.gateLostHandlerCountForTesting
+        let seeded = try AudioFixture.makeReadyEntry(in: queue)
+        let seededDirectory = root.appendingPathComponent(seeded.name)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: seededDirectory.path))
+        let parked = expectation(description: "trigger entered its pre-drain gate")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        var service: VoiceControlService?
+        weak var weakAssembly: VoiceControlAssembly?
+        weak var weakTrigger: VoiceSharingUploadTrigger?
+        weak var weakCollector: VoiceSharingCollector?
+        weak var weakSink: VoiceSharingContributionSink?
+        weak var weakLifetime: VoiceSharingLifetime?
+        var capturedTask: Task<Void, Never>?
+        let samples: [Float] = [0, 0.25, -0.5, 0.5]
+        let event = { VoiceSharingCollector.SegmentEvent(
+            kind: .completed, captureID: UUID(), enrollmentEpoch: "epoch-1", authorizationSession: "gen-A",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false) }
+        do {
+            let assembly = VoiceControlAssembly()
+            weakAssembly = assembly
+            let policy = coordinator.policy
+            let provenance = self.provenance
+            let sink = VoiceSharingContributionSink(
+                queue: queue, isEnabled: { policy.permitsCollection },
+                encoderProvenance: { provenance })
+            weakSink = sink
+            sink.handle(event())
+            sink.waitForIdleForTesting()
+            guard case .known(let admitted) = queue.readyEntriesReportingUnknownCoverage() else {
+                XCTFail("premise: queue readable")
+                return
+            }
+            XCTAssertEqual(admitted.count, 2, "premise: this event is admitted while policy permits")
+            let collector = VoiceSharingCollector(
+                policy: policy, membership: { self.state }, epochProvider: { "epoch-1" },
+                sessionIdentity: { "gen-A" }, sink: { sink.handle($0) })
+            weakCollector = collector
+
+            let uploader = VoiceSharingUploader(
+                queue: queue,
+                retryPolicy: VoiceSharingRetryPolicy(
+                    retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+                isAuthorized: { policy.permitsCollection }, endpoint: { nil },
+                transport: { _, _, _ in XCTFail("parked/cancelled trigger must not send"); return .transportFailure })
+            let trigger = VoiceSharingUploadTrigger(
+                scheduler: VoiceSharingUploadScheduler(
+                    queue: queue, uploader: uploader, isAuthorized: { policy.permitsCollection }),
+                surfaceEnabled: { true }, isAuthorized: { policy.permitsCollection })
+            trigger.preDrainGateForTesting = {
+                parked.fulfill()
+                if release.wait(timeout: .now() + 5) != .success { XCTFail("trigger gate timed out") }
+            }
+            weakTrigger = trigger
+            let model = VoiceSharingSettingsModel(
+                queue: queue, isCollectionPermitted: { policy.permitsCollection },
+                isAccountEnrolled: { true }, isLocallyOptedIn: { false },
+                coherenceAccount: { "account-a" })
+            assembly.installVoiceSharingGateLoss(
+                collector: collector, sink: sink, uploadTrigger: trigger,
+                queue: queue, coordinator: coordinator)
+            service = assembly.installVoiceSharingLifetime(
+                on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
+                settingsModel: model, uploadTrigger: trigger,
+                enrollmentStore: store, policy: policy, queue: queue)
+            weakLifetime = service?.voiceSharingLifetime
+            trigger.triggerDrainIfPermitted()
+            capturedTask = trigger.drainTaskForTesting
+        }
+        await fulfillment(of: [parked], timeout: 2)
+        XCTAssertNil(weakAssembly)
+        XCTAssertNotNil(weakCollector)
+        XCTAssertNotNil(weakTrigger)
+        XCTAssertNotNil(capturedTask)
+        XCTAssertTrue(weakTrigger?.isDrainingForTesting == true)
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline + 1)
+        let generation = weakSink?.revocationGenerationForTesting ?? -1
+        XCTAssertGreaterThanOrEqual(generation, 0)
+        remoteEnabled = false
+        coordinator.policyRefreshAfterActivation(
+            freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(weakSink?.revocationGenerationForTesting, generation + 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path), "retained bytes must be purged")
+        if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() {
+            XCTAssertTrue(ready.isEmpty)
+        } else {
+            XCTFail("queue coverage must be known")
+        }
+        weakSink?.handle(event())
+        weakSink?.waitForIdleForTesting()
+        if case .known(let after) = queue.readyEntriesReportingUnknownCoverage() {
+            XCTAssertTrue(after.isEmpty, "new sink work must be refused after disable")
+        } else {
+            XCTFail("queue coverage remains known")
+        }
+        XCTAssertTrue(capturedTask?.isCancelled == true)
+        XCTAssertFalse(weakTrigger?.isDrainingForTesting ?? true)
+        release.signal()
+        let settled = expectation(description: "cancelled trigger task settled")
+        let joiningTask = capturedTask
+        Task { await joiningTask?.value; settled.fulfill() }
+        await fulfillment(of: [settled], timeout: 2)
+        capturedTask = nil
+        XCTAssertFalse(weakTrigger?.hasPublishedCompletionRegistrationForTesting ?? true)
+        service = nil
+        XCTAssertNil(weakLifetime)
+        XCTAssertNil(weakTrigger)
+        XCTAssertNil(weakCollector)
+        XCTAssertNil(weakSink)
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline)
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+    }
+
     /// Produces a REAL open capture the way production does — the engine's own `speechStarted` — because
     /// an observation can only land on a capture that exists. Reports on a context the collector never
     /// minted are dropped by design, and a control that used a made-up context would prove nothing.

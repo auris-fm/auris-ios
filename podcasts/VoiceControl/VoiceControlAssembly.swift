@@ -209,21 +209,9 @@ class VoiceControlAssembly {
         VoiceSharingCoordinator.shared.initiateIdentityRecoveryRefresh = {
             FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
         }
-        contributionCollector.gateLostSubscription =
-            VoiceSharingCoordinator.shared.registerGateLostHandler {
-                [weak contributionCollector, weak contributionSink, weak uploadTrigger] in
-                contributionSink?.noteRevocation()
-                contributionCollector?.gateLost()
-                // PRODUCTION CANCELLATION (reviewer 2a570a0b): revocation is exactly when the
-                // trigger must stop — drop any pending owner-completion registration, clear the
-                // slot and cancel the in-flight drain task. The policy gate would also refuse the
-                // next trigger, but stop() halts the drain that is ALREADY waiting on the
-                // scheduler instead of letting it wake and then refuse.
-                uploadTrigger?.stop()
-                // Purge failures leave the sink's generation already bumped and the queue's own
-                // hold set by purgeAll; nothing serves or admits until a purge reconciles.
-                _ = contributionQueue.purgeAll()
-            }
+        installVoiceSharingGateLoss(
+            collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
+            queue: contributionQueue, coordinator: .shared)
 
         // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
         // not here — assembly must not download/init models before the service
@@ -296,6 +284,23 @@ class VoiceControlAssembly {
             on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
             enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
             queue: contributionQueue)
+    }
+
+    /// Keep revocation subscribed for as long as the collector can retain contribution audio.
+    func installVoiceSharingGateLoss(
+        collector: VoiceSharingCollector,
+        sink: VoiceSharingContributionSink,
+        uploadTrigger: VoiceSharingUploadTrigger,
+        queue: VoiceSharingUploadQueue,
+        coordinator: VoiceSharingCoordinator
+    ) {
+        collector.gateLostSubscription = coordinator.registerGateLostHandler {
+            [weak collector, weak sink, weak uploadTrigger] in
+            sink?.noteRevocation()
+            collector?.gateLost()
+            uploadTrigger?.stop()
+            _ = queue.purgeAll()
+        }
     }
 
     /// The service outlives this builder; subscriptions and their dependencies must do so too.
