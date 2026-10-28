@@ -1,0 +1,9 @@
+{
+  "audio_sha256" : "7867a89de6ac268520df59c80a0c6a9d17aa32951bf21d9acc0cd2a2f6114347",
+  "capture_id" : "11111111-2222-3333-4444-555555555555",
+  "metadata_sha256" : "2e0dcbbf32131cf0034b0b8bf97ac158db5ec1102448ca39381f40402d249f35",
+  "record_sha256" : "113a0551eda7f6e19df9e19f532fad4c8a213307ba2b148fa74c1b8fc987321e",
+  "unobserved_reason" : "observation_unavailable",
+  "unobserved_stage" : "asr",
+  "unobserved_state" : "unknown"
+}

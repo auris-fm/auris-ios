@@ -131,12 +131,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
             // only in the user's own locale (spec ruling 2026-09-24).
             let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
-            return comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon)
+            // The client declines to route: nothing was sent, regardless of
+            // what the template sounds like.
+            return (comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon),
+                    SinkActionFact(state: "not_run", reason: "client_refused"))
         }
 
         let client = clientFactory()
@@ -161,6 +164,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // in a turn that issued no `play_quote` would seek to a previous turn's
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
+        // Action outcomes are INVOCATION-LOCAL to this turn: the aggregate fact
+        // is built ONLY from the actions this turn actually ran, and two
+        // overlapping turns on one sink can never see each other's entries.
+        var turnActionFacts: [SinkActionFact] = []
 
         // Hold the place for the turn: the server decides when the assistant
         // speaks, so the client does not pause on its own for a turn that may
@@ -198,7 +205,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             case let .audioFrame(frame):
                 audioPlayer.enqueue(frame)
             case let .action(tool, action, params):
-                executeAction(tool: tool, action: action, params: params)
+                turnActionFacts.append(executeAction(tool: tool, action: action, params: params))
             // .token is no longer accumulated — cloud answers are played as
             // audio, not text (spec: "cloud answers are played, not spoken").
             case .token:
@@ -225,7 +232,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     restoreTransientAudioState()
                 }
                 audioPlayer.finish()
-                return .silent
+                // The aggregate fact comes from the actions actually run this
+                // turn — `done` alone (stream completion; audio may still be
+                // pending) proves nothing about execution. No actions ran: no
+                // fact (a pure-answer turn stays unknown). Pending audio is
+                // tracked separately (drain restore) and does NOT gate the
+                // execution fact: the recorded operation is the action, not
+                // playback (spec 3d51f037).
+                return (.silent, Self.aggregateActionFact(turnActionFacts))
             case let .error(code, message):
                 guard !turnToken.isCancelled else { break turnLoop }
                 audioPlayer.cancel()
@@ -243,19 +257,30 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let spoken = serverMessage.isEmpty
                     ? spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
                     : serverMessage
+                // An error frame may be admission/transport failure rather
+                // than a failed action — the code alone does not distinguish
+                // them (reviewer fa2c92ab), so no fact is stated here either.
+                // The server outcome is unobserved, but actions this turn
+                // already ran stay known — delivered on every exit.
+                let knownFacts = Self.aggregateActionFact(turnActionFacts)
                 if spoken.isEmpty {
-                    return .earcon(.error)
+                    return (.earcon(.error), knownFacts)
                 }
-                return .spoken(spoken)
+                return (.spoken(spoken), knownFacts)
             }
         }
 
         if turnToken.isCancelled {
-            // The superseding turn owns pause/restore and analytics.
-            return .silent
+            // The superseding turn owns pause/restore and analytics. Supersession
+            // itself proves no outcome (spec 152b86a5) — but actions this turn
+            // ALREADY observed before being replaced stay known: their facts are
+            // delivered, not discarded (spec 1a0661ba).
+            return (.silent, Self.aggregateActionFact(turnActionFacts))
         }
         restoreTransientAudioState()
-        return .silent
+        // Stream ended without a `done` — no server outcome was observed. Any
+        // action facts this turn already observed are still delivered.
+        return (.silent, Self.aggregateActionFact(turnActionFacts))
     }
 
     private func restoreTransientAudioState() {
@@ -271,25 +296,45 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Seek positions are intentionally not rolled back.
     }
 
-    private func executeAction(tool: String, action: String, params: [String: CloudRouteJSONValue]) {
-        guard tool == "playback" else { return }
+    /// Returns ONE fact for EVERY action event — appended once by the caller —
+    /// so an action can never go missing from the turn's log (reviewer
+    /// 2fcedf35). Guard branches return their explicit verdicts (unknown until
+    /// spec approves a different malformed-event semantics); performed branches
+    /// over Void-result sinks return unknown; only real decision channels
+    /// (pauseWithFact) return what the sink stated.
+    private func executeAction(tool: String, action: String, params: [String: CloudRouteJSONValue]) -> SinkActionFact {
+        let unobserved = SinkActionFact(state: "unknown", reason: "observation_unavailable")
+        guard tool == "playback" else { return unobserved }
 
         switch action {
         case "seek_to":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
+            // A missing required parameter is an OBSERVED refusal at this
+            // decision site (spec afe5418e): the event named an action whose
+            // precondition is absent — not an unobserved outcome.
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else {
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
+            }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
+            return unobserved
         // Serve the quote. This does not take or release the hold: the quote
         // plays over playback the server has already ducked, and the turn's end
         // is the release (Task 12). Resuming here would end the duck early.
         case "play_quote":
-            guard let referenceMs = params["reference_position_ms"]?.int64Value else { return }
+            guard let referenceMs = params["reference_position_ms"]?.int64Value else {
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
+            }
             capturePreActionPosition(referenceMs: referenceMs)
             seekToReference(referenceMs)
+            return unobserved
         case "stop_quote":
-            guard let restoreMs = preQuotePositionMs else { return }
+            guard let restoreMs = preQuotePositionMs else {
+                // The action's own decline: no quote is in flight to stop.
+                return SinkActionFact(state: "not_run", reason: "precondition_failed")
+            }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
             _ = playbackSink.seekTo(positionSeconds: seconds)
+            return unobserved
         case "seek_relative":
             // Per the recovery contract (PR 59, cloud-seek-relative):
             // Capture previous position so "go back to where I was" works
@@ -304,14 +349,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // next call site that passes the wrapper where a string is wanted.
             let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
+            return unobserved
         case "pause":
-            _ = playbackSink.pause()
+            let (response, fact) = playbackSink.pauseWithFact()
+            _ = response
+            // The turn that PAUSED owns the restore: without this, the end-of-
+            // turn restore would resume over the cloud's own pause (the
+            // hold/release protocol — reviewer af68a7bb regression).
             didAutoPause = false
+            return fact ?? unobserved
         case "resume":
             _ = playbackSink.resume()
             didAutoPause = false
+            return unobserved
         default:
-            break // unknown action ignored (forward compatibility)
+            return unobserved
         }
     }
 
@@ -345,6 +397,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if declared == "backward" { return .backward }
         if declared == "forward" { return .forward }
         return .forward // default: app's configurable interval
+    }
+
+    static func aggregateActionFact(_ facts: [SinkActionFact]) -> SinkActionFact? {
+        guard !facts.isEmpty else { return nil }
+        if facts.contains(where: { $0.state == "failed" }) {
+            return SinkActionFact(state: "failed", reason: "action_failed")
+        }
+        let states = Set(facts.map(\.state))
+        if states == ["not_run"] {
+            return SinkActionFact(state: "not_run", reason: "precondition_failed")
+        }
+        if states == ["completed"] {
+            return SinkActionFact(state: "completed", reason: nil)
+        }
+        return SinkActionFact(state: "unknown", reason: "observation_unavailable")
     }
 
     private func seekToReference(_ referenceMs: Int64) {

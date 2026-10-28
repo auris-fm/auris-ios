@@ -215,8 +215,10 @@ private final class IntegrationPlaybackSink: VoicePlaybackSink {
 }
 
 private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
-        .spoken("Cloud response")
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
+        // Integration fixture: the turn completes; a nil fact keeps these tests
+        // presentation-scoped (they assert grace/analytics, not verdicts).
+        (.spoken("Cloud response"), nil)
     }
 }
 

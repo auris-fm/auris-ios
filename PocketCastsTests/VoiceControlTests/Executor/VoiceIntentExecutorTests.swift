@@ -48,6 +48,80 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// CORRECTED CONTRACT (spec 6a033773 — my first cut inferred verdicts from presentation
+    /// classes; withdrawn). Only the executor's OWN decisions are verdicts: the error earcon is
+    /// the failure the executor itself logs and acts on (spec 012b19dd); confirm-required is its
+    /// own decision not to act without confirmation. Every other presentation stays UNKNOWN —
+    /// a success-shaped presentation cannot prove action completion.
+    func test_executeWithVerdictReportsTheExecutorStructuredVerdict() async {
+        typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
+
+        // The executor's own failure verdict — on an intent whose sink has NO fact channel, so
+        // this is the bridge (nextEpisode's channel would otherwise answer first).
+        mockEffectsSink.nextAdjustResponse = .earcon(.error)
+        let (_, failedVerdict) = await executor.executeWithVerdict(
+            EffectsIntent.adjustSpeed(delta: 0.5))
+        XCTAssertEqual(failedVerdict.state, "failed")
+        XCTAssertEqual(failedVerdict.reason, "action_failed")
+        XCTAssertEqual(failedVerdict.outcome, "failed")
+
+        // The executor's own decision not to act without confirmation.
+        mockEffectsSink.nextAdjustResponse = .earcon(.confirmRequired)
+        let (_, refusedVerdict) = await executor.executeWithVerdict(
+            EffectsIntent.adjustSpeed(delta: 0.5))
+        XCTAssertEqual(refusedVerdict.state, "not_run")
+        XCTAssertEqual(refusedVerdict.reason, "client_refused")
+        XCTAssertEqual(refusedVerdict.outcome, "refused")
+        _ = Outcome.self
+    }
+
+    /// THE DISCRIMINATING CONTROL (spec 6a033773), now with a REAL fact channel: pause presents
+    /// the SAME `.earcon(.success)` whether or not anything was playing — the presentation cannot
+    /// discriminate. The SINK'S FACT does: pausing from playing is a completed action; pausing
+    /// while already paused is a no-op with its precondition absent (not_run/precondition_failed).
+    /// RED until the fact channel lands; the sleep half (below) pins the world where NO fact
+    /// channel exists — unknown in both worlds.
+    func test_samePresentationDifferentActionOutcome_verdictFollowsTheSinkFactNotThePresentation() async {
+        // The skip happened: the action handed back the title it played.
+        mockPlaybackSink.skipResult = "Episode B"
+        let (_, skipped) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        XCTAssertEqual(skipped.state, "completed",
+                       "the sink fact (an actual skip) must conclude the turn, not the "
+                           + "success-shaped template")
+        XCTAssertNil(skipped.reason)
+        XCTAssertEqual(skipped.outcome, "executed")
+
+        // The IDENTICAL template with nothing queued: the sink declined — nothing moved.
+        mockPlaybackSink.skipResult = nil
+        let (_, declined) = await executor.executeWithVerdict(PlaybackIntent.nextEpisode)
+        XCTAssertEqual(declined.state, "not_run",
+                       "with no episode to skip to, nothing happened; the identical template "
+                           + "must not read as a completed action")
+        XCTAssertEqual(declined.reason, "precondition_failed")
+        XCTAssertEqual(declined.outcome, "refused")
+
+        // Pause: idempotent success per the existing contract — completed from either state.
+        let (_, pausedFromPlaying) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(pausedFromPlaying.state, "completed")
+        let (_, pausedWhilePaused) = await executor.executeWithVerdict(PlaybackIntent.pause)
+        XCTAssertEqual(pausedWhilePaused.state, "completed",
+                       "a prior paused state alone does not turn an idempotent pause into a refusal")
+    }
+
+    /// The NO-CHANNEL half: the sleep sink has no fact channel yet, so its identical
+    /// presentations in both worlds stay unknown — the verdict must not follow presentation
+    /// where no structured fact exists.
+    func test_withoutAFactChannel_identicalPresentationsStayUnknown() async {
+        mockSleepSink.armedFact = true
+        let (_, armed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
+        XCTAssertEqual(armed.state, "unknown",
+                       "no sink fact channel exists for this sink; unknown, not completed")
+        mockSleepSink.armedFact = false
+        let (_, notArmed) = await executor.executeWithVerdict(SleepIntent.set(minutes: 30))
+        XCTAssertEqual(notArmed.state, "unknown",
+                       "identical presentation, no fact channel — unknown, not refused")
+    }
+
     /// The origin branch is what decides whether a dispatch re-arms the allowance
     /// that permitted it. A fallback pays for its permission; a cloud route the
     /// model chose is a deliberate act and does restore it. Asserting the pair is
@@ -69,6 +143,38 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
         XCTAssertNil(gracePeriodSignal.claimEscalationBudget(),
                      "a fallback must not re-arm the allowance that let it happen")
+    }
+
+    /// The ONLY cloud fact the sink currently claims is the client's own
+    /// not-configured refusal (cleared by review). done/error/superseded state
+    /// NO fact — the identical success-shaped template must classify as the
+    /// labeled bridge's conservative unknown, never a claimed outcome.
+    func test_cloudVerdict_onlyTheClientRefusalIsClaimed_otherBoundariesStayUnknown() async {
+        mockPlaybackContextProvider.context = Self.context
+
+        // The sink's claimed fact: the client refused to route.
+        mockCloudRouteSink.cloudFactToReturn = SinkActionFact(state: "not_run", reason: "client_refused")
+        let (_, refusedVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(refusedVerdict.state, "not_run")
+        XCTAssertEqual(refusedVerdict.reason, "client_refused")
+
+        // done (audio pending / actions unaggregated): no fact -> unknown.
+        mockCloudRouteSink.cloudFactToReturn = nil
+        let (_, doneVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        XCTAssertEqual(doneVerdict.state, "unknown")
+
+        // A no-template SERVER ERROR (earcon .error + no fact) must NOT be
+        // re-invented as failed/action_failed by the presentation bridge —
+        // the real sink returns exactly this shape (reviewer b9b9fe0f).
+        mockCloudRouteSink.errorEarconResponse = true
+        let (_, errorVerdict) = await executor.executeWithVerdict(CloudRouteIntent(
+            request: "what did they say", tier: .unknown, generation: nil))
+        mockCloudRouteSink.errorEarconResponse = false
+        XCTAssertEqual(errorVerdict.state, "unknown",
+                       "an unobserved cloud outcome is unknown, not an action failure")
+        XCTAssertEqual(errorVerdict.reason, "observation_unavailable")
     }
 
     func test_execute_modelChosenCloudRouteRestoresTheAllowance() async {
@@ -145,7 +251,9 @@ final class VoiceIntentExecutorTests: XCTestCase {
     }
 
     func test_execute_nextEpisode_returnsSpokenWithTitle() async {
-        mockPlaybackSink.nextEpisodeResponse = .spoken("Playing The Daily")
+        // The mock builds its spoken text from the skip's returned title — the
+        // same single-result seam the real sink uses.
+        mockPlaybackSink.skipResult = "The Daily"
         let response = await executor.execute(PlaybackIntent.nextEpisode)
         if case .spoken(let text) = response {
             XCTAssertTrue(text.contains("The Daily"))
@@ -235,6 +343,23 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(gracePeriodSignal.isActive)
     }
 
+    /// REVIEW 8bc80b2b regression control: the verdict path must ride the ONE shared execution
+    /// path — the first cut duplicated the dispatch switch and silently skipped the shared
+    /// post-execute effects (analytics.recordCommand, grace restore). The grace effect is the
+    /// observable half asserted here; the verdict must not cost the turn its side effects.
+    func test_executeWithVerdict_preservesTheSharedGraceEffect() async {
+        XCTAssertFalse(gracePeriodSignal.isActive)
+        _ = await executor.executeWithVerdict(PlaybackIntent.pause)
+        // GracePeriodSignal.startOrReset hops to the main queue (Timer must bind
+        // to the main run loop), so activation lands asynchronously. Drain the
+        // main queue before asserting, otherwise this test races the hop.
+        let mainQueueDrained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { mainQueueDrained.fulfill() }
+        await fulfillment(of: [mainQueueDrained], timeout: 2)
+        XCTAssertTrue(gracePeriodSignal.isActive,
+                      "the verdict path must preserve the shared grace restore")
+    }
+
     func test_runtimePlaybackContextProvider_populatesPlaybackAndReferenceContext() {
         let episode = Episode()
         episode.uuid = "episode-1"
@@ -296,7 +421,26 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
+    /// Pause is idempotent success (spec 32305c22): the fact is completed in both worlds —
+    /// stated at the sink, not inferred from the earcon.
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        pauseCalled = true
+        return (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
+    }
+    /// The skip's fact mirrors the REAL sink's outcome seam: it follows the
+    /// action's own decision (`skipResult` non-nil models the manager's
+    /// `.played` outcome; nil models `.declined`). The real manager contract —
+    /// earlier candidate title vs declined action, shuffle attribution — is
+    /// pinned separately in PlaybackManagerSinkTests (reviewer 50103ef9).
+    var skipResult: String? = "Episode A"
+    func nextEpisode() -> VoiceResponse { nextEpisodeWithFact().response }
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        let response = VoiceResponse.spoken("Playback: \(skipResult ?? "next episode")")
+        return skipResult != nil
+            ? (response, SinkActionFact(state: "completed", reason: nil))
+            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+    }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
         lastSeekRelativeDelta = deltaSeconds
@@ -308,7 +452,6 @@ private final class MockPlaybackSink: VoicePlaybackSink {
         lastSeekToPosition = positionSeconds
         return .silent
     }
-    func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
 }
 
 private final class MockEffectsSink: VoiceEffectsSink {
@@ -318,7 +461,10 @@ private final class MockEffectsSink: VoiceEffectsSink {
     var lastVolumeBoostEnabled: Bool?
 
     func setSpeed(_ speed: Double) -> VoiceResponse { lastSetSpeed = speed; return .silent }
-    func adjustSpeed(delta: Double) -> VoiceResponse { lastDelta = delta; return .silent }
+    var nextAdjustResponse: VoiceResponse?
+    func adjustSpeed(delta: Double) -> VoiceResponse {
+        lastDelta = delta; return nextAdjustResponse ?? .silent
+    }
     func setTrimMode(_ mode: TrimMode) -> VoiceResponse { lastTrimMode = mode; return .earcon(.success) }
     func setVolumeBoost(enabled: Bool) -> VoiceResponse { lastVolumeBoostEnabled = enabled; return .earcon(.success) }
     func queryEffects() -> VoiceResponse { .spoken("Speed is 1x") }
@@ -336,6 +482,9 @@ private final class MockVolumeSink: VoiceVolumeSink {
 private final class MockSleepSink: VoiceSleepSink {
     var setCalled = false
     var lastMinutes: Int?
+    /// The structured fact a sink-side verdict channel must carry: whether the timer actually
+    /// armed. The presentation is identical in both worlds (see the discriminating control).
+    var armedFact = true
 
     func set(minutes: Int) -> VoiceResponse { setCalled = true; lastMinutes = minutes; return .earcon(.success) }
     func endOfEpisode() -> VoiceResponse { .earcon(.success) }
@@ -418,12 +567,16 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     var routeToCloudCalled = false
     var lastRequest: String?
     var lastContext: PlaybackContext?
-
-    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> VoiceResponse {
+    /// RED: the cloud sink's own fact channel. Identical success-shaped spoken
+    /// template in every world; only the sink's stated fact differs.
+    var cloudFactToReturn: SinkActionFact? = SinkActionFact(state: "completed", reason: nil)
+    /// Models the real sink's no-template server-error shape: earcon(.error), nil fact.
+    var errorEarconResponse = false
+    func routeToCloud(request: String, tier: CloudTier, context: PlaybackContext) async -> (response: VoiceResponse, fact: SinkActionFact?) {
         routeToCloudCalled = true
         lastRequest = request
         lastContext = context
-        return .spoken("Here's what I found")
+        return (errorEarconResponse ? .earcon(.error) : .spoken("Here's what I found"), cloudFactToReturn)
     }
 }
 

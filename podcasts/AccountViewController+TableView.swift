@@ -46,6 +46,14 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         let row = tableData[indexPath.section][indexPath.row]
 
         switch row {
+        case .voiceSharing:
+            let cell = tableView.dequeueReusableCell(withIdentifier: AccountViewController.actionCellId, for: indexPath) as! AccountActionCell
+            cell.cellLabel.text = L10n.voiceSharingAccountTitle
+            cell.cellImage.image = UIImage(systemName: "waveform")
+            cell.iconStyle = .primaryInteractive01
+            cell.counterView.isHidden = true
+            cell.showsDisclosureIndicator = true
+            return cell
         case .upgradeView:
             let cell: PlusAccountPromptTableCell
             if let dequeuedCell = tableView.dequeueReusableCell(withIdentifier: PlusAccountPromptTableCell.reuseIdentifier) as? PlusAccountPromptTableCell {
@@ -175,6 +183,10 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         let row = tableData[indexPath.section][indexPath.row]
 
         switch row {
+        case .voiceSharing:
+            if let controller = AccountViewController.makeVoiceSharingController() {
+                navigationController?.pushViewController(controller, animated: true)
+            }
         case .upgradeView:
             break
         case .upgradeAccount:
@@ -246,22 +258,7 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
             let finalAlert = UIAlertController(title: L10n.accountDeleteAccountTitle, message: L10n.accountDeleteAccountFinalAlertMsg, preferredStyle: .alert)
 
             let deleteAction = UIAlertAction(title: L10n.accountDeleteAccountConf, style: .destructive) { [weak self] _ in
-                ApiServerHandler.shared.deleteAccount { success, errorMessage in
-                    if !success {
-                        let message = errorMessage ?? L10n.accountDeleteAccountErrorMsg
-                        SJUIUtils.showAlert(title: L10n.accountDeleteAccountError, message: message, from: self)
-
-                        return
-                    }
-
-                    DispatchQueue.main.async {
-                        Analytics.track(.userAccountDeleted)
-                        AnalyticsHelper.accountDeleted()
-                        SignOutHelper.signout()
-
-                        self?.navigationController?.popViewController(animated: true)
-                    }
-                }
+                ApiServerHandler.shared.deleteAccount(completion: AccountViewController.accountDeletionCompletion(controller: self))
             }
             finalAlert.addAction(deleteAction)
 
@@ -276,6 +273,35 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         firstAlert.addAction(cancelAction)
 
         present(firstAlert, animated: true, completion: nil)
+    }
+
+    /// The account deletion callback outlives its presenting controller. A successful server reply
+    /// still signs out on main, including the identity notifications that revoke retained voice audio.
+    static func accountDeletionCompletion(
+        controller: AccountViewController?,
+        recordDeletion: @escaping () -> Void = {
+            Analytics.track(.userAccountDeleted)
+            AnalyticsHelper.accountDeleted()
+        },
+        showFailure: @escaping (AccountViewController?, String?) -> Void = { controller, errorMessage in
+            let message = errorMessage ?? L10n.accountDeleteAccountErrorMsg
+            SJUIUtils.showAlert(title: L10n.accountDeleteAccountError, message: message, from: controller)
+        },
+        navigate: @escaping (AccountViewController?) -> Void = { controller in
+            controller?.navigationController?.popViewController(animated: true)
+        }
+    ) -> (Bool, String?) -> Void {
+        { [weak controller] success, errorMessage in
+            guard success else {
+                showFailure(controller, errorMessage)
+                return
+            }
+            DispatchQueue.main.async {
+                recordDeletion()
+                SignOutHelper.signout()
+                navigate(controller)
+            }
+        }
     }
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {

@@ -348,6 +348,61 @@ final class LfmIntentRouterTests: XCTestCase {
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
     }
 
+    func test_usedModelIsReportedBeforeHeldInference() async {
+        let inference = FakeLfmInference()
+        let router = createRouter(inference: inference)
+        let ready = await router.ensureReady()
+        XCTAssertTrue(ready.isSuccess)
+        let entered = expectation(description: "first inference operation held")
+        let release = DispatchSemaphore(value: 0)
+        let stateLock = NSLock()
+        var used: VoiceSharingContributionEncoder.ModelRef?
+        var first = true
+        var released = false
+        inference.onTokenize = {
+            if first {
+                first = false
+                entered.fulfill()
+                released = release.wait(timeout: .now() + 2) == .success
+            }
+        }
+        let pending = Task.detached {
+            router.classify(input: .english(transcript: "pause"), pendingDialog: nil) { identity in
+                stateLock.withLock { used = identity }
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        let frozen = stateLock.withLock { used }
+        XCTAssertEqual(frozen?.version, "2026-06-21-143005")
+        release.signal()
+        _ = await pending.value
+        XCTAssertTrue(released)
+        XCTAssertEqual(stateLock.withLock { used }, frozen)
+    }
+
+#if DEBUG
+    func test_loadedButUnsupportedFormatDoesNotClaimModelUse() async {
+        let original = RouterInputFormat.benchmarkGateOpen
+        defer { RouterInputFormat.benchmarkGateOpen = original }
+        RouterInputFormat.benchmarkGateOpen = true
+        let manager = ModelManager(storageDir: tempDir)
+        seedLfmAssets(manager: manager, format: "dual_v1")
+        let inference = FakeLfmInference()
+        let router = LfmIntentRouter(modelManager: manager, inference: inference)
+        let ready = await router.ensureReady()
+        XCTAssertTrue(ready.isSuccess)
+        RouterInputFormat.benchmarkGateOpen = false
+        var reports: [VoiceSharingContributionEncoder.ModelRef?] = []
+        var tokenizeCount = 0
+        inference.onTokenize = { tokenizeCount += 1 }
+        _ = router.classify(input: .english(transcript: "pause"), pendingDialog: nil) { reports.append($0) }
+        XCTAssertEqual(reports.count, 1)
+        XCTAssertNil(reports.first.flatMap { $0 })
+        XCTAssertEqual(tokenizeCount, 0)
+        XCTAssertEqual(inference.classifyCount, 0)
+    }
+#endif
+
     private func createRouter(
         inference: FakeLfmInference,
         now: @escaping () -> CFTimeInterval = { CACurrentMediaTime() }

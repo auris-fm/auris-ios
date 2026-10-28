@@ -360,6 +360,12 @@ struct Constants {
         static let errorLogoutHandling = "error_logout_handling"
         static let errorLogoutHandlingDefault: Bool = false
 
+        // Voice Recording Uploads (voice-recording-uploads spec): the ONLY remote
+        // control for the feature. Local fallback is false by design — an absent or
+        // invalid remote value must disable collection, never a local default enable it.
+        static let voiceSharingEnabled = "voice_sharing_enabled"
+        static let voiceSharingEnabledDefault: Bool = false
+
         static let slumberStudiosPromoCode = "slumber_studios_yearly_promo_code"
         static let slumberStudiosPromoCodeDefault = ""
     }

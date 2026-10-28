@@ -1,0 +1,1658 @@
+import XCTest
+import SwiftUI
+import UIKit
+import PocketCastsServer
+@testable import podcasts
+
+/// Transport seam: the client builds REAL `URLRequest`s through a real `URLSession`; this stub answers them
+/// so status handling, wire decoding and session-identity dropping are exercised on the production path.
+private typealias Reply = VoiceSharingStubProtocol.Reply
+
+final class VoiceSharingStubProtocol: URLProtocol {
+    struct Reply {
+        let status: Int
+        let body: [String: Any]
+    }
+    /// Keyed by "<METHOD> <path>" so a control can script different answers per route.
+    static var replies: [String: Reply] = [:]
+    static var seenRequests: [URLRequest] = []
+    static var responseDelay: TimeInterval = 0
+    /// Hook invoked after the request is recorded but before the reply is delivered — lets a control flip
+    /// account identity mid-flight and prove stale-session responses are dropped rather than applied.
+    static var onRequest: (() -> Void)?
+    static let lock = NSLock()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url else { return }
+        // Snapshot the schedule at request time: reading `responseDelay` again inside the deferred block,
+        // or mutating shared arrays from a background queue, lets one test's held reply land inside the
+        // next test and makes ordering unreviewable.
+        let delay = VoiceSharingStubProtocol.responseDelay
+        VoiceSharingStubProtocol.lock.lock()
+        VoiceSharingStubProtocol.seenRequests.append(request)
+        VoiceSharingStubProtocol.lock.unlock()
+        VoiceSharingStubProtocol.onRequest?()
+        let key = "\(request.httpMethod ?? "GET") \(url.path)"
+        let reply = VoiceSharingStubProtocol.replies[key]
+        if delay > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                self.deliver(reply, path: url.path)
+            }
+        } else {
+            deliver(reply, path: url.path)
+        }
+    }
+    private func deliver(_ reply: Reply?, path: String) {
+        guard let reply, let http = HTTPURLResponse(
+            url: URL(string: "https://api.example.test" + path)!,
+            statusCode: reply.status, httpVersion: nil, headerFields: nil
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: reply.body)) ?? Data()
+        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+
+    static func reset() {
+        replies = [:]
+        seenRequests = []
+        responseDelay = 0
+        onRequest = nil
+    }
+}
+
+/// Receipts carry schema_version like every other response in this contract.
+private func deletionReceipt(_ id: String, status: String = "deletion_pending", version: Int = 1) -> [String: Any] {
+    ["schema_version": version, "deletion_request_id": id, "status": status]
+}
+
+private func projection(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> [String: Any] {
+    var body: [String: Any] = [
+        "schema_version": 1,
+        "membership_revision": revision,
+        "plan": "pro",
+        "voice_sharing_enrolled": enrolled,
+        "withdrawal_state": withdrawal,
+    ]
+    body["enrollment_epoch"] = epoch as Any
+    body["accepted_disclosure_version"] = "2026-09" as Any
+    return body
+}
+
+/// A credential provider that never blocks, mirroring the trust-on-first-use default in CloudTokenProviding.
+private final class AccountStubTokenProvider: CloudTokenProviding {
+    var tokenValue: String? = "test-bearer"
+    var delay: TimeInterval = 0
+    private(set) var unauthorizedCalls = 0
+    private(set) var lastRejectedToken: String?
+    func token() async -> String? {
+        if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+        return tokenValue
+    }
+    func prepare() async {}
+    func handleUnauthorized(rejectedToken: String?) async {
+        unauthorizedCalls += 1
+        lastRejectedToken = rejectedToken
+    }
+}
+
+final class VoiceSharingAccountClientTests: XCTestCase {
+    private var session: URLSession!
+    private var tokens: AccountStubTokenProvider!
+    /// Non-secret session label; production derives a digest of session material.
+    private var identity: String? = "gen-A"
+    private var requestIDs: [String] = []
+
+    override func setUp() {
+        super.setUp()
+        VoiceSharingStubProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        session = URLSession(configuration: config)
+        tokens = AccountStubTokenProvider()
+        identity = "gen-A"
+        requestIDs = []
+        let suite = "VoiceSharingClientStore-\(UUID().uuidString)"
+        clientSuiteName = suite
+        testStore = VoiceSharingEnrollmentStore(
+            defaults: UserDefaults(suiteName: suite)!,
+            accountScopeProvider: { "client-test-account" },
+            sessionIdentityProvider: { [weak self] in self?.identity }
+        )
+    }
+
+    private var clientSuiteName: String?
+
+    override func tearDown() {
+        if let clientSuiteName, let d = UserDefaults(suiteName: clientSuiteName) {
+            d.removePersistentDomain(forName: clientSuiteName)
+        }
+        testStore = nil
+        VoiceSharingStubProtocol.reset()
+        super.tearDown()
+    }
+
+    /// A single client instance shared by `begin…` and `perform…` in one test, so an operation's immutable
+    /// request identity is carried across calls exactly as production must.
+    private lazy var clientForTest: VoiceSharingAccountClient = makeClient()
+
+    /// Store used by every client built here. Sharing one instance is the point: the client stamps reads
+    /// with THIS store's fence and the tests apply through it, so a control can move the fence between the
+    /// two moments exactly as production does.
+    private var testStore: VoiceSharingEnrollmentStore!
+
+    private func makeClient(factory: (() -> String)? = nil) -> VoiceSharingAccountClient {
+        VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: tokens,
+            session: session,
+            requestIDFactory: factory ?? { [weak self] in
+                let id = UUID().uuidString.lowercased()
+                self?.requestIDs.append(id)
+                return id
+            },
+            sessionIdentity: { [weak self] in self?.identity },
+            membershipStore: testStore!
+        )
+    }
+
+    private func activationCoordinator(store: VoiceSharingEnrollmentStore) -> VoiceSharingCoordinator {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
+            lastFetchTime: { nil }, enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in }
+        coordinator.policy.identityBecameReadable()
+        return coordinator
+    }
+
+    func test_activationLookupChangesMembershipThenRequiresANewAuthoritativeActivation() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("lookup-1", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        let followUp = expectation(description: "one authoritative follow-up requested")
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = {
+            refreshes += 1
+            followUp.fulfill()
+        }
+        let first = coordinator.beginEnrollmentLookup()
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: first, accountClient: makeClient())
+        await fulfillment(of: [followUp], timeout: 2)
+        XCTAssertTrue(testStore.currentEffectiveEnrolled, "real GET must apply authoritative membership")
+        XCTAssertFalse(coordinator.policy.permitsCollection, "changed membership cannot reuse activation authority")
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+
+        // A failed follow-up supplies no authority and must not start another lookup or loop.
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: false, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+        XCTAssertEqual(refreshes, 1)
+
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertTrue(coordinator.policy.permitsCollection, "unchanged membership may use the NEW activation token")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 2)
+        XCTAssertEqual(refreshes, 1, "unchanged authoritative membership must not create a refresh loop")
+    }
+
+    func test_activationLookupRejectsRepliesRetiredByNewerFetchOrAccountIntent() async {
+        for retirement in ["newer-fetch", "signout", "account-switch", "withdrawal"] {
+            identity = "gen-A"
+            let suite = "lookup-retirement-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = VoiceSharingEnrollmentStore(
+                defaults: defaults, accountScopeProvider: { "account-a" },
+                sessionIdentityProvider: { [weak self] in self?.identity })
+            store.setLocalOptIn(true)
+            let coordinator = activationCoordinator(store: store)
+            let client = VoiceSharingAccountClient(
+                baseURLProvider: { "https://api.example.test" }, tokenProvider: tokens,
+                session: session, sessionIdentity: { [weak self] in self?.identity }, membershipStore: store)
+            VoiceSharingStubProtocol.reset()
+            VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+                Reply(status: 200, body: projection("old", enrolled: true, epoch: "old-epoch", withdrawal: "active"))
+            var refreshes = 0
+            coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+            VoiceSharingStubProtocol.onRequest = { [weak self] in
+                switch retirement {
+                case "newer-fetch": _ = coordinator.beginEnrollmentLookup()
+                case "signout": self?.identity = nil
+                case "account-switch": self?.identity = "gen-B"
+                default: store.setLocalOptIn(false)
+                }
+            }
+            await coordinator.completeActivationWithEnrollment(
+                freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: client)
+            XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1, retirement)
+            XCTAssertNil(store.currentEnrollmentAnswer, "\(retirement): stale reply must not apply")
+            XCTAssertFalse(coordinator.policy.permitsCollection, retirement)
+            XCTAssertEqual(refreshes, 0, retirement)
+            VoiceSharingStubProtocol.onRequest = nil
+        }
+    }
+
+    func test_activationLookupFailureDoesNotApplyOrRequestAnotherRefresh() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = Reply(status: 503, body: [:])
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1)
+        XCTAssertNil(testStore.currentEnrollmentAnswer)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0)
+    }
+
+    func test_newLookupDuringApplicationRetiresTheDispatchedFollowUp() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("accepted", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        let observer = testStore.addObserver { state in
+            if state.hasAuthoritativeProjection { _ = coordinator.beginEnrollmentLookup() }
+        }
+        defer { testStore.removeObserver(observer) }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        let dispatched = expectation(description: "main follow-up dispatch has drained")
+        DispatchQueue.main.async { dispatched.fulfill() }
+        await fulfillment(of: [dispatched], timeout: 2)
+        XCTAssertTrue(testStore.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0, "accepted but superseded intent cannot dispatch an obsolete refresh")
+    }
+
+    func test_withdrawalAtMainDispatchRetiresAnAcceptedLookupsFollowUp() async {
+        testStore.setLocalOptIn(true)
+        let coordinator = activationCoordinator(store: testStore)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("accepted", enrolled: true, epoch: "epoch-1", withdrawal: "active"))
+        var refreshes = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshes += 1 }
+        let retired = expectation(description: "withdrawal before queued follow-up intent check")
+        coordinator.beforeEnrollmentFollowUpForTesting = { [self] in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertTrue(testStore.currentEffectiveEnrolled, "premise: GET applied successfully before dispatch")
+            testStore.setLocalOptIn(false)
+            retired.fulfill()
+        }
+        defer { coordinator.beforeEnrollmentFollowUpForTesting = nil }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: makeClient())
+        await fulfillment(of: [retired], timeout: 2)
+        XCTAssertNotNil(testStore.currentEnrollmentAnswer, "authoritative projection remains applied")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertEqual(refreshes, 0, "withdrawn intent cannot dispatch an authoritative follow-up")
+    }
+
+    // MARK: - Production generation registry (the object the client actually reads by default)
+
+    /// The lifecycle object is the state production mutates at sign-in/sign-out. Driving it here (rather
+    /// than a test-local string) means the same transitions the app performs are what supersede an operation.
+    func test_lifecycleRegistry_signOutThenSignIn_supersedesOperations() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r15", enrolled: true, epoch: "e15", withdrawal: "active"))
+        let registry = VoiceSharingSessionGeneration()
+        registry.beginNewLifecycle()
+        // This control drives the REAL lifecycle object, so its store reads the same generation; otherwise
+        // the store has no lifecycle to stamp a token with and `begin` correctly refuses.
+        let registryStore = VoiceSharingEnrollmentStore(
+            defaults: UserDefaults(suiteName: clientSuiteName!)!,
+            accountScopeProvider: { "client-test-account" },
+            sessionIdentityProvider: { registry.currentGeneration() }
+        )
+        let client = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: tokens,
+            session: session,
+            requestIDFactory: { UUID().uuidString.lowercased() },
+            sessionIdentity: { registry.currentGeneration() },
+            membershipStore: registryStore
+        )
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session to begin under")
+        }
+        // Sign-out ends the lifecycle; signing back in mints a NEW one.
+        registry.clear()
+        registry.beginNewLifecycle()
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "operations from the previous login must not run")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and they must not reach the network")
+    }
+
+    /// A lifecycle label is stable until a real transition rotates it. Nothing about acquiring or refreshing
+    /// a bearer moves it — that property is what keeps routine token maintenance from dropping user intent.
+    func test_lifecycleRegistry_rotatesOnlyOnRealTransitions() {
+        let registry = VoiceSharingSessionGeneration()
+        XCTAssertNil(registry.currentGeneration(), "a cold process has no session to act under")
+
+        let first = registry.ensureLifecycle()
+        XCTAssertEqual(registry.currentGeneration(), first)
+        XCTAssertEqual(registry.ensureLifecycle(), first, "ensure must not rotate an existing lifecycle")
+
+        let rotated = registry.beginNewLifecycle()
+        XCTAssertNotEqual(rotated, first, "sign-in / account switch establishes a new lifecycle")
+        XCTAssertNotEqual(rotated.count, 0, "a lifecycle label exists")
+
+        registry.clear()
+        XCTAssertNil(registry.currentGeneration(), "sign-out leaves no session to act under")
+    }
+
+
+    // MARK: - Round 9: production lifecycle writer (beginA -> real transition -> perform)
+
+    /// The closure @spec asked for (f5a9275f): the generation must have a REAL writer, and an operation
+    /// begun under one lifecycle must refuse after the app's own account transitions run.
+    ///
+    /// Nothing here posts a hand-made notification into a test center. It calls `SignOutHelper.signout()`
+    /// and `AuthenticationHelper.handleSuccessfulSignIn(...)`, i.e. the same code paths the UI runs, and
+    /// subscribes through `AppDelegate.setupVoiceSharingIdentityInvalidation` — the app's composition point.
+    func test_productionLifecycle_realSignOut_supersedesAnOperationBegunBeforeIt() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r20", enrolled: true, epoch: "e20", withdrawal: "active"))
+
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        // Production subscription: AppDelegate -> installIdentityInvalidation on the DEFAULT center,
+        // which is where SyncManager posts its account notifications.
+        let appDelegate = AppDelegate()
+        appDelegate.setupVoiceSharingIdentityInvalidation()
+
+        // A client built with PRODUCTION DEFAULTS — no injected identity closure at all.
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        // Hermetic start: whatever earlier tests left, this test establishes its own lifecycle first —
+        // exactly what a login does — and then lets the app's sign-out path end it.
+        VoiceSharingSessionGeneration.shared.clear()
+        // Establish honestly: signed-in state + the notification a login produces.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "supersede-control@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        guard VoiceSharingSessionGeneration.shared.currentGeneration() != nil else {
+            return XCTFail("control setup: login-change must leave a lifecycle to begin work under")
+        }
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session to begin under")
+        }
+        let begunUnder = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertEqual(op.originatingGeneration, begunUnder ?? "", "the operation records the live lifecycle")
+
+        // THE REAL TRANSITION: the app's sign-out entry point, not a synthesized notification.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let afterSignOut = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertNotEqual(afterSignOut, begunUnder ?? "",
+                       "the app's sign-out path must end the lifecycle the operation was begun under")
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession,
+                       "an operation begun before a real sign-out must refuse, not be sent under whatever session follows")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and it must refuse before transport")
+    }
+
+    /// Round 10 (reviewer 3c118e11): `SignOutHelper.signout()` posts `.userLoginDidChange` AFTER
+    /// `SyncManager.signout()` has cleared the credential, i.e. while SIGNED OUT. That notification is a
+    /// state change, not proof of a login. Driving the real producer sequence must leave NO lifecycle at
+    /// all — asserting only "the label differs from before" would pass on a freshly minted signed-out label.
+    func test_realSignOutSequence_leavesNoLifecycleAndRefusesEveryBegin() async {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        AppDelegate().setupVoiceSharingIdentityInvalidation()
+
+        // Signed in for real, through the app's own setter, then establish a lifecycle via the same
+        // notification a sign-in produces.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "signout-sequence@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        guard let signedIn = VoiceSharingSessionGeneration.shared.currentGeneration() else {
+            return XCTFail("control sanity: a real sign-in state must establish a lifecycle")
+        }
+
+        // THE REAL PRODUCER SEQUENCE: SignOutHelper clears credentials, then posts userLoginDidChange.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertFalse(SyncManager.isUserLoggedIn(), "control sanity: the app really is signed out now")
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(),
+                     "a trailing login-change while signed out must NOT mint a replacement lifecycle")
+
+        // Every operation entry point must refuse to produce work with no session behind it.
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        XCTAssertNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                     "no enrollment may be begun while signed out")
+        XCTAssertNil(client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r7"),
+                     "no withdrawal may be begun while signed out")
+        XCTAssertNil(client.beginDeletion(), "no deletion may be begun while signed out")
+        XCTAssertNotEqual(VoiceSharingSessionGeneration.shared.currentGeneration(), signedIn,
+                          "and nothing may still carry the departed session")
+    }
+
+    /// The fence must stay raised after that sequence: a refresh belonging to the departed account cannot
+    /// install permission merely because a notification ran.
+    func test_realSignOutSequence_policyStaysFencedAfterTrailingLoginChange() {
+        let center = NotificationCenter()
+        // Enrollment flips to false when sign-out runs, which is what makes `permitsCollection` go dark
+        // through the SAME production path a real withdrawal takes.
+        var enrolledForControl = true
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { enrolledForControl }
+        )
+        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        let token = coordinator.policy.tokenForFetchStart()
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertTrue(coordinator.policy.permitsCollection, "wired first so there is something to lose")
+
+        // Sign out, then the trailing login-change while signed out.
+        enrolledForControl = false
+        center.post(name: .serverUserWillBeSignedOut, object: nil, userInfo: ["user_initiated": true])
+        center.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertFalse(coordinator.policy.permitsCollection,
+                       "a signed-out trailing notification must not lift the fence")
+        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+        XCTAssertFalse(coordinator.policy.permitsCollection, "still fenced against the departed identity")
+    }
+
+    /// Cold start into an already-signed-in account: the process has no lifecycle yet, so the first thing
+    /// the wiring does is establish one. Without this every `begin…()` would return nil on launch and
+    /// voice sharing could never be turned on until the user happened to log in again.
+    func test_productionLifecycle_coldStartIntoSignedInAccount_establishesLifecycle() {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: fresh process")
+
+        // Cold start means SIGNED IN: `SyncManager.isUserLoggedIn()` reads the email from the Keychain, so
+        // the precondition is supplied through the app's own setter rather than assumed. Restored after.
+        let priorEmail = ServerSettings.syncingEmail()
+        if priorEmail == nil || priorEmail!.isEmpty {
+            ServerSettings.setSyncingEmail(email: "cold-start-control@example.test")
+        }
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        XCTAssertTrue(SyncManager.isUserLoggedIn(), "control sanity: the app believes it is signed in")
+
+        // The app's composition point runs on activation.
+        let appDelegate = AppDelegate()
+        appDelegate.handleBecomeActive()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertNotNil(VoiceSharingSessionGeneration.shared.currentGeneration(),
+                        "activation must give a signed-in account a lifecycle to act under")
+        let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
+        XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                        "so work can be begun immediately after launch, not only after a manual re-login")
+    }
+
+    /// Sign-in establishes a NEW lifecycle, so work begun under the previous login cannot leak into it —
+    /// including signing back into the SAME account, which a stable user id cannot distinguish.
+    func test_productionLifecycle_realSignIn_establishesNewGeneration() {
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) },
+            isAccountEnrolled: { true }
+        )
+        VoiceSharingCoordinator.setSharedForTesting(coordinator)
+        defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        let appDelegate = AppDelegate()
+        appDelegate.setupVoiceSharingIdentityInvalidation()
+
+        // Start from signed-out: the point is that a login CREATES a lifecycle, not what preceded it.
+        SignOutHelper.signout()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        VoiceSharingSessionGeneration.shared.clear()
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: signed out")
+
+        // A real sign-in sets the credential BEFORE posting, which is exactly what makes this case differ
+        // from SignOutHelper's trailing post.
+        let priorEmail = ServerSettings.syncingEmail()
+        ServerSettings.setSyncingEmail(email: "signin-establish@example.test")
+        defer {
+            if let priorEmail { ServerSettings.setSyncingEmail(email: priorEmail) }
+            else { ServerSettings.setSyncingEmail(email: nil) }
+        }
+        NotificationCenter.default.post(name: .userLoginDidChange, object: nil)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let established = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertNotNil(established, "a login-change WHILE SIGNED IN must establish a lifecycle")
+        guard let client = Optional(VoiceSharingAccountClient(tokenProvider: tokens, session: session)) else { return }
+        XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+                        "after a login there IS a session to act under")
+    }
+
+    // MARK: - Review round 7 additions: same-account relogin, GET guarding, numeric bridging
+
+    /// `userId` alone cannot see sign-out followed by signing back into the SAME account. The session half of
+    /// the identity does, so a reply from the previous session must drop rather than apply membership.
+    /// The operation's originating generation is captured at BEGIN and retained across retries. If the
+    /// current session no longer matches, perform must refuse BEFORE transport — otherwise account A's
+    /// opt-in intent would be sent under account B's credential, and the server could not tell.
+    func test_operationBegunUnderSessionA_refusesToRunUnderSessionB_beforeTransport() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r14", enrolled: true, epoch: "e14", withdrawal: "active"))
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session to begin under")
+        }
+        XCTAssertEqual(op.originatingGeneration, identity, "the operation records the session it was begun under")
+        // Transition lands AFTER begin, before perform.
+        identity = "gen-B"
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "an operation begun under a superseded session must not run")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty,
+                      "refusal happens before transport — no bytes on the wire")
+    }
+
+    /// Same-account re-login: a stable user id cannot see it; only session material distinguishes old login
+    /// from new. Begin under the first login, then move to a NEW login for the SAME account.
+    func test_sameAccountNewLogin_supersedesOperationsFromTheOldLogin() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        let client = makeClient()
+        guard let op = client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r5") else {
+            return XCTFail("no session")
+        }
+        identity = "gen-A2"   // same account, NEW login, after BEGIN
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "logout/login into the same account supersedes old operations")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "must refuse before transport")
+    }
+
+    /// Deletion previously read identity only AFTER awaiting the bearer inside request building — a real
+    /// suspension point. The originating generation must be checked before that await too.
+    func test_deletionBegunUnderSessionA_refusesToRunUnderSessionB() async {
+        VoiceSharingStubProtocol.replies["DELETE /api/v1/account/voice-sharing/data"] =
+            Reply(status: 202, body: deletionReceipt("del-9"))
+        let client = makeClient()
+        guard let delOp = client.beginDeletion() else { return XCTFail("no session") }
+        identity = "gen-B"   // lands after BEGIN, before performDeletion awaits a token
+        let outcome = await client.performDeletion(delOp)
+        XCTAssertEqual(outcome, .unavailableBackend, "a stale deletion must not be sent")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty,
+                      "deletion is fenced before the credential await, not merely after the response")
+    }
+
+    /// A reply that arrives after the session moved is dropped rather than applied — distinct from refusing
+    /// to send at all, and reachable because the transition lands while the request is in flight.
+    func test_responseArrivingAfterSessionChange_isNotApplied() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r13", enrolled: true, epoch: "e13", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session")
+        }
+        VoiceSharingStubProtocol.onRequest = { [weak self] in self?.identity = "gen-B" }
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "a reply from a superseded session must never apply")
+        XCTAssertFalse(VoiceSharingStubProtocol.seenRequests.isEmpty, "this path DID send, unlike the pre-transport refusal")
+    }
+
+    /// ONE-REFRESH COMPOSITION (spec 175260b2): same account, same enrollment epoch, NEW login.
+    /// A re-login is not an enrollment change: the epoch must survive the one refresh that the new
+    /// login performs, and the stale session's in-flight read must never install.
+    func test_sameAccountSameEpochNewLogin_refreshesOnceAndKeepsTheEpoch() async throws {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = Reply(
+            status: 200,
+            body: projection("r8", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        // Install the membership under the FIRST login (epoch e1).
+        let firstFetch = await client.fetchProjection()
+        let firstRead = try XCTUnwrap(firstFetch)
+        XCTAssertEqual(firstRead.membership.enrollmentEpoch, "e1")
+        // Same account, SAME epoch, NEW login.
+        identity = "gen-A2"
+        // The new login's refresh runs — exactly one request, and the epoch is unchanged by it.
+        VoiceSharingStubProtocol.seenRequests.removeAll()
+        let refreshedFetch = await client.fetchProjection()
+        let refreshed = try XCTUnwrap(
+            refreshedFetch, "the new login must be able to refresh")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1,
+                       "one refresh — not a retry storm — for the new login")
+        XCTAssertEqual(refreshed.membership.enrollmentEpoch, "e1",
+                       "a re-login must not move the enrollment epoch")
+        // And a mutation begun under the OLD login is still refused before transport.
+        VoiceSharingStubProtocol.seenRequests.removeAll()
+        identity = "gen-A"
+        let staleOp = try XCTUnwrap(client.beginWithdrawal(
+            enrollmentEpoch: "e1", expectedMembershipRevision: "r8"))
+        identity = "gen-A2"
+        let outcome = await client.perform(staleOp)
+        XCTAssertEqual(outcome, .refusedStaleSession,
+                       "same account, new login: the old login's operation is superseded")
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty,
+                      "refusal is before transport")
+    }
+
+    /// GET was previously unguarded: an account transition during the fetch would still install the previous
+    /// account's projection. Also asserts no request at all when there is no authenticated session.
+    func test_getProjection_transitionDuringFetch_isDropped() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        VoiceSharingStubProtocol.onRequest = { [weak self] in
+            self?.identity = "gen-B"
+        }
+        let fetched = await client.fetchProjection()
+        XCTAssertNil(fetched, "a projection read across an account change must not be returned")
+    }
+
+    func test_noSessionIdentity_makesNoRequest() async {
+        identity = nil
+        let fetched = await makeClient().fetchProjection()
+        XCTAssertNil(fetched)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no session means no call, not an anonymous probe")
+    }
+
+    /// JSONSerialization bridges an INTEGER to Bool under `as? Bool`. A numeric publication must never be
+    /// read as enrollment, so the strict boolean check rejects it before any decision is made.
+    func test_projection_numericBoolBridging_isRejected() {
+        func bytes(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o)) ?? Data() }
+        var numeric = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        numeric["voice_sharing_enrolled"] = 1          // integer masquerading as JSON true
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(numeric)),
+                     "an Int 1 must not bridge into permission")
+        numeric["voice_sharing_enrolled"] = "true"     // string form likewise
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(numeric)))
+
+        // Empty-but-present values are not "present": they carry no authority.
+        var blanks = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        blanks["membership_revision"] = ""
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(blanks)))
+        blanks = projection("r1", enrolled: true, epoch: "", withdrawal: "active")
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(blanks)))
+        // Active enrollment whose accepted disclosure is missing cannot be honored.
+        var noDisclosure = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        noDisclosure.removeValue(forKey: "accepted_disclosure_version")
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(noDisclosure)))
+        // enrolled=true with withdrawal_state=withdrawn is a contradiction, not permission.
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection("r1", enrolled: true, epoch: "e1", withdrawal: "withdrawn"))))
+    }
+
+
+    // MARK: - Review round 8: 401 ordering, secret hygiene, refresh-vs-logout, exact numeric schema
+
+    /// A 401 that arrives for account A's request must not invalidate account B's credential. The captured
+    /// generation is validated BEFORE the side effect, so the provider is never called once the session moved.
+    func test_401_fromStaleSession_doesNotInvalidateCurrentCredential() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] = Reply(status: 401, body: [:])
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session to begin under")
+        }
+        // Session changes after the request left; the 401 belongs to the OLD session.
+        VoiceSharingStubProtocol.onRequest = { [weak self] in self?.identity = "gen-B" }
+        let outcome = await clientForTest.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession)
+        XCTAssertEqual(tokens.unauthorizedCalls, 0, "a stale session's 401 must not touch the live credential")
+    }
+
+    /// The existing auth API requires the ACTUAL rejected bearer; passing nil would invalidate every other
+    /// cached token instead of just the one the server refused.
+    func test_401_reportsTheActualRejectedBearer() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] = Reply(status: 401, body: [:])
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session")
+        }
+        let outcome = await clientForTest.perform(op)
+        XCTAssertEqual(outcome, .unauthorized)
+        XCTAssertEqual(tokens.lastRejectedToken, "test-bearer", "the bearer this request carried must be the one reported")
+    }
+
+    /// Operation bodies are persisted-ready artifacts (queue metadata, diagnostics). They must carry contract
+    /// fields only — no credential material in any form.
+    func test_operationBodies_carryNoCredentialMaterial() throws {
+        guard let enroll = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+              let withdraw = clientForTest.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r7"),
+              let delete = clientForTest.beginDeletion() else { return XCTFail("no session") }
+        for op in [enroll.body, withdraw.body, delete.body] {
+            let text = String(describing: op)
+            for forbidden in ["test-bearer", "credential", "token", "refresh"] {
+                XCTAssertFalse(text.lowercased().contains(forbidden), "operation body leaks \(forbidden): \(text)")
+            }
+        }
+    }
+
+    /// Operation identity is a lifecycle label, never credential material. Two properties @spec asked for:
+    /// the label carries nothing recoverable about the account, and no operation body can contain a bearer.
+    func test_operationIdentity_isOpaqueAndCarriesNoCredentialMaterial() async {
+        let registry = VoiceSharingSessionGeneration()
+        let label = registry.beginNewLifecycle()
+        XCTAssertFalse(label.isEmpty, "a lifecycle label is opaque text with nothing to recover")
+        XCTAssertFalse(label.lowercased().contains("token"), "label must not describe credential material")
+
+        guard let enroll = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
+              let withdraw = clientForTest.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r7") else {
+            return XCTFail("no session")
+        }
+        for body in [enroll.body, withdraw.body] {
+            let text = body.description.lowercased()
+            for forbidden in ["bearer", "credential", "token", "password"] {
+                XCTAssertFalse(text.contains(forbidden), "operation body leaks \(forbidden): \(text)")
+            }
+        }
+    }
+
+    /// `intValue` truncates: a schema_version of 1.5 must not read as 1.
+    func test_schemaVersion_rejectsFractionalAndBridgedValues() {
+        func bytes(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o)) ?? Data() }
+        var fractional = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        fractional["schema_version"] = 1.5
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(fractional)), "1.5 must not satisfy schema 1")
+        var boolish = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        boolish["schema_version"] = true      // bridges to Int 1 under `as? Int`/intValue
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(boolish)))
+        var stringy = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        stringy["schema_version"] = "1"
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(stringy)))
+
+        // Deletion receipts follow the same rule.
+        XCTAssertFalse(VoiceSharingAccountClient.isExactInteger(NSNumber(value: 1.5), 1))
+        XCTAssertFalse(VoiceSharingAccountClient.isExactInteger(kCFBooleanTrue, 1))
+        XCTAssertTrue(VoiceSharingAccountClient.isExactInteger(NSNumber(value: 1), 1))
+    }
+
+    // MARK: - Projection reading
+
+    func test_getProjection_decodesAuthoritativeFields() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let fetched = await makeClient().fetchProjection()
+        let membership = fetched?.membership
+        XCTAssertEqual(membership?.membershipRevision, "r7")
+        XCTAssertEqual(membership?.enrollmentEpoch, "e1")
+        XCTAssertTrue(membership?.voiceSharingEnrolled == true)
+        XCTAssertEqual(membership?.withdrawalState, .active)
+        // The reply carries the fence value it was issued under so the store can refuse it later.
+        XCTAssertEqual(fetched?.issuedUnder.lifecycleGeneration, identity)
+    }
+
+    /// Fail-closed parsing: unknown schema, missing fields, or an impossible combination must not read as
+    /// permission. A permissive default here would authorize uploads from garbage.
+    func test_decodeProjection_rejectsUnknownOrImpossibleShapes() {
+        func bytes(_ o: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: o) }
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(["schema_version": 2])))
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(["nothing": "relevant"])))
+        // enrolled=true with no epoch cannot authorize collection (records key on epoch).
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection("r1", enrolled: true, epoch: nil, withdrawal: "active"))))
+        // withdrawn + not enrolled is a legal shape and must parse as not-enrolled.
+        let ok = VoiceSharingAccountClient.decodeProjection(bytes(projection("r2", enrolled: false, epoch: nil, withdrawal: "withdrawn")))
+        XCTAssertEqual(ok?.voiceSharingEnrolled, false)
+        XCTAssertEqual(ok?.withdrawalState, .withdrawn)
+    }
+
+    func test_noCredential_makesNoRequest() async {
+        tokens.tokenValue = nil
+        let fetched = await makeClient().fetchProjection()
+        XCTAssertNil(fetched)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no bearer means no call at all")
+    }
+
+    // MARK: - Enrollment
+
+    func test_enroll_carriesRequestIdAndExpectedRevision_andDisclosure() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r8", enrolled: true, epoch: "e2", withdrawal: "active"))
+        let client = makeClient(factory: { "fixed-request-id" })
+        guard let op0 = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session") }
+        _ = await client.perform(op0)
+        guard let request = VoiceSharingStubProtocol.seenRequests.last else { return XCTFail("no request was made") }
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-bearer")
+        guard let body = requestBodyDictionary(of: request) else { return XCTFail("request carried no readable body") }
+        XCTAssertEqual(body["request_id"] as? String, "fixed-request-id")
+        XCTAssertEqual(body["expected_membership_revision"] as? String, "r7")
+        XCTAssertEqual(body["accepted_disclosure_version"] as? String, "2026-09")
+    }
+
+    /// Spec rule: a 409 conflict returns the current projection and MUST NOT be auto-replayed against the
+    /// newer revision — renewed opt-in requires fresh user intent. Assert exactly one request was made.
+    func test_conflict_returnsCurrentProjection_andNeverAutoReplays() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 409, body: projection("r9", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session to begin under") }
+        let outcome = await clientForTest.perform(op)
+        switch outcome {
+        case .conflict(current: let current, issuedUnder: _):
+            XCTAssertEqual(current?.membershipRevision, "r9")
+            XCTAssertEqual(current?.voiceSharingEnrolled, false)
+        default:
+            XCTFail("expected conflict, got \(outcome)")
+        }
+        let postCount = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count
+        XCTAssertEqual(postCount, 1, "a conflicted opt-in must not be retried automatically")
+    }
+
+    func test_refusals_neverReadAsEnrolled() async {
+        for (status, label) in [(403, "ineligible"), (422, "unsupported disclosure")] {
+            VoiceSharingStubProtocol.reset()
+            VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+                Reply(status: status, body: ["error": label == "ineligible" ? "ineligible_plan" : "unsupported_disclosure"])
+            guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "x", expectedMembershipRevision: "r1") else { return XCTFail("no session to begin under") }
+            let outcome = await clientForTest.perform(op)
+            guard case .refused(let reason) = outcome else { XCTFail("\(label) should refuse"); continue }
+            XCTAssertEqual(reason, label == "ineligible" ? .ineligible : .unsupportedDisclosure)
+        }
+    }
+
+    /// Round 9 (spec 3de3957f): 403 and 422 previously returned account-specific refusals with NO
+    /// post-transport generation check, so account A's "ineligible" could be shown as account B's state.
+    /// The guard now sits before every status branch, so both codes refuse on a superseded session.
+    /// Round 9 (spec 3de3957f): 403 previously returned an account-specific refusal with NO post-transport
+    /// generation check, so account A's "ineligible" could be shown as account B's state.
+    func test_staleSession_403refusal_isNotSurfaced() async {
+        await assertStaleRefusalIsDropped(status: 403, error: "ineligible_plan")
+    }
+
+    /// …and the same for 422, whose body is decoded into a reason before it is reported.
+    func test_staleSession_422refusal_isNotSurfaced() async {
+        await assertStaleRefusalIsDropped(status: 422, error: "unsupported_disclosure")
+    }
+
+    private func assertStaleRefusalIsDropped(status: Int, error: String) async {
+        VoiceSharingStubProtocol.reset()
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: status, body: ["error": error])
+        // Fresh client per case: identity starts at gen-A and moves to gen-B only after the request leaves.
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "x", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        XCTAssertEqual(clientForTestIdentity(), "gen-A", "control sanity: begins under gen-A")
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        VoiceSharingStubProtocol.onRequest = { [weak self] in self?.identity = "gen-B" }
+        let outcome = await client.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "\(status) must not surface a superseded session's refusal")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.count, 1,
+                       "control sanity: exactly one request was sent, so this exercised the post-transport guard")
+        VoiceSharingStubProtocol.responseDelay = 0
+    }
+
+    private func clientForTestIdentity() -> String? { identity }
+
+    func test_unauthorized_reportsRatherThanRetrying() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 401, body: [:])
+        guard let op = clientForTest.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r1") else { return XCTFail("no session") }
+        let outcome = await clientForTest.perform(op)
+        XCTAssertEqual(outcome, .unauthorized)
+        XCTAssertEqual(tokens.unauthorizedCalls, 1, "the rejected credential must be reported to the provider once")
+    }
+
+    // MARK: - Race controls named by the spec
+
+    /// Delayed FIRST delivery of an earlier opt-in landing after a withdrawal: the server rejects it via the
+    /// stale expected revision, and the client shows the conflict without resurrecting enrollment.
+    func test_delayedFirstDeliveryEnrollment_afterWithdrawal_cannotReactivate() async {
+        // User withdrew; server advanced to r9 with withdrawal_state=withdrawn.
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 409, body: projection("r9", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session") }
+        let late = await clientForTest.perform(op)
+        guard case .conflict(current: let current, issuedUnder: _) = late else { return XCTFail("late first delivery must conflict") }
+        XCTAssertEqual(current?.withdrawalState, .withdrawn)
+        XCTAssertFalse(current?.voiceSharingEnrolled == true, "a delayed opt-in may not undo a later opt-out")
+    }
+
+    /// Withdrawal while already inactive still advances the revision, which is what fences later
+    /// first-delivery opt-ins. Client must treat that 200 as authoritative state, not a no-op.
+    func test_withdrawalFromInactiveProjection_advancesRevision() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("r10", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        guard let op = clientForTest.beginWithdrawal(enrollmentEpoch: nil, expectedMembershipRevision: "r9") else { return XCTFail("no session") }
+        let outcome = await clientForTest.perform(op)
+        guard case .applied(membership: let m, issuedUnder: _) = outcome else { return XCTFail("withdrawal from inactive must apply") }
+        XCTAssertEqual(m.membershipRevision, "r10", "revision must advance even when already inactive")
+        XCTAssertEqual(m.withdrawalState, .withdrawn)
+    }
+
+    /// Identical request_id retried AFTER a later transition returns the original result without changing
+    /// state. The client must surface the returned projection verbatim and make no additional mutation.
+    func test_identicalRequestId_retry_afterLaterTransition_returnsOriginalResult_withoutChangingState() async {
+        var issued: [String] = []
+        let client = makeClient(factory: {
+            let id = "req-original"          // one operation identity, reused by every retry
+            issued.append(id)
+            return id
+        })
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r8", enrolled: true, epoch: "e8", withdrawal: "active"))
+
+        // Begin ONCE, then perform twice. The whole point of the immutable operation is that a retry after a
+        // lost response carries the same request_id and body — calling begin… again would mint new intent.
+        guard let operation = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session") }
+        let first = await client.perform(operation)
+        guard case .applied(membership: let m1, issuedUnder: _) = first else { return XCTFail("first enroll should apply") }
+
+        let retry = await client.perform(operation)
+        guard case .applied(membership: let m2, issuedUnder: _) = retry else { return XCTFail("identical retry should replay original") }
+        XCTAssertEqual(m1.membershipRevision, m2.membershipRevision, "a retry must not report different state")
+        XCTAssertEqual(issued.count, 1, "begin… runs once; perform… must not mint a new request_id")
+        let bodies = VoiceSharingStubProtocol.seenRequests.compactMap(requestBodyDictionary(of:))
+        XCTAssertEqual(bodies.count, 2, "two POSTs were made")
+        let ids = bodies.compactMap { $0["request_id"] as? String }
+        XCTAssertEqual(Set(ids).count, 1, "both requests carry the SAME request_id (\(ids))")
+    }
+
+    /// A lost response (transport failure) is an UNKNOWN outcome. Retrying through the public API has to
+    /// reuse the original identity rather than looking like fresh intent — this is the production path a
+    /// caller takes, so it cannot be simulated by holding a private struct in a test.
+    func test_lostResponse_retryThroughPublicAPI_reusesOriginalRequestID() async {
+        var issued: [String] = []
+        let client = makeClient(factory: {
+            let id = "req-lost-retry"
+            issued.append(id)
+            return id
+        })
+        // No reply configured for the route => the stub fails the load, i.e. a lost response.
+        guard let lostOp = client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r5") else { return XCTFail("no session") }
+        let first = await client.perform(lostOp)
+        XCTAssertEqual(first, .unavailableBackend, "a transport failure is an unknown outcome, not a state change")
+
+        // Now the same operation is retried and succeeds.
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        _ = await client.perform(lostOp)     // retry reuses the SAME operation identity
+        let bodies = VoiceSharingStubProtocol.seenRequests.compactMap(requestBodyDictionary(of:))
+        let ids = Set(bodies.compactMap { $0["request_id"] as? String })
+        XCTAssertEqual(ids.count, 1, "retries of one operation share a single request_id: \(ids)")
+        XCTAssertEqual(issued.count, 1, "begin ran exactly once; retries go through perform and mint nothing new")
+    }
+
+    /// Null epoch withdrawal is valid only when the expected projection has no active epoch.
+    func test_nullEpochWithdrawal_onlyValidWhenProjectionHasNoActiveEpoch() async {
+        // Case A: projection has an active epoch -> null-epoch withdrawal is refused as invalid.
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 422, body: ["error": "invalid_request_epoch"])
+        guard let opA = clientForTest.beginWithdrawal(enrollmentEpoch: nil, expectedMembershipRevision: "r5") else { return XCTFail("no session") }
+        let a = await clientForTest.perform(opA)
+        guard case .refused(let reason) = a else { return XCTFail("null epoch with an active epoch must be refused") }
+        XCTAssertEqual(reason, .invalidRequest)
+
+        // Case B: no active epoch -> accepted, and it fences outstanding opt-ins.
+        VoiceSharingStubProtocol.reset()
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        guard let opB = clientForTest.beginWithdrawal(enrollmentEpoch: nil, expectedMembershipRevision: "r5") else { return XCTFail("no session") }
+        let b = await clientForTest.perform(opB)
+        guard case .applied(membership: let m, issuedUnder: _) = b else { return XCTFail("null epoch withdrawal should apply when nothing is active") }
+        XCTAssertEqual(m.withdrawalState, .withdrawn)
+    }
+
+    /// A reply that belongs to an obsolete account/session is dropped, never applied. Identity flips while
+    /// the request is in flight — the shape that actually happens when sign-out lands mid-mutation.
+    func test_responseForObsoleteSession_isDroppedNotApplied() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("r11", enrolled: true, epoch: "e11", withdrawal: "active"))
+        VoiceSharingStubProtocol.onRequest = { [weak self] in
+            self?.identity = "gen-B"   // a different session exists mid-flight
+        }
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else { return XCTFail("no session to begin under") }
+        let outcome = await clientForTest.perform(op)
+        XCTAssertEqual(outcome, .refusedStaleSession, "a projection from a superseded session must not be applied")
+    }
+
+    // MARK: - Deletion is its own operation
+
+    func test_deleteData_usesOwnRequestIdAndReportsPendingOnly() async {
+        VoiceSharingStubProtocol.replies["DELETE /api/v1/account/voice-sharing/data"] =
+            Reply(status: 202, body: deletionReceipt("del-1"))
+        guard let delOp = clientForTest.beginDeletion() else { return XCTFail("no session") }
+        let outcome = await clientForTest.performDeletion(delOp)
+        XCTAssertEqual(outcome, .pending(deletionRequestId: "del-1"))
+        guard let request = VoiceSharingStubProtocol.seenRequests.last else { return XCTFail("no request was made") }
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        guard let body = requestBodyDictionary(of: request) else { return XCTFail("request carried no readable body") }
+        XCTAssertNotNil(body["request_id"], "deletion carries its own request identity")
+        // It must NOT be sent to the enrollment/withdrawal routes.
+        XCTAssertFalse(request.url!.path.contains("enrollment"))
+        XCTAssertFalse(request.url!.path.contains("withdrawal"))
+    }
+
+    /// A 202 whose payload doesn't say deletion_pending is not treated as a receipt.
+    func test_deleteData_incompleteReceipt_isNotSuccess() async {
+        VoiceSharingStubProtocol.replies["DELETE /api/v1/account/voice-sharing/data"] =
+            Reply(status: 202, body: deletionReceipt("del-2", status: "queued"))
+        guard let delOp = clientForTest.beginDeletion() else { return XCTFail("no session") }
+        let outcome = await clientForTest.performDeletion(delOp)
+        XCTAssertEqual(outcome, .unavailableBackend)
+    }
+
+    func test_backendUnavailable_isRetryableNotAStateChange() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 503, body: ["error": "state_unavailable"])
+        guard let op = clientForTest.beginEnrollment(acceptedDisclosureVersion: "x", expectedMembershipRevision: "r1") else { return XCTFail("no session") }
+        let outcome = await clientForTest.perform(op)
+        XCTAssertEqual(outcome, .unavailableBackend)
+    }
+    // MARK: - Delayed read applying through the real store (reviewer 4599fb63 / 7897cd94)
+
+    /// A GET issued BEFORE a withdrawal whose reply arrives AFTER it. The response is well-formed and says
+    /// "enrolled"; only the fence stops it. This drives the whole production path — client stamps the token,
+    /// store refuses application — so nothing here depends on how `membership_revision` is spelled.
+    func test_delayedGETReply_cannotReEnableThroughTheStore() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("opaque-token-AAA", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+
+        // Read is issued while enrolled-looking state is current.
+        guard let first = await client.fetchProjection() else { return XCTFail("expected a projection") }
+        XCTAssertTrue(testStore.apply(authoritative: first.membership, readUnder: first.issuedUnder))
+        XCTAssertTrue(testStore.currentEffectiveEnrolled, "local gesture plus a confirmed projection enables")
+
+        // User opts out locally. Every read issued before this instant is now inapplicable.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+
+        // The OLD reply finally arrives — replayed against the store exactly as its caller would apply it.
+        XCTAssertFalse(testStore.apply(authoritative: first.membership, readUnder: first.issuedUnder),
+                       "a projection issued before the withdrawal must not be applied")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled, "and it must not re-enable collection")
+
+        // A read issued AFTER the withdrawal is still usable, so this is staleness, not a dead store.
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("opaque-token-ZZZ", enrolled: true, epoch: "e9", withdrawal: "active"))
+        let fresh = await client.fetchProjection()!
+        testStore.setLocalOptIn(true)
+        let afterOptIn = testStore.projectionToken()!
+        XCTAssertTrue(testStore.apply(authoritative: fresh.membership, readUnder: afterOptIn),
+                      "the same mechanism accepts a current read")
+        XCTAssertTrue(testStore.currentEffectiveEnrolled)
+    }
+
+    /// An account switch mid-read: the client already drops the reply, and even if a caller handed the store
+    /// an old token anyway, the lifecycle half of the fence refuses it.
+    func test_accountSwitchDuringRead_leavesStoreUnapplied() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        // Token taken BEFORE the request, as every caller must.
+        let stale = testStore.projectionToken()!
+        XCTAssertEqual(stale.lifecycleGeneration, "gen-A")
+
+        // The switch lands while the GET is in flight.
+        VoiceSharingStubProtocol.onRequest = { [weak self] in
+            self?.identity = "gen-B"
+            self?.testStore.transitionToAccount(signedIn: true)
+        }
+
+        let fetched = await client.fetchProjection()
+        VoiceSharingStubProtocol.onRequest = nil
+        XCTAssertNil(fetched, "the client does not return a reply that crossed an account change")
+        let handRolled = VoiceSharingAccountClient.decodeProjection(
+            projectionData("r1", enrolled: true, epoch: "e1", withdrawal: "active"))!
+        XCTAssertFalse(testStore.apply(authoritative: handRolled, readUnder: stale),
+                       "nor may a pre-switch token apply one by hand")
+    }
+
+    private func projectionData(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: projection(revision, enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
+    }
+
+    // MARK: - Mutation outcomes carry their issuing fence (reviewer 79427fe7)
+
+    /// A GET is not the only projection-bearing reply. An enrollment POST issued BEFORE a withdrawal can
+    /// SUCCEED afterwards — the server has not moved yet, so nothing about its answer marks it stale. If the
+    /// outcome carried only a bare projection, a caller could apply it under a token taken after the reply
+    /// and re-enable a user who just opted out. The operation carries the store fence from BEGIN, and the
+    /// outcome hands that same value back.
+    func test_delayedEnrollSuccess_afterWithdrawal_cannotBeAppliedWithItsOwnToken() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("opaque-ENROLL-7", enrolled: true, epoch: "e7", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        XCTAssertEqual(op.issuedUnder.lifecycleGeneration, "gen-A", "the operation records the lifecycle it began under")
+
+        // Withdraw locally WHILE the enrollment request is in flight.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+
+        let outcome = await client.perform(op)
+        guard case .applied(membership: let projection, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected a successful enrollment reply, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder, "the outcome reports the BEGIN fence, never a post-reply value")
+
+        // Applying through the production path is refused on the recorded fence...
+        XCTAssertFalse(testStore.apply(authoritative: projection, readUnder: issued),
+                       "a mutation issued before the withdrawal may not be applied after it")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled, "and must not re-enable collection")
+
+        // ...while the very same bytes WOULD be accepted under a current token. That asymmetry is the whole
+        // reason outcomes must carry their issuing fence: if a caller could substitute a fresh one, the data
+        // itself offers no way to tell it came from a departed instant.
+        XCTAssertTrue(testStore.apply(authoritative: projection, readUnder: testStore.projectionToken()!),
+                      "control: the projection is well-formed and acceptable NOW — only its origin disqualifies it")
+    }
+
+    /// A 409 conflict also bears a projection, and reconciling it must go through a NEW GET rather than
+    /// adopting the conflict payload under a token minted after the reply.
+    func test_delayedConflict_afterNewIntent_isRefusedAndNeverAutoReplayed() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 409, body: projection("opaque-CONFLICT-Z", enrolled: true, epoch: "eZ", withdrawal: "active"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+
+        // New local intent lands while the request is in flight.
+        _ = testStore.withdrawLocally(acceptedServerProjectionAfterward: false)
+
+        let outcome = await client.perform(op)
+        guard case .conflict(current: let current, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected conflict, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder, "the conflict reports the BEGIN fence too")
+        guard let current else { return XCTFail("a conflict must surface the server's current projection") }
+
+        XCTAssertFalse(testStore.apply(authoritative: current, readUnder: issued),
+                       "a pre-withdrawal conflict payload must not be applied after the withdrawal")
+        XCTAssertFalse(testStore.currentEffectiveEnrolled)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, 1,
+                       "a conflicted opt-in is never retried automatically")
+    }
+
+    /// Retries keep the operation identity AND its issuing fence immutable, so a delayed first delivery and a
+    /// retry are both judged against the instant the user actually acted.
+    func test_retryKeepsTheSameIssuingFence() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
+            Reply(status: 200, body: projection("opaque-RETRY-1", enrolled: true, epoch: "e1", withdrawal: "active"))
+        let client = makeClient()
+        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        let before = op.issuedUnder
+        _ = await client.perform(op)
+        let again = await client.perform(op)   // same operation object, as a retry must be
+        guard case .applied(_, issuedUnder: let issued) = again else { return XCTFail("expected applied") }
+        XCTAssertEqual(issued, before, "a retry must not silently re-stamp the fence after the fact")
+    }
+
+    /// Withdrawal's own success reply is likewise fenced by its BEGIN instant: an opt-out that lands after a
+    /// later opt-in gesture must not overwrite the newer intent with the older answer.
+    func test_withdrawalReply_afterLaterOptIn_usesItsOwnIssuingFence() async {
+        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/withdrawal"] =
+            Reply(status: 200, body: projection("opaque-W-1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.responseDelay = 0.05
+        let client = makeClient()
+        testStore.setLocalOptIn(true)
+        guard let op = client.beginWithdrawal(enrollmentEpoch: "e1", expectedMembershipRevision: "r1") else {
+            return XCTFail("no session to begin under")
+        }
+        // User changes their mind and opts back in while the withdrawal is in flight.
+        testStore.setLocalOptIn(true)
+        let outcome = await client.perform(op)
+        guard case .applied(let projection, issuedUnder: let issued) = outcome else {
+            return XCTFail("expected applied, got \\(outcome)")
+        }
+        XCTAssertEqual(issued, op.issuedUnder)
+        XCTAssertFalse(testStore.apply(authoritative: projection, readUnder: issued),
+                       "the withdrawal answer belongs to an earlier instant than the new opt-in")
+    }
+}
+
+extension Data {
+    var jsonDictionary: [String: Any] {
+        (try? JSONSerialization.jsonObject(with: self)) as? [String: Any] ?? [:]
+    }
+}
+
+/// `URLProtocol` relocates a request's `httpBody` into `httpBodyStream`, so reading `httpBody` on a
+/// recorded request would fail for every POST/DELETE — and asserting "no body" would be a false alarm
+/// about production rather than a real defect. This reads whichever form the body actually arrived in.
+func requestBodyDictionary(of request: URLRequest) -> [String: Any]? {
+    if let data = request.httpBody { return data.jsonDictionary }
+    guard let stream = request.httpBodyStream else { return nil }
+    stream.open()
+    defer { stream.close() }
+    var collected = Data()
+    let bufferSize = 4096
+    let pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    defer { pointer.deallocate() }
+    while stream.hasBytesAvailable {
+        let read = stream.read(pointer, maxLength: bufferSize)
+        if read <= 0 { break }
+        collected.append(pointer, count: read)
+    }
+    guard !collected.isEmpty else { return nil }
+    return collected.jsonDictionary
+}
+
+@MainActor
+private final class SharingAccountModelHarness {
+    let suite = "account-model-\(UUID().uuidString)"
+    var identity: String? = "session-A"
+    let defaults: UserDefaults
+    let session: URLSession
+    let store: VoiceSharingEnrollmentStore
+    let client: VoiceSharingAccountClient
+    private let identityBox: SharingAccountIdentityBox
+
+    init(tokenProvider: CloudTokenProviding = AccountStubTokenProvider()) {
+        VoiceSharingStubProtocol.reset()
+        defaults = UserDefaults(suiteName: suite)!
+        let box = SharingAccountIdentityBox()
+        identityBox = box
+        store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { box.value ?? "out" }, sessionIdentityProvider: { box.value })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VoiceSharingStubProtocol.self]
+        session = URLSession(configuration: configuration)
+        client = VoiceSharingAccountClient(baseURLProvider: { "https://api.example.test" }, tokenProvider: tokenProvider,
+            session: session, sessionIdentity: { box.value }, membershipStore: store)
+    }
+    func rotateSessionWithoutStoreTransition(_ value: String?) { identity = value; identityBox.value = value }
+    func switchAccount(_ value: String?) { rotateSessionWithoutStoreTransition(value); store.transitionToAccount(signedIn: value != nil) }
+    func seed(enrolled: Bool = false) {
+        store.setLocalOptIn(enrolled)
+        let value = VoiceSharingMembership(membershipRevision: "r0", plan: .pro, voiceSharingEnrolled: enrolled,
+            enrollmentEpoch: enrolled ? "old-epoch" : nil, acceptedDisclosureVersion: enrolled ? "synthetic" : nil,
+            withdrawalState: enrolled ? .active : .notEnrolled)
+        _ = store.apply(authoritative: value, readUnder: store.projectionToken()!)
+    }
+    func model(version: String? = "synthetic", purge: (() -> VoiceSharingSettingsModel.DeleteResult)? = nil) -> VoiceSharingAccountModel {
+        VoiceSharingAccountModel(store: store, client: client, disclosureVersion: version,
+            session: { [identityBox] in identityBox.value }, purgeLocal: purge)
+    }
+    func close() { session.invalidateAndCancel(); defaults.removePersistentDomain(forName: suite); VoiceSharingStubProtocol.reset() }
+}
+private final class SharingAccountIdentityBox { var value: String? = "session-A" }
+private final class SharingAccountTokenClosure: CloudTokenProviding {
+    let body: () async -> String?
+    init(_ body: @escaping () async -> String?) { self.body = body }
+    func token() async -> String? { await body() }
+    func handleUnauthorized(rejectedToken: String?) async {}
+}
+private actor SharingAccountHold {
+    var opened = false
+    var continuation: CheckedContinuation<String?, Never>?
+    func wait() async -> String? { if opened { return "synthetic" }; return await withCheckedContinuation { continuation = $0 } }
+    func open() { opened = true; continuation?.resume(returning: "synthetic"); continuation = nil }
+}
+
+final class VoiceSharingAccountModelTests: XCTestCase {
+    @MainActor
+    func test_missingOrDeclinedDisclosureNeverEnrollsButWithdrawalAndDeletionRemainAvailable() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        let model = harness.model(version: nil)
+        await model.enroll(disclosureConfirmed: false)
+        XCTAssertEqual(model.membershipStatus, .confirmationRequired)
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .disclosureUnavailable)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        await model.withdraw()
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertTrue(model.localCleanupUnavailable, "missing retained queue capability is not a purge-success claim")
+        model.retryLocalCleanup()
+        XCTAssertTrue(model.localCleanupUnavailable)
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 202, body: deletionReceipt("pending-id"))
+        await model.deleteAcceptedData(confirmed: true)
+        XCTAssertEqual(model.deletionStatus, .pending("pending-id"))
+        XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
+    }
+
+    @MainActor
+    func test_busyEnrollmentCannotDelayLocalWithdrawalOrPurgeAndItsLateReplyCannotRestoreUI() async throws {
+        let entered = expectation(description: "enrollment credential held")
+        let hold = SharingAccountHold()
+        var reads = 0
+        let provider = SharingAccountTokenClosure {
+            reads += 1
+            if reads == 1 { entered.fulfill(); return await hold.wait() }
+            return "synthetic"
+        }
+        let harness = SharingAccountModelHarness(tokenProvider: provider)
+        defer { harness.close() }
+        harness.seed()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let settings = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { harness.store.currentEnrollmentAnswer }, isLocallyOptedIn: { harness.store.currentState.localOptIn })
+        let model = harness.model(purge: { settings.deletePendingRecordingsOnThisDevice() })
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 200, body: projection("old-enroll", enrolled: true, epoch: "late", withdrawal: "active"))
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        let enrollment = Task { await model.enroll(disclosureConfirmed: true) }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(model.busy)
+        VoiceSharingStubProtocol.onRequest = {
+            XCTAssertFalse(harness.store.currentEffectiveEnrolled, "withdrawal stops locally before HTTP")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(entry.name).path), "actual pending bytes are purged before HTTP")
+        }
+        await model.withdraw()
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertNotNil(model.localCleanup)
+        await hold.open()
+        await enrollment.value
+        let withdrawal = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.url?.path == VoiceSharingAccountClient.withdrawalPath })
+        let body = try XCTUnwrap(requestBodyDictionary(of: withdrawal))
+        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
+    }
+
+    @MainActor
+    func test_unknownRevisionStillStopsLocallyAndDeletionRetryKeepsIdentity() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.store.setLocalOptIn(true)
+        let model = harness.model(version: nil)
+        await model.withdraw()
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertEqual(model.membershipStatus, .withdrawalUnconfirmed)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "never invent an authoritative revision")
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 503, body: [:])
+        await model.deleteAcceptedData(confirmed: true)
+        XCTAssertEqual(model.deletionStatus, .unavailable)
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 202, body: deletionReceipt("same-cutoff"))
+        await model.retryDeletion()
+        XCTAssertEqual(model.deletionStatus, .pending("same-cutoff"))
+        let deletes = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(deletes.count, 2)
+        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.first)))
+        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.last)))
+        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
+        XCTAssertNotNil(first["request_id"])
+    }
+
+    @MainActor
+    func test_conflictedEnrollmentRequiresNewGestureAndUnavailableRetryKeepsBody() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 503, body: [:])
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .unavailable)
+        let currentProjection = projection("r-new", enrolled: false, epoch: nil, withdrawal: "not_enrolled")
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 409, body: currentProjection)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: currentProjection)
+        await model.retryMembership()
+        XCTAssertEqual(model.membershipStatus, .conflict)
+        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }
+        XCTAssertEqual(posts.count, 2)
+        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.first)))
+        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.last)))
+        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
+        XCTAssertNotNil(first["request_id"])
+        await model.retryMembership()
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, 2, "no automatic conflict replay")
+    }
+
+    @MainActor
+    func test_accountSwitchRetiresBusyStateRetryAndDelayedProjection() async {
+        let entered = expectation(description: "old account fetch held")
+        let hold = SharingAccountHold()
+        let harness = SharingAccountModelHarness(tokenProvider: SharingAccountTokenClosure { entered.fulfill(); return await hold.wait() })
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("old", enrolled: true, epoch: "old", withdrawal: "active"))
+        let fetch = Task { await model.refresh() }
+        await fulfillment(of: [entered], timeout: 3)
+        harness.switchAccount("session-B")
+        await hold.open()
+        await fetch.value
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.membership)
+        XCTAssertEqual(model.membershipStatus, .idle)
+        XCTAssertEqual(model.deletionStatus, .idle)
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+    }
+}
+
+extension VoiceSharingAccountModelTests {
+    @MainActor
+    func test_retryImmediatelyAfterStoreGenerationMovesRetiresOldOperationWithoutStickingBusy() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 503, body: [:])
+        await model.enroll(disclosureConfirmed: true)
+        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count
+        XCTAssertEqual(posts, 1)
+        harness.store.setLocalOptIn(false)
+        // No actor yield: Retry must reconcile before the observer's queued Task executes.
+        await model.retryMembership()
+        XCTAssertFalse(model.busy)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, posts)
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+    }
+
+    @MainActor
+    func test_rawSessionRotationCannotRepublishOldMembershipAndFailedRefreshIsExplicit() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 503, body: [:])
+        await model.refresh()
+        XCTAssertEqual(model.membership?.plan, .pro, "retain last known display data")
+        XCTAssertTrue(model.refreshUnavailable)
+        XCTAssertEqual(model.membershipStatus, .unavailable)
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("confirmed", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        await model.withdraw()
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed, "failed follow-up GET cannot erase server acknowledgement")
+        XCTAssertTrue(model.refreshUnavailable)
+        harness.rotateSessionWithoutStoreTransition("session-B")
+        await model.refresh()
+        XCTAssertNil(model.membership, "A's accepted projection is not B's display authority")
+        XCTAssertNil(model.locallyOptedIn)
+        XCTAssertFalse(model.busy)
+    }
+}
+
+extension VoiceSharingAccountModelTests {
+    @MainActor
+    func test_confirmedEnrollmentUsesCurrentRevisionAndDisclosureWithoutChangingProPlan() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        let active = projection("accepted", enrolled: true, epoch: "new-epoch", withdrawal: "active")
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 200, body: active)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: active)
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .enrolled)
+        XCTAssertTrue(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membership?.plan, .pro)
+        let request = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.httpMethod == "POST" })
+        let body = try XCTUnwrap(requestBodyDictionary(of: request))
+        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
+        XCTAssertEqual(body["accepted_disclosure_version"] as? String, "synthetic")
+        XCTAssertNil(body["plan"], "enrollment cannot choose a paid plan")
+        XCTAssertFalse(model.busy)
+    }
+}
+
+final class VoiceSharingAccountNavigationTests: XCTestCase {
+    @MainActor
+    func test_factoryGatesBeforeConstructionAndRetainsExactInjectedModels() throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        var built = 0
+        let makeModel = { built += 1; return harness.model() }
+        XCTAssertNil(AccountViewController.makeVoiceSharingController(signedIn: { true }, accountModel: makeModel))
+        XCTAssertNil(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { false }, accountModel: makeModel))
+        XCTAssertEqual(built, 0)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        var local: VoiceSharingSettingsModel? = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { true }, isLocallyOptedIn: { true })
+        var account: VoiceSharingAccountModel? = harness.model()
+        weak var weakAccount = account
+        weak var weakLocal = local
+        var controller = try XCTUnwrap(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { true }, accountModel: { account! }, localModel: { local })) as VoiceSharingAccountController?
+        XCTAssertTrue(controller?.accountModel === account)
+        XCTAssertTrue(controller?.localModel === local)
+        account = nil
+        local = nil
+        XCTAssertNotNil(weakAccount)
+        XCTAssertNotNil(weakLocal)
+        controller = nil
+        XCTAssertNil(weakAccount)
+        XCTAssertNil(weakLocal)
+    }
+
+    @MainActor
+    func test_realConfirmationCallbacksDeclineWithoutActionAndRetainedScreenClosesOnSignout() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        var enabled = true
+        let view = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { enabled })
+        view.enroll(confirmed: false)
+        view.deleteAccepted(confirmed: false)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        enabled = false
+        view.enroll(confirmed: true)
+        view.deleteAccepted(confirmed: true)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        enabled = true
+        harness.switchAccount(nil)
+        await model.refresh()
+        XCTAssertFalse(model.accountControlsAvailable)
+        view.enroll(confirmed: true)
+        view.deleteAccepted(confirmed: true)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+    }
+
+    @MainActor
+    func test_renderRealAccountScreenWithUnavailableEnrollmentAndIndependentWithdrawalDeletion() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: true, epoch: "old-epoch", withdrawal: "active"))
+        let model = harness.model(version: nil)
+        let controller = try XCTUnwrap(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { true }, accountModel: { model }, localModel: { nil }))
+        let navigation = UINavigationController(rootViewController: controller)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 1200)
+        window.backgroundColor = .systemBackground
+        window.rootViewController = navigation
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKeyAndVisible() }
+        let laidOut = expectation(description: "SwiftUI layout opportunity")
+        DispatchQueue.main.async { window.layoutIfNeeded(); laidOut.fulfill() }
+        await fulfillment(of: [laidOut], timeout: 3)
+        controller.view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true), "a failed draw is not render evidence")
+        }
+        let pixels = try XCTUnwrap(image.cgImage?.dataProvider?.data) as Data
+        XCTAssertGreaterThan(Set(pixels).count, 8, "empty/solid render must fail")
+        XCTAssertEqual(image.size.width, 393)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "voice-sharing-account-unavailable-enrollment"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        harness.switchAccount(nil)
+        await model.refresh()
+        XCTAssertFalse(model.accountControlsAvailable)
+        let closedLayout = expectation(description: "signed-out SwiftUI layout opportunity")
+        DispatchQueue.main.async { window.layoutIfNeeded(); closedLayout.fulfill() }
+        await fulfillment(of: [closedLayout], timeout: 3)
+        let signedOut = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let closed = XCTAttachment(image: signedOut)
+        closed.name = "voice-sharing-account-signed-out"
+        closed.lifetime = .keepAlways
+        add(closed)
+    }
+}
+
+extension VoiceSharingAccountNavigationTests {
+    @MainActor
+    func test_queuedConfirmationAndOldDialogCannotActForReplacementAccount() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        let screenA = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { true })
+        let queuedEnrollment = screenA.enroll(confirmed: true)
+        let queuedDeletion = screenA.deleteAccepted(confirmed: true)
+        // Still on the same actor turn: queued action Tasks have not started.
+        harness.switchAccount("session-B")
+        harness.seed()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("B", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        await model.refresh()
+        await queuedEnrollment?.value
+        await queuedDeletion?.value
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.allSatisfy { $0.httpMethod == "GET" }, "A's queued confirmations cannot mutate B")
+        // The same confirmation can also arrive from a dialog retained across the replacement.
+        let dialogEnrollment = screenA.enroll(confirmed: true)
+        let dialogDeletion = screenA.deleteAccepted(confirmed: true)
+        await dialogEnrollment?.value
+        await dialogDeletion?.value
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.allSatisfy { $0.httpMethod == "GET" })
+    }
+}

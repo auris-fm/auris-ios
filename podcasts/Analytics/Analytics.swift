@@ -96,12 +96,16 @@ extension Analytics {
     func optOutOfAnalytics() {
         Analytics.track(.analyticsOptOut)
         Settings.setAnalytics(optOut: true)
+#if !os(watchOS) && !APPCLIP && !os(tvOS)
+        VoiceSharingCoordinator.shared.refreshCohortAttributes()
+#endif
         refreshRegistered()
     }
 
     func optInOfAnalytics() {
 #if !os(watchOS) && !APPCLIP && !os(tvOS)
         Settings.setAnalytics(optOut: false)
+        VoiceSharingCoordinator.shared.refreshCohortAttributes()
         setAdaptersRegisteredStatus(false)
         (UIApplication.shared.delegate as? AppDelegate)?.setupAnalytics()
         Analytics.track(.analyticsOptIn)

@@ -20,6 +20,7 @@ final class FakeLfmInference: LfmInference {
     var lastErrorMessage = ""
     var classifyLabel: String? = "playback:pause"
     var generateResult: String? = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+    var onTokenize: (() -> Void)?
     var tokenizeThrows: Error?
     var classifyCount = 0
     var resetCount = 0
@@ -33,6 +34,7 @@ final class FakeLfmInference: LfmInference {
     }
 
     func tokenize(_ text: String, addBos: Bool) throws -> [Int] {
+        onTokenize?()
         if let tokenizeThrows { throw tokenizeThrows }
         if text == "pause" {
             return [10]
@@ -61,4 +63,20 @@ final class FakeLfmInference: LfmInference {
     }
 
     func release() {}
+}
+
+/// A finite synthetic capture allowance for controls of other boundaries. No storage/daily claim.
+final class FiniteCaptureAdmission: VoiceSharingCaptureAdmitting {
+    private let lock = NSLock()
+    private var remaining = 4_096
+    func take(for stamp: VoiceSharingCaptureStamp) -> VoiceSharingCaptureReservation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remaining > 0 else { return nil }
+        remaining -= 1
+        return .init(clipSamples: VoiceSharingCollector.maxRetainedSamples,
+                     metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes)
+    }
+    func requestPreparation() {}
+    func invalidate() {}
 }

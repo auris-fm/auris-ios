@@ -50,6 +50,27 @@ final class WakeWordThresholdLoaderTests: XCTestCase {
         XCTAssertEqual(threshold, 0.8, accuracy: 0.0001)
     }
 
+    func test_verifiedDeploymentIdentityChangesWithAssetsAndRejectsUnverifiedMutation() throws {
+        let asset = try writeAsset(named: "auris.ort", contents: "model-A")
+        let manifest = try writeManifest([
+            "deployment_threshold": 0.8,
+            "asset_hashes": ["auris.ort": sha256(of: Data("model-A".utf8))],
+        ])
+        let first = try WakeWordThresholdLoader.loadDeployment(manifestURL: manifest, modelDirectory: tempDir).get()
+        XCTAssertNotNil(first.identity)
+        try Data("model-B".utf8).write(to: asset)
+        if case .success = WakeWordThresholdLoader.loadDeployment(manifestURL: manifest, modelDirectory: tempDir) {
+            XCTFail("unverified changed assets cannot mint a deployment identity")
+        }
+        _ = try writeManifest([
+            "deployment_threshold": 0.8,
+            "asset_hashes": ["auris.ort": sha256(of: Data("model-B".utf8))],
+        ])
+        let next = try WakeWordThresholdLoader.loadDeployment(manifestURL: manifest, modelDirectory: tempDir).get()
+        XCTAssertNotNil(next.identity)
+        XCTAssertNotEqual(first.identity, next.identity)
+    }
+
     func test_missingManifest_fails() {
         let missing = tempDir.appendingPathComponent("does-not-exist.json")
         let result = WakeWordThresholdLoader.load(manifestURL: missing, modelDirectory: tempDir)

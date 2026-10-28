@@ -16,7 +16,7 @@ final class IntentRoutingInputTests: XCTestCase {
 
         var inputs: [IntentRoutingInput] = []
         var unroutable = 0
-        engine.onRoutingInput = { inputs.append($0) }
+        engine.onRoutingInput = { input, _ in inputs.append(input) }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
@@ -39,7 +39,7 @@ final class IntentRoutingInputTests: XCTestCase {
         let engine = makeEngine(backend: backend, translation: translation)
 
         var inputs: [IntentRoutingInput] = []
-        engine.onRoutingInput = { inputs.append($0) }
+        engine.onRoutingInput = { input, _ in inputs.append(input) }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
@@ -62,7 +62,7 @@ final class IntentRoutingInputTests: XCTestCase {
         let engine = makeEngine(backend: backend, translation: translation)
 
         var inputs: [IntentRoutingInput] = []
-        engine.onRoutingInput = { inputs.append($0) }
+        engine.onRoutingInput = { input, _ in inputs.append(input) }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
@@ -88,7 +88,7 @@ final class IntentRoutingInputTests: XCTestCase {
 
         var inputs: [IntentRoutingInput] = []
         var unroutable = 0
-        engine.onRoutingInput = { inputs.append($0) }
+        engine.onRoutingInput = { input, _ in inputs.append(input) }
         engine.onUnroutable = { unroutable += 1 }
 
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))

@@ -47,7 +47,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
         playback.positionMs = 500_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "What did she mean?",
             tier: .free,
             context: sampleContext()
@@ -75,7 +75,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "summarize",
             tier: .free,
             context: sampleContext()
@@ -103,7 +103,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.setPlaying(false)
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "what was that about",
             tier: .free,
             context: sampleContext()
@@ -148,7 +148,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [500.0: 510.0]
         playback.positionMs = 900_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "play that",
             tier: .free,
             context: sampleContext()
@@ -176,7 +176,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.positionMs = 120_000
 
-        let response = await makeSink().routeToCloud(
+        let (response, _) = await makeSink().routeToCloud(
             request: "forward 15 seconds",
             tier: .free,
             context: sampleContext()
@@ -266,7 +266,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [100.0: 110.0]
         playback.positionMs = 50_000
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("rate limited"))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
@@ -367,6 +367,319 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     // MARK: - Helpers
 
+    /// PRODUCTION-LOOP boundary control (spec b9b82155): through the REAL sink
+    /// and stubbed transport, a `done` turn states NO fact — stream completion
+    /// with pending audio and unaggregated actions is not an executed claim.
+    func testDoneTurnThroughTheProductionLoopStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact, "done is stream completion, not an action-executed fact")
+    }
+
+    /// PRODUCTION-LOOP boundary control: a server error frame also states NO
+    /// fact — admission/transport refusal is not distinguishable from a failed
+    /// action by the code alone.
+    func testErrorFrameThroughTheProductionLoopStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact, "an error frame is not provably an action failure")
+    }
+
+    /// RED (aggregation slice, spec 3d51f037): a DECLINED action inside the
+    /// turn is the sink's own observed fact — done must not mask it with an
+    /// aggregate success.
+    func testDeclinedActionInsideTheTurnFactsPreconditionFailed_notAggregateSuccess() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run", "stop_quote with no quote in flight declined")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// Void-result actions (the seek sinks return presentation only) are
+    /// UNKNOWN entries, never claims: a turn whose only actions were Void
+    /// seeks aggregates to unknown, not completed (spec 1a0661ba/15662487).
+    func testVoidResultActionsAreUnknownEntries() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown", "a Void seek is an unobserved result, not a completion")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+    }
+
+    /// Transport termination without `done` (the client's own request timeout
+    /// surfaces as stream end): no server outcome — no fact.
+    func testStreamEndWithoutDoneStatesNoFact() async {
+        self.pendingFixture =
+            """
+            event: token
+            data: {"text":"partial"}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        // The client surfaces premature close as a synthesized error event
+        // (hence the spoken "connection lost" template) — but no server turn
+        // outcome was observed, so still no fact.
+        XCTAssertNil(fact)
+    }
+
+    /// PENDING-AUDIO fixture coverage (spec 1a0661ba): with audio still
+    /// buffered at done, the execution fact comes from the actions alone —
+    /// pending playback neither gates nor upgrades the claim.
+    func testPendingAudioDoesNotGateTheActionFact() async {
+        let player = CloudAudioPlayer()
+        player.enqueue(CloudAudioFrame(data: Data(repeating: 0, count: 4800)))
+        XCTAssertTrue(player.hasPendingAudio, "fixture precondition: audio is buffered")
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: "https://cloud.test",
+                    fixture: self.nextFixture()
+                )
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { true },
+            audioPlayer: player,
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics
+        )
+        let (_, fact) = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run", "the declined action is the fact; pending audio is separate")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// MIXED outcomes (completed decline-pair here: one declined, one Void) —
+    /// no truthful single state exists, so the aggregate is UNKNOWN, never a
+    /// forced not_run (reviewer f96813da, spec 15662487).
+    func testMixedOutcomesStayUnknown_noFalseAggregate() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+    }
+
+    /// GENUINELY completed + declined (reviewer 2fcedf35): a pause that stated
+    /// its observed completion AND a stop_quote that declined — no truthful
+    /// single state, so unknown.
+    func testGenuinelyCompletedPlusDeclinedStaysUnknown() async {
+        playback.pauseReturnsCompletedFact = true
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+        playback.pauseReturnsCompletedFact = false
+    }
+
+    /// A MISSING required parameter is an OBSERVED refusal at the decision
+    /// site (spec afe5418e): not_run/precondition_failed, never unobserved.
+    func testMalformedActionFactsObservedPreconditionRefusal() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// PLAYBACK OWNERSHIP regression control (reviewer af68a7bb): an initially
+    /// playing episode, cloud pauses it mid-turn — done must NOT resume over
+    /// that pause (the turn that paused owns the restore).
+    func testCloudPauseDuringTurnDoneDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "done must not resume what the cloud turn itself paused")
+    }
+
+    /// Same ownership when the stream ends without any terminal event (server
+    /// drop — synthesized error exit, not an explicit error frame).
+    func testCloudPauseDuringTurnStreamEndDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "a stream end after the cloud's own pause must not resume over it")
+    }
+
+    /// Same ownership at the error exit.
+    func testCloudPauseDuringTurnErrorDoesNotResumeOverIt() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"pause","params":{}}
+
+            event: error
+            data: {"code":"connection_lost","message":""}
+
+            """
+        _ = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
+                       "the error exit must not resume what the cloud turn itself paused")
+    }
+
+    /// Uniform declines still map truthfully to not_run.
+    func testUniformDeclinesMapToNotRun() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// An UNKNOWN action is recorded, not omitted: a turn whose only action is
+    /// a forward-compat no-op aggregates to unknown.
+    func testUnknownActionIsRecordedAsAnUnknownEntry() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"do_a_barrel_roll","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertEqual(fact?.state, "unknown")
+        XCTAssertEqual(fact?.reason, "observation_unavailable")
+    }
+
+    /// A turn that executed NO actions states no aggregate fact at done: there
+    /// is nothing observed to claim (a pure-answer turn stays unknown).
+    func testTurnWithoutActionsStatesNoFactAtDone() async {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let (_, fact) = await makeSink().routeToCloud(
+            request: "x", tier: .free, context: sampleContext())
+        XCTAssertNil(fact)
+    }
+
+    /// The not-configured guard is the client's own decline to route: the
+    /// spoken coming-soon template is still delivered unchanged, but the fact
+    /// says nothing was sent (not_run/client_refused).
+    func testUnconfiguredSinkSpeaksComingSoonButFactsClientRefused() async {
+        let sink = CloudRouteSink(
+            isConfigured: { false },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics
+        )
+        let (response, fact) = await sink.routeToCloud(
+            request: "what did they say",
+            tier: .unknown,
+            context: sampleContext()
+        )
+        if case .spoken(let text) = response {
+            XCTAssertFalse(text.isEmpty)
+        } else if case .earcon(.error) = response {
+            // acceptable when the locale has no coming-soon template
+        } else {
+            XCTFail("unexpected response \(response)")
+        }
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "client_refused")
+    }
+
     private func makeSink(
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil
@@ -416,6 +729,16 @@ private final class RecordingPlaybackSink: VoicePlaybackSink {
     /// Models the state before a turn: a user who paused before speaking, or a
     /// player that is running. `pause()`/`resume()` maintain it thereafter.
     func setPlaying(_ playing: Bool) { isPlaying = playing }
+
+    /// Opt-in REAL fact channel: when set, pause states an observed completion
+    /// (used by the genuinely-completed+declined mixed control).
+    var pauseReturnsCompletedFact = false
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        pause()
+        return pauseReturnsCompletedFact
+            ? (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
+            : (.earcon(.success), nil)
+    }
 
     var calls: [Call] = []
     var positionMs: Int64 = 0
@@ -480,6 +803,17 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
+/// Thread-safe turn-result holder for the bounded overlap watchdog.
+private final class TurnBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _done = false
+    var done: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _done }
+        set { lock.lock(); _done = newValue; lock.unlock() }
+    }
+    var value: (response: VoiceResponse, fact: SinkActionFact?)?
+}
+
 final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
@@ -501,6 +835,116 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         CloudRouteTestURLProtocol.reset()
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
+    }
+
+    /// OVERLAPPING TURNS on ONE sink (reviewer 2fcedf35): A is held OPEN after
+    /// its logged action (mid-stream gate) and PROVABLY in flight when B
+    /// supersedes it. Each turn's action log is invocation-local: A's logged
+    /// action reaches A's caller through the supersession exit; B's empty log
+    /// states no fact. A shared-log mutant fails on the winner's assertion.
+    func testOverlappingTurnsKeepTheirActionLogsSeparate() async throws {
+        // Turn A: a play_quote (records a seek), then the stream is held before
+        // its last frame — A stays in flight with its action already logged.
+        self.nextTurnFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1000}}
+
+            event: token
+            data: {"text":"slow"}
+
+            """
+        let midStreamGate = Gate()
+        // Arm the hold ONLY on the FIRST built client (turn A). Applying it to
+        // every client would block B's single done frame too — a circular wait
+        // (reviewer af68a7bb).
+        var holdArmed = false
+        let sink = makeSink(configureTask: { task in
+            guard !holdArmed else { return }
+            holdArmed = true
+            task.holdWhenRemaining = (count: 1, gate: midStreamGate)
+        })
+        let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext()) }
+        // Deterministic: wait until A has actually processed its action (the
+        // seek lands on the playback recording). The mid-stream gate holds A's
+        // stream open from here on — A cannot complete.
+        let sawSeek = await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            self.playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        }
+        XCTAssertTrue(sawSeek, "turn A processed its action while still in flight")
+
+        // Turn B supersedes A while A is held open, and completes. The release
+        // happens only AFTER an observed B start (its client build swaps
+        // capturedTask away from A's task) — A remains parked at the gate the
+        // whole time, so overlap is forced, not merely deadlock-free
+        // (reviewer eb0a8ada / spec 55350a94).
+        let taskOfA = capturedTask
+        self.nextTurnFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let winnerBox = TurnBox()
+        let winnerWork = Task {
+            winnerBox.value = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+            winnerBox.done = true
+        }
+        let sawBStart = await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            self.capturedTask !== taskOfA && self.capturedTask != nil
+        }
+        XCTAssertTrue(sawBStart, "turn B never started while A was held")
+        // No in-flight assertion on B here: with the hold on A only, B may
+        // complete between its start observation and this line — the forced
+        // premise is A parked at the (still unreleased) gate while B ran, not
+        // B's liveness at this instant.
+        // NOW unblock A: its receive resumes, the loop top observes
+        // cancellation, and the supersession exit delivers A's own logged fact.
+        midStreamGate.release()
+        let loserBox = TurnBox()
+        let loserWork = Task {
+            loserBox.value = await slow.value
+            loserBox.done = true
+        }
+        // Watchdog (2s) is SHORTER than the client's 5s requestTimeoutSeconds,
+        // so the fallback can never masquerade as delivery (reviewer 9e39323c).
+        let deadline = Int(2_000_000_000 / 10_000_000)
+        for _ in 0..<deadline where !(winnerBox.done && loserBox.done) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(winnerBox.done, "the winner's turn hung")
+        XCTAssertTrue(loserBox.done, "the losing turn hung")
+        // done-before-deadline is the discriminator against the client's 5s
+        // requestTimeout fallback (the elapsed-time check is scheduler-
+        // sensitive); the 2s watchdog above already bounds it.
+        guard winnerBox.done, loserBox.done else {
+            // Failure path: cancel and walk away — no await of a stuck turn.
+            // `slow` is unstructured and awaits routeToCloud directly, so
+            // cancelling only its wrapper would leave it running.
+            winnerWork.cancel()
+            loserWork.cancel()
+            slow.cancel()
+            return
+        }
+        let winnerFact = winnerBox.value
+        let loserFact = loserBox.value
+        XCTAssertNil(winnerFact?.fact, "the winner ran no actions and must not see A's log")
+        XCTAssertEqual(loserFact?.fact?.state, "unknown", "A's logged action reaches A's caller via supersession")
+        XCTAssertEqual(loserFact?.fact?.reason, "observation_unavailable")
+        _ = await winnerWork.value
+        _ = await loserWork.value
+    }
+
+    private static func waitUntil(timeoutNanoseconds: UInt64,
+                                  _ condition: @escaping () -> Bool) async -> Bool {
+        let step: UInt64 = 10_000_000
+        var waited: UInt64 = 0
+        while waited < timeoutNanoseconds {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: step)
+            waited += step
+        }
+        return condition()
     }
 
     func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
@@ -527,8 +971,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
-        _ = await slow.value
+        let (_, secondFact) = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext())
+        // The WINNING (done) turn states no fact either (stream completion).
+        XCTAssertNil(secondFact)
+        let (_, lostFact) = await slow.value
+        // SUPERSESSION-AFTER-ACTION: supersession itself is not cancellation
+        // and proves no outcome — but facts the losing turn ALREADY observed
+        // (here: its stop_quote decline, processed before replacement) are
+        // delivered, not discarded (spec 1a0661ba).
+        XCTAssertNil(lostFact,
+                     "this fixture's losing turn observed no action outcomes, so nil stands")
 
         // Exactly one resume: the superseding turn's. A must not restore after B.
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
@@ -637,13 +1089,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// `pendingFixture` handoff would let the second overwrite the first's.
     private var nextTurnFixture: String?
 
-    private func makeSink() -> CloudRouteSink {
+    private func makeSink(configureTask: ((StubWebSocketTask) -> Void)? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
                 let fixture = self.nextTurnFixture ?? self.nextFixture()
                 self.nextTurnFixture = nil
                 let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture)
+                configureTask?(built.task)
                 if let gate = self.pendingHeldGate {
                     // The held turn waits for frames; the test releases it later.
                     built.task.holdUntilReleased(gate)
@@ -703,7 +1156,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"connection_lost","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."), "a code with a template is spoken")
     }
@@ -715,7 +1168,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
             data: {"code":"invalid_response","message":""}
 
             """
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let (response, _) = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
 
         XCTAssertEqual(response, .earcon(.error), "an internal diagnostic stays an earcon, never English prose")
     }
@@ -805,7 +1258,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         let caPath = Bundle.main.path(forResource: "ca", ofType: "lproj")
         let empty = caPath.flatMap { Bundle(path: $0) } ?? Bundle(path: NSTemporaryDirectory()) ?? Bundle(for: type(of: self))
         stubError(code: "connection_lost")
-        let response = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
+        let (response, _) = await makeSink(localeBundle: empty).routeToCloud(request: "x", tier: .free, context: context())
         XCTAssertEqual(response, .earcon(.error), "no translation in the user's locale ⇒ earcon, never English speech")
     }
 
@@ -823,7 +1276,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
         stubError(code: "connection_lost")
         // The test host's own bundle carries the en.lproj translation.
         let enBundle = Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
-        let response = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
+        let (response, _) = await makeSink(localeBundle: enBundle).routeToCloud(request: "x", tier: .free, context: context())
         XCTAssertEqual(response, .spoken("Connection lost. Please try again."))
     }
 }
@@ -874,7 +1327,7 @@ final class CloudRouteSinkWhitespaceMessageTests: SocketCapturingTestCase {
         )
         let context = PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
 
-        let response = await sink.routeToCloud(request: "x", tier: .free, context: context)
+        let (response, _) = await sink.routeToCloud(request: "x", tier: .free, context: context)
 
         XCTAssertEqual(response, .earcon(.error), "a spaces-only message follows the code route, never spoken as silence")
     }
