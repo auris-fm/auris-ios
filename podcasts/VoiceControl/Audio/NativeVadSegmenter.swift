@@ -42,13 +42,11 @@ class NativeVadSegmenter {
     private let stuckActiveSamples: Int
     /// Samples of continuously-active speech since it began, used for the stuck check.
     private(set) var activeSamples = 0
-    /// Capture instant of each sample in `preRoll`, parallel to it.
-    ///
-    /// Trimming evicts the OLDEST samples, so the instant of the first retained sample moves
-    /// forward with them. Keeping a single start instant while dropping samples would name a
-    /// moment that is no longer in the buffer. The epoch is emitted audio's start, not one
-    /// instant per sample: it advances in whole frames, which is the granularity the tap
-    /// delivers and the one the echo filter compares against.
+    /// Capture instant of each sample in `preRoll`, parallel to it — one entry per SAMPLE, not
+    /// per frame. Trimming evicts the OLDEST samples, so the instant of the first retained
+    /// sample moves forward with them. Keeping a single start instant while dropping samples
+    /// would name a moment that is no longer in the buffer, and keeping only frame-level
+    /// instants would misalign the parallel arrays when trimming lands mid-frame.
     private var preRollInstants: [MonotonicTime?] = []
     /// Retains at most this much pre-confirmation audio. 0.5 s covers the classifier's window
     /// plus `minSpeechDuration` with margin while bounding memory when a room never confirms.
@@ -114,12 +112,12 @@ class NativeVadSegmenter {
         let reason: String
     }
 
-    /// Delivers unavailability. Setting it replays the current reason if classification is
-    /// ALREADY unavailable, because the condition is decided at construction and an observer
-    /// installed afterwards would otherwise never hear about it.
     /// Announces that a fault ended, so a listener can clear the interruption.
     var onRecoveredFromFault: (() -> Void)?
 
+    /// Delivers unavailability. Setting it replays the current reason if classification is
+    /// ALREADY unavailable, because the condition is decided at construction and an observer
+    /// installed afterwards would otherwise never hear about it.
     var onClassifierUnavailable: ((ClassifierUnavailableFault) -> Void)? {
         didSet {
             if let reason = classifierUnavailableReason, onClassifierUnavailable != nil {
@@ -335,7 +333,9 @@ class NativeVadSegmenter {
             preRollInstants.removeFirst(excess)
         }
         // The buffer's start is the instant of the oldest retained SAMPLE, not of its frame.
-        preRollCapturedAt = preRollInstants.first ?? nil
+        // flatMap flattens the double optional (first gives MonotonicTime??). Written this
+        // way because SwiftFormat rewrites `?? nil` here, which does not compile.
+        preRollCapturedAt = preRollInstants.first.flatMap { $0 }
     }
 
     private func emitUtterance() {

@@ -80,9 +80,12 @@ final class SileroVadAvailabilityControl: XCTestCase {
         /// reusing one detector lets an earlier signal bias the next. `clear()` empties the segment
         /// queue but is not a model reset, and an earlier version of this control disagreed with an
         /// independent sweep because of exactly that.
-        func detections(_ gen: (Int) -> Float) -> Int {
+        func detections(_ gen: (Int) -> Float) throws -> Int {
             var fresh = config
-            let d = SherpaOnnxVoiceActivityDetectorWrapper(config: &fresh, buffer_size_in_seconds: 60)
+            let d = try XCTUnwrap(
+                SherpaOnnxVoiceActivityDetectorWrapper(config: &fresh, buffer_size_in_seconds: 60),
+                "the real bundled model must load"
+            )
             var hits = 0
             for i in 0..<(16_000 / frame * 3) {
                 var f = [Float](repeating: 0, count: frame)
@@ -95,11 +98,11 @@ final class SileroVadAvailabilityControl: XCTestCase {
 
         var rng = SystemRandomNumberGenerator()
         // Steady noise at roughly the ambient level measured on the simulator (~0.12 peak -> 0.072 rms).
-        let noise = detections { _ in Float.random(in: -0.12...0.12, using: &rng) }
+        let noise = try detections { _ in Float.random(in: -0.12...0.12, using: &rng) }
         // A loud stationary tone: high energy, no speech structure.
-        let loudTone = detections { n in Float(sin(2 * .pi * 180 * Double(n) / 16_000.0)) * 0.30 }
+        let loudTone = try detections { n in Float(sin(2 * .pi * 180 * Double(n) / 16_000.0)) * 0.30 }
         // Voiced with syllabic amplitude modulation and moving pitch — quieter than the tone above.
-        let voiced = detections { n in
+        let voiced = try detections { n in
             let t = Double(n) / 16_000.0
             let env = 0.5 + 0.5 * sin(2 * .pi * 4.0 * t)
             let f0 = 120.0 + 30.0 * sin(2 * .pi * 0.7 * t)
@@ -116,8 +119,8 @@ final class SileroVadAvailabilityControl: XCTestCase {
         // (0.08) has rms ~0.033, below the noise floor's ~0.069, so a miss there says nothing
         // about structure — it may simply be too quiet. Measuring the onset of detection
         // separates "cannot classify speech" from "cannot classify speech THIS quiet".
-        let sweep: [(Double, Int)] = [0.08, 0.15, 0.25, 0.40].map { (amp: Double) -> (Double, Int) in
-            let hits = detections { n in
+        let sweep: [(Double, Int)] = try [0.08, 0.15, 0.25, 0.40].map { (amp: Double) -> (Double, Int) in
+            let hits = try detections { n in
                 let t = Double(n) / 16_000.0
                 let env = 0.5 + 0.5 * sin(2 * .pi * 4.0 * t)
                 let f0 = 120.0 + 30.0 * sin(2 * .pi * 0.7 * t)
@@ -148,6 +151,8 @@ final class SileroVadAvailabilityControl: XCTestCase {
             sampleRate: 16_000
         )
         let detector = SherpaOnnxVoiceActivityDetectorWrapper(config: &config, buffer_size_in_seconds: 5)
+        guard let detector else { XCTFail("the real bundled model must load")
+return }
         // One second of silence must be accepted without crashing or reporting speech.
         detector.acceptWaveform(samples: [Float](repeating: 0, count: 16_000))
         XCTAssertFalse(detector.isSpeechDetected(), "silence must not be classified as speech")
@@ -174,7 +179,7 @@ final class SileroBundledModelResolutionControl: XCTestCase {
                 + "would fail silently unless unavailability is surfaced. Bundle: \(Bundle.main.bundlePath)"
         )
         for path in found {
-            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? nil
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int)
             XCTAssertEqual(size, 643_854, "unexpected model size at \(path)")
         }
     }
@@ -182,10 +187,11 @@ final class SileroBundledModelResolutionControl: XCTestCase {
     /// `bundled()` must return a usable classifier in the shipped layout, not nil.
     func testProductionClassifierLoadsFromTheBundle() {
         guard let classifier = SileroSpeechFrameClassifier.bundled() else {
-            return XCTFail(
+            XCTFail(
                 "bundled() returned nil in the shipped bundle; the app would report no classifier "
                     + "and dispatch nothing, or previously have run the energy rule"
             )
+            return
         }
         // A loaded classifier must produce a decision, not merely exist.
         _ = classifier.isSpeech([Float](repeating: 0, count: 5_120))

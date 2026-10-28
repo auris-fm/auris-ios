@@ -58,9 +58,8 @@ final class SileroSpeechFrameClassifier: SpeechFrameClassifier {
     /// The detector requires exactly this many samples per `acceptWaveform` call.
     static let frameSize = 512
 
-    /// The wrapper `fatalError`s when the runtime rejects a config, so it is only ever
-    /// constructed after the model path and file have been verified. Keeping the stored
-    /// property non-optional means every read is safe.
+    /// The wrapper is failable: a present-but-unloadable model yields nil (see `make`), so a
+    /// constructed wrapper always holds a live detector and every read is safe.
     private let detector: SherpaOnnxVoiceActivityDetectorWrapper
     private var pending: [Float] = []
     /// Latest classification, held between frames because a single capture buffer does not
@@ -119,12 +118,18 @@ final class SileroSpeechFrameClassifier: SpeechFrameClassifier {
             numThreads: 1,
             provider: "cpu"
         )
-        // Only reached when the file exists, so the wrapper's fatalError path is not taken
-        // for the missing-resource case; that case returns nil above.
+        // Builds the detector through the exception-safe shim. A model that exists but cannot
+        // load makes the C API throw a C++ `Ort::Exception`; the shim converts that (and a
+        // NULL return) into nil here, so a corrupt bundled file reports classifier
+        // unavailability instead of killing the app at launch.
         let detector = SherpaOnnxVoiceActivityDetectorWrapper(
             config: &config,
             buffer_size_in_seconds: 30
         )
+        guard let detector else {
+            FileLog.shared.addMessage("[VoicePipeline] silero model present at \(modelPath) but the runtime could not load it")
+            return nil
+        }
         return SileroSpeechFrameClassifier(detector: detector)
     }
 
