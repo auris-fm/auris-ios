@@ -83,6 +83,20 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// schedule, so the deferral would wait on an identity that is not its own.
     @discardableResult
     func finish() -> Int {
+        finishWithStopBinding().requestEpoch
+    }
+
+    struct DrainRequest {
+        let requestEpoch: Int
+        /// A physical stop at or after this epoch quiesces this request. A later cancel may
+        /// supersede that owner; the request itself still settles separately as superseded.
+        let stopEpoch: Int
+    }
+
+    /// Publishes the request and captures its notifiable stop binding under the SAME lock.
+    /// If a physical stop has already claimed/cleared its owner, this schedules a new drain,
+    /// rather than binding to zero or borrowing an older pending notification.
+    func finishWithStopBinding() -> DrainRequest {
         runnerLock.lock()
         // Same atomic coalescing as cancel(): the check and the publication share one
         // critical section, so the runner cannot complete a decrement before the increment.
@@ -113,9 +127,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
         runnerRunning = true
         if !sharesNotification { pendingStopNotifications += 1 }
+        let request = DrainRequest(requestEpoch: allocated, stopEpoch: stopOwnerEpoch)
         runnerLock.signal()
         runnerLock.unlock()
-        return allocated
+        return request
     }
 
     /// Reset state immediately (e.g. on cancellation).
@@ -1123,9 +1138,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// still comes from `startEngine`, the buffer still goes through `scheduleBuffer`, and the
     /// position still comes from `renderPosition(of:)`. Production never sets it, so production
     /// behaviour is unchanged.
-    static var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
-
     static var audioOutputAvailabilityOverrideForTesting: Bool? = nil
+
+    /// Test-host-only output setup, applied to the real graph before starting it.
+    static var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
     /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
     /// whether the process reported itself as a test host at all (the override is consulted only
     /// then) and what availability was decided. A control asserts this instead of assuming the

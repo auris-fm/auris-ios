@@ -2333,6 +2333,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     @MainActor
     func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
+        try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
+    }
+
+    @MainActor
+    func testCoalescedDoneReleasesTheHoldOnItsBoundPhysicalStop() async throws {
+        try await exerciseScheduledOnlyDone(coalesceBeforeDone: true)
+    }
+
+    @MainActor
+    private func exerciseScheduledOnlyDone(coalesceBeforeDone: Bool) async throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
         CloudAudioPlayer.configureEngineForTesting = { engine in
@@ -2379,9 +2389,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(player.hasOutstandingOutput)
         XCTAssertEqual(holdCounters?.begin.value, 1)
         let releasesBeforeDone = try XCTUnwrap(holdCounters?.end.value) // Admission also reports an absent predecessor.
+        let priorDrain = coalesceBeforeDone ? player.finishWithStopBinding() : nil
         producerRelease.signal()
         let result = await turn.value
         XCTAssertEqual(result.outcome, .completed)
+        if let priorDrain {
+            XCTAssertEqual(player.currentDrainEpoch, priorDrain.requestEpoch + 1,
+                           "premise: done allocated a distinct request coalesced on the pending drain")
+        }
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0,
                        "done must not resume host playback over the queued response tail")
         XCTAssertEqual(holdCounters?.end.value, releasesBeforeDone, "done must retain its existing grace playback hold")
@@ -2389,8 +2404,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         while (player.renderPosition(of: node)?.renderedFrames ?? 0) < 33_600 && Date() < deadline {
             XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
         }
-        try await waitUntil("the actual owned stop releases the hold") {
-            playback.calls.filter { $0 == .resume }.count == 1 && holdCounters?.end.value == releasesBeforeDone + 1
+        do {
+            try await waitUntil("the actual owned stop releases the hold") {
+                playback.calls.filter { $0 == .resume }.count == 1 && holdCounters?.end.value == releasesBeforeDone + 1
+            }
+        } catch {
+            XCTFail("the notifiable physical stop did not release the retained hold: \(error)")
+        }
+        if let priorDrain {
+            XCTAssertEqual(player.confirmedStopEpochForTesting, priorDrain.stopEpoch,
+                           "the superseded done request must not be relabelled as a physical stop")
         }
     }
 
