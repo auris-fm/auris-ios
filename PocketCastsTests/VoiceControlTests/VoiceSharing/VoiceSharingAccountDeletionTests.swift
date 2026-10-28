@@ -1,5 +1,7 @@
 import XCTest
-import PocketCastsServer
+@testable import PocketCastsServer
+import PocketCastsUtils
+import Security
 @testable import podcasts
 
 /// Account deletion and Voice Sharing.
@@ -356,5 +358,77 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
         // WHAT THE LOST CALLBACK COSTS: the files remain, so they persist past the process and past
         // the sign-out that would have purged them. Nothing here claims they are still SERVED after
         // a later sign-out — only that the revocation never happened, so nothing removed them.
+    }
+}
+
+/// Exercises SyncManager's real signout body and default notification delivery. Enrollment and
+/// remote policy are controlled premises; this does not execute the account deletion API or UI.
+final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
+    @MainActor
+    func testRealSyncManagerSignoutPurgesRetainedAudioAndFencesTheOldLease() throws {
+        let keys = [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey,
+                    ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
+                    ServerConstants.Values.appleAuthUserIDKey]
+        let previousCredentials = try keys.map { try KeychainHelper.string(for: $0) }
+        let domain = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        let previousDefaults = UserDefaults.standard.persistentDomain(forName: domain)
+        let previousDelegate = ServerConfig.shared.syncDelegate
+        // The unrelated cloud-file delegate must not mutate the test host's podcast database.
+        ServerConfig.shared.syncDelegate = nil
+        defer {
+            ServerConfig.shared.syncDelegate = previousDelegate
+            for (key, value) in zip(keys, previousCredentials) {
+                XCTAssertTrue(KeychainHelper.save(string: value, key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
+            }
+            if let previousDefaults { UserDefaults.standard.setPersistentDomain(previousDefaults, forName: domain) }
+            else { UserDefaults.standard.removePersistentDomain(forName: domain) }
+        }
+        ServerSettings.setSyncingEmail(email: "voice-sharing-test@example.com")
+        ServerSettings.userId = "account-a"
+        XCTAssertTrue(SyncManager.isUserLoggedIn(), "the real signout body must start from signed in")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("real-signout-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "real-signout-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = try VoiceSharingDeletionFixture.enroll(
+            VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" }), defaults: defaults)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        XCTAssertEqual(queue.readyEntries().count, 1, "premise: an actual durable recording is retained")
+        let retained = try XCTUnwrap(queue.readyEntries().first)
+        let retainedDirectory = root.appendingPathComponent(retained.name, isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path))
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) }, enrollmentStore: store)
+        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        defer { subscription.unregisterNow() }
+        let removeIdentityObservers = coordinator.installIdentityInvalidation() // SyncManager posts to this default center.
+        defer { removeIdentityObservers() }
+        let oldFetch = coordinator.policy.tokenForFetchStart()
+        XCTAssertNotNil(coordinator.policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: oldFetch))
+        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: an unexpired policy lease permits this enrolled account")
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled, "the test does not activate the compiled product surface")
+
+        SyncManager.signout(userInitiated: true)
+
+        XCTAssertFalse(SyncManager.isUserLoggedIn(), "the real body cleared credentials, not merely a posted test notification")
+        XCTAssertNil(ServerSettings.userId)
+        for key in keys { XCTAssertNil(try KeychainHelper.string(for: key)) }
+        XCTAssertFalse(store.currentEffectiveEnrolled)
+        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertNil(coordinator.policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: oldFetch),
+                     "a fetch begun before real signout cannot reinstall the old lease")
+        guard case .known(let remaining) = queue.readyEntriesReportingUnknownCoverage() else {
+            XCTFail("healthy signout purge must reconcile")
+            return
+        }
+        XCTAssertTrue(remaining.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retainedDirectory.path),
+                       "signout removed the recording rather than only excluding it from the ready set")
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertTrue(restarted.readyEntries().isEmpty, "the purge survives a fresh queue owner")
     }
 }
