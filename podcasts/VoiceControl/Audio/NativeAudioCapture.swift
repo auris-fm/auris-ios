@@ -79,8 +79,9 @@ class NativeAudioCapture: AudioCaptureSource {
     /// (#core:25b91a1b `98ba5c48`). This reports buffer arrival and the peak level against the
     /// threshold, throttled so a healthy pipeline does not flood the log.
     ///
-    /// Observability only: it does not gate, alter or delay sample delivery.
-    private var telemetry = CaptureTelemetry()
+    /// This accumulator is OWNED PER TAP: a fresh `CaptureTelemetry` is created where the tap is
+    /// installed, not shared across taps. A restart's already-queued blocks would otherwise race
+    /// the new tap's counters on this property (log-only skew, but still a data race).
     private static let telemetryInterval: TimeInterval = 5
     private let session: CaptureAudioSession
     /// Live playback-ownership signal, re-read at teardown. Deactivating a
@@ -150,6 +151,9 @@ class NativeAudioCapture: AudioCaptureSource {
         // carries it, so a buffer released after a restart still reports the session that
         // produced it rather than the session that happens to be current.
         let tapSessionCapturedAtInstall = self.tapSession
+        // One accumulator per installed tap: queued blocks from a previous tap can never
+        // interleave with this tap's counters (see the telemetry note above).
+        var tapTelemetry = CaptureTelemetry()
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buf, when in
             guard let self else { return }
             let frameLength = Int(buf.frameLength)
@@ -195,8 +199,8 @@ class NativeAudioCapture: AudioCaptureSource {
                     FileLog.shared.addMessage("[VoicePipeline] First buffer: \(converted.count) samples, min=\(String(format: "%.6f", minVal)) max=\(String(format: "%.6f", maxVal))")
                     FileLog.shared.forceFlush()
                 }
-                self.telemetry.record(rms: CaptureTelemetry.rms(of: converted))
-                if let report = self.telemetry.takeReport(
+                tapTelemetry.record(rms: CaptureTelemetry.rms(of: converted))
+                if let report = tapTelemetry.takeReport(
                     now: Date(),
                     interval: Self.telemetryInterval
                 ) {

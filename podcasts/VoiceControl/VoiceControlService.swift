@@ -206,8 +206,22 @@ class VoiceControlService: ObservableObject {
             "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
                 + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"
         )
+        // A classifier-unavailable fault is a PERSISTENT CONDITION, not a new event: the
+        // segmenter replays it to every newly wired observer, and the engine re-wires its
+        // callbacks on every start() — so each refused start would re-present the same
+        // unchanged condition and replay the error earcon. Present it audibly ONCE; published
+        // state above still updates on every replay. Non-persistent kinds (a real ceiling
+        // event, a capture failure) are distinct events and keep speaking every time.
+        if fault.kind == .classifierUnavailable {
+            guard !hasPresentedClassifierUnavailableEarcon else { return }
+            hasPresentedClassifierUnavailableEarcon = true
+        }
         audioRenderer.playEarcon(.error)
     }
+
+    /// Whether the persistent classifier-unavailable condition has already had its audible
+    /// presentation. Never reset: the condition does not clear without relaunching.
+    private var hasPresentedClassifierUnavailableEarcon = false
 
     /// The current segmentation fault, published so a listener can render the interruption.
     ///

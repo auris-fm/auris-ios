@@ -61,10 +61,11 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         drainMainQueue()
 
         guard let fault = faults.first else {
-            return XCTFail(
+            XCTFail(
                 "the duration ceiling produced no fault observable through the engine, so the "
                     + "interruption never leaves the audio component"
             )
+            return
         }
         XCTAssertEqual(fault.kind, .durationLimitReached)
         XCTAssertGreaterThan(fault.elapsedMs, 0)
@@ -573,7 +574,8 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
             audioSession: FakeAudioSessionControlling(),
             capture: RecordingCapture()
         )
-        guard let service else { return XCTFail("service could not be built") }
+        guard let service else { XCTFail("service could not be built")
+return }
 
         var earcons: [EarconId] = []
         service.earconObserverForTesting = { earcons.append($0) }
@@ -598,7 +600,8 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
             audioSession: FakeAudioSessionControlling(),
             capture: RecordingCapture()
         )
-        guard let service else { return XCTFail("service could not be built") }
+        guard let service else { XCTFail("service could not be built")
+return }
         var earcons: [EarconId] = []
         service.earconObserverForTesting = { earcons.append($0) }
 
@@ -611,6 +614,62 @@ final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
 
         XCTAssertEqual(service.segmentationFault?.kind, .classifierUnavailable)
         XCTAssertEqual(earcons, [.error])
+    }
+
+    /// THE PERSISTENT CONDITION IS PRESENTED ONCE, NOT PER REFUSED START.
+    ///
+    /// Classifier unavailability never clears on its own (a missing model does not reappear
+    /// mid-session), and the segmenter replays it to every newly wired observer — the engine
+    /// re-wires its callbacks on every `start()`. So every refused start would re-present the
+    /// same condition and replay the error earcon: two start attempts, two error tones for one
+    /// unchanged problem. The published state must still update each time; only the audible
+    /// presentation is once-per-condition.
+    func testAPersistentClassifierUnavailableFaultIsAudiblyPresentedOnce() {
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: FakeAudioSessionControlling(),
+            capture: RecordingCapture()
+        )
+        guard let service else { XCTFail("service could not be built")
+return }
+        var earcons: [EarconId] = []
+        service.earconObserverForTesting = { earcons.append($0) }
+        let fault = VoiceAsrEngine.SegmentationFault(
+            kind: .classifierUnavailable,
+            discardedSamples: 0,
+            elapsedMs: 0,
+            reason: "model missing"
+        )
+
+        service.presentSegmentationFault(fault)
+        service.presentSegmentationFault(fault)
+
+        XCTAssertEqual(service.segmentationFault?.kind, .classifierUnavailable, "state must still reflect the condition on every replay")
+        XCTAssertEqual(earcons, [.error], "the same persistent condition must not tone the user again on each refused start")
+    }
+
+    /// A NON-persistent fault (a real stuck-active ceiling event) is a NEW event each time and
+    /// keeps speaking on every presentation — the once-only rule is specific to the replayed
+    /// persistent condition, not a blanket earcon suppressor.
+    func testARepeatedNonPersistentFaultStillSpeaksEachTime() {
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: FakeAudioSessionControlling(),
+            capture: RecordingCapture()
+        )
+        guard let service else { XCTFail("service could not be built")
+return }
+        var earcons: [EarconId] = []
+        service.earconObserverForTesting = { earcons.append($0) }
+        let fault = VoiceAsrEngine.SegmentationFault(
+            kind: .durationLimitReached,
+            discardedSamples: 16_000,
+            elapsedMs: 240_000,
+            reason: nil
+        )
+
+        service.presentSegmentationFault(fault)
+        service.presentSegmentationFault(fault)
+
+        XCTAssertEqual(earcons, [.error, .error], "distinct fault events must each be audible")
     }
 }
 
