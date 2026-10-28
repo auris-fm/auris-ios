@@ -441,9 +441,27 @@ public extension ServerSettings {
     private static var committedAuthentication: UUID?
     private static let incompleteCredentialWriteKey = "AurisIncompleteCredentialWrite"
 
-    static func refreshPasswordSessionIfNeeded() {
-        guard (try? refreshToken()) == nil, syncingEmail() != nil, syncingPassword() != nil else { return }
-        _ = TokenHelper.shared.acquireToken(onlyIfMissingRefresh: true)
+    private static var passwordSessionMigration: (generation: Int, retryAfter: Date, inFlight: Bool)?
+
+    /// Shared across credential-provider instances. The first attempt remains synchronous;
+    /// failed or concurrent lookups cannot repeat that network wait for the same session.
+    static func refreshPasswordSessionIfNeeded(now: Date = Date(), acquire: (() -> Void)? = nil) {
+        let generation: Int? = authenticationLock.withLock {
+            guard (try? refreshToken()) == nil, syncingEmail() != nil, syncingPassword() != nil else { return nil }
+            if let previous = passwordSessionMigration, previous.generation == authenticationGeneration,
+               previous.inFlight || now < previous.retryAfter { return nil }
+            passwordSessionMigration = (authenticationGeneration, now.addingTimeInterval(60), true)
+            return authenticationGeneration
+        }
+        guard let generation else { return }
+        defer {
+            authenticationLock.withLock {
+                if passwordSessionMigration?.generation == generation { passwordSessionMigration?.inFlight = false }
+            }
+        }
+        // Main-state lookup and networking must never run under authenticationLock.
+        if let acquire { acquire() }
+        else { _ = TokenHelper.shared.acquireToken(onlyIfMissingRefresh: true) }
     }
 
     static func beginAuthentication(email: String? = nil, explicit: Bool = true) -> AuthenticationAttempt? {
@@ -473,12 +491,20 @@ public extension ServerSettings {
                                      write: ((String?, String) -> Bool)? = nil,
                                      defaults: UserDefaults = .standard) -> Bool {
         authenticationLock.withLock {
-            guard attempt.generation == authenticationGeneration,
-                  let access = response.token, !access.isEmpty,
-                  let email = response.email, !email.isEmpty,
-                  let uuid = response.uuid, !uuid.isEmpty,
+            guard attempt.generation == authenticationGeneration else {
+                FileLog.shared.addMessage("Authentication response rejected: superseded request")
+                return false
+            }
+            // A renewal may omit unchanged identity fields. Only its captured verified account
+            // supplies those fields; an explicit login still has to return its full identity.
+            guard let access = response.token, !access.isEmpty,
+                  let email = response.email ?? (attempt.explicit ? nil : attempt.email), !email.isEmpty,
+                  let uuid = response.uuid ?? (attempt.explicit ? nil : attempt.uuid), !uuid.isEmpty,
                   attempt.email == nil || attempt.email?.lowercased() == email.lowercased(),
-                  attempt.uuid == nil || attempt.uuid == uuid else { return false }
+                  attempt.uuid == nil || attempt.uuid == uuid else {
+                FileLog.shared.addMessage("Authentication response rejected: missing credentials or account mismatch")
+                return false
+            }
             let refresh = response.refreshToken.flatMap { $0.isEmpty ? nil : $0 }
             guard !attempt.explicit || refresh != nil else { return false }
             let keys = [ServerConstants.Values.refreshTokenKey, ServerConstants.Values.syncingV2TokenKey]
@@ -509,6 +535,13 @@ public extension ServerSettings {
         }
     }
 
+    /// Nonblocking observation for a notification reentry control; never waits on a failed lock.
+    internal static func authenticationLockAvailableForTesting() -> Bool {
+        guard authenticationLock.try() else { return false }
+        authenticationLock.unlock()
+        return true
+    }
+
     static func committedAuthenticationID() -> UUID? {
         authenticationLock.withLock { committedAuthentication }
     }
@@ -533,13 +566,15 @@ public extension ServerSettings {
     }
 
     /// Signout and account-field clears share the same lock as commits.
-    static func invalidateAuthentication(defaults: UserDefaults = .standard, _ action: () -> Void) {
+    @discardableResult
+    static func invalidateAuthentication(defaults: UserDefaults = .standard, _ action: () -> Void) -> AuthenticationAttempt {
         authenticationLock.withLock {
             authenticationGeneration += 1
             explicitAuthentication = nil
             committedAuthentication = nil
             defaults.set(true, forKey: incompleteCredentialWriteKey)
             action()
+            return AuthenticationAttempt(generation: authenticationGeneration, email: nil, uuid: nil, explicit: false)
         }
     }
 

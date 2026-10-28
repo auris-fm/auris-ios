@@ -24,7 +24,7 @@ class AuthenticationHelper {
 
     static func validateLogin(username: String, password: String, scope: AuthenticationScope = .default) async throws -> AuthenticationResponse {
         let response = try await ApiServerHandler.shared.validateLogin(username: username, password: password, scope: scope.rawValue)
-        handleSuccessfulSignIn(response)
+        await handleSuccessfulSignIn(response)
 
         return response
     }
@@ -37,7 +37,7 @@ class AuthenticationHelper {
         var response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, scope: scope)
         guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
         response.localAttempt = attempt
-        handleSuccessfulSignIn(response)
+        await handleSuccessfulSignIn(response)
 
         return response
     }
@@ -48,13 +48,14 @@ class AuthenticationHelper {
         var response = try await ApiServerHandler.shared.validateLogin(identityToken: identityToken, provider: provider)
         guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
         response.localAttempt = attempt
-        handleSuccessfulSignIn(response)
+        await handleSuccessfulSignIn(response)
 
         return response
     }
 
     // MARK: Common
 
+    @MainActor
     private static func handleSuccessfulSignIn(_ response: AuthenticationResponse) {
         guard let attempt = response.localAttempt else { return }
         ServerSettings.withCommittedAuthentication(attempt) {
@@ -90,7 +91,7 @@ class AuthenticationHelper {
         var response = try await ApiServerHandler.shared.deviceGetToken(deviceCode: deviceCode, scope: scope)
         guard ServerSettings.commitAuthentication(response, for: attempt) else { throw APIError.UNKNOWN }
         response.localAttempt = attempt
-        handleSuccessfulSignIn(response)
+        await handleSuccessfulSignIn(response)
 
         return response
     }

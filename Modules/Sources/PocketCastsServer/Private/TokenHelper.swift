@@ -124,7 +124,11 @@ class TokenHelper {
                 // if the user doesn't have an email and password or SSO token, they aren't going to be able to acquire a sync token
                 switch error as? APIError {
                 case APIError.TOKEN_DEAUTH?, APIError.PERMISSION_DENIED?, APIError.INCORRECT_PASSWORD?, APIError.EMAIL_NOT_FOUND?:
-                    ServerSettings.ifAuthenticationIsCurrent(attempt) { tokenCleanUp() }
+                    let cleanup = { ServerSettings.ifAuthenticationIsCurrent(attempt) { self.tokenCleanUp() } }
+                    // Never wait on main while owning renewalLock. Revalidate when the queued
+                    // effect runs so a newer login cannot be signed out by this old failure.
+                    if Thread.isMainThread { cleanup() }
+                    else { DispatchQueue.main.async(execute: cleanup) }
                 default:
                     // Do nothing so the user is not disrupted in the case of non-auth errors
                     FileLog.shared.addMessage("TokenHelper: Unable to acquire token but avoided logout due to error: \(String(describing: error))")

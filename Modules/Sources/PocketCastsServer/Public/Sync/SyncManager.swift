@@ -31,6 +31,15 @@ public class SyncManager {
     /// Signs the user out
     /// - Parameter userInitiated: Whether the user initiated the sign out or not
     public class func signout(userInitiated: Bool = false) {
+        guard Thread.isMainThread else {
+            // Invalidate the intent immediately, then fence delayed effects so they cannot
+            // clear a newer login. No auth lock is held while handing work to main.
+            let invalidation = ServerSettings.invalidateAuthentication {}
+            DispatchQueue.main.async {
+                ServerSettings.ifAuthenticationIsCurrent(invalidation) { performSignout(userInitiated: userInitiated) }
+            }
+            return
+        }
         ServerSettings.invalidateAuthentication { performSignout(userInitiated: userInitiated) }
     }
 

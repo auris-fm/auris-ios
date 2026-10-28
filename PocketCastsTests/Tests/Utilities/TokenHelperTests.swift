@@ -24,6 +24,7 @@ class TokenHelperTests: XCTestCase {
         try super.setUpWithError()
         previousUserID = ServerSettings.userId
         previousIncompleteWrite = UserDefaults.standard.bool(forKey: "AurisIncompleteCredentialWrite")
+        ServerSettings.invalidateAuthentication {}
         for key in credentialKeys {
             previous[key] = try KeychainHelper.string(for: key)
             XCTAssertTrue(KeychainHelper.removeKey(key))
@@ -40,6 +41,91 @@ class TokenHelperTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+
+    @MainActor
+    func testBackgroundSignoutImmediatelyRejectsLateLoginAndSkipsEffectsAfterNewLogin() async throws {
+        let pending = try XCTUnwrap(ServerSettings.beginAuthentication(email: "old@example.com"))
+        let returned = DispatchSemaphore(value: 0)
+        var notifications = 0
+        let observer = NotificationCenter.default.addObserver(forName: .serverUserWillBeSignedOut, object: nil, queue: nil) { _ in
+            notifications += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        DispatchQueue.global().async {
+            SyncManager.signout()
+            returned.signal()
+        }
+        let completed = returned.wait(timeout: .now() + 1)
+        XCTAssertEqual(completed, .success)
+        guard completed == .success else { return }
+        XCTAssertFalse(ServerSettings.commitAuthentication(
+            AuthenticationResponse(token: "late-access", uuid: "old-account", email: "old@example.com", refreshToken: "late-refresh"),
+            for: pending, password: "old-password"
+        ), "signout intent invalidates a pending login before its queued effects run")
+        let newer = try XCTUnwrap(ServerSettings.beginAuthentication(email: "new@example.com"))
+        XCTAssertTrue(ServerSettings.commitAuthentication(
+            AuthenticationResponse(token: "new-access", uuid: "new-account", email: "new@example.com", refreshToken: "new-refresh"),
+            for: newer, password: "new-password"
+        ))
+        let drained = expectation(description: "queued signout had its chance")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(notifications, 0, "a superseded signout must not notify or clear the newer session")
+        XCTAssertEqual(ServerSettings.syncingEmail(), "new@example.com")
+        XCTAssertEqual(try ServerSettings.refreshToken(), "new-refresh")
+    }
+
+    @MainActor
+    func testBackgroundSignoutAllowsNotificationObserverToReenterAuthentication() async {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        let notified = expectation(description: "signout observer ran without a background auth lock")
+        let observer = NotificationCenter.default.addObserver(forName: .serverUserWillBeSignedOut, object: nil, queue: nil) { _ in
+            XCTAssertTrue(Thread.isMainThread)
+            let canReenter = ServerSettings.authenticationLockAvailableForTesting()
+            XCTAssertTrue(canReenter, "notification must not synchronously wait on main while holding the auth lock")
+            // Keep the RED variant bounded rather than blocking main on the disputed lock.
+            if canReenter { _ = ServerSettings.syncingEmail() }
+            notified.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        DispatchQueue.global().async { SyncManager.signout() }
+        await fulfillment(of: [notified], timeout: 2)
+        XCTAssertFalse(SyncManager.isUserLoggedIn())
+    }
+
+    @MainActor
+    func testBackgroundRejectedRenewalReturnsBeforeMainCleanupAndCannotClearNewLogin() async throws {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.saveSyncingPassword("rejected-password")
+        let returned = DispatchSemaphore(value: 0)
+        let helper = TokenHelper(urlConnection: URLConnection { request in
+            let data = try JSONSerialization.data(withJSONObject: ["errorMessageId": APIError.INCORRECT_PASSWORD.rawValue])
+            return (data, HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil))
+        }, backgroundState: { false })
+        DispatchQueue.global().async {
+            _ = helper.acquireToken()
+            returned.signal()
+        }
+        let completed = returned.wait(timeout: .now() + 1)
+        XCTAssertEqual(completed, .success, "renewal must release its lock without waiting for main effects")
+        guard completed == .success else { return }
+
+        let migration = TokenHelper(urlConnection: URLConnection { request in
+            (nil, HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil))
+        }, backgroundState: { true })
+        XCTAssertNil(migration.acquireToken(onlyIfMissingRefresh: true), "main migration can acquire the released renewal lock")
+
+        let login = try XCTUnwrap(ServerSettings.beginAuthentication(email: "new@example.com"))
+        XCTAssertTrue(ServerSettings.commitAuthentication(
+            AuthenticationResponse(token: "new-access", uuid: "new-account", email: "new@example.com", refreshToken: "new-refresh"),
+            for: login, password: "new-password"
+        ))
+        let mainEffectsDrained = expectation(description: "queued cleanup had its chance")
+        DispatchQueue.main.async { mainEffectsDrained.fulfill() }
+        await fulfillment(of: [mainEffectsDrained], timeout: 2)
+        XCTAssertEqual(ServerSettings.syncingEmail(), "new@example.com")
+        XCTAssertEqual(try ServerSettings.refreshToken(), "new-refresh")
+    }
 
     func testFirstLaunchClearAllowsPlainAccountRegistration() {
         SyncManager.clearTokensFromKeyChain()
@@ -111,6 +197,72 @@ class TokenHelperTests: XCTestCase {
         release.signal()
         wait(for: [finished], timeout: 3)
         XCTAssertFalse(stateLock.withLock { queryTimedOut }, "renewal held its lock while waiting on main")
+    }
+
+    func testPasswordMigrationBackoffIsSharedAndResetsForANewSession() {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.saveSyncingPassword("legacy-password")
+        let now = Date()
+        var attempts = 0
+        let failedAttempt = { attempts += 1 }
+        ServerSettings.refreshPasswordSessionIfNeeded(now: now, acquire: failedAttempt)
+        ServerSettings.refreshPasswordSessionIfNeeded(now: now.addingTimeInterval(1), acquire: failedAttempt)
+        XCTAssertEqual(attempts, 1, "a failed migration must not repeat at every credential lookup")
+        ServerSettings.refreshPasswordSessionIfNeeded(now: now.addingTimeInterval(61), acquire: failedAttempt)
+        XCTAssertEqual(attempts, 2, "a transient failure becomes eligible after the retry interval")
+
+        SyncManager.clearTokensFromKeyChain()
+        ServerSettings.setSyncingEmail(email: "new@example.com")
+        ServerSettings.saveSyncingPassword("new-password")
+        ServerSettings.refreshPasswordSessionIfNeeded(now: now.addingTimeInterval(62), acquire: failedAttempt)
+        XCTAssertEqual(attempts, 3, "a different session does not inherit the prior session's backoff")
+    }
+
+    func testConcurrentPasswordMigrationIsSuppressedEvenPastTheRetryDeadline() {
+        ServerSettings.setSyncingEmail(email: "test@test.com")
+        ServerSettings.saveSyncingPassword("legacy-password")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = expectation(description: "first migration returned")
+        let now = Date()
+        let stateLock = NSLock()
+        var released = false
+        DispatchQueue.global().async {
+            ServerSettings.refreshPasswordSessionIfNeeded(now: now) {
+                entered.signal()
+                let succeeded = release.wait(timeout: .now() + 2) == .success
+                stateLock.withLock { released = succeeded }
+            }
+            finished.fulfill()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+        ServerSettings.refreshPasswordSessionIfNeeded(now: now.addingTimeInterval(120)) {
+            XCTFail("an in-flight migration must suppress another provider's attempt")
+        }
+        release.signal()
+        wait(for: [finished], timeout: 3)
+        XCTAssertTrue(stateLock.withLock { released }, "test release must beat the bounded cleanup timeout")
+    }
+
+    func testRenewalCanOmitAccountFieldsButCannotChangeTheCapturedAccount() throws {
+        for (email, uuid, accepted) in [(nil, nil, true), ("other@example.com", nil, false), (nil, "other-account", false)] as [(String?, String?, Bool)] {
+            ServerSettings.setSyncingEmail(email: "test@test.com")
+            ServerSettings.userId = "uuid-test"
+            ServerSettings.setRefreshToken("refresh-existing")
+            ServerSettings.syncingV2Token = "access-existing"
+            let helper = TokenHelper(urlConnection: URLConnection { request in
+                var response = Api_TokenLoginResponse()
+                response.accessToken = "access-renewed"
+                if let email { response.email = email }
+                if let uuid { response.uuid = uuid }
+                return (try response.serializedData(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil))
+            }, backgroundState: { true })
+            XCTAssertEqual(helper.acquireToken(), accepted ? "access-renewed" : nil)
+            XCTAssertEqual(ServerSettings.syncingV2Token, accepted ? "access-renewed" : "access-existing")
+            XCTAssertEqual(try ServerSettings.refreshToken(), "refresh-existing")
+            XCTAssertEqual(ServerSettings.syncingEmail(), "test@test.com")
+            XCTAssertEqual(ServerSettings.userId, "uuid-test")
+        }
     }
 
     func testSSORenewalUsesRefreshGrantAndPreservesAnOmittedRefreshToken() throws {
