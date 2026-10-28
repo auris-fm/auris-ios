@@ -139,6 +139,14 @@ final class VoiceSharingEnrollmentStore {
         publish(snapshot.membership.plan.rawValue, snapshot.effectiveEnrolled ? "true" : "false")
     }
 
+    /// Account-facing display data is authoritative only for the lifecycle that accepted it.
+    var currentAuthoritativeState: State? {
+        lock.lock(); defer { lock.unlock() }
+        guard state.hasAuthoritativeProjection, let lifecycle = sessionIdentityProvider(),
+              lifecycle == authoritativeLifecycle else { return nil }
+        return state
+    }
+
     // MARK: - Observing
 
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// The Voice Sharing settings surface, BUILT DISABLED (round 69).
 ///
@@ -539,4 +540,260 @@ final class VoiceSharingSettingsModel {
         return RecoveryGuidance(reason: .noActiveLease,
                                 action: L10n.voiceSharingRecoveryPaused)
     }
+}
+
+/// Account operations for the sharing screen. Local consent and server acknowledgement stay separate.
+@MainActor
+final class VoiceSharingAccountModel: ObservableObject {
+    enum MembershipStatus: Equatable {
+        case idle, loading, disclosureUnavailable, confirmationRequired, unavailable, conflict, unauthorized
+        case refused(VoiceSharingMutationOutcome.RefusalReason)
+        case enrolled, withdrawnServerConfirmed, withdrawalUnconfirmed
+    }
+    enum DeletionStatus: Equatable {
+        case idle, sending, unavailable, unauthorized
+        case refused(VoiceSharingMutationOutcome.RefusalReason)
+        case pending(String)
+    }
+    @Published private(set) var membershipStatus: MembershipStatus = .idle
+    @Published private(set) var deletionStatus: DeletionStatus = .idle
+    @Published private(set) var localCleanup: VoiceSharingSettingsModel.DeleteResult?
+    @Published private(set) var cleanupAttempted = false
+    var localCleanupUnavailable: Bool { cleanupAttempted && localCleanup == nil }
+    @Published private(set) var membership: VoiceSharingMembership?
+    @Published private(set) var locallyOptedIn: Bool?
+    @Published private(set) var refreshUnavailable = false
+    @Published private(set) var busy = false
+    var enrollmentAvailable: Bool { disclosureVersion != nil }
+
+    private let store: VoiceSharingEnrollmentStore
+    private let client: VoiceSharingAccountClient
+    private let disclosureVersion: String?
+    private let session: () -> String?
+    private let purgeLocal: (() -> VoiceSharingSettingsModel.DeleteResult)?
+    private var observer: UUID?
+    private var account: String?
+    private var serial = 0
+    private var stamp: Stamp?
+    private var mutation: VoiceSharingAccountClient.MutationOperation?
+    private var deletion: VoiceSharingAccountClient.DeletionOperation?
+    private var withdrawing = false
+    private struct Stamp: Equatable {
+        let serial: Int
+        let token: VoiceSharingEnrollmentStore.ProjectionToken
+    }
+
+    init(store: VoiceSharingEnrollmentStore = .shared,
+         client: VoiceSharingAccountClient,
+         disclosureVersion: String? = nil,
+         session: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+         purgeLocal: (() -> VoiceSharingSettingsModel.DeleteResult)? = nil) {
+        self.store = store
+        self.client = client
+        self.disclosureVersion = disclosureVersion.flatMap { $0.isEmpty ? nil : $0 }
+        self.session = session
+        self.purgeLocal = purgeLocal
+        account = session()
+        observer = store.addObserver { [weak self] _ in
+            Task { @MainActor [weak self] in self?.storeChanged() }
+        }
+        updateMembership()
+    }
+
+    private func updateMembership() {
+        let state = store.currentAuthoritativeState
+        membership = state?.membership
+        locallyOptedIn = state?.localOptIn
+    }
+
+    private func storeChanged() {
+        if account != session() {
+            account = session()
+            serial += 1
+            stamp = nil
+            mutation = nil
+            deletion = nil
+            withdrawing = false
+            busy = false
+            localCleanup = nil
+            cleanupAttempted = false
+            membershipStatus = .idle
+            deletionStatus = .idle
+            refreshUnavailable = false
+        } else if let stamp, store.projectionToken() != stamp.token {
+            serial += 1
+            self.stamp = nil
+            mutation = nil
+            busy = false
+            membershipStatus = .idle
+        }
+        updateMembership()
+    }
+
+    private func begin() -> Stamp? {
+        storeChanged()
+        serial += 1
+        stamp = nil
+        busy = false
+        guard let token = store.projectionToken(), token.lifecycleGeneration == session() else { return nil }
+        let next = Stamp(serial: serial, token: token)
+        stamp = next
+        busy = true
+        return next
+    }
+
+    private func current(_ sent: Stamp) -> Bool {
+        sent == stamp && sent.token == store.projectionToken() && sent.token.lifecycleGeneration == session()
+    }
+
+    func refresh() async {
+        guard let sent = begin() else { membershipStatus = .unavailable; return }
+        membershipStatus = .loading
+        let result = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return }
+        busy = false
+        membershipStatus = result == .success ? .idle : .unavailable
+    }
+
+    private enum RefreshResult { case success, failure, stale }
+    private func refreshProjection(under sent: Stamp) async -> RefreshResult {
+        guard current(sent) else { return .stale }
+        guard let result = await client.fetchProjection() else {
+            guard current(sent) else { return .stale }
+            refreshUnavailable = true
+            return .failure
+        }
+        guard current(sent), result.issuedUnder == sent.token,
+              store.apply(authoritative: result.membership, readUnder: result.issuedUnder) else { return .stale }
+        refreshUnavailable = false
+        updateMembership()
+        return .success
+    }
+
+    func enroll(disclosureConfirmed: Bool) async {
+        storeChanged()
+        guard disclosureConfirmed else { membershipStatus = .confirmationRequired; return }
+        guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
+        guard !busy, let revision = store.currentAuthoritativeState?.membership.membershipRevision else { membershipStatus = .unavailable; return }
+        store.setLocalOptIn(true)
+        guard let sent = begin(), let operation = client.beginEnrollment(
+            acceptedDisclosureVersion: disclosureVersion, expectedMembershipRevision: revision) else {
+            membershipStatus = .unavailable
+            busy = false
+            return
+        }
+        withdrawing = false
+        mutation = operation
+        await performMutation(operation, under: sent)
+    }
+
+    /// Never blocked by an enrollment/fetch in flight. Capture server preconditions BEFORE local stop.
+    func withdraw() async {
+        storeChanged()
+        let original = store.currentAuthoritativeState?.membership
+        let revision = original?.membershipRevision
+        let epoch = original?.enrollmentEpoch
+        serial += 1
+        stamp = nil
+        mutation = nil
+        withdrawing = true
+        _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
+        cleanupAttempted = true
+        localCleanup = purgeLocal?()
+        updateMembership()
+        membershipStatus = .withdrawalUnconfirmed
+        guard let sent = begin() else { busy = false; return }
+        guard let revision, let operation = client.beginWithdrawal(
+            enrollmentEpoch: epoch, expectedMembershipRevision: revision) else { busy = false; return }
+        mutation = operation
+        await performMutation(operation, under: sent)
+    }
+
+    func retryMembership() async {
+        storeChanged() // Retire stale operations before capturing an immutable retry.
+        guard !busy else { return }
+        if let operation = mutation {
+            guard operation.issuedUnder == store.projectionToken() else {
+                mutation = nil
+                membershipStatus = .unavailable
+                return
+            }
+            guard let sent = begin() else { return }
+            guard operation.issuedUnder == sent.token else {
+                if stamp == sent { mutation = nil; busy = false; membershipStatus = .unavailable }
+                return
+            }
+            await performMutation(operation, under: sent)
+        } else if withdrawing {
+            guard let sent = begin() else { return }
+            let refreshed = await refreshProjection(under: sent)
+            guard current(sent) else { storeChanged(); return }
+            busy = false
+            guard refreshed == .success else { membershipStatus = .withdrawalUnconfirmed; return }
+            await withdraw()
+        }
+    }
+
+    func retryLocalCleanup() { cleanupAttempted = true; localCleanup = purgeLocal?() }
+
+    private func performMutation(_ operation: VoiceSharingAccountClient.MutationOperation, under sent: Stamp) async {
+        let result = await client.perform(operation)
+        guard current(sent) else { storeChanged(); return }
+        switch result {
+        case .applied(let projection, let issuedUnder):
+            guard issuedUnder == sent.token, store.apply(authoritative: projection, readUnder: issuedUnder) else {
+                busy = false; membershipStatus = .unavailable; return
+            }
+            mutation = nil
+            if withdrawing {
+                membershipStatus = projection.voiceSharingEnrolled ? .withdrawalUnconfirmed : .withdrawnServerConfirmed
+            } else {
+                membershipStatus = store.currentEffectiveEnrolled ? .enrolled : .unavailable
+            }
+        case .conflict(let projection, let issuedUnder):
+            guard issuedUnder == sent.token else { busy = false; membershipStatus = .unavailable; return }
+            store.applyConflict(current: projection, readUnder: issuedUnder)
+            mutation = nil // Never replay conflicted opt-in against a newer revision.
+            membershipStatus = .conflict
+        case .unauthorized: membershipStatus = .unauthorized
+        case .refused(let reason): mutation = nil; membershipStatus = .refused(reason)
+        case .unavailableBackend: membershipStatus = withdrawing ? .withdrawalUnconfirmed : .unavailable
+        case .refusedStaleSession:
+            storeChanged()
+            if stamp == sent { busy = false; membershipStatus = .unavailable }
+            return
+        }
+        updateMembership()
+        _ = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return }
+        busy = false
+    }
+
+    func deleteAcceptedData(confirmed: Bool) async {
+        storeChanged()
+        guard confirmed, deletionStatus != .sending, let operation = client.beginDeletion() else { return }
+        deletion = operation
+        await performDeletion(operation)
+    }
+
+    func retryDeletion() async {
+        storeChanged()
+        guard deletionStatus != .sending, let operation = deletion else { return }
+        await performDeletion(operation)
+    }
+
+    private func performDeletion(_ operation: VoiceSharingAccountClient.DeletionOperation) async {
+        guard session() == operation.originatingGeneration else { return }
+        deletionStatus = .sending
+        let result = await client.performDeletion(operation)
+        guard session() == operation.originatingGeneration, deletion?.requestID == operation.requestID else { storeChanged(); return }
+        switch result {
+        case .pending(let id): deletion = nil; deletionStatus = .pending(id)
+        case .unauthorized: deletionStatus = .unauthorized
+        case .refused(let reason): deletion = nil; deletionStatus = .refused(reason)
+        case .unavailableBackend: deletionStatus = .unavailable
+        }
+    }
+
+    deinit { if let observer { store.removeObserver(observer) } }
 }

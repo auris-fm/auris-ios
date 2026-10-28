@@ -1270,3 +1270,258 @@ func requestBodyDictionary(of request: URLRequest) -> [String: Any]? {
     guard !collected.isEmpty else { return nil }
     return collected.jsonDictionary
 }
+
+@MainActor
+private final class SharingAccountModelHarness {
+    let suite = "account-model-\(UUID().uuidString)"
+    var identity: String? = "session-A"
+    let defaults: UserDefaults
+    let session: URLSession
+    let store: VoiceSharingEnrollmentStore
+    let client: VoiceSharingAccountClient
+    private let identityBox: SharingAccountIdentityBox
+
+    init(tokenProvider: CloudTokenProviding = AccountStubTokenProvider()) {
+        VoiceSharingStubProtocol.reset()
+        defaults = UserDefaults(suiteName: suite)!
+        let box = SharingAccountIdentityBox()
+        identityBox = box
+        store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { box.value ?? "out" }, sessionIdentityProvider: { box.value })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VoiceSharingStubProtocol.self]
+        session = URLSession(configuration: configuration)
+        client = VoiceSharingAccountClient(baseURLProvider: { "https://api.example.test" }, tokenProvider: tokenProvider,
+            session: session, sessionIdentity: { box.value }, membershipStore: store)
+    }
+    func rotateSessionWithoutStoreTransition(_ value: String?) { identity = value; identityBox.value = value }
+    func switchAccount(_ value: String?) { rotateSessionWithoutStoreTransition(value); store.transitionToAccount(signedIn: value != nil) }
+    func seed(enrolled: Bool = false) {
+        store.setLocalOptIn(enrolled)
+        let value = VoiceSharingMembership(membershipRevision: "r0", plan: .pro, voiceSharingEnrolled: enrolled,
+            enrollmentEpoch: enrolled ? "old-epoch" : nil, acceptedDisclosureVersion: enrolled ? "synthetic" : nil,
+            withdrawalState: enrolled ? .active : .notEnrolled)
+        _ = store.apply(authoritative: value, readUnder: store.projectionToken()!)
+    }
+    func model(version: String? = "synthetic", purge: (() -> VoiceSharingSettingsModel.DeleteResult)? = nil) -> VoiceSharingAccountModel {
+        VoiceSharingAccountModel(store: store, client: client, disclosureVersion: version,
+            session: { [identityBox] in identityBox.value }, purgeLocal: purge)
+    }
+    func close() { session.invalidateAndCancel(); defaults.removePersistentDomain(forName: suite); VoiceSharingStubProtocol.reset() }
+}
+private final class SharingAccountIdentityBox { var value: String? = "session-A" }
+private final class SharingAccountTokenClosure: CloudTokenProviding {
+    let body: () async -> String?
+    init(_ body: @escaping () async -> String?) { self.body = body }
+    func token() async -> String? { await body() }
+    func handleUnauthorized(rejectedToken: String?) async {}
+}
+private actor SharingAccountHold {
+    var opened = false
+    var continuation: CheckedContinuation<String?, Never>?
+    func wait() async -> String? { if opened { return "synthetic" }; return await withCheckedContinuation { continuation = $0 } }
+    func open() { opened = true; continuation?.resume(returning: "synthetic"); continuation = nil }
+}
+
+final class VoiceSharingAccountModelTests: XCTestCase {
+    @MainActor
+    func test_missingOrDeclinedDisclosureNeverEnrollsButWithdrawalAndDeletionRemainAvailable() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        let model = harness.model(version: nil)
+        await model.enroll(disclosureConfirmed: false)
+        XCTAssertEqual(model.membershipStatus, .confirmationRequired)
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .disclosureUnavailable)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        await model.withdraw()
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertTrue(model.localCleanupUnavailable, "missing retained queue capability is not a purge-success claim")
+        model.retryLocalCleanup()
+        XCTAssertTrue(model.localCleanupUnavailable)
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 202, body: deletionReceipt("pending-id"))
+        await model.deleteAcceptedData(confirmed: true)
+        XCTAssertEqual(model.deletionStatus, .pending("pending-id"))
+        XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
+    }
+
+    @MainActor
+    func test_busyEnrollmentCannotDelayLocalWithdrawalOrPurgeAndItsLateReplyCannotRestoreUI() async throws {
+        let entered = expectation(description: "enrollment credential held")
+        let hold = SharingAccountHold()
+        var reads = 0
+        let provider = SharingAccountTokenClosure {
+            reads += 1
+            if reads == 1 { entered.fulfill(); return await hold.wait() }
+            return "synthetic"
+        }
+        let harness = SharingAccountModelHarness(tokenProvider: provider)
+        defer { harness.close() }
+        harness.seed()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let settings = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { harness.store.currentEnrollmentAnswer }, isLocallyOptedIn: { harness.store.currentState.localOptIn })
+        let model = harness.model(purge: { settings.deletePendingRecordingsOnThisDevice() })
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 200, body: projection("old-enroll", enrolled: true, epoch: "late", withdrawal: "active"))
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        let enrollment = Task { await model.enroll(disclosureConfirmed: true) }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(model.busy)
+        VoiceSharingStubProtocol.onRequest = {
+            XCTAssertFalse(harness.store.currentEffectiveEnrolled, "withdrawal stops locally before HTTP")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(entry.name).path), "actual pending bytes are purged before HTTP")
+        }
+        await model.withdraw()
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertNotNil(model.localCleanup)
+        await hold.open()
+        await enrollment.value
+        let withdrawal = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.url?.path == VoiceSharingAccountClient.withdrawalPath })
+        let body = try XCTUnwrap(requestBodyDictionary(of: withdrawal))
+        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
+        XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
+    }
+
+    @MainActor
+    func test_unknownRevisionStillStopsLocallyAndDeletionRetryKeepsIdentity() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.store.setLocalOptIn(true)
+        let model = harness.model(version: nil)
+        await model.withdraw()
+        XCTAssertFalse(harness.store.currentState.localOptIn)
+        XCTAssertEqual(model.membershipStatus, .withdrawalUnconfirmed)
+        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "never invent an authoritative revision")
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 503, body: [:])
+        await model.deleteAcceptedData(confirmed: true)
+        XCTAssertEqual(model.deletionStatus, .unavailable)
+        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 202, body: deletionReceipt("same-cutoff"))
+        await model.retryDeletion()
+        XCTAssertEqual(model.deletionStatus, .pending("same-cutoff"))
+        let deletes = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(deletes.count, 2)
+        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.first)))
+        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.last)))
+        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
+        XCTAssertNotNil(first["request_id"])
+    }
+
+    @MainActor
+    func test_conflictedEnrollmentRequiresNewGestureAndUnavailableRetryKeepsBody() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 503, body: [:])
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .unavailable)
+        let currentProjection = projection("r-new", enrolled: false, epoch: nil, withdrawal: "not_enrolled")
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 409, body: currentProjection)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: currentProjection)
+        await model.retryMembership()
+        XCTAssertEqual(model.membershipStatus, .conflict)
+        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }
+        XCTAssertEqual(posts.count, 2)
+        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.first)))
+        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.last)))
+        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
+        XCTAssertNotNil(first["request_id"])
+        await model.retryMembership()
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, 2, "no automatic conflict replay")
+    }
+
+    @MainActor
+    func test_accountSwitchRetiresBusyStateRetryAndDelayedProjection() async {
+        let entered = expectation(description: "old account fetch held")
+        let hold = SharingAccountHold()
+        let harness = SharingAccountModelHarness(tokenProvider: SharingAccountTokenClosure { entered.fulfill(); return await hold.wait() })
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("old", enrolled: true, epoch: "old", withdrawal: "active"))
+        let fetch = Task { await model.refresh() }
+        await fulfillment(of: [entered], timeout: 3)
+        harness.switchAccount("session-B")
+        await hold.open()
+        await fetch.value
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.membership)
+        XCTAssertEqual(model.membershipStatus, .idle)
+        XCTAssertEqual(model.deletionStatus, .idle)
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+    }
+}
+
+extension VoiceSharingAccountModelTests {
+    @MainActor
+    func test_retryImmediatelyAfterStoreGenerationMovesRetiresOldOperationWithoutStickingBusy() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 503, body: [:])
+        await model.enroll(disclosureConfirmed: true)
+        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count
+        XCTAssertEqual(posts, 1)
+        harness.store.setLocalOptIn(false)
+        // No actor yield: Retry must reconcile before the observer's queued Task executes.
+        await model.retryMembership()
+        XCTAssertFalse(model.busy)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, posts)
+        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
+    }
+
+    @MainActor
+    func test_rawSessionRotationCannotRepublishOldMembershipAndFailedRefreshIsExplicit() async {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed(enrolled: true)
+        let model = harness.model()
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 503, body: [:])
+        await model.refresh()
+        XCTAssertEqual(model.membership?.plan, .pro, "retain last known display data")
+        XCTAssertTrue(model.refreshUnavailable)
+        XCTAssertEqual(model.membershipStatus, .unavailable)
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.withdrawalPath] = .init(status: 200, body: projection("confirmed", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        await model.withdraw()
+        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed, "failed follow-up GET cannot erase server acknowledgement")
+        XCTAssertTrue(model.refreshUnavailable)
+        harness.rotateSessionWithoutStoreTransition("session-B")
+        await model.refresh()
+        XCTAssertNil(model.membership, "A's accepted projection is not B's display authority")
+        XCTAssertNil(model.locallyOptedIn)
+        XCTAssertFalse(model.busy)
+    }
+}
+
+extension VoiceSharingAccountModelTests {
+    @MainActor
+    func test_confirmedEnrollmentUsesCurrentRevisionAndDisclosureWithoutChangingProPlan() async throws {
+        let harness = SharingAccountModelHarness()
+        defer { harness.close() }
+        harness.seed()
+        let model = harness.model()
+        let active = projection("accepted", enrolled: true, epoch: "new-epoch", withdrawal: "active")
+        VoiceSharingStubProtocol.replies["POST " + VoiceSharingAccountClient.enrollmentPath] = .init(status: 200, body: active)
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: active)
+        await model.enroll(disclosureConfirmed: true)
+        XCTAssertEqual(model.membershipStatus, .enrolled)
+        XCTAssertTrue(harness.store.currentEffectiveEnrolled)
+        XCTAssertEqual(model.membership?.plan, .pro)
+        let request = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.httpMethod == "POST" })
+        let body = try XCTUnwrap(requestBodyDictionary(of: request))
+        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
+        XCTAssertEqual(body["accepted_disclosure_version"] as? String, "synthetic")
+        XCTAssertNil(body["plan"], "enrollment cannot choose a paid plan")
+        XCTAssertFalse(model.busy)
+    }
+}
