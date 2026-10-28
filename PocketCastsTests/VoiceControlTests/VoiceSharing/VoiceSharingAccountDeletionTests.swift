@@ -1,6 +1,7 @@
 import XCTest
 @testable import PocketCastsServer
 import PocketCastsUtils
+import PocketCastsDataModel
 import Security
 @testable import podcasts
 
@@ -436,5 +437,162 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
                        "signout removed the recording rather than only excluding it from the ready set")
         let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertTrue(restarted.readyEntries().isEmpty, "the purge survives a fresh queue owner")
+    }
+}
+
+/// Runs the actual deletion response parser and the same callback installed by the confirmation UI.
+/// Transport and unrelated UI/analytics effects are stubbed; SignOutHelper itself remains real.
+final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
+    @MainActor
+    func testSuccessfulDeletionPurgesAfterThePresentingControllerDisappears() async throws {
+        try await exerciseDeletion(success: true, dropCompletion: false)
+    }
+
+    @MainActor
+    func testRejectedDeletionPreservesCredentialsLeaseAndRetainedAudio() async throws {
+        try await exerciseDeletion(success: false, dropCompletion: false)
+    }
+
+    @MainActor
+    func testSuccessfulServerReplyWithoutACompletionPreservesLocalState() async throws {
+        try await exerciseDeletion(success: true, dropCompletion: true)
+    }
+
+    @MainActor
+    private func exerciseDeletion(success: Bool, dropCompletion: Bool) async throws {
+        // Real SignOutHelper also cleans account data. This focused test host must have none to lose.
+        guard DataManager.sharedManager.allPaidPodcasts().isEmpty,
+              DataManager.sharedManager.allUserEpisodesUploaded().isEmpty else {
+            XCTFail("the separate test host must have no paid podcasts or uploaded cloud episodes")
+            return
+        }
+        let keys = [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey,
+                    ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
+                    ServerConstants.Values.appleAuthUserIDKey]
+        let savedCredentials = try keys.map { try KeychainHelper.string(for: $0) }
+        let domain = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        let savedDefaults = UserDefaults.standard.persistentDomain(forName: domain)
+        let savedDelegate = ServerConfig.shared.syncDelegate
+        ServerConfig.shared.syncDelegate = nil // No unrelated cloud-file delegate work in the test host.
+        defer {
+            ServerConfig.shared.syncDelegate = savedDelegate
+            for (key, value) in zip(keys, savedCredentials) {
+                if let value {
+                    XCTAssertTrue(KeychainHelper.save(string: value, key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
+                } else {
+                    KeychainHelper.removeKey(key)
+                }
+                XCTAssertEqual(try KeychainHelper.string(for: key), value)
+            }
+            if let savedDefaults { UserDefaults.standard.setPersistentDomain(savedDefaults, forName: domain) }
+            else { UserDefaults.standard.removePersistentDomain(forName: domain) }
+        }
+        for key in keys {
+            XCTAssertTrue(KeychainHelper.save(string: "deletion-control", key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
+        }
+        ServerSettings.userId = "account-a"
+        XCTAssertTrue(SyncManager.isUserLoggedIn())
+        let credentialsBefore = try keys.map { try KeychainHelper.string(for: $0) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("deletion-callback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "deletion-callback-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = try VoiceSharingDeletionFixture.enroll(
+            VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" }), defaults: defaults)
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        try VoiceSharingDeletionFixture.seed(in: queue)
+        let retained = try XCTUnwrap(queue.readyEntries().first)
+        let retainedDirectory = root.appendingPathComponent(retained.name, isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path))
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) }, enrollmentStore: store)
+        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        defer { subscription.unregisterNow() }
+        let removeObservers = coordinator.installIdentityInvalidation()
+        defer { removeObservers() }
+        let oldFetch = coordinator.policy.tokenForFetchStart()
+        XCTAssertNotNil(coordinator.policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: oldFetch))
+        XCTAssertTrue(coordinator.policy.permitsCollection)
+        XCTAssertTrue(store.currentEffectiveEnrolled)
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+
+        var controller: AccountViewController? = AccountViewController()
+        weak var weakController = controller
+        var recorded = 0
+        var navigated = 0
+        var rejected = 0
+        let callback = AccountViewController.accountDeletionCompletion(
+            controller: controller,
+            recordDeletion: {
+                XCTAssertTrue(Thread.isMainThread)
+                XCTAssertTrue(SyncManager.isUserLoggedIn(), "analytics still precedes real signout")
+                recorded += 1
+            },
+            showFailure: { presenter, message in
+                XCTAssertNil(presenter)
+                XCTAssertEqual(message, "deletion-control-message")
+                rejected += 1
+            },
+            navigate: { presenter in
+                XCTAssertTrue(Thread.isMainThread)
+                XCTAssertNil(presenter)
+                XCTAssertFalse(SyncManager.isUserLoggedIn(), "navigation follows real SignOutHelper")
+                navigated += 1
+            })
+        controller = nil
+        XCTAssertNil(weakController, "the callback must not retain its presenting controller")
+        var reply = Api_UserChangeResponse()
+        reply.success.value = success
+        reply.message = "deletion-control-message"
+        let transport = DeletionResponseTransport(data: try reply.serializedData())
+        let task = DeleteAccountTask(urlConnection: URLConnection(handler: transport))
+        task.completion = dropCompletion ? nil : callback
+        let parsed = expectation(description: "actual deletion task parsed the stubbed response")
+        DispatchQueue.global().async {
+            task.apiTokenAcquired(token: "deletion-control-token")
+            parsed.fulfill()
+        }
+        await fulfillment(of: [parsed], timeout: 2)
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(transport.requests.first?.url?.path, "/user/delete_account")
+        XCTAssertEqual(transport.requests.first?.httpMethod, "POST")
+        // Drain the existing main-queue success dispatch, without delaying or suppressing transport.
+        let drained = expectation(description: "deletion callback main effects drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+
+        let signsOut = success && !dropCompletion
+        XCTAssertEqual(recorded, signsOut ? 1 : 0)
+        XCTAssertEqual(navigated, signsOut ? 1 : 0)
+        XCTAssertEqual(rejected, !success && !dropCompletion ? 1 : 0)
+        XCTAssertEqual(SyncManager.isUserLoggedIn(), !signsOut)
+        XCTAssertEqual(store.currentEffectiveEnrolled, !signsOut)
+        XCTAssertEqual(coordinator.policy.permitsCollection, !signsOut)
+        XCTAssertEqual(FileManager.default.fileExists(atPath: retainedDirectory.path), !signsOut)
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(restarted.readyEntries().count, signsOut ? 0 : 1)
+        if signsOut {
+            for key in keys { XCTAssertNil(try KeychainHelper.string(for: key)) }
+            XCTAssertNil(ServerSettings.userId)
+            XCTAssertNil(coordinator.policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: oldFetch))
+        } else {
+            XCTAssertEqual(try keys.map { try KeychainHelper.string(for: $0) }, credentialsBefore)
+            XCTAssertEqual(ServerSettings.userId, "account-a")
+            XCTAssertNotNil(coordinator.policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: oldFetch))
+        }
+    }
+}
+
+private final class DeletionResponseTransport: RequestHandler {
+    let data: Data
+    private(set) var requests: [URLRequest] = []
+
+    init(data: Data) { self.data = data }
+
+    func send(request: URLRequest, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        requests.append(request)
+        completion(data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil), nil)
     }
 }
