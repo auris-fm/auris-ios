@@ -404,6 +404,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var timingLastQueued: CloudPlaybackTiming?
     private var timingActive: CloudPlaybackTiming?
     private var timingScheduledFrames = 0.0
+    var onNaturalCatchUpForTesting: ((Double) -> Void)?
     private(set) var timingSnapshotsForTesting = 0
     var timingQueuedBytesForTesting: Int {
         bufferLock.lock(); defer { bufferLock.unlock() }
@@ -959,6 +960,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     private func stopEngine(reason: String, terminal: Bool = false) {
+        // Either natural branch can observe catch-up: the early underrun check can win
+        // before the later render_caught_up check. Capture the actual position before either
+        // resets the node; production has no hook and performs no extra progress read.
+        if let onNaturalCatchUpForTesting,
+           reason == "underrun" || reason == "render_caught_up",
+           ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+           let node = playerNode, let position = renderPosition(of: node)?.renderedFrames,
+           position >= nodeIncarnationFrames {
+            onNaturalCatchUpForTesting(position)
+        }
         // Capture readable progress before resetting the node; no player lock is held here.
         if engine != nil { observeTiming("stop_requested", reason: reason) }
         if let engine {

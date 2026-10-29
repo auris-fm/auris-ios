@@ -186,21 +186,33 @@ final class RenderLifecycleControlTests: XCTestCase {
             handoff.drain()
             XCTAssertNotNil(reference.currentRenderAnchor, "the current clock's measured position must map")
 
-            player.armPhysicalStopGateForTesting(allow: 0)
+            let naturalStopEntered = DispatchSemaphore(value: 0)
+            let releaseNaturalStop = DispatchSemaphore(value: 0)
+            var measuredCatchUp: Double?
+            var holdReleased = false
+            player.onNaturalCatchUpForTesting = { position in
+                measuredCatchUp = position
+                naturalStopEntered.signal()
+                holdReleased = releaseNaturalStop.wait(timeout: .now() + 2) == .success
+            }
+            defer { releaseNaturalStop.signal() }
             var caughtUp = pending.renderedFrames
-            let renderDeadline = Date().addingTimeInterval(2)
+            let renderDeadline = Date().addingTimeInterval(1)
             while caughtUp < Double(scheduledSamples)
                 && Date() < renderDeadline {
                 XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
                 caughtUp = try XCTUnwrap(player.renderPosition(of: node)).renderedFrames
             }
-            XCTAssertGreaterThanOrEqual(caughtUp, Double(scheduledSamples))
-            player.openPhysicalStopGateForTesting()
+            XCTAssertEqual(naturalStopEntered.wait(timeout: .now() + 1), .success,
+                           "premise: the natural catch-up path actually entered the pre-reset hold")
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(measuredCatchUp), Double(scheduledSamples))
+            releaseNaturalStop.signal()
             let retirementDeadline = Date().addingTimeInterval(2)
             while player.producerIdentityForTesting == identity && Date() < retirementDeadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.005))
             }
             XCTAssertNotEqual(player.producerIdentityForTesting, identity)
+            XCTAssertTrue(holdReleased, "the measured natural stop must be released, not time out")
             reference.recordRenderPosition(nil)
             handoff.submitRenderPosition(pending, producer: identity)
             handoff.drain()
