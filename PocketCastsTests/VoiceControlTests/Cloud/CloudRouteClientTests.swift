@@ -533,6 +533,32 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
 
     /// The production path parses `connected` for the negotiated codec, plays
     /// binary frames as audio, and closes the socket when the turn ends.
+    func testTimingReceiptIsAttachedAtActualSocketReceiveAndErrorGetsTransportSummary() async throws {
+        let ended = expectation(description: "transport diagnostic summary")
+        let trace = CloudPlaybackTiming(turn: "synthetic", enabled: true, minimumInterval: 0,
+            clock: { 123_456 }, emit: { event in
+                if event.stage == "receiver_end" {
+                    XCTAssertEqual(event.receivedBytes, 4)
+                    XCTAssertTrue(event.summary)
+                    ended.fulfill()
+                }
+            })
+        let task = StubWebSocketTask([
+            .string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#),
+            .data(Data([1, 0, 2, 0]))
+        ]) // Exhaustion throws: no done and no player terminal exists.
+        let transport = CloudRouteClient(baseURL: "https://cloud.test", userId: "user_test",
+            tokenProvider: StubTokenProvider(token: "tok"), webSocketTaskFactory: { _ in task },
+            playbackTimingFactory: { _ in trace })
+        let events = await collect(transport.route(request: "synthetic", context: context(), turn: testTurnEnvelope()))
+        let frames = events.compactMap { if case let .audioFrame(frame) = $0 { return frame }; return nil }
+        let receipt = try XCTUnwrap(frames.first?.timingReceipt)
+        XCTAssertTrue(receipt.trace === trace)
+        XCTAssertEqual(receipt.receivedAt, 123_456)
+        XCTAssertEqual(frames.first?.data, Data([1, 0, 2, 0]))
+        await fulfillment(of: [ended], timeout: 2)
+    }
+
     func testConnectedThenAudioThenDoneOnProductionTransport() async {
         let connected = #"{"type":"connected","codec":"pcm_s16le@24k"}"#
         let done = #"{"type":"done","usage":{"input_tokens":3,"output_tokens":4}}"#

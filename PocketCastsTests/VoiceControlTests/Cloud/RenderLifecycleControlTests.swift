@@ -93,7 +93,33 @@ final class RenderLifecycleControlTests: XCTestCase {
     }
 
     @MainActor
+    func testTimingSeparatesEmptyQueueFromUnrenderedAudioAtCancel() throws {
+        let lock = NSLock()
+        var summary: CloudPlaybackTiming.Event?
+        let timing = CloudPlaybackTiming(turn: "synthetic", enabled: true, minimumInterval: 0, emit: { event in
+            if event.stage == "stop_requested" { lock.lock(); summary = event; lock.unlock() }
+        })
+        try withPendingOfflineAudio(timing: timing) { player, _, _, _, scheduledSamples in
+            let cancelled = player.cancel()
+            let deadline = Date().addingTimeInterval(2)
+            while player.confirmedStopEpochForTesting < cancelled && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            lock.lock()
+            let captured = summary
+            lock.unlock()
+            let event = try XCTUnwrap(captured)
+            XCTAssertEqual(event.state.queuedBytes, 0)
+            XCTAssertEqual(event.state.queuedFrames, 0)
+            XCTAssertEqual(event.state.scheduledFrames, Double(scheduledSamples))
+            XCTAssertLessThan(try XCTUnwrap(event.state.renderedFrames), Double(scheduledSamples))
+            XCTAssertEqual(event.state.reason, "cancel")
+        }
+    }
+
+    @MainActor
     private func withPendingOfflineAudio(
+        timing: CloudPlaybackTiming? = nil,
         _ body: (CloudAudioPlayer, AVAudioEngine, AVAudioPlayerNode, AVAudioPCMBuffer, Int) throws -> Void
     ) throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
@@ -104,7 +130,7 @@ final class RenderLifecycleControlTests: XCTestCase {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
         defer { withExtendedLifetime(handoff) {} }
-        let player = CloudAudioPlayer()
+        let player = CloudAudioPlayer(timingEnabled: timing != nil)
         player.emittedPCMReference = reference
         player.echoReferenceHandoff = handoff // Production assembly retains and wires both halves.
         // Retain the actual stop notification path so confirmation is observable without a sink.
@@ -118,13 +144,16 @@ final class RenderLifecycleControlTests: XCTestCase {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.005))
             }
             XCTAssertGreaterThanOrEqual(player.confirmedStopEpochForTesting, cancelled, "cleanup must settle before shared hooks reset")
+            XCTAssertTrue(player.shutdownForTimingTesting())
         }
         let scheduledSamples = 22_400
         var data = Data()
         withUnsafeBytes(of: Int16(2_000)) { raw in
             for _ in 0..<3_200 { data.append(contentsOf: raw) }
         }
-        for _ in 0..<7 { player.enqueue(CloudAudioFrame(data: data)) }
+        for _ in 0..<7 {
+            player.enqueue(CloudAudioFrame(data: data, timingReceipt: timing?.received(byteCount: data.count)))
+        }
         let scheduledDeadline = Date().addingTimeInterval(3)
         while Date() < scheduledDeadline && reference.streamIndex < scheduledSamples {
             RunLoop.current.run(until: Date().addingTimeInterval(0.005))
@@ -141,87 +170,41 @@ final class RenderLifecycleControlTests: XCTestCase {
         try body(player, engine, node, output, scheduledSamples)
     }
 
-    /// The fixture feeds a real burst, waits for the appends, then measures: while the node still
-    /// has unrendered scheduled audio, the incarnation must NOT have rotated (the ranges survive),
-    /// and a position measured AFTER the scheduled span has rendered must anchor — the mapping
-    /// stayed alive long enough to hear its own audio.
+    /// Queue emptiness must preserve the current clock while measured scheduled audio remains.
+    /// After real catch-up retires that clock, its old observations must be refused.
     @MainActor
     func testQueueEmptinessDoesNotRetireRangesWithPendingAudibleWork() throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        let reference = PlaybackEchoReference()
-        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
-        let player = CloudAudioPlayer()
-        player.emittedPCMReference = reference
-        player.echoReferenceHandoff = handoff
-        player.setNegotiatedCodec(CloudAudioCodec(name: "pcm_s16le@16k")!)
-        var data = Data()
-        withUnsafeBytes(of: Int16(3_000)) { raw in for _ in 0..<1600 { data.append(contentsOf: raw) } }
-        for _ in 0..<7 { player.enqueue(CloudAudioFrame(data: data)) }
-        // Appends: the reference grows by the burst (resample is 1:1 at the pipeline rate).
-        let deadline = Date().addingTimeInterval(5.0)
-        while Date() < deadline && reference.streamIndex < 7 * 1_600 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertGreaterThanOrEqual(
-            reference.streamIndex, 7 * 1_600,
-            "precondition: the burst was appended; without this the case proves nothing"
-        )
-        // The identity the ranges were recorded under: startEngine's own pre-stop rotates the
-        // counter once at engine birth (measured), so the emission incarnation is read AFTER the
-        // appends, not at enqueue time.
-        let emissionIncarnation = player.producerIdentityForTesting.incarnation
+        try withPendingOfflineAudio { player, engine, node, output, scheduledSamples in
+            let identity = player.producerIdentityForTesting
+            let handoff = try XCTUnwrap(player.echoReferenceHandoffForTesting)
+            let reference = try XCTUnwrap(player.emittedPCMReference)
+            let pending = try XCTUnwrap(player.renderPosition(of: node))
+            XCTAssertLessThan(pending.renderedFrames, Double(scheduledSamples))
+            XCTAssertEqual(player.bufferedFrameCountForTesting, 0)
+            XCTAssertEqual(player.producerIdentityForTesting, identity)
+            handoff.submitRenderPosition(pending, producer: identity)
+            handoff.drain()
+            XCTAssertNotNil(reference.currentRenderAnchor, "the current clock's measured position must map")
 
-        // The scheduled audio is 7 × 100 ms. Render catch-up must keep the incarnation alive at
-        // least while that audio is still pending: poll for it to ROTATE only after ~enough wall
-        // time for the node to have rendered (0.9 s > 0.7 s), or fail early if it rotated while
-        // the audio was still pending.
-        let audibleDeadline = Date().addingTimeInterval(0.9)
-        while Date() < audibleDeadline {
-            XCTAssertEqual(
-                player.producerIdentityForTesting.incarnation, emissionIncarnation,
-                "the incarnation rotated while scheduled audio was still pending: queue emptiness "
-                    + "discarded audible work (contract violation)"
-            )
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-
-        // After the measured render catch-up the engine may retire; whether it did or not, a
-        // position measured within the SAME incarnation must anchor inside the appended audio —
-        // the ranges were kept as historical evidence for their incarnation.
-        let anchorDeadline = Date().addingTimeInterval(10.0)
-        var anchored = false
-        while Date() < anchorDeadline && !anchored {
-            // A rendering node reading: submit a position measured mid-audio under the identity
-            // the ranges were recorded under.
-            if player.producerIdentityForTesting.incarnation == emissionIncarnation {
-                // Real measured position: read from the player's own node if it renders, else
-                // measure via a real position inside the recorded span.
-                let position = PlaybackRenderAnchor(
-                    renderedFrames: 800, sourceSampleRate: PlaybackEchoReference.pipelineSampleRate, hostTime: 0
-                )
-                handoff.submitRenderPosition(position, producer: .init(kind: .cloud, incarnation: emissionIncarnation))
-                handoff.drain()
-                anchored = reference.currentRenderAnchor != nil
+            player.armPhysicalStopGateForTesting(allow: 0)
+            var caughtUp = pending.renderedFrames
+            let renderDeadline = Date().addingTimeInterval(2)
+            while caughtUp < Double(scheduledSamples)
+                && Date() < renderDeadline {
+                XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+                caughtUp = try XCTUnwrap(player.renderPosition(of: node)).renderedFrames
             }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertGreaterThanOrEqual(caughtUp, Double(scheduledSamples))
+            player.openPhysicalStopGateForTesting()
+            let retirementDeadline = Date().addingTimeInterval(2)
+            while player.producerIdentityForTesting == identity && Date() < retirementDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+            XCTAssertNotEqual(player.producerIdentityForTesting, identity)
+            reference.recordRenderPosition(nil)
+            handoff.submitRenderPosition(pending, producer: identity)
+            handoff.drain()
+            XCTAssertNil(reference.currentRenderAnchor, "a retired clock must not reuse its old ranges")
         }
-        XCTAssertTrue(
-            anchored,
-            "a position from the incarnation that emitted the audio was refused even though the "
-                + "audio was appended and (by the elapsed 0.55 s) rendered: the ranges did not "
-                + "survive as the incarnation's historical evidence"
-        )
-
-        // Explicit stop rotates: the contract's explicit-stop branch.
-        player.cancel()
-        let rotateDeadline = Date().addingTimeInterval(2.0)
-        while Date() < rotateDeadline
-            && player.producerIdentityForTesting.incarnation == emissionIncarnation {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertNotEqual(
-            player.producerIdentityForTesting.incarnation, emissionIncarnation,
-            "an explicit cancel did not rotate the incarnation"
-        )
     }
 }

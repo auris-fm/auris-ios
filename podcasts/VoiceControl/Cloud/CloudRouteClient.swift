@@ -30,6 +30,7 @@ final class CloudRouteClient {
 
     /// Optional seam for the WebSocket task (see `WebSocketTasking`); `nil`
     /// uses the session's real web socket.
+    private let playbackTimingFactory: (String) -> CloudPlaybackTiming?
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
 
     /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
@@ -67,7 +68,8 @@ final class CloudRouteClient {
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
-        webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil
+        webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil,
+        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
@@ -77,6 +79,7 @@ final class CloudRouteClient {
         self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.webSocketTaskFactory = webSocketTaskFactory
+        self.playbackTimingFactory = playbackTimingFactory
         if let session {
             self.session = session
         } else {
@@ -509,6 +512,8 @@ final class CloudRouteClient {
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) async -> Bool {
+        let playbackTiming = playbackTimingFactory(turn.requestId)
+        defer { playbackTiming?.receiverEnded() }
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
             // A distinguishable message, so a run's export says WHICH construction step failed rather
             // than reporting both under `invalid_request`.
@@ -691,7 +696,7 @@ final class CloudRouteClient {
                 switch message {
                 case .data(let data):
                     // Binary frame: audio payload.
-                    continuation.yield(.audioFrame(CloudAudioFrame(data: data)))
+                    continuation.yield(.audioFrame(CloudAudioFrame(data: data, timingReceipt: playbackTiming?.received(byteCount: data.count))))
 
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
@@ -707,7 +712,7 @@ final class CloudRouteClient {
                         // connection after `done`/`error`, so continuing to
                         // receive would turn that normal close into a spurious
                         // `connection_lost` after a successful answer.
-                        if case .done = event { terminalFlag.set(); break receiveLoop }
+                        if case .done = event { playbackTiming?.observe("server_done"); terminalFlag.set(); break receiveLoop }
                         if case .error = event { terminalFlag.set(); break receiveLoop }
                     }
 

@@ -44,6 +44,8 @@ struct CloudAudioFrame: Equatable {
     /// PCM; there is no Opus decoder in this path. The sample rate is encoded
     /// in the negotiated codec name — the wire has no separate rate field.
     let data: Data
+    /// Ephemeral diagnostic metadata only; nil unless explicitly enabled in a Debug build.
+    var timingReceipt: CloudPlaybackTiming.Receipt? = nil
 }
 
 /// Usage reported in the `done` frame (cloud-assistant.md).
@@ -117,7 +119,6 @@ enum CloudRouteEvent: Equatable {
     /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks
     /// like a client tag, and a client tag could be reworded.
     case error(source: CloudRouteErrorSource, code: String, message: String)
-
 }
 
 /// JSON values that appear in action `params` (numbers normalized to Int64 when integral).

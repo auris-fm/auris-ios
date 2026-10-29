@@ -59,12 +59,21 @@ final class CloudAudioPlayer: @unchecked Sendable {
     func enqueue(_ frame: CloudAudioFrame) {
         bufferLock.lock()
         buffer.append(frame)
+        if timingEnabled {
+            timingQueuedBytes += frame.data.count
+            if let trace = frame.timingReceipt?.trace { timingLastQueued = trace }
+        }
+        let timingQueue = (timingQueuedBytes, buffer.count)
         // A CUMULATIVE record of every frame this player was actually handed. `bufferedFrameCount`
         // is a current depth that drains, so after a turn ends it cannot distinguish "audio was
         // delivered and played" from "audio never arrived" — which made an output assertion
         // vacuous. This counts arrivals and never decreases.
         framesEnqueued += 1
         bufferLock.unlock()
+
+        frame.timingReceipt?.trace.observe("enqueue", receipt: frame.timingReceipt) {
+            CloudPlaybackTiming.Snapshot(queuedBytes: timingQueue.0, queuedFrames: timingQueue.1)
+        }
 
         // Wake the runner: `runnerRunning` is "there is work to do", and the
         // runner waits until it is true. Clearing it here (the previous
@@ -154,6 +163,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         cancelRequestCountForTesting += 1
         bufferLock.lock()
         buffer.removeAll()
+        if timingEnabled { timingQueuedBytes = 0 }
         bufferClearCountForTesting += 1
         bufferLock.unlock()
         runnerLock.lock()
@@ -389,6 +399,34 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Frame buffer (in-order).
     private var buffer: [CloudAudioFrame] = []
+    // Queue metadata is guarded by bufferLock. Runner metadata is touched only on the runner.
+    private var timingQueuedBytes = 0
+    private var timingLastQueued: CloudPlaybackTiming?
+    private var timingActive: CloudPlaybackTiming?
+    private var timingScheduledFrames = 0.0
+    private(set) var timingSnapshotsForTesting = 0
+    var timingQueuedBytesForTesting: Int {
+        bufferLock.lock(); defer { bufferLock.unlock() }
+        return timingQueuedBytes
+    }
+    private let timingEnabled: Bool
+    private let timingPlayerID: String?
+
+    private func observeTiming(_ stage: String, reason: String? = nil, terminal: Bool = false) {
+        guard timingEnabled else { return }
+        bufferLock.lock()
+        let queue = (timingQueuedBytes, buffer.count)
+        let trace = timingActive ?? timingLastQueued
+        bufferLock.unlock()
+        trace?.observe(stage, terminal: terminal) {
+            self.timingSnapshotsForTesting += 1
+            return CloudPlaybackTiming.Snapshot(player: self.timingPlayerID, generation: self.nodeIncarnation,
+                queuedBytes: queue.0, queuedFrames: queue.1, scheduledFrames: stage == "stopped" ? nil : self.timingScheduledFrames,
+                renderedFrames: self.playerNode.flatMap { self.renderPosition(of: $0)?.renderedFrames },
+                sampleRate: self.negotiatedSampleRate, reason: reason)
+        }
+        if terminal { timingActive = nil }
+    }
 
     /// Codec negotiated in the server's `connected` frame (guarded by
     /// `bufferLock`, written on the main actor and read on the runner thread).
@@ -507,10 +545,28 @@ final class CloudAudioPlayer: @unchecked Sendable {
         EchoReferenceHandoff.ProducerIdentity(kind: .cloud, incarnation: nodeIncarnation)
     }
 
-    init() {
+    init(timingEnabled: Bool = CloudPlaybackTiming.isEnabled(environment: ProcessInfo.processInfo.environment)) {
+        self.timingEnabled = timingEnabled
+        timingPlayerID = timingEnabled ? UUID().uuidString : nil
         runnerThread = Thread(target: self, selector: #selector(runnerLoop), object: nil)
         runnerThread?.name = "CloudAudioPlayer"
         runnerThread?.start()
+    }
+
+    /// Tests must join this session-long worker rather than leave diagnostic callbacks live.
+    func shutdownForTimingTesting() -> Bool {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil else { return false }
+        runnerLock.lock()
+        defer { runnerLock.unlock() }
+        if runnerExited { return true }
+        shutdownRequested = true
+        runnerRunning = true
+        runnerLock.signal()
+        let deadline = Date().addingTimeInterval(2)
+        while !runnerExited {
+            if !runnerLock.wait(until: deadline) { break }
+        }
+        return runnerExited
     }
 
     /// Lifetime: the player is built once per app session
@@ -565,7 +621,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             if shutdownRequested {
                 shutdownRequested = false
                 runnerLock.unlock()
-                stopEngine()
+                stopEngine(reason: "shutdown", terminal: true)
                 isPlaying = false
                 paused = false
                 runnerLock.lock()
@@ -592,7 +648,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 stopOwnerEpoch = 0
                 runnerLock.unlock()
                 physicalStopGateWait()
-                stopEngine()
+                stopEngine(reason: "cancel", terminal: true)
                 isPlaying = false
                 paused = false
                 notifyDidStop(epoch: scheduledEpoch)
@@ -660,8 +716,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
             paused = true
             isPlaying = false
             renderStopDeadline = nil
-            stopEngine()
-            if let delegate = delegate {
+            stopEngine(reason: "underrun", terminal: false)
+            if let delegate {
                 DispatchQueue.main.async {
                     delegate.audioPlayerDidPause()
                 }
@@ -698,7 +754,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             if playerNode == nil {
                 paused = true
                 isPlaying = false
-                if let delegate = delegate {
+                if let delegate {
                     DispatchQueue.main.async {
                         delegate.audioPlayerDidPause()
                     }
@@ -719,8 +775,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 paused = true
                 isPlaying = false
                 renderStopDeadline = nil
-                stopEngine()
-                if let delegate = delegate {
+                stopEngine(reason: "render_caught_up", terminal: false)
+                if let delegate {
                     DispatchQueue.main.async {
                         delegate.audioPlayerDidPause()
                     }
@@ -729,8 +785,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 paused = true
                 isPlaying = false
                 renderStopDeadline = nil
-                stopEngine()
-                if let delegate = delegate {
+                stopEngine(reason: "render_timeout", terminal: false)
+                if let delegate {
                     DispatchQueue.main.async {
                         delegate.audioPlayerDidPause()
                     }
@@ -826,7 +882,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferLock.lock()
         defer { bufferLock.unlock() }
         guard !buffer.isEmpty else { return nil }
-        return buffer.removeFirst()
+        let frame = buffer.removeFirst()
+        if timingEnabled { timingQueuedBytes -= frame.data.count }
+        return frame
     }
 
     /// TEST-ONLY: park the drain runner until released, WITHOUT returning an exhaustion sentinel.
@@ -853,7 +911,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // MARK: - Audio engine
 
     private func startEngine() {
-        stopEngine()
+        stopEngine(reason: "restart", terminal: false)
+        if timingEnabled {
+            bufferLock.lock()
+            timingActive = buffer.first?.timingReceipt?.trace
+            bufferLock.unlock()
+        }
 
         // No output device (a test host, or a detached process): the frames are
         // still consumed by the runner, but nothing is scheduled. Creating the
@@ -886,16 +949,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
         self.engine = engine
         self.playerNode = playerNode
+        observeTiming("start")
 
-        if let delegate = delegate {
+        if let delegate {
             DispatchQueue.main.async {
                 delegate.audioPlayerDidStartPlaying()
             }
         }
     }
 
-    private func stopEngine() {
-        if let engine = engine {
+    private func stopEngine(reason: String, terminal: Bool = false) {
+        // Capture readable progress before resetting the node; no player lock is held here.
+        if engine != nil { observeTiming("stop_requested", reason: reason) }
+        if let engine {
             engine.stop()
             engine.reset()
             // Detach only the nodes THIS class attached. `attachedNodes` also reports the
@@ -910,6 +976,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
         playerNode = nil
         self.engine = nil
+        if timingEnabled {
+            observeTiming("stopped", reason: reason, terminal: terminal)
+            timingScheduledFrames = 0
+        }
         // The next start builds a NEW node whose frame count restarts at zero, so this
         // producer's clock identity rotates here — at the point the counter actually resets —
         // and the handoff refuses positions from the retired incarnation. The running block
@@ -1024,7 +1094,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var nodeIncarnationFrames: Double = 0
 
     private func playFrame(_ frame: CloudAudioFrame) {
-        guard let node = playerNode, let engine = engine else { return }
+        if timingEnabled { timingActive = frame.timingReceipt?.trace }
+        guard let node = playerNode, let engine else {
+            observeTiming("schedule_refused", reason: "no_engine")
+            return
+        }
 
         // Frames arrive as raw Int16 PCM in the negotiated codec. This client
         // advertises PCM only (see `CloudRouteClient.supportedCodecs`); there is
@@ -1066,6 +1140,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
+        if timingEnabled { timingScheduledFrames += Double(pcmBuffer.frameLength) }
+        observeTiming("schedule")
     }
 
     /// The output node's rendered position, or nil when the node is not rendering.
@@ -1324,7 +1400,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopRequested = false
         runnerLock.unlock()
         physicalStopGateWait()
-        stopEngine()
+        stopEngine(reason: stoppedEpoch == claimedEpoch ? "finish" : "cancel_during_finish", terminal: true)
         isPlaying = false
         paused = false
         notifyDidStop(epoch: stoppedEpoch)
