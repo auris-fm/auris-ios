@@ -29,19 +29,64 @@ struct AppOperationResultFrame: Equatable {
     ) {
         // Owning-frame contract, enforced on every external shape:
         // - operation_id is always present and NON-EMPTY (an empty id names nothing);
-        // - reason is non-empty on every non-success and absent on success;
-        // - state rides SUCCESS ONLY (a non-success has no resulting state to report);
-        // - detail is bounded prose (512 chars), never the gate.
+        // - reason is present on every non-success and absent on success, and it obeys the
+        //   published ASCII grammar `[a-z][a-z0-9_]{0,127}` (an unknown or malformed token is
+        //   not a wire reason: the frame is invalid, never sent);
+        // - state is REQUIRED on success as a JSON object carrying the observed result, and
+        //   MUST NOT ride a non-success (there is no resulting state to report);
+        // - detail is bounded prose (≤512 UTF-8 bytes, sender truncates), never the gate;
+        // - encoded state is bounded too (≤8 KiB; oversize = invalid frame, i.e. unresolved).
         guard !operationId.isEmpty else { return nil }
         guard (outcome == .succeeded) == (reason == nil) else { return nil }
-        if let reason, reason.isEmpty { return nil }
+        if let reason { guard Self.isWireReason(reason) else { return nil } }
         if outcome != .succeeded && state != nil { return nil }
-        if let detail, detail.count > 512 { return nil }
+        // Wire amendment (cloud-assistant.md @ bf5fb219): success REQUIRES a state OBJECT —
+        // the actual observed result, never a request echo or an earcon. Presence is enforced
+        // here; each action's concrete result SHAPE is validated by its owning producer, not
+        // by a blanket non-empty rule (an action whose honest observed result is an empty
+        // object, e.g. an empty-queue read, stays wire-legal).
+        if outcome == .succeeded, state == nil { return nil }
+        // detail: at most 512 UTF-8 BYTES; the sender truncates on a code-point boundary.
+        let boundedDetail = detail.map(Self.boundedDetail)
+        // state: at most 8 KiB encoded. An oversize state cannot settle success — the frame is
+        // invalid (nil), leaving the operation unresolved toward `unknown` per the amendment.
+        if let state {
+            let encoded = state.mapValues { $0.toJSONSerializable() }
+            guard let data = try? JSONSerialization.data(withJSONObject: encoded), data.count <= 8192 else {
+                return nil
+            }
+        }
         self.operationId = operationId
         self.outcome = outcome
         self.reason = reason
         self.state = state
-        self.detail = detail
+        self.detail = boundedDetail
+    }
+
+    /// The published reason grammar (cloud-assistant.md @ bf5fb219): 1 + up to 127 ASCII
+    /// bytes, lowercase letters/digits/underscore, starting with a letter. Bounded in BYTES,
+    /// which for this ASCII alphabet equals characters.
+    static func isWireReason(_ reason: String) -> Bool {
+        let scalars = Array(reason.unicodeScalars)
+        guard (1...128).contains(scalars.count) else { return false }
+        guard let first = scalars.first, ("a"..."z").contains(Character(first)) else { return false }
+        return scalars.allSatisfy { scalar in
+            ("a"..."z").contains(Character(scalar)) || ("0"..."9").contains(Character(scalar)) || scalar == "_"
+        }
+    }
+
+    /// Truncates to the amendment's 512-UTF-8-byte bound on a code-point boundary.
+    private static func boundedDetail(_ text: String) -> String {
+        guard text.utf8.count > 512 else { return text }
+        var kept = ""
+        var bytes = 0
+        for character in text {
+            let length = String(character).utf8.count
+            if bytes + length > 512 { break }
+            kept.append(character)
+            bytes += length
+        }
+        return kept
     }
 
     /// The wire shape. Values come from typed builders, so encoding cannot fail here.

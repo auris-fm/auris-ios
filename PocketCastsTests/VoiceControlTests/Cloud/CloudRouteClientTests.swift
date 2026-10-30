@@ -741,3 +741,110 @@ extension CloudRouteClientTests {
         XCTAssertEqual(report, .undelivered)
     }
 }
+
+// MARK: - Result-frame codec controls (wire amendment cloud-assistant.md @ bf5fb219)
+
+/// The result frame is the ONLY thing the server can believe about an operation, so its shape
+/// rules are enforced at construction: no call site can build a frame the contract refuses.
+final class AppOperationResultFrameCodecTests: XCTestCase {
+    /// Success without observed state is not state evidence (an earcon or echo is not a result):
+    /// the frame cannot be built at all, so the operation stays unresolved toward the honest
+    /// `unknown` rather than settling success with nothing to show.
+    func testSuccessWithoutStateIsNotAWireFrame() {
+        XCTAssertNil(AppOperationResultFrame(operationId: "op-1", outcome: .succeeded),
+                     "a stateless success cannot be reported")
+    }
+
+    /// Presence, not size: an action whose honest observed result IS an empty object (e.g. an
+    /// empty queue read) remains wire-legal. Blanket non-empty was never the contract rule.
+    func testSuccessWithEmptyStateObjectIsLegal() throws {
+        let frame = try XCTUnwrap(
+            AppOperationResultFrame(operationId: "op-2", outcome: .succeeded, state: [:])
+        )
+        let json = frame.jsonFrame()
+        XCTAssertEqual(json["outcome"] as? String, "succeeded")
+        XCTAssertNotNil(json["state"] as? [String: Any], "state rides as an object")
+        XCTAssertNil(json["reason"])
+    }
+
+    /// Encoded state above 8 KiB cannot ride a result frame: oversize is an invalid frame, so
+    /// the operation is left unresolved toward `unknown` instead of being settled by a blob the
+    /// server would reject.
+    func testOversizeStateIsNotAWireFrame() {
+        let huge = String(repeating: "x", count: 9_000)
+        XCTAssertNil(
+            AppOperationResultFrame(operationId: "op-3", outcome: .succeeded, state: ["blob": .string(huge)]),
+            "an oversize state must not settle success"
+        )
+        // The same payload just under the bound IS a frame: the guard is a bound, not a ban.
+        let fits = String(repeating: "x", count: 7_000)
+        XCTAssertNotNil(
+            AppOperationResultFrame(operationId: "op-4", outcome: .succeeded, state: ["blob": .string(fits)])
+        )
+    }
+
+    /// detail is bounded in UTF-8 BYTES, truncated on a code-point boundary: multibyte text is
+    /// never cut mid-scalar (which would produce invalid UTF-8 on the wire).
+    func testDetailTruncatesOnACodePointBoundaryAt512Bytes() throws {
+        // "é" is 2 UTF-8 bytes: 400 of them = 800 bytes, so the bound lands at 256 characters.
+        let multibyte = String(repeating: "é", count: 400)
+        let frame = try XCTUnwrap(
+            AppOperationResultFrame(operationId: "op-5", outcome: .refused,
+                                    reason: OperationReason.unsupportedOperation, detail: multibyte)
+        )
+        let detail = try XCTUnwrap(frame.detail)
+        XCTAssertLessThanOrEqual(detail.utf8.count, 512)
+        XCTAssertEqual(detail.utf8.count, 512, "truncation keeps as many whole code points as fit")
+        XCTAssertEqual(detail.count, 256)
+        XCTAssertEqual(detail, String(repeating: "é", count: 256), "no partial scalar survives")
+        // A 4-byte scalar that would straddle the bound is dropped whole rather than halved.
+        let four: String = String(repeating: "😀", count: 200) // 800 bytes
+        let frame2 = try XCTUnwrap(
+            AppOperationResultFrame(operationId: "op-6", outcome: .refused,
+                                    reason: OperationReason.unsupportedOperation, detail: four)
+        )
+        XCTAssertEqual(frame2.detail?.utf8.count, 512)
+        XCTAssertEqual(frame2.detail, String(repeating: "😀", count: 128))
+    }
+
+    /// Under the bound, detail passes through untouched.
+    func testDetailUnderBoundIsUnchanged() throws {
+        let detail = String(repeating: "é", count: 10)
+        let frame = try XCTUnwrap(
+            AppOperationResultFrame(operationId: "op-7", outcome: .refused,
+                                    reason: OperationReason.unsupportedOperation, detail: detail)
+        )
+        XCTAssertEqual(frame.detail, detail)
+    }
+
+    /// The published reason grammar, enforced where frames are built: lowercase ASCII
+    /// [a-z][a-z0-9_]{0,127}. A nonconforming reason is not a wire reason — the frame is
+    /// invalid rather than silently rewritten.
+    func testReasonGrammarIsEnforcedWithANegativeControl() {
+        XCTAssertTrue(AppOperationResultFrame.isWireReason("unsupported_operation"))
+        XCTAssertTrue(AppOperationResultFrame.isWireReason("a"))
+        XCTAssertTrue(AppOperationResultFrame.isWireReason(String(repeating: "a", count: 128)),
+                      "128 bytes is the published maximum")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason(String(repeating: "a", count: 129)),
+                       "129 bytes exceeds the bound")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason(""), "empty is not a reason")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason("Unsupported"), "uppercase is not in the grammar")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason("unsupported operation"), "spaces are not in the grammar")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason("unsupported-операция"), "non-ASCII is not in the grammar")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason("_leading"), "must start with a letter")
+        XCTAssertFalse(AppOperationResultFrame.isWireReason("1leading"), "digits do not start a reason")
+
+        // Negative control at the frame seam: a malformed reason cannot be built into a frame.
+        XCTAssertNil(AppOperationResultFrame(operationId: "op-8", outcome: .refused, reason: "Bad Reason!"))
+        XCTAssertNotNil(AppOperationResultFrame(operationId: "op-9", outcome: .refused,
+                                                reason: OperationReason.unsupportedOperation))
+    }
+
+    /// Every reason the journal can emit conforms to the grammar — a constant that would be
+    /// refused on the wire is a client bug the codec would otherwise hide until send time.
+    func testAllJournalReasonsConformToTheWireGrammar() {
+        for reason in OperationReason.allWireReasons {
+            XCTAssertTrue(AppOperationResultFrame.isWireReason(reason), "nonconforming reason: \(reason)")
+        }
+    }
+}

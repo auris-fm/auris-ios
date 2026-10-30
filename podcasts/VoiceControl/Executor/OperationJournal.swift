@@ -111,6 +111,9 @@ enum OperationReason {
     /// The sink does not support this operation at all, as opposed to supporting it and
     /// refusing for a policy reason.
     static let unsupportedOperation = "unsupported_operation"
+    /// Wire-pinned (cloud-assistant.md @ bf5fb219): a required identity precondition is
+    /// missing — the operation is malformed, refused before any execution.
+    static let invalidRequest = "invalid_request"
     /// The exactly-once record could not be durably persisted (or existing history is
     /// unreadable): the mutation is refused before any effect rather than risking an
     /// unrecorded execution.
@@ -162,6 +165,15 @@ enum OperationReason {
     static let turnBudgetExhausted = "turn_budget_exhausted"
     /// The mutation was interrupted in flight: it may or may not have happened.
     static let interruptedInFlight = "interrupted_in_flight"
+
+    /// Every reason this client can put on the wire. Kept as one list so the wire grammar can be
+    /// checked against the whole vocabulary rather than only the tokens a test happens to name.
+    static let allWireReasons: [String] = [
+        clientPolicy, stalePrecondition, unsupportedOperation, invalidRequest,
+        persistenceUnavailable, missingEntitlement, audioSessionDenied, malformedSeekTarget,
+        referenceMappingUnavailable, volumeControlUnavailable, sinkUnimplemented,
+        supersededByPreemption, cancelledByUser, turnBudgetExhausted, interruptedInFlight,
+    ]
 }
 
 /// The result of claiming an operation for execution.
