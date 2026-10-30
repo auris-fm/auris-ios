@@ -1675,6 +1675,115 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
+    /// PRODUCTION CHAIN for spec 1e79e5b4 (review: a control must exercise the real path, not a hand-built
+    /// event). Real engine bleed branch → real collector → REAL sink → REAL encoder → queue entry → read
+    /// back from the persisted record. The ASR stage states the observed skip, the bleed stage keeps its own
+    /// observed decision, no transcript is invented, and no recognition ran (the stub counts transcribe calls).
+    func test_realEngineBleedRejectionPersistsTheObservedAsrSkip() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
+        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        let engine = chain.engine
+        engine.isExposedSpeakerRouteForTesting = true
+        // Identical arrays peak at zero lag, which the filter reads as "no echo evidence"; the mic frame is
+        // the playback tail shifted by 8 samples, which is what speaker bleed actually looks like.
+        let playback = stride(from: Float(-0.6), through: 0.6, by: 0.001).map { $0 }
+        engine.playbackBufferForTesting = playback
+        let utterance = Array(repeating: 0, count: 8) + playback
+        chain.backend.emitSpeech(level: 0.6, totalSamples: 5 * 160)
+        let frozen = chain.engine.contributionCollector?.currentCaptureContextForTesting
+        await engine.processUtterance(utterance, frozenContext: frozen)
+        XCTAssertEqual(chain.backend.transcribeCalls, 0, "premise: bleed skip performs no recognition")
+
+        // The queue persists asynchronously even under synchronous delivery; wait for the durable entry.
+        let ready = waitForReadyEntries(1).compactMap { $0 as? VoiceSharingUploadQueue.Entry }
+        XCTAssertEqual(ready.count, 1, "the bleed-rejected segment remains a collectable record")
+        // Identified by the record's OWN capture id, never by queue order.
+        let expectedID = try XCTUnwrap(frozen?.id.uuidString)
+        let record = try XCTUnwrap(ready.compactMap { entry -> [String: Any]? in
+            let url = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+            guard let data = try? Data(contentsOf: url),
+                let envelope = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                let record = envelope["record"] as? [String: Any],
+                record["capture_id"] as? String == expectedID
+            else { return nil }
+            return record
+        }.first, "the persisted record for capture \(expectedID) must exist")
+        let observations = try XCTUnwrap(record["observations"] as? [String: Any])
+        let asrBlock = try XCTUnwrap(observations["asr"] as? [String: Any])
+        XCTAssertEqual(asrBlock["state"] as? String, "not_run",
+                       "the persisted record states why recognition did not run")
+        XCTAssertEqual(asrBlock["reason"] as? String, "rejected_by_bleed")
+        XCTAssertNil(asrBlock["text"], "a skipped stage carries no transcript")
+        let bleed = try XCTUnwrap(observations["bleed"] as? [String: Any])
+        XCTAssertEqual(bleed["decision"] as? String, "overlap",
+                       "the bleed stage keeps its own observed decision")
+        _ = try queue.boundIdentity(of: ready[0])
+        engine.stop()
+    }
+
+    /// SPEC 1e79e5b4: `rejected_by_bleed` states ONE thing — an observed bleed decision skipped ASR.
+    /// The positive must be accepted (or the negatives prove nothing), and every pairing that would
+    /// claim a different fact is refused: another stage, a state that says ASR ran or failed, or a
+    /// completed stage where the transcript is the result. Asserted on the raw observations AND on a
+    /// re-sealed persisted envelope, because recovery cannot accept what intake refuses.
+    func test_bleedSkipReasonIsValidOnlyForAsrNotRun() throws {
+        func observations(stage: String = "asr", block: [String: Any]) -> [String: Any] {
+            var all: [String: Any] = [:]
+            for name in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
+                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
+            }
+            all["bleed"] = ["state": "completed", "decision": "overlap"]
+            all[stage] = block
+            return all
+        }
+        let valid = observations(block: ["state": "not_run", "reason": "rejected_by_bleed"])
+        do {
+            try VoiceSharingRecordBinding.validateObservationsForTesting(valid)
+        } catch {
+            return XCTFail("premise: asr/not_run/rejected_by_bleed must be accepted; got \(error)")
+        }
+
+        let refused: [(String, [String: Any], String)] = [
+            ("asr completed", observations(block: ["state": "completed", "reason": "rejected_by_bleed",
+                                                   "text": "hello"]), "reason"),
+            ("asr failed", observations(block: ["state": "failed", "reason": "rejected_by_bleed"]), "reason"),
+            ("asr cancelled", observations(block: ["state": "cancelled", "reason": "rejected_by_bleed"]), "reason"),
+            ("asr unknown", observations(block: ["state": "unknown", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+            ("wake not_run", observations(stage: "wake", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+            ("bleed not_run", observations(stage: "bleed", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+            ("translation not_run", observations(stage: "translation",
+                                                 block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+            ("routing not_run", observations(stage: "routing", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+            ("execution not_run", observations(stage: "execution",
+                                               block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
+        ]
+        for (label, payload, fragment) in refused {
+            assertRefused(label, payload, containing: fragment)
+        }
+        // The bleed stage's own observed decision is preserved, never replaced by the skip.
+        let persisted = try XCTUnwrap(valid["bleed"] as? [String: Any])
+        XCTAssertEqual(persisted["decision"] as? String, "overlap")
+
+        // RE-SEALED PERSISTED ENVELOPE: the same contradiction coming back through `bind`.
+        for (label, block) in [("completed", ["state": "completed", "reason": "rejected_by_bleed", "text": "hi"]),
+                               ("failed", ["state": "failed", "reason": "rejected_by_bleed"])] {
+            let record = try encodedRecordWithEmptyResult()
+            var mutated = record
+            var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
+            all["asr"] = block
+            mutated["observations"] = all
+            do {
+                _ = try VoiceSharingRecordBinding.bind(envelope: try rescaled(mutated), audio: Data())
+                XCTFail("\(label): a persisted record with rejected_by_bleed outside asr/not_run must be refused")
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                guard case .invalidField(let path, _) = error else {
+                    return XCTFail("\(label): expected invalidField, got \(error)")
+                }
+                XCTAssertEqual(path, "observations.asr.reason")
+            }
+        }
+    }
+
     /// SPEC DELTA f8 ON EVERY STAGE (review b5fb69ef): a completed stage carries NO reason. Only exact
     /// asr/completed/empty_result may, where the reason IS the result. Asserted on the raw observations
     /// AND on a re-sealed persisted envelope, so the rule is proven where records actually come back.

@@ -66,6 +66,10 @@ final class VoiceSharingCollector {
         case started, completed, cancelled, rejectedBleed, rejectedWake
     }
 
+    /// The enumerated ASR reason stating an observed bleed decision skipped recognition (spec 1e79e5b4).
+    /// Defined HERE because this is the site that actually made the decision.
+    static let bleedSkipReason = "rejected_by_bleed"
+
     /// Immutable association token handed to the engine at confirmed start and REQUIRED on every later
     /// outcome for that segment. Association by argument, not by "whatever is current": utterance B starting
     /// before A's rejection arrives cannot make A's callback land on B, because A's Task holds A's context
@@ -644,7 +648,15 @@ return }
         markTerminal(c)
         terminalRing[c.id]?.emitted = true
         cancelOutcomeDeadlineLocked(c.id)
-        let event = makeEvent(kind: kind, from: c)
+        // SPEC 1e79e5b4: for a bleed-rejected segment the ASR stage did not run because the engine
+        // OBSERVED playback bleed and skipped it — a known skip, not an absent observation. The bleed
+        // stage keeps its own observed decision from the contract enum (`overlap` here); this fact says
+        // only why ASR did not run.
+        var event = makeEvent(kind: kind, from: c)
+        if kind == .rejectedBleed {
+            event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
+                state: "not_run", reason: Self.bleedSkipReason)
+        }
         lock.unlock()
         submit(event)
     }

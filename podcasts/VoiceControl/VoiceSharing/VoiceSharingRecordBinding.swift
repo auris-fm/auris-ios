@@ -245,6 +245,12 @@ enum VoiceSharingRecordBinding {
 
     private static let emptyResultReason = "empty_result"
 
+    /// SPEC 1e79e5b4: `rejected_by_bleed` names ONE observed decision — the engine saw playback bleed
+    /// and therefore SKIPPED recognition. It is valid only on ASR with `not_run`; on any other stage, or
+    /// with a state claiming ASR ran, failed or was cancelled, it would describe something that did not
+    /// happen. The bleed stage keeps its own observed decision, which the reason does not replace.
+    private static let bleedSkipReason = VoiceSharingCollector.bleedSkipReason
+
     /// The engine names this reason when a recognition succeeded and returned nothing usable. Exposed so
     /// the producer and the validator cannot drift to two spellings of the same fact.
     static let emptyResultReasonForEngine = "empty_result"
@@ -252,7 +258,12 @@ enum VoiceSharingRecordBinding {
     private static let stageReasons: [String: Set<String>] = [
         "wake": ["no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"],
         "bleed": ["no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"],
-        "asr": ["local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user"],
+        // SPEC 1e79e5b4: `rejected_by_bleed` joins the enumerated ASR reasons — an observed bleed
+        // decision that skipped recognition. Pairing enforced in `assertBleedSkipPairing` below.
+        "asr": [
+            "local_only_action", "rejected_by_wake", "rejected_by_bleed", "provider_error",
+            "outcome_wait_expired", "cancelled_by_user",
+        ],
         // Spec delta 4d10275f: the three ways translation can be correctly SKIPPED get their own
         // reasons. Reporting them as `observation_unavailable` discarded facts the engine actually knew.
         // `backend_handles_translation` records why THIS stage was skipped — it does not claim the
@@ -389,6 +400,8 @@ enum VoiceSharingRecordBinding {
                         "empty_result requires state completed, not \(state)")
                 } else if translationSkipReasons.contains(reason) {
                     try assertTranslationSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
+                } else if reason == bleedSkipReason {
+                    try assertBleedSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else {
                     guard let enumerated = stageReasons[stage], enumerated.contains(reason) else {
                         throw BindingError.invalidField("\(stagePath).reason", "not enumerated")
@@ -438,6 +451,8 @@ enum VoiceSharingRecordBinding {
                     try assertDetectorErrorPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else if translationSkipReasons.contains(text) {
                     try assertTranslationSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
+                } else if text == bleedSkipReason {
+                    try assertBleedSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else if text == emptyResultReason {
                     // `empty_result` is the ONLY reason a completed stage may carry, and only on ASR.
                     // Asserted BEFORE the per-stage field rules below, which must then see an absent text.
@@ -469,6 +484,21 @@ enum VoiceSharingRecordBinding {
         guard state == "not_run" else {
             throw BindingError.invalidField(
                 path, "translation skip reason requires state not_run, not \(state)")
+        }
+    }
+
+    /// The bleed skip is a DECISION NOT TO RUN recognition. Only `asr` + `not_run` states it; a
+    /// completed/failed/cancelled ASR carrying it would claim the recogniser ran and did not run at the
+    /// same time. Recovery calls this same function, so a persisted record cannot adopt a pairing intake
+    /// refuses.
+    private static func assertBleedSkipPairing(stage: String, state: String, path: String) throws {
+        guard stage == "asr" else {
+            throw BindingError.invalidField(
+                path, "\(bleedSkipReason) is valid only on the asr stage, not \(stage)")
+        }
+        guard state == "not_run" else {
+            throw BindingError.invalidField(
+                path, "\(bleedSkipReason) requires state not_run, not \(state)")
         }
     }
 

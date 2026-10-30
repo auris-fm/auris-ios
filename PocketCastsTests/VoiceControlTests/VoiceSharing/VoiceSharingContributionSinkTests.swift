@@ -535,6 +535,103 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertTrue(String(decoding: metadata, as: UTF8.self).contains(terminal.captureID.uuidString))
     }
 
+    /// SPEC 1e79e5b4, BUILDER SIDE: the ASR stage states the observed skip that belongs to a bleed
+    /// rejection, while the bleed stage keeps its own observed decision. The claim arrives as an
+    /// OBSERVED stage fact — the encoder never infers stage facts from the event kind (review: fixtures
+    /// that omitted `reportedStages` were exercising nothing but that inference) — so this control states
+    /// the facts explicitly. The full engine→collector→queue integration proof is
+    /// `test_realEngineBleedRejectionPersistsTheObservedAsrSkip`; records are identified by capture ID
+    /// because queue ordering is not part of the observation contract.
+    func test_persistedRecordCarriesTheStatedAsrSkipAndItsOwnBleedDecision() throws {
+        let frozen = provenance
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { true }, encoderProvenance: { frozen })
+        lastSink = sink
+        let bleedID = UUID(), wakeID = UUID()
+        var bleedOutcome = VoiceSharingCollector.SegmentEvent(
+            kind: .rejectedBleed, captureID: bleedID, enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: samples.count, audio: samples, isGateControl: false)
+        bleedOutcome.reportedStages = [
+            "bleed": .init(state: "completed", decision: "overlap"),
+            "asr": .init(state: "not_run", reason: VoiceSharingCollector.bleedSkipReason),
+        ]
+        var wakeOutcome = VoiceSharingCollector.SegmentEvent(
+            kind: .rejectedWake, captureID: wakeID, enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: samples.count, audio: samples, isGateControl: false)
+        wakeOutcome.reportedStages = ["asr": .init(state: "not_run", reason: "rejected_by_wake")]
+        for event in [bleedOutcome, wakeOutcome] { sink.handle(event) }
+        drain()
+
+        let byCapture = try recordsByCaptureID()
+        let bleed = try XCTUnwrap(byCapture[bleedID.uuidString])
+        let bleedASR = try XCTUnwrap(bleed["asr"] as? [String: Any], "the record states the ASR stage")
+        XCTAssertEqual(bleedASR["state"] as? String, "not_run",
+                       "the record must state why ASR did not run for this capture")
+        XCTAssertEqual(bleedASR["reason"] as? String, "rejected_by_bleed")
+        XCTAssertNil(bleedASR["text"], "a skipped stage carries no transcript")
+        XCTAssertEqual((bleed["bleed"] as? [String: Any])?["decision"] as? String, "overlap",
+                       "the bleed stage keeps its own observed decision")
+        let wake = try XCTUnwrap(byCapture[wakeID.uuidString])
+        let wakeASR = try XCTUnwrap(wake["asr"] as? [String: Any], "the record states the ASR stage")
+        XCTAssertEqual(wakeASR["state"] as? String, "not_run")
+        XCTAssertEqual(wakeASR["reason"] as? String, "rejected_by_wake",
+                       "the wake path is unchanged by the bleed-skip change")
+    }
+
+    /// RECOVERY SIDE of spec 1e79e5b4: a persisted bleed-skip record — built by the real encoder and
+    /// marked ready with its real bytes and digest — must be confirmed by a FRESH queue instance.
+    /// Recovery refuses a pairing intake refuses, so the known skip has to survive restart.
+    func test_genuineBleedRejectedRecordSurvivesFreshQueueRecovery() throws {
+        let frozen = provenance
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { true }, encoderProvenance: { frozen })
+        lastSink = sink
+        let captureID = UUID()
+        var event = VoiceSharingCollector.SegmentEvent(
+            kind: .rejectedBleed, captureID: captureID, enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: samples.count, audio: samples, isGateControl: false)
+        event.reportedStages = [
+            "bleed": .init(state: "completed", decision: "overlap"),
+            "asr": .init(state: "not_run", reason: VoiceSharingCollector.bleedSkipReason),
+        ]
+        sink.handle(event)
+        drain()
+        lastSink = nil
+        XCTAssertEqual(queue.readyEntries().count, 1)
+
+        let recovered = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let ready = recovered.readyEntries()
+        XCTAssertEqual(ready.count, 1, "recovery must confirm the record the builder wrote")
+        _ = try recovered.boundIdentity(of: ready[0])
+        let recoveredRecord = try XCTUnwrap(try recordsByCaptureID(in: recovered)[captureID.uuidString])
+        let recoveredASR = try XCTUnwrap(recoveredRecord["asr"] as? [String: Any])
+        XCTAssertEqual(recoveredASR["state"] as? String, "not_run")
+        XCTAssertEqual(recoveredASR["reason"] as? String, "rejected_by_bleed",
+                       "the recovered record still states the observed skip")
+    }
+
+    /// Persisted observation blocks keyed by the record's own capture ID — the identity the observation
+    /// contract names, never the queue's enumeration order.
+    private func recordsByCaptureID(
+        in source: VoiceSharingUploadQueue? = nil
+    ) throws -> [String: [String: Any]] {
+        var byCapture: [String: [String: Any]] = [:]
+        for entry in (source ?? queue).readyEntries() {
+            let directory = root.appendingPathComponent(entry.name)
+            let metadata = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
+            let record = try XCTUnwrap(
+                (try JSONSerialization.jsonObject(with: metadata) as? [String: Any])?["record"] as? [String: Any])
+            let captureID = try XCTUnwrap(record["capture_id"] as? String)
+            let observations = try XCTUnwrap(record["observations"] as? [String: Any],
+                                             "\(captureID): observations missing")
+            byCapture[captureID] = observations
+        }
+        return byCapture
+    }
+
     func test_wakeAndBleedRejectionsRemainRealAudioContributions() throws {
         let frozen = provenance
         let sink = VoiceSharingContributionSink(

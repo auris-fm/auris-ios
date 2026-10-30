@@ -254,10 +254,12 @@ class VoiceAsrEngine {
             FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
             // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the bleed filter RAN for this capture and its
             // verdict was "bleed" — reported from the site that made the decision, never inferred.
+            // Spec ruling (080fee80): the bleed decision vocabulary is the contract enum
+            // overlap/no_overlap/uncertain — the ASR skip reason does not add a decision value.
             contributionCollector?.engineReported(
                 stage: "bleed",
                 outcome: .init(state: "completed", reason: nil),
-                context: utteranceContext, decision: "bleed_rejected")
+                context: utteranceContext, decision: "overlap")
             // Observed bleed decision, not a discard: the spec requires collecting bleed-rejected segments
             // and retaining the decision rather than treating all rejects as playback-only ground truth.
             contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
@@ -271,7 +273,7 @@ class VoiceAsrEngine {
             contributionCollector?.engineReported(
                 stage: "bleed",
                 outcome: .init(state: "completed", reason: nil),
-                context: utteranceContext, decision: "no_bleed")
+                context: utteranceContext, decision: "no_overlap")
         }
 
         // The detector observes every segment in both listening modes.
