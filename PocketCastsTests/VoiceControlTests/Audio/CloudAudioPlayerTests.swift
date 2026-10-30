@@ -74,6 +74,25 @@ final class CloudAudioPlayerTests: XCTestCase {
         XCTAssertTrue(secondTurnDrained, "the runner must survive a finish() and serve the next turn")
     }
 
+    /// Pending output must be checked again when its timer expires, even if no socket frame,
+    /// finish, or cancel arrives. Otherwise the expired deadline spins under runnerLock and
+    /// blocks the main thread's next enqueue (and ASR's main-thread grace lookup).
+    func testRenderCatchUpTimeoutRechecksWithoutNewWork() async {
+        let player = CloudAudioPlayer()
+        let rechecked = expectation(description: "runner rechecks pending render progress")
+        player.scheduleRenderCatchUpForTesting(after: 0.03) { rechecked.fulfill() }
+        await fulfillment(of: [rechecked], timeout: 1.0)
+
+        // Keep failure cleanup off the test executor: the broken runner can starve this lock.
+        let admitted = expectation(description: "next frame can acquire the runner lock")
+        DispatchQueue.global().async {
+            player.enqueue(CloudAudioFrame(data: Data(repeating: 0x11, count: 480)))
+            admitted.fulfill()
+            player.cancel()
+        }
+        await fulfillment(of: [admitted], timeout: 1.0)
+    }
+
     private func waitFor(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {

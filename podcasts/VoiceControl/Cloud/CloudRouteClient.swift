@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// WebSocket client for `GET /api/v1/cloud/route`.
 ///
@@ -29,7 +30,12 @@ final class CloudRouteClient {
 
     /// Optional seam for the WebSocket task (see `WebSocketTasking`); `nil`
     /// uses the session's real web socket.
+    private let playbackTimingFactory: (String) -> CloudPlaybackTiming?
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
+
+    /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
+    /// injected-factory tests bypass the default path entirely.
+    private(set) var lastProductionTaskStateForTesting: URLSessionTask.State?
 
     /// Codecs advertised to the server in the authenticate frame.
     ///
@@ -62,7 +68,8 @@ final class CloudRouteClient {
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
-        webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil
+        webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil,
+        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.userId = userId
@@ -72,6 +79,7 @@ final class CloudRouteClient {
         self.tokenProvider = tokenProvider ?? CloudStaticIdentityTokenProvider()
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.webSocketTaskFactory = webSocketTaskFactory
+        self.playbackTimingFactory = playbackTimingFactory
         if let session {
             self.session = session
         } else {
@@ -85,19 +93,6 @@ final class CloudRouteClient {
 
     // MARK: - Public API
 
-    /// Streams route events until `done`/`error` or connection close.
-    ///
-    /// A fresh `CloudTurnEnvelope` is minted per call — callers that issue
-    /// transport retries for the same logical turn must pass the envelope they
-    /// built for that turn so `request_id` stays stable (see `route(request:context:turn:)`).
-    func route(request: String, context: CloudRouteContext) -> AsyncStream<CloudRouteEvent> {
-        route(
-            request: request,
-            context: context,
-            turn: CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [])
-        )
-    }
-
     /// Streams route events for one logical turn.
     ///
     /// `turn.requestId` is client-assigned and must be reused across transport
@@ -107,31 +102,423 @@ final class CloudRouteClient {
     func route(
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil
     ) -> AsyncStream<CloudRouteEvent> {
-        AsyncStream { continuation in
-            let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation)
+        route(
+            request: request,
+            context: context,
+            turn: turn,
+            resultSocket: nil,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
+    }
+
+    /// Routes a turn AND hands back the handle its `app_operation_result` sends must travel by:
+    /// the handle binds to the ORIGINAL socket registration, so late results from a retired turn
+    /// are undelivered rather than routed onto a successor that reused the request id.
+    func routeWithResultSocket(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
+        // The pending interruption report for this turn's AUTHENTICATION frame
+        // (cloud-assistant.md → Interruption): the server applies it to already-settled history
+        // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
+    ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
+        let socket = AppOperationResultSocket(requestId: turn.requestId)
+        let lifetime = TurnSocketLifetime()
+        // The socket lives as long as the consumer's turn: the sink closes it via
+        // `finishTurn()` when its event loop ends — never on producer completion, which
+        // AsyncStream surfaces as `onTermination` on `finish()` while the consumer may still
+        // be awaiting a result send. Awaiting local submission before normal retirement is the
+        // design; server receipt stays unclaimed.
+        // Strong: the socket OWNS its lifetime. The lifetime must outlive the producer task so
+        // the consumer's claim and close still reach the registration after producer completion.
+        socket.closeHook = { lifetime.close() }
+        socket.claimHook = { lifetime.claimOwnership() }
+        // Bounded cleanup armed at creation: if no consumer ever claims the turn, the
+        // registration is retired on a bound. claimOwnership() cancels this timer; a
+        // claimed consumer is NEVER closed by it, however long its work takes.
+        lifetime.closeAfterGrace()
+        let stream = route(
+            request: request,
+            context: context,
+            turn: turn,
+            resultSocket: socket,
+            lifetime: lifetime,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage,
+            pendingInterruptReport: pendingInterruptReport,
+            onReportAttached: onReportAttached
+        )
+        return (stream, socket)
+    }
+
+    /// Carries the socket registration out of `performWebSocket` so a caller can hold the socket
+    /// open until the CONSUMER finishes the turn. Retirement at producer completion was measured
+    /// losing a race: AsyncStream buffers, so the producer can yield `done` and return (retiring
+    /// the socket) while the consumer is still awaiting the awaited result send for an earlier
+    /// event — turning a deliverable result into `undelivered`.
+    final class TurnSocketLifetime {
+        fileprivate var requestId: String?
+        fileprivate var identity: UUID?
+        fileprivate var client: CloudRouteClient?
+        fileprivate var wsTask: WebSocketTasking?
+        private let closeLock = NSLock()
+        private var closed = false
+        private var consumerClaimed = false
+        private var graceTask: Task<Void, Never>?
+
+        /// True once the lifetime has closed. Read by the binding site so a socket that closed
+        /// before its transport registered retires immediately at bind time instead of leaking.
+        fileprivate var isClosed: Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            return closed
+        }
+
+        /// Single synchronized bind/close transition: publishes the binding fields and returns
+        /// whether the bind was ACCEPTED. A lifetime that already closed rejects the bind under
+        /// the same lock that closed it — no publish-then-check window.
+        fileprivate func bind(requestId: String, identity: UUID, client: CloudRouteClient, wsTask: WebSocketTasking) -> Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            if closed { return false }
+            self.requestId = requestId
+            self.identity = identity
+            self.client = client
+            self.wsTask = wsTask
+            return true
+        }
+
+        /// Idempotent: whichever of consumer close (`finishTurn`) or bounded cleanup wins, the
+        /// cancel+retire runs exactly once.
+        func close() {
+            closeLock.lock()
+            if closed { closeLock.unlock(); return }
+            closed = true
+            graceTask?.cancel()
+            closeLock.unlock()
+            if let client, let requestId, let identity {
+                client.retireSocket(requestId: requestId, identity: identity)
             }
-            continuation.onTermination = { _ in
-                task.cancel()
+            wsTask?.cancel(with: .goingAway, reason: nil)
+        }
+
+        /// The consumer takes ownership when it starts iterating the turn: from then on the
+        /// registration lives only as long as the consumer's own close (or stream cancellation).
+        /// A claimed consumer held past the grace deadline must NOT lose its registration.
+        fileprivate func claimOwnership() {
+            closeLock.lock()
+            consumerClaimed = true
+            graceTask?.cancel()
+            graceTask = nil
+            closeLock.unlock()
+        }
+
+        /// Deadline close that re-checks claimed/closed UNDER the lock, so a consumer claiming
+        /// concurrently with the deadline is never severed by the timer (blocker: the old timer
+        /// checked outside the lock and closed after a concurrent claim).
+        func closeIfUnclaimed() {
+            closeLock.lock()
+            if closed || consumerClaimed { closeLock.unlock(); return }
+            closed = true
+            graceTask?.cancel()
+            closeLock.unlock()
+            if let client, let requestId, let identity {
+                client.retireSocket(requestId: requestId, identity: identity)
+            }
+            wsTask?.cancel(with: .goingAway, reason: nil)
+        }
+
+        /// Bounded cleanup for a turn whose consumer never claimed the socket. A claimed
+        /// consumer is never closed by this timer, however long its work takes.
+        fileprivate func closeAfterGrace(seconds: UInt64 = 2) {
+            closeLock.lock()
+            if closed || consumerClaimed { closeLock.unlock(); return }
+            closeLock.unlock()
+            graceTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: seconds * 1_000_000_000) }
+                catch { return } // cancelled by claim/close: never close on a cancelled timer
+                guard let self, !Task.isCancelled else { return }
+                self.closeIfUnclaimed()
             }
         }
     }
 
+    private func route(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope,
+        resultSocket: AppOperationResultSocket?,
+        lifetime: TurnSocketLifetime? = nil,
+        sourceTranscript: String? = nil,
+        sourceLanguage: String? = nil,
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
+    ) -> AsyncStream<CloudRouteEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onReportAttached: onReportAttached)
+            }
+            continuation.onTermination = { [lifetime] reason in
+                task.cancel()
+                // Consumer-side close ownership: `.cancelled` means the consumer abandoned (or
+                // the surrounding task was cancelled) — close immediately. `.finished` is
+                // PRODUCER completion: the stream may still hold buffered events the consumer
+                // is lawfully draining (an awaited result send lives there), so closing now was
+                // measured severing a deliverable send. Bound the cleanup instead: if the
+                // consumer never claims the socket via `finishTurn`, close after a grace period.
+                if case .cancelled = reason {
+                    lifetime?.close()
+                }
+                // `.finished` needs no action: the grace was armed at creation and is
+                // cancelled by claimOwnership(); a claimed consumer closes via finishTurn.
+            }
+        }
+    }
+
+    /// The configured base URL, for a run to record as configuration (not a credential). It is what the
+    /// client will dial, and an empty value is the one condition that produces `invalid_request` before
+    /// any authentication is attempted.
+    var resolvedBaseURLForDiagnostics: String { baseURL }
+
+    /// Whether a credential is available, as a BOOLEAN: the value itself is never read out here. This
+    /// distinguishes `unauthorized` (no credential) from `invalid_request` (a malformed request).
+    var hasCredentialForDiagnostics: Bool {
+        get async { await tokenProvider.token() != nil }
+    }
+
+    /// OPT-IN ACCEPTANCE COLLECTION. It consumes the route stream for ONE controlled acceptance turn and
+    /// emits a single `CloudAcceptanceRecord` carrying only the allowlisted fields — the turn's request
+    /// id, its conversation id, the server's response text and the terminal outcome — with the request
+    /// id taken from the TURN THAT WAS SUBMITTED, so the record can be matched to its own incoming
+    /// events. It is deliberately not a general traffic capture: a caller opts in per turn, for the
+    /// benign acceptance turns only, and nothing outside the allowlist is exported.
+    func collectAcceptance(
+        request: String,
+        context: CloudRouteContext,
+        turn: CloudTurnEnvelope
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        collectAcceptance(turn: turn, upstream: route(request: request, context: context, turn: turn))
+    }
+
+    /// The same collector over an INJECTED event stream, so the wrapper and the consumer can be driven
+    /// by a control without subclassing this final client. The production entry point above passes the
+    /// real stream; both share one implementation, so the control exercises the same code path.
+    func collectAcceptance(
+        turn: CloudTurnEnvelope,
+        upstream: AsyncStream<CloudRouteEvent>
+    ) -> (stream: AsyncStream<CloudRouteEvent>, record: @Sendable () -> CloudAcceptanceRecord) {
+        let recorder = CloudAcceptanceRecord.Recorder(
+            requestId: turn.requestId,
+            conversationId: turn.conversation?.conversationId
+        )
+        let stream = AsyncStream<CloudRouteEvent> { continuation in
+            let task = Task {
+                var sawTerminal = false
+                for await event in upstream {
+                    recorder.observe(event)
+                    if case .done = event { sawTerminal = true }
+                    if case .error = event { sawTerminal = true }
+                    continuation.yield(event)
+                }
+                // AN END WITHOUT A TERMINAL IS AN INCOMPLETE TURN, not a cancellation: an upstream EOF
+                // happens on completion and on failure too. It is classified as a transport failure so
+                // a missing done/error cannot pass as success, and cancellation is NOT inferred here.
+                if !sawTerminal { recorder.markStreamEndedWithoutTerminal() }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                // Downstream termination cancels the work but does NOT by itself mean the TURN was
+                // cancelled: the consumer may simply have stopped reading. The recorder is left to
+                // whichever terminal it observed, and the caller marks .cancelled explicitly if it
+                // actually cancelled the turn.
+                task.cancel()
+            }
+        }
+        return (stream, { recorder.record() })
+    }
+
     // MARK: - WebSocket implementation
+
+    // MARK: App-operation result transport (wire contract rev da327e624)
+
+    /// Live turn sockets by `request_id`, so an `app_operation_result` can ride the SAME socket
+    /// its operation arrived on.
+    ///
+    /// Ownership is PER REGISTRATION: each registration carries a unique identity, and a turn's
+    /// close retires ONLY its own registration. A `request_id` reused while a predecessor socket
+    /// is still open therefore cannot have its registration removed by the predecessor's finishing
+    /// defer — the successor keeps its own entry.
+    private struct SocketRegistration {
+        let task: WebSocketTasking
+        let identity = UUID()
+    }
+    private let liveSocketsLock = NSLock()
+    private var liveSockets: [String: SocketRegistration] = [:]
+
+    /// Registers a turn's socket and binds its identity into the turn's result socket handle.
+    private func registerSocket(_ task: WebSocketTasking, requestId: String, resultSocket: AppOperationResultSocket?) -> UUID {
+        liveSocketsLock.lock()
+        defer { liveSocketsLock.unlock() }
+        let registration = SocketRegistration(task: task)
+        liveSockets[requestId] = registration
+        resultSocket?.boundIdentity = registration.identity
+        return registration.identity
+    }
+
+    /// Retires ONLY the registration made by this turn (identity-checked), so a duplicate live
+    /// `request_id` is never un-registered by a predecessor's close.
+    private func retireSocket(requestId: String, identity: UUID) {
+        liveSocketsLock.lock()
+        defer { liveSocketsLock.unlock() }
+        if liveSockets[requestId]?.identity == identity {
+            liveSockets.removeValue(forKey: requestId)
+        }
+    }
+
+    /// TEST SEAM: retire a turn's socket registration EXACTLY as a consumer close would, so a
+    /// control can produce the `.undelivered` branch through the production send path instead of
+    /// calling state transitions directly. Identity-checked in `retireSocket`, so it cannot retire
+    /// a different turn's registration.
+    func retireSocketRegistrationForTesting(requestId: String, identity: UUID) {
+        retireSocket(requestId: requestId, identity: identity)
+    }
+
+    /// What a result send established — LOCAL SUBMISSION KNOWLEDGE ONLY. `submitted` means the
+    /// frame was handed to the socket without error; it is NOT a server receipt, and a send may
+    /// transmit and still lose the connection after. `undelivered` means no live socket existed
+    /// (or the send failed): the server's only honest reading is `unknown` — never a retry
+    /// signal, never a fabricated success.
+    enum AppOperationResultSendReport: Equatable {
+        case submitted
+        case undelivered
+    }
+
+
+
+
+    /// Sends an `app_operation_result` on the turn socket that carried the operation — bound to
+    /// the ORIGINAL registration via the handle, so a late result from a retired turn can never
+    /// route onto a successor's socket that reused the request id.
+    @discardableResult
+    func sendOperationResult(_ frame: AppOperationResultFrame, via socket: AppOperationResultSocket) async -> AppOperationResultSendReport {
+        liveSocketsLock.lock()
+        let entry = liveSockets[socket.requestId]
+        let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
+        liveSocketsLock.unlock()
+        guard let boundTask else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] app_operation_result undelivered: registration retired for turn \(socket.requestId)"
+            )
+            return .undelivered
+        }
+        return await Self.dispatch(frame, on: boundTask, requestId: socket.requestId)
+    }
+
+    /// Sends the `interrupt` control frame on the PRIOR turn's still-open socket
+    /// (`docs/specs/cloud-assistant.md` → Interruption, spec ruling c5fe3416).
+    ///
+    /// The ordering is not negotiable and is not retried: the server acts on an interrupt only
+    /// while the named turn is live, and IGNORES one that arrives after that turn's terminal. So a
+    /// send that loses the race is gone — there is no queue and no second attempt, which is why the
+    /// caller claims the one shot (`CloudInterruptionState.claimInterruptEmission`) before reaching
+    /// here.
+    ///
+    /// `playbackPositionMs` is deliberately optional: the contract calls it untrusted reported
+    /// progress, so an unmeasured position is OMITTED rather than sent as zero.
+    func sendInterrupt(
+        requestId: String,
+        playbackPositionMs: Int64?,
+        via socket: AppOperationResultSocket
+    ) async -> AppOperationResultSendReport {
+        liveSocketsLock.lock()
+        let entry = liveSockets[socket.requestId]
+        let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
+        liveSocketsLock.unlock()
+        guard let boundTask else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] interrupt undelivered: registration retired for turn \(socket.requestId)"
+            )
+            return .undelivered
+        }
+        var json: [String: Any] = ["type": "interrupt", "request_id": requestId]
+        if let playbackPositionMs { json["playback_position_ms"] = playbackPositionMs }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: json)
+            guard let text = String(data: data, encoding: .utf8) else { return .undelivered }
+            try await boundTask.send(.string(text))
+            FileLog.shared.addMessage(
+                "[CloudRoute] interrupt sent for turn \(requestId) positionMs=\(playbackPositionMs.map(String.init) ?? "omitted")"
+            )
+            return .submitted
+        } catch {
+            FileLog.shared.addMessage("[CloudRoute] interrupt send failed for turn \(requestId): \(error)")
+            return .undelivered
+        }
+    }
+
+    private static func dispatch(_ frame: AppOperationResultFrame, on socketTask: WebSocketTasking, requestId: String) async -> AppOperationResultSendReport {
+        let json = frame.jsonFrame()
+        do {
+            let data = try JSONSerialization.data(withJSONObject: json)
+            guard let text = String(data: data, encoding: .utf8) else { return .undelivered }
+            try await socketTask.send(.string(text))
+            return .submitted
+        } catch {
+            // A send may TRANSMIT and then throw (the transport's own submission rule): the
+            // report stays local-knowledge — the server's knowledge is in question either way.
+            FileLog.shared.addMessage(
+                "[CloudRoute] app_operation_result send failed for turn \(requestId): \(error)"
+            )
+            return .undelivered
+        }
+    }
 
     /// Drives the turn over the WebSocket and always terminates the stream —
     /// either with the turn's events or with a delivered error. The return value
     /// is always `true`; it is kept for the caller's shape.
+    /// Producer-side observation seam, set only by controls: called after EACH frame is received,
+    /// on the producer's own task — just before the next `receive()`. Lets a control park the
+    /// producer exactly where the turn needs to be held (after the frame carrying the action,
+    /// before the frame carrying its result). Production never sets it.
+    var onFrameReceived: (@Sendable () -> Void)?
+
+    /// Test-only seam: invoked with the turn's request id at the exact instant between creating
+    /// the socket task and binding its registration. A deterministic bind-interleaving control
+    /// uses it to settle (or inspect) the lifetime before the transport publishes its bind.
+    var onBeforeBind: (@Sendable (String) -> Void)?
+    /// Control-only: parked transport latches to notify when THIS transport is retired. The
+    /// production `cancel(with:reason:)` path invokes it, so the parked receive wakes from the
+    /// same retirement that retires the registration — no polling, no race window.
+
+
     private func performWebSocket(
         request: String,
         context: CloudRouteContext,
         turn: CloudTurnEnvelope,
-        continuation: AsyncStream<CloudRouteEvent>.Continuation
+        continuation: AsyncStream<CloudRouteEvent>.Continuation,
+        resultSocket: AppOperationResultSocket?,
+        lifetime: TurnSocketLifetime? = nil,
+        sourceTranscript: String?,
+        sourceLanguage: String?,
+        pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) async -> Bool {
+        let playbackTiming = playbackTimingFactory(turn.requestId)
+        defer { playbackTiming?.receiverEnded() }
         guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
-            continuation.yield(.error(code: "invalid_request", message: ""))
+            // A distinguishable message, so a run's export says WHICH construction step failed rather
+            // than reporting both under `invalid_request`.
+            FileLog.shared.addMessage("[CloudRoute] invalid_request: websocket URL could not be built from baseURL='\(baseURL)'")
+            continuation.yield(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
             continuation.finish()
             return true
         }
@@ -141,37 +528,140 @@ final class CloudRouteClient {
             tokenProvider: self.tokenProvider,
             request: request,
             context: context,
-            turn: turn
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
         ) else {
             // No credential: fail closed with a terminal event, so the sink can
             // speak/earcon the failure. Finishing silently would leave the user
             // with no error and no outcome.
-            continuation.yield(.error(code: "unauthorized", message: ""))
+            continuation.yield(.error(source: .requestConstruction, code: "unauthorized", message: ""))
             continuation.finish()
             return true
         }
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        let wsTask: WebSocketTasking = webSocketTaskFactory?(req) ?? session.webSocketTask(with: req)
+        let wsTask: WebSocketTasking
+        if let injected = webSocketTaskFactory?(req) {
+            // A test double. It owns its own readiness, so nothing is resumed here.
+            wsTask = injected
+        } else {
+            // PRODUCTION PATH. A `URLSessionWebSocketTask` starts SUSPENDED and must be resumed to
+            // begin its connection: without this the task never reached startup, so a turn could
+            // not begin. (The observable is startup, not a claim about every send's behaviour —
+            // that stronger statement was not measured and is not made.) The controlled tests
+            // inject a factory and so never exercised this line, which is how the omission
+            // survived: a double bypasses the code it stands in for.
+            let task = session.webSocketTask(with: req)
+            task.resume()
+            // Exposed so a test can verify the PRODUCTION task is not left suspended. A test that
+            // injects a factory cannot reach this line at all, which is how the missing resume
+            // survived the whole suite.
+            lastProductionTaskStateForTesting = task.state
+            wsTask = task
+        }
+
+        // Register the live socket under this turn's request id so mid-turn
+        // `app_operation_result` sends ride the SAME socket the operation arrived on. The
+        // registration identity is retired conditionally at close (a duplicate live id keeps
+        // its own registration).
+        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
+        // DETERMINISTIC BIND SEAM (test-only). This point is the last instant before the bind makes
+        // its ACCEPTANCE DECISION, and the registration has already been published into the live
+        // table — so a lifetime settled here is exactly the window that a publish-then-check bind
+        // would honour (keeping a registration whose lifetime is already closed) while the single
+        // synchronized transition still rejects it. The seam is a synchronous call on the
+        // transport's own task, so a control can hold this task until the consumer's close has
+        // landed, making the "settled before the decision" order deterministic.
+        if let lifetime, let willBind = onBeforeBind { willBind(turn.requestId) }
+        if let lifetime {
+            // Deferred-close mode: the CALLER closes on consumer completion. Bind acceptance is
+            // ONE synchronized transition: a lifetime that closed before registration REJECTS the
+            // bind — retire the registration AND cancel the task so no auth/turn frame is ever
+            // submitted on a socket whose lifetime is already settled.
+            if !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: wsTask) {
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                wsTask.cancel(with: .goingAway, reason: nil)
+                FileLog.shared.addMessage("[CloudRoute] connection_lost: the socket closed before the turn was submitted")
+                continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                continuation.finish()
+                return true
+            }
+        }
 
         // Close the socket whenever this call returns, on every path. The
         // stream's `onTermination` cancels only the surrounding Swift task, so
         // without this a superseded turn leaves the socket open and the server
         // generating and streaming an answer the user abandoned (billed, and
         // the connection held until the server's own idle timeout).
-        defer { wsTask.cancel(with: .goingAway, reason: nil) }
+        defer {
+            if lifetime == nil {
+                wsTask.cancel(with: .goingAway, reason: nil)
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+            }
+        }
+
+        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
+        // plainly rather than leave a dead branch implying otherwise.
+        //
+        // The failure kinds that could precede submission — frame construction and encoding —
+        // already return above as `invalid_request` BEFORE this point. Everything that can fail
+        // from here on happens after the send has been INVOKED, and a send may transmit and then
+        // throw, so admission is possible and the outcome must be preserved rather than replayed.
+        //
+        // Consequence, stated as a limit: this client cannot currently produce the one outcome that
+        // would make eligible automatic recovery possible. The transport never reports "provably
+        // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
+        // producer is separate work; until then, automatic retry of a turn is not available.
+
+        // PENDING INTERRUPTION REPORT ON THE AUTH FRAME (cloud-assistant.md → Interruption, spec
+        // c5fe3416): the contract says to report the interruption in the NEXT turn's
+        // authentication frame, and the server applies it to already-settled history BEFORE
+        // assembling model input. It rides here, not the turn body, because `CloudRouteRequestBuilder`
+        // is shared with the envelope path and history correction is an authentication-time
+        // concern. `playback_position_ms` is omitted when unmeasured — the contract makes it
+        // optional and untrusted reported progress, so it is never invented.
+        let finalAuthFrame: [String: Any] = {
+            guard let pendingInterruptReport else { return authFrame }
+            var frame = authFrame
+            var report: [String: Any] = ["request_id": pendingInterruptReport.requestId]
+            if let position = pendingInterruptReport.playbackPositionMs {
+                report["playback_position_ms"] = position
+            }
+            frame["interrupts"] = report
+            return frame
+        }()
 
         do {
             // Send authentication frame. The task's text message is a String,
             // so the frame is serialized to JSON text here.
-            let authJSON = try JSONSerialization.data(withJSONObject: authFrame)
+            let authJSON = try JSONSerialization.data(withJSONObject: finalAuthFrame)
             guard let authText = String(data: authJSON, encoding: .utf8) else {
-                continuation.yield(.error(code: "invalid_request", message: ""))
+                FileLog.shared.addMessage("[CloudRoute] invalid_request: auth frame JSON was not valid UTF-8")
+                continuation.yield(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
                 continuation.finish()
                 return true
             }
+            // SUBMISSION PROVENANCE. The flag is set only AFTER the send returns, so a failure
+            // before this line is a frame that provably never left — the sole case where automatic
+            // recovery cannot duplicate a turn. Anything past this line may have been admitted.
+            // SUBMISSION IS ATTEMPTED BEFORE THE CALL, not proven after it. A send can TRANSMIT
+            // and then throw or lose its completion, so a flag set only on return would classify
+            // that frame as never-submitted — and it would be replayed although it may have been
+            // admitted. The conservative reading is the correct one here: once the send is
+            // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
+            // never left.
             try await wsTask.send(.string(authText))
+
+            // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
+            // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before
+            // this point, so the correction survives for the next attempt instead of being
+            // destroyed by the attempt that failed. `confirmReportAttached` is identity-checked, so
+            // a newer report recorded meanwhile is not lost by this late confirmation.
+            if let pendingInterruptReport {
+                await onReportAttached?(pendingInterruptReport.requestId)
+            }
 
             // Written by the receive loop and read by the timeout task, so the
             // flag is lock-protected rather than a plain `Bool` shared across
@@ -191,7 +681,8 @@ final class CloudRouteClient {
                     return // cancelled: a frame arrived, the main loop owns the stream
                 }
                 if !terminalFlag.isSet {
-                    continuation.yield(.error(code: "connection_lost", message: ""))
+                    FileLog.shared.addMessage("[CloudRoute] connection_lost: no first frame within \(Int(self.requestTimeoutSeconds))s — the turn never started")
+                    continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
                     continuation.finish()
                 }
             }
@@ -200,21 +691,28 @@ final class CloudRouteClient {
                 let message = try await wsTask.receive()
                 // Cancel the timeout on first frame.
                 firstFrameTimeout.cancel()
+                onFrameReceived?()
 
                 switch message {
                 case .data(let data):
                     // Binary frame: audio payload.
-                    continuation.yield(.audioFrame(CloudAudioFrame(data: data)))
+                    continuation.yield(.audioFrame(CloudAudioFrame(data: data, timingReceipt: playbackTiming?.received(byteCount: data.count))))
 
                 case .string(let string):
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
+                        if case .error(_, let code, _) = event {
+                            // BOUNDED: the CODE only. The server's free-form message is NOT written —
+                            // an arbitrary server string is not known to be free of sensitive content,
+                            // and the allowlist here is the acceptance protocol, not general traffic.
+                            FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")
+                        }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
                         // connection after `done`/`error`, so continuing to
                         // receive would turn that normal close into a spurious
                         // `connection_lost` after a successful answer.
-                        if case .done = event { terminalFlag.set(); break receiveLoop }
+                        if case .done = event { playbackTiming?.observe("server_done"); terminalFlag.set(); break receiveLoop }
                         if case .error = event { terminalFlag.set(); break receiveLoop }
                     }
 
@@ -225,11 +723,11 @@ final class CloudRouteClient {
 
             // WebSocket closed.
             if !terminalFlag.isSet {
-                continuation.yield(.error(code: "connection_lost", message: ""))
+                FileLog.shared.addMessage("[CloudRoute] connection_lost: socket closed before a terminal event")
+                continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             }
             continuation.finish()
             return true
-
         } catch is CancellationError {
             continuation.finish()
             return true
@@ -245,7 +743,13 @@ final class CloudRouteClient {
             // speaks a non-empty message verbatim, so it reached the user as
             // English prose in whatever locale they had set, instead of the
             // localized template or the error earcon.
-            continuation.yield(.error(code: "connection_lost", message: ""))
+            //
+            // The diagnostic is not discarded though: it goes to the log, where it is
+            // diagnostics rather than user-facing text. Without it a failed cloud turn was
+            // indistinguishable from a timeout or an early socket close, so no run could
+            // say which of the three happened.
+            FileLog.shared.addMessage("[CloudRoute] connection_lost: transport error — \(error)")
+            continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
             continuation.finish()
             return true
         }
@@ -262,18 +766,40 @@ final class CloudRouteClient {
         tokenProvider: CloudTokenProviding,
         request: String,
         context: CloudRouteContext,
-        turn: CloudTurnEnvelope
+        turn: CloudTurnEnvelope,
+        sourceTranscript: String?,
+        sourceLanguage: String?
     ) async -> [String: Any]? {
         guard let credential = await tokenProvider.token() else {
+            // Name the failure. A missing credential surfaced only as a generic `unauthorized`
+            // terminal, so a turn that never dialled was indistinguishable from a server
+            // rejecting the token — and nothing recorded which provider was consulted.
+            // The token value is never logged; only which provider answered and whether it had one.
+            FileLog.shared.addMessage("[CloudRoute] unauthorized: token provider \(type(of: tokenProvider)) returned no credential — the turn was not submitted")
             return nil
         }
-        var frame = CloudRouteRequestBuilder.envelope(request: request, context: context, turn: turn)
+        var frame = CloudRouteRequestBuilder.envelope(
+            request: request,
+            context: context,
+            turn: turn,
+            sourceTranscript: sourceTranscript,
+            sourceLanguage: sourceLanguage
+        )
         // Transport-specific fields: the credential rides the first frame, and
         // the codecs are advertised here so the server negotiates the binary
         // frame format up front.
         frame["type"] = "authenticate"
         frame["access_token"] = credential
         frame["codecs"] = Self.supportedCodecs
+        // Record the OUTGOING frame's shape (keys and the codec list only; never the token) and the
+        // request/conversation ids, so a server `invalid_request` can be attributed to the frame we
+        // actually sent rather than deduced from the code.
+        let keys = frame.keys.sorted().joined(separator: ",")
+        FileLog.shared.addMessage(
+            "[CloudRoute] auth frame keys=[\(keys)] codecs=\(Self.supportedCodecs) "
+            + "requestId=\(turn.requestId) conversationId=\(turn.conversation?.conversationId ?? "nil") "
+            + "mode=\(turn.conversation?.mode ?? "nil") credentialPresent=true"
+        )
         return frame
     }
 
@@ -337,7 +863,9 @@ final class CloudRouteClient {
             else { return [] }
             let params = (json["params"] as? [String: Any])
                 .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
-            return [.action(tool: tool, action: action, params: params)]
+            return [.action(tool: tool, action: action, params: params,
+                            operationId: json["operation_id"] as? String,
+                            capabilityVersion: json["capability_version"] as? String)]
 
         case "token":
             // `token` rides the **socket**: the Worker's `lifecycle.ts` calls
@@ -354,7 +882,7 @@ final class CloudRouteClient {
             // and is ignored. This guard lived in the retired SSE parser; the
             // contract it enforced rides the socket too.
             if isMalformedResultPayload(text) {
-                return [.error(code: "invalid_response", message: "")]
+                return [.error(source: .server, code: "invalid_response", message: "")]
             }
             guard let result = DiscoveryResult.parse(json: text) else { return [] }
             return [.result(result)]
@@ -367,7 +895,7 @@ final class CloudRouteClient {
             guard let code = json["code"] as? String,
                   let message = json["message"] as? String
             else { return [] }
-            return [.error(code: code, message: message)]
+            return [.error(source: .server, code: code, message: message)]
 
         default:
             return []

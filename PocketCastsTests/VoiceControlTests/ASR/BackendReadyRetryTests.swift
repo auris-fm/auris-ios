@@ -91,7 +91,7 @@ final class BackendReadyRetryTests: XCTestCase {
         await self.waitUntil { backend.ensureReadyCalls >= 2 }
 
         var transcripts: [String] = []
-        engine.onRoutingInput = { transcripts.append($0.routerTranscript) }
+        engine.onRoutingInput = { transcripts.append($0.routerTranscript); return true }
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
 
         XCTAssertEqual(transcripts, ["pause"], "utterance must transcribe once the backend recovered")

@@ -97,34 +97,24 @@ test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Te
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
         2>&1 | tee $(LOG_DIR)/test.log
 
-build_staging: ensure_llama_ios ## Builds using the StagingDebug configuration
-	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild -project podcasts.xcodeproj \
-       -scheme "Pocket Casts Staging" \
-       -configuration StagingDebug \
-       -destination 'generic/platform=iOS Simulator' \
-       $(SIM_ARCH) \
-       build 2>&1 | tee $(LOG_DIR)/build_staging.log
+build_staging: build ## Build the Debug app using the staging gateway
 
-test_staging: ensure_llama_ios ## Build and run Unit Tests using the StagingDebug configuration
-	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild test -project podcasts.xcodeproj \
-	    -scheme "Pocket Casts Staging" \
-        -only-testing:$(ONLY_TESTING) \
-        $(TEST_TIMEOUT_FLAGS) \
-        $(SIM_ARCH) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
-        2>&1 | tee $(LOG_DIR)/test_staging.log
+test_staging: test ## Run Debug unit tests using the staging gateway
 
-build_fast: ensure_llama_ios ## Fast local StagingDebug build (no dSYM/signing/lint); not for CI
+build_fast: ensure_llama_ios ## Fast local Debug build (no dSYM/signing/lint); not for CI
+	# The shared "Pocket Casts Staging" scheme was removed with the staging-gateway work,
+	# so main's StagingDebug _fast targets are carried over on the pocketcasts scheme at
+	# Debug configuration instead; the point of the target is the FAST_FLAGS savings.
 	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild -project podcasts.xcodeproj \
-       -scheme "Pocket Casts Staging" \
-       -configuration StagingDebug \
+       -scheme pocketcasts \
+       -configuration Debug \
        -destination 'generic/platform=iOS Simulator' \
        $(FAST_FLAGS) \
        build 2>&1 | tee $(LOG_DIR)/build_fast.log
 
 test_fast: ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
 	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild test -project podcasts.xcodeproj \
-	    -scheme "Pocket Casts Staging" \
+	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
         $(TEST_TIMEOUT_FLAGS) \
         $(FAST_FLAGS) \

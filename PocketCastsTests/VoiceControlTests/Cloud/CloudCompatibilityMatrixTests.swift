@@ -1,3 +1,14 @@
+/// The origin these cases dispatch under. The conversation bound refuses a turn whose origin
+/// is not live, so a sink built for these cases must be given one — otherwise every turn would
+/// be refused before it dials and the case would exercise the bound rather than the sink.
+private let cloudTestOrigin = 1
+
+private func testConversationManager() -> CloudConversationManager {
+    let manager = CloudConversationManager()
+    manager.registerLiveOrigin(cloudTestOrigin)
+    return manager
+}
+
 import XCTest
 @testable import podcasts
 
@@ -41,9 +52,19 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
 
-        XCTAssertEqual(response, .spoken("token expired"))
+        // MID-SESSION (stream already open, a partial token arrived first) — distinct from the
+        // pre-stream case above. Spec ruling 2026-10-23 (f4b34311): the server's `message` is
+        // operator diagnostics, "never spoken or used to select client feedback" — so whatever
+        // feedback is chosen here, the remote prose must NOT be spoken. This implementation
+        // emits the local error earcon; assert that and assert the prose is absent.
+        XCTAssertEqual(response.response, .earcon(.error))
+        if case .spoken(let text) = response.response {
+            XCTAssertFalse(text.contains("token expired"), "the server's message is never spoken verbatim")
+        } else {
+            XCTAssertTrue(true, "the remote prose is not surfaced as speech")
+        }
         XCTAssertTrue(playback.calls.contains(.resume), "the turn restores playback after a mid-session failure")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
     }
@@ -59,11 +80,11 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
             """
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
 
         // `unauthorized` has no user-facing template, so the failure signal is
         // the error earcon — never silence, and never English prose for TTS.
-        XCTAssertEqual(response, .earcon(.error))
+        XCTAssertEqual(response.response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.resume))
     }
 
@@ -87,12 +108,12 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"text":"She"}
 
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+            data: {"tool":"playback","operation_id":"op-X12625","capability_version":"v7","action":"seek_to","params":{"reference_position_ms":100000}}
 
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext())
+        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
 
         XCTAssertTrue(playback.calls.contains(.seekTo(110)), "actions that did arrive are honored")
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
@@ -102,35 +123,76 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         // Asserting those two exact values (never `.silent`) keeps this pin able to
         // fail if the turn ever regressed to silence (PR #19 review).
         XCTAssertTrue(
-            response == .spoken("Connection lost. Please try again.") || response == .earcon(.error),
+            response.response == .spoken("Connection lost. Please try again.") || response.response == .earcon(.error),
             "expected a locale-appropriate failure signal, got \(response)"
         )
     }
 
     // MARK: - unaligned quotes
 
-    func testUnalignedQuoteSeeksBestEffortAndStopRestoresPreActionPosition() async {
+    /// An unmapped `play_quote` is refused rather than converted by assumption: reference time
+    /// is not playback time, and the raw value is a position the server never asked for. With
+    /// the seek refused, no pre-action position is captured, so `stop_quote` has nothing to
+    /// restore — and must not seek on that missing evidence either.
+    func testUnmappedQuoteIsRefusedAndStopQuoteDoesNotRestore() async {
         self.pendingFixture =
             """
             event: action
-            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":500000}}
+            data: {"tool":"playback","operation_id":"op-X77564","capability_version":"v7","action":"play_quote","params":{"reference_position_ms":500000}}
 
             event: token
             data: {"text":"quote"}
 
             event: action
-            data: {"tool":"playback","action":"stop_quote","params":{}}
+            data: {"tool":"playback","operation_id":"op-X57434","capability_version":"v7","action":"stop_quote","params":{}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        // No mapping for reference 500s: the client seeks as-is (best effort).
+        // No mapping for reference 500s.
         playback.positionMs = 900_000
+        let sink = makeSink()
 
-        _ = await makeSink().routeToCloud(request: "play that", tier: .free, context: sampleContext())
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
 
-        XCTAssertTrue(playback.calls.contains(.seekTo(500)), "unmapped reference seeks as-is")
+        // The refusal removes the QUOTE seek only. stop_quote still restores the pre-action
+        // position, which was captured before the refusal and is sink time — the existing
+        // restore behaviour @spec kept.
+        XCTAssertFalse(playback.calls.contains(.seekTo(500)), "an unmapped reference must not become a playback position")
+        XCTAssertTrue(playback.calls.contains(.seekTo(900)), "stop_quote restores the pre-action position in sink time")
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
+    }
+
+    /// The mapped counterpart: a quote with a known mapping seeks to the mapped position and
+    /// `stop_quote` restores the pre-action position, which is sink time.
+    func testMappedQuoteSeeksToMappedPositionAndStopRestoresPreActionPosition() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","operation_id":"op-X77564","capability_version":"v7","action":"play_quote","params":{"reference_position_ms":500000}}
+
+            event: token
+            data: {"text":"quote"}
+
+            event: action
+            data: {"tool":"playback","operation_id":"op-X57434","capability_version":"v7","action":"stop_quote","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // 500s reference maps to 515s playback: a nonzero offset, so passing this by seeking to
+        // the raw reference value is not possible.
+        mapper.playbackSecondsForReference = [500.0: 515.0]
+        playback.positionMs = 900_000
+        let sink = makeSink()
+
+        _ = await sink.routeToCloud(request: "play that", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(515)), "the quote seeks to the mapped position")
+        XCTAssertFalse(playback.calls.contains(.seekTo(500)), "the raw reference value is not the target")
         XCTAssertTrue(playback.calls.contains(.seekTo(900)), "stop_quote restores the pre-action playback position")
     }
 
@@ -184,7 +246,8 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: CloudPlaybackContextState(),
-            analytics: VoiceAnalytics(analytics: analytics)
+            analytics: VoiceAnalytics(analytics: analytics),
+            conversationManager: testConversationManager()
         )
     }
 

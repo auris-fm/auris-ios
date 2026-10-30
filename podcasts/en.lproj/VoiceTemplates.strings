@@ -37,6 +37,7 @@
 
 /* Volume */
 "volume.current" = "Volume is %d%%";
+"volume.unavailable" = "Sorry, I can’t change the volume right now";
 
 /* Stats / Queries */
 "stats.check_profile" = "Check Stats in the Profile tab for %@";
@@ -89,3 +90,11 @@
    no affordance for a language the user doesn't read (spec ruling 2026-09-24).
    Revisit when translations are added — a locale that carries the key is spoken. */
 "cloud_error_connection_lost" = "Connection lost. Please try again.";
+
+/* The free daily allowance is a limit of the ASSISTANT, so the user has to hear
+   which assistant and which allowance ran out — a generic "not admitted" reads as
+   an unexplained failure. Spec clarification 27ced9b: name Auris and the daily
+   limit exactly once, and do NOT speak the remote frame's message for this code
+   (the wire text stays diagnostic-only). No "resets at" time: the client is not
+   told when the allowance resets, and inventing one would be a false statement. */
+"cloud_error_limit_exceeded" = "You have reached your Auris free daily limit. Please try again tomorrow.";

@@ -33,7 +33,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "What did she mean?", context: sampleContext))
+        let events = await collect(client().route(request: "What did she mean?", context: sampleContext, turn: testTurnEnvelope()))
 
         XCTAssertEqual(
             events,
@@ -41,7 +41,9 @@ final class CloudRouteClientTests: XCTestCase {
                 .action(
                     tool: "playback",
                     action: "seek_to",
-                    params: ["reference_position_ms": .int(1_130_000)]
+                    params: ["reference_position_ms": .int(1_130_000)],
+                    operationId: nil,
+                    capabilityVersion: nil
                 ),
                 .token("She"),
                 .token(" is arguing."),
@@ -51,7 +53,148 @@ final class CloudRouteClientTests: XCTestCase {
         assertRouteBody(capturedTask?.sentTextFrames.first)
     }
 
-    func testActionOnlyStream() async {
+    /// The `app_operation_result` frame rides the SAME socket as its turn (wire contract rev
+    /// da327e624), observed on ONE client/turn across its whole life: held open → mid-turn send
+    /// SUBMITTED (frame captured on that socket) → turn completes → send after close is
+    /// UNDELIVERED (typed local-knowledge, not a server receipt). A duplicate live registration
+    /// of the same request_id is retired only by its own turn.
+    func testOperationResultRidesTheLiveTurnSocketAndReportsUndeliveredAfterClose() async throws {
+        let liveFixture = [
+            "event: action",
+            "data: {\"operation_id\":\"op-live\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "",
+            "event: done",
+            "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}",
+            "",
+        ].joined(separator: "\n")
+        let liveTask = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: liveFixture))
+        let heldGate = Gate()
+        liveTask.holdUntilReleased(heldGate)
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in liveTask }
+        )
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        let stream = routed.stream
+        let resultSocket = routed.resultSocket
+        let reader = Task {
+            var events: [CloudRouteEvent] = []
+            for await event in stream { events.append(event) }
+            // The consumer owns the close on normal completion (as the sink does).
+            resultSocket.finishTurn()
+            return events
+        }
+        // Barrier 1: the turn has SUBMITTED (auth frame is the first send) before the result send.
+        let submitted = Date().addingTimeInterval(5)
+        while Date() < submitted && liveTask.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let frame = AppOperationResultFrame(
+            operationId: "op-live", outcome: .refused,
+            reason: OperationReason.referenceMappingUnavailable
+        )
+        let midTurnReport = await client.sendOperationResult(try XCTUnwrap(frame), via: resultSocket)
+        XCTAssertEqual(midTurnReport, .submitted, "a result sent while the turn socket is live is submitted")
+        let captured = try XCTUnwrap(
+            liveTask.sentTextFrames.last.flatMap {
+                try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            },
+            "the result left as a text frame on the turn's own socket"
+        )
+        XCTAssertEqual(captured["type"] as? String, "app_operation_result")
+        XCTAssertEqual(captured["operation_id"] as? String, "op-live")
+        XCTAssertEqual(captured["outcome"] as? String, "refused")
+        XCTAssertEqual(captured["reason"] as? String, "reference_mapping_unavailable")
+
+        // Barrier 2: the SAME turn completes; the socket closes; the registration retires.
+        heldGate.release()
+        _ = await reader.value
+        let afterCloseReport = await client.sendOperationResult(try XCTUnwrap(frame), via: resultSocket)
+        XCTAssertEqual(
+            afterCloseReport, .undelivered,
+            "after the SAME turn closed, the result is undelivered — typed local-knowledge, not a server receipt"
+        )
+    }
+
+    /// A `request_id` reused while a predecessor turn is STILL OPEN, on ONE client (one registry,
+    /// factory returning socket A then socket B): the predecessor's close retires only its own
+    /// registration, AND a LATE result sent via the predecessor's handle is undelivered — never
+    /// routed onto the successor's socket.
+    func testADuplicateLiveRequestIDIsNotRetiredByThePredecessorsClose() async throws {
+        let openFixture = [
+            "event: action",
+            "data: {\"operation_id\":\"op-a\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "",
+        ].joined(separator: "\n")
+        let gateA = Gate()
+        let taskA = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
+        taskA.holdUntilReleased(gateA)
+        let gateB = Gate()
+        let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: openFixture))
+        taskB.holdUntilReleased(gateB)
+        var sockets: [StubWebSocketTask] = []
+        let lock = NSLock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in
+                lock.lock(); defer { lock.unlock() }
+                let next = sockets.isEmpty ? taskA : taskB
+                sockets.append(next)
+                return next
+            }
+        )
+        // BOTH turns deliberately share one request_id (the reuse the rules guard).
+        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        // SERIALIZE the turn starts (the factory hands out sockets in call order, so concurrent
+        // starts could swap A/B): start A, wait for its submission, then start B.
+        let routedA = client.routeWithResultSocket(request: "a", context: sampleContext, turn: sharedTurn)
+        let readerA = Task { for await _ in routedA.stream {} }
+        let deadlineA = Date().addingTimeInterval(5)
+        while Date() < deadlineA && taskA.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let routedB = client.routeWithResultSocket(request: "b", context: sampleContext, turn: sharedTurn)
+        let readerB = Task { for await _ in routedB.stream {} }
+        let deadlineB = Date().addingTimeInterval(5)
+        while Date() < deadlineB && taskB.sentTextFrames.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        // A closes: retires only its own registration — B's result path must stay live.
+        gateA.release()
+        _ = await readerA.value
+        let frame = AppOperationResultFrame(
+            operationId: "op-a", outcome: .refused,
+            reason: OperationReason.malformedSeekTarget
+        )
+        let successorReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedB.resultSocket)
+        XCTAssertEqual(successorReport, .submitted, "the successor's registration survived the predecessor's close")
+        XCTAssertEqual(
+            taskB.sentTextFrames.last.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }?["type"] as? String,
+            "app_operation_result",
+            "the frame rode the successor's socket"
+        )
+        // LATE PREDECESSOR result: A's handle is retired; the result must NOT route onto B.
+        // Snapshot B's count BEFORE the late send and assert UNCHANGED after.
+        let framesOnBBefore = taskB.sentTextFrames.count
+        let lateReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedA.resultSocket)
+        XCTAssertEqual(
+            lateReport, .undelivered,
+            "a late result from the retired predecessor is undelivered, never routed onto the successor's socket"
+        )
+        XCTAssertEqual(
+            taskB.sentTextFrames.count, framesOnBBefore,
+            "no extra frame landed on B from the late predecessor send"
+        )
+        gateB.release()
+        _ = await readerB.value
+    }
+
+        func testActionOnlyStream() async {
         self.pendingFixture = """
             event: action
             data: {"tool":"playback","action":"pause","params":{}}
@@ -61,11 +204,11 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "pause", context: sampleContext))
+        let events = await collect(client().route(request: "pause", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
-                .action(tool: "playback", action: "pause", params: [:]),
+                .action(tool: "playback", action: "pause", params: [:], operationId: nil, capabilityVersion: nil),
                 .done(usage: CloudTurnUsage(inputTokens: 10, outputTokens: 0)),
             ]
         )
@@ -84,7 +227,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "summarize", context: sampleContext))
+        let events = await collect(client().route(request: "summarize", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
@@ -108,10 +251,10 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
-            [.error(code: "limit_exceeded", message: "You've used 10/10 free requests today.")]
+            [.error(source: .server, code: "limit_exceeded", message: "You've used 10/10 free requests today.")]
         )
     }
 
@@ -132,7 +275,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(
             events,
             [
@@ -152,9 +295,9 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let events = await collect(client().route(request: "hello", context: sampleContext))
+        let events = await collect(client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope()))
         XCTAssertEqual(events.first, .token("partial"))
-        guard case let .error(code, _)? = events.dropFirst().first else {
+        guard case let .error(_, code, _)? = events.dropFirst().first else {
             XCTFail("Expected connection_lost after partial token, got \(events)")
             return
         }
@@ -174,7 +317,7 @@ final class CloudRouteClientTests: XCTestCase {
 
             """
 
-        let stream = client().route(request: "hello", context: sampleContext)
+        let stream = client().route(request: "hello", context: sampleContext, turn: testTurnEnvelope())
         var received: [CloudRouteEvent] = []
         let collectTask = Task {
             for await event in stream {
@@ -274,9 +417,9 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"text":"hi"}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.last else {
+        guard case let .error(_, code, message)? = events.last else {
             return XCTFail("expected a terminal error, got \(events)")
         }
         XCTAssertEqual(code, "connection_lost")
@@ -294,9 +437,9 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"code":"unauthorized","message":""}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.first else {
+        guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
         }
         XCTAssertEqual(code, "unauthorized")
@@ -310,9 +453,9 @@ final class CloudRouteClientLocaleTests: XCTestCase {
             data: {"code":"limit_exceeded","message":"Daily limit reached"}
 
             """
-        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await makeClient().route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        guard case let .error(code, message)? = events.first else {
+        guard case let .error(_, code, message)? = events.first else {
             return XCTFail("expected an error event, got \(events)")
         }
         XCTAssertEqual(code, "limit_exceeded")
@@ -379,15 +522,43 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// Finishing silently leaves the user with no error and no outcome.
     func testMissingCredentialYieldsUnauthorizedError() async {
         let task = StubWebSocketTask([])
-        let events = await collect(client(task: task, token: nil).route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: nil).route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
-        XCTAssertEqual(events.last, .error(code: "unauthorized", message: ""),
+        // .requestConstruction: with no credential no frame is built, let alone sent, so the
+        // failure is provably client-side pre-send (the emission site is e2dc42d1d).
+        XCTAssertEqual(events.last, .error(source: .requestConstruction, code: "unauthorized", message: ""),
                        "a turn with no credential must report the failure, not end silently")
         XCTAssertEqual(task.sent.count, 0, "nothing is sent without a credential")
     }
 
     /// The production path parses `connected` for the negotiated codec, plays
     /// binary frames as audio, and closes the socket when the turn ends.
+    func testTimingReceiptIsAttachedAtActualSocketReceiveAndErrorGetsTransportSummary() async throws {
+        let ended = expectation(description: "transport diagnostic summary")
+        let trace = CloudPlaybackTiming(turn: "synthetic", enabled: true, minimumInterval: 0,
+            clock: { 123_456 }, emit: { event in
+                if event.stage == "receiver_end" {
+                    XCTAssertEqual(event.receivedBytes, 4)
+                    XCTAssertTrue(event.summary)
+                    ended.fulfill()
+                }
+            })
+        let task = StubWebSocketTask([
+            .string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#),
+            .data(Data([1, 0, 2, 0]))
+        ]) // Exhaustion throws: no done and no player terminal exists.
+        let transport = CloudRouteClient(baseURL: "https://cloud.test", userId: "user_test",
+            tokenProvider: StubTokenProvider(token: "tok"), webSocketTaskFactory: { _ in task },
+            playbackTimingFactory: { _ in trace })
+        let events = await collect(transport.route(request: "synthetic", context: context(), turn: testTurnEnvelope()))
+        let frames = events.compactMap { if case let .audioFrame(frame) = $0 { return frame }; return nil }
+        let receipt = try XCTUnwrap(frames.first?.timingReceipt)
+        XCTAssertTrue(receipt.trace === trace)
+        XCTAssertEqual(receipt.receivedAt, 123_456)
+        XCTAssertEqual(frames.first?.data, Data([1, 0, 2, 0]))
+        await fulfillment(of: [ended], timeout: 2)
+    }
+
     func testConnectedThenAudioThenDoneOnProductionTransport() async {
         let connected = #"{"type":"connected","codec":"pcm_s16le@24k"}"#
         let done = #"{"type":"done","usage":{"input_tokens":3,"output_tokens":4}}"#
@@ -397,7 +568,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
             .string(done)
         ])
 
-        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context(), turn: testTurnEnvelope()))
         XCTAssertEqual(events.count, 3, "connected, one audio frame, done — got \(events)")
         if case let .connected(codec) = events[0] {
             XCTAssertEqual(codec.base, "pcm_s16le")
@@ -417,9 +588,9 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     /// A stream that ends without a terminal event is reported, not silent.
     func testClosedWithoutTerminalYieldsConnectionLost() async {
         let task = StubWebSocketTask([.string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#)])
-        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context()))
+        let events = await collect(client(task: task, token: "tok").route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
-        guard case let .error(code, _)? = events.last else {
+        guard case let .error(_, code, _)? = events.last else {
             return XCTFail("expected a terminal error, got \(String(describing: events.last))")
         }
         XCTAssertEqual(code, "connection_lost", "a stream that ends without a terminal event is reported")
@@ -435,9 +606,9 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         task.receiveError = URLError(.cannotConnectToHost)
         let client = client(task: task, token: "tok")
 
-        let events = await collect(client.route(request: "hello", context: context()))
+        let events = await collect(client.route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
-        guard case let .error(code, message)? = events.last else {
+        guard case let .error(_, code, message)? = events.last else {
             return XCTFail("a failed upgrade must report an error, got \(events)")
         }
         XCTAssertEqual(code, "connection_lost")
@@ -448,5 +619,125 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let sent = task.sentTextFrames
         XCTAssertEqual(sent.count, 1, "exactly one frame — the auth frame — and no fallback request")
         XCTAssertTrue(sent[0].contains("authenticate"), "the one frame is the authenticate frame")
+    }
+}
+
+// MARK: - Turn-socket lifetime ownership
+
+extension CloudRouteClientTests {
+    private func makeResultSocketClient(actionId: String) -> (CloudRouteClient, CloudTurnEnvelope, StubWebSocketTask) {
+        let fixture = [
+            "event: action",
+            "data: {\"operation_id\":\"\(actionId)\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "",
+            "event: done",
+            "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}",
+            "",
+        ].joined(separator: "\n")
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "t"),
+            webSocketTaskFactory: { _ in task }
+        )
+        return (client, CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()), task)
+    }
+
+    private func resultFrame(operationId: String) -> AppOperationResultFrame {
+        AppOperationResultFrame(
+            operationId: operationId,
+            outcome: .refused,
+            reason: OperationReason.unsupportedOperation,
+            detail: nil
+        )!
+    }
+
+    /// A CLAIMED consumer held past the bounded grace deadline keeps its registration: the
+    /// producer-finish grace cleanup applies only while no consumer has claimed ownership.
+    func testGraceCleanupDoesNotSeverAClaimedConsumerHeldPastTheDeadline() async throws {
+        let (client, turn, _) = makeResultSocketClient(actionId: "op-grace-claim")
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        let stream = routed.stream
+        let socket = routed.resultSocket
+        // Consume the first event, then hold the consumer past the 2s grace.
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        socket.claimConsumerOwnership()
+        try await Task.sleep(nanoseconds: 2_400_000_000)
+        let report = await client.sendOperationResult(
+            resultFrame(operationId: "op-grace-claim"), via: socket
+        )
+        XCTAssertEqual(report, .submitted, "a claimed consumer must keep its registration past the grace deadline")
+    }
+
+    /// A turn whose stream is never consumed is cleaned up on a bound, not held forever.
+    func testNeverConsumedTurnSocketIsCleanedUpByTheBoundedGrace() async throws {
+        let (client, turn, _) = makeResultSocketClient(actionId: "op-grace-orphan")
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        // Deliberately never iterate. The producer finishes; the grace timer owns cleanup.
+        var report: CloudRouteClient.AppOperationResultSendReport?
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            report = await client.sendOperationResult(
+                resultFrame(operationId: "op-grace-orphan"), via: routed.resultSocket
+            )
+            if report == .undelivered { break }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        XCTAssertEqual(report, .undelivered, "an unclaimed turn's registration must be retired by the bounded cleanup")
+    }
+
+    /// A consumer that abandons the stream closes the registration immediately (.cancelled).
+    func testCancelledConsumerClosesTheTurnSocketImmediately() async throws {
+        // Cancellation cleanup is bound to the task that owns consumer execution via
+        // withTaskCancellationHandler (the sink's production pattern), not to AsyncStream
+        // termination, which does not fire on task cancellation.
+        let (client, turn, liveTask) = makeResultSocketClient(actionId: "op-cancel-close")
+        // Hold the producer open so the consumer is genuinely SUSPENDED in the handler when
+        // cancellation strikes — the production shape (a live turn mid-stream), not a stream
+        // that already finished and deregistered the handler.
+        let heldGate = Gate()
+        liveTask.holdUntilReleased(heldGate)
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        let stream = routed.stream
+        // PRODUCTION SHAPE: the consumer claims, installs the same single idempotent close the
+        // sink runs in a defer, and iterates. Cancelling the OWNING task makes AsyncStream's
+        // next() return nil, the loop exits, and the defer retires the registration — no
+        // test-only cancellation handler.
+        let reader = Task {
+            routed.resultSocket.claimConsumerOwnership()
+            defer { routed.resultSocket.finishTurn() }
+            for await _ in stream {}
+        }
+        // The consumer claims ownership (cancelling the creation-armed grace), then abandons
+        // the turn: only the cancellation close can retire the registration.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        routed.resultSocket.claimConsumerOwnership()
+        reader.cancel()
+        await reader.value
+        var report: CloudRouteClient.AppOperationResultSendReport?
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            report = await client.sendOperationResult(
+                resultFrame(operationId: "op-cancel-close"), via: routed.resultSocket
+            )
+            if report == .undelivered { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(report, .undelivered, "cancellation while the consumer is suspended in the handler must close the socket")
+    }
+
+    /// finishTurn is idempotent: a second call neither traps nor resurrects the registration.
+    func testFinishTurnIsIdempotent() async throws {
+        let (client, turn, _) = makeResultSocketClient(actionId: "op-idem")
+        let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
+        routed.resultSocket.claimConsumerOwnership()
+        routed.resultSocket.finishTurn()
+        routed.resultSocket.finishTurn()
+        let report = await client.sendOperationResult(
+            resultFrame(operationId: "op-idem"), via: routed.resultSocket
+        )
+        XCTAssertEqual(report, .undelivered)
     }
 }

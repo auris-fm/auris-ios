@@ -10,6 +10,10 @@ CURRENT_PROJECT_VERSION = $(VERSION_LONG)
 // Define a root bundle identifier so that extensions can append to it
 PRODUCT_BUNDLE_IDENTIFIER_ROOT = fm.auris
 
+// The name the launcher shows. Configs that install alongside the base app
+// (staging, prototypes) override this so the two are distinguishable.
+APP_DISPLAY_NAME = Auris
+
 DEVELOPMENT_TEAM = 6LL2R2A55F
 
 // The llama/onnx link and header search paths are app-target only; see PocketCasts.app.xcconfig.

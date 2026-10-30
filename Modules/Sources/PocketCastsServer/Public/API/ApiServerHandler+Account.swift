@@ -3,20 +3,30 @@ import PocketCastsDataModel
 import PocketCastsUtils
 
 public extension ApiServerHandler {
-    func validateLogin(username: String, password: String, scope: String) async throws -> AuthenticationResponse {
-        var loginRequest = Api_UserLoginRequest()
-        loginRequest.email = username
-        loginRequest.password = password
-        loginRequest.scope = scope
+    internal func passwordLoginRequest(username: String, password: String, scope: String) throws -> URLRequest {
+        let url = ServerHelper.asUrl(ServerConstants.Urls.api() + "user/login_pocket_casts")
+        let body = PocketCastsLoginRequest(email: username, password: password, scope: scope)
+        guard let request = ServerHelper.createJsonRequest(url: url, params: body, timeout: 30.seconds, cachePolicy: .useProtocolCachePolicy) else { throw APIError.UNKNOWN }
+        return request
+    }
 
-        let url = ServerHelper.asUrl(ServerConstants.Urls.api() + "user/login")
-        let data = try loginRequest.serializedData()
-        guard let request = ServerHelper.createProtoRequest(url: url, data: data) else {
-            FileLog.shared.addMessage("Unable to create protobuffer request to obtain token")
-            throw APIError.UNKNOWN
+    internal func decodePasswordLogin(data: Data?, response: URLResponse?) throws -> AuthenticationResponse {
+        guard let data, let response = response as? HTTPURLResponse else { throw APIError.UNKNOWN }
+        guard response.statusCode == ServerConstants.HttpConstants.ok else {
+            throw ApiServerHandler.extractErrorResponse(data: data, response: response, error: nil) ?? .UNKNOWN
         }
+        return AuthenticationResponse(from: try JSONDecoder().decode(PocketCastsLoginResponse.self, from: data))
+    }
 
-        return try await obtainToken(request: request, usingRefreshToken: false)
+    func validateLogin(username: String, password: String, scope: String) async throws -> AuthenticationResponse {
+        guard let attempt = ServerSettings.beginAuthentication(email: username) else { throw APIError.UNKNOWN }
+        defer { ServerSettings.finishAuthentication(attempt) }
+        let request = try passwordLoginRequest(username: username, password: password, scope: scope)
+        let (data, response) = try await URLConnection(handler: URLSession.shared).send(request: request)
+        var authentication = try decodePasswordLogin(data: data, response: response)
+        guard ServerSettings.commitAuthentication(authentication, for: attempt, password: password) else { throw APIError.UNKNOWN }
+        authentication.localAttempt = attempt
+        return authentication
     }
 
     func validateLogin(username: String, password: String, completion: @escaping (_ success: Bool, _ userId: String?, _ error: APIError?) -> Void) {
@@ -96,41 +106,18 @@ public extension ApiServerHandler {
     }
 
     func obtainToken(username: String, password: String, scope: String, completion: @escaping (_ token: String?, _ userId: String?, _ error: APIError?) -> Void) {
-        var loginRequest = Api_UserLoginRequest()
-        loginRequest.email = username
-        loginRequest.password = password
-        loginRequest.scope = scope
-
-        let url = ServerHelper.asUrl(ServerConstants.Urls.api() + "user/login")
-        do {
-            let data = try loginRequest.serializedData()
-
-            guard let request = ServerHelper.createProtoRequest(url: url, data: data) else {
-                FileLog.shared.addMessage("Unable to create protobuffer request to obtain token")
-                completion(nil, nil, nil)
-                return
+        Task {
+            do {
+                let response = try await validateLogin(username: username, password: password, scope: scope)
+                DispatchQueue.main.async {
+                    guard let attempt = response.localAttempt else { completion(nil, nil, .UNKNOWN); return }
+                    if !ServerSettings.withCommittedAuthentication(attempt, { completion(response.token, response.uuid, nil) }) {
+                        completion(nil, nil, .UNKNOWN)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { completion(nil, nil, (error as? APIError) ?? .UNKNOWN) }
             }
-
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                guard let responseData = data, error == nil, response?.extractStatusCode() == ServerConstants.HttpConstants.ok else {
-                    let errorResponse = ApiServerHandler.extractErrorResponse(data: data, response: response, error: error)
-                    FileLog.shared.addMessage("Unable to obtain token, status code: \(response?.extractStatusCode() ?? -1), server error: \(errorResponse?.rawValue ?? "none")")
-                    completion(nil, nil, errorResponse)
-
-                    return
-                }
-
-                do {
-                    let response = try Api_UserLoginResponse(serializedBytes: responseData)
-                    completion(response.token, response.uuid, nil)
-                } catch {
-                    FileLog.shared.addMessage("Error occurred while trying to unpack token request \(error.localizedDescription)")
-                    completion(nil, nil, nil)
-                }
-            }.resume()
-        } catch {
-            FileLog.shared.addMessage("obtainToken failed \(error.localizedDescription)")
-            completion(nil, nil, nil)
         }
     }
 
@@ -145,9 +132,9 @@ public extension ApiServerHandler {
         }
     }
 
-    func obtainToken(request: URLRequest, usingRefreshToken: Bool) async throws -> AuthenticationResponse {
+    func obtainToken(request: URLRequest, usingRefreshToken: Bool, connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
         try await withUnsafeThrowingContinuation { continuation in
-            URLSession.shared.dataTask(with: request) { data, response, error in
+            connection.send(request: request) { data, response, error in
                 guard let responseData = data, error == nil, response?.extractStatusCode() == ServerConstants.HttpConstants.ok else {
                     let errorResponse = ApiServerHandler.extractErrorResponse(data: data, response: response, error: error)
                     FileLog.shared.addMessage("Unable to obtain token, status code: \(response?.extractStatusCode() ?? -1), server error: \(errorResponse?.rawValue ?? "none")")
@@ -167,7 +154,7 @@ public extension ApiServerHandler {
                     FileLog.shared.addMessage("Error occurred while trying to unpack token request \(error.localizedDescription)")
                     continuation.resume(throwing: APIError.UNKNOWN)
                 }
-            }.resume()
+            }
         }
     }
 

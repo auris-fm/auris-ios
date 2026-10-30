@@ -251,6 +251,25 @@ final class CloudAuthTokenProviderTests: XCTestCase {
 /// The credential presented for the exchange is the session the app already
 /// holds, with the refresh token preferred (the verifier's refresh-exchange mode).
 final class CloudAccountSessionCredentialProviderTests: XCTestCase {
+    func testExistingPasswordSessionObtainsRefreshAtCredentialBoundary() {
+        var refresh: String?
+        var migrations = 0
+        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { refresh }, migrate: {
+            migrations += 1
+            refresh = "migrated-refresh"
+        })
+        XCTAssertEqual(provider.credential(), "migrated-refresh")
+        XCTAssertEqual(provider.credential(), "migrated-refresh")
+        XCTAssertEqual(migrations, 1)
+    }
+
+    func testFailedMigrationStillPresentsNoAccessToken() {
+        var migrations = 0
+        let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { nil }, migrate: { migrations += 1 })
+        XCTAssertNil(provider.credential())
+        XCTAssertEqual(migrations, 1)
+    }
+
     func testPresentsTheAccountRefreshToken() {
         let provider = CloudAccountSessionCredentialProvider(refreshTokenReader: { "refresh-1" })
         XCTAssertEqual(provider.credential(), "refresh-1")
@@ -627,9 +646,10 @@ final class CloudTokenProviderRouterTests: XCTestCase {
             ),
         )
 
-        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0)).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
+        let events = await client.route(request: "x", context: CloudRouteContext(episodeId: "ep", clientPositionMs: 0), turn: testTurnEnvelope()).reduce(into: [CloudRouteEvent]()) { $0.append($1) }
 
-        XCTAssertEqual(events, [.error(code: "unauthorized", message: "")])
+        // No credential ⇒ no frame built ⇒ .requestConstruction, matching the emission site.
+        XCTAssertEqual(events, [.error(source: .requestConstruction, code: "unauthorized", message: "")])
         XCTAssertTrue(requests.isEmpty, "no credential ⇒ nothing dialled, and never the legacy bearer")
     }
 }

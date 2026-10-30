@@ -9,7 +9,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Pocket Casts</string>
+	<string>$(APP_DISPLAY_NAME)</string>
+	<key>AurisCloudBaseURL</key>
+	<string>$(AURIS_CLOUD_BASE_URL)</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

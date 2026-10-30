@@ -70,7 +70,7 @@ public extension ApiServerHandler {
         return try await obtainToken(request: request, usingRefreshToken: true)
     }
 
-    func refreshIdentityToken() async throws -> AuthenticationResponse {
+    func refreshIdentityToken(connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
         guard
             let identityToken = try ServerSettings.refreshToken(),
             let request = tokenRequest(identityToken: identityToken, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30.seconds)
@@ -79,7 +79,7 @@ public extension ApiServerHandler {
             throw APIError.TOKEN_DEAUTH
         }
 
-        return try await obtainToken(request: request, usingRefreshToken: true)
+        return try await obtainToken(request: request, usingRefreshToken: true, connection: connection)
     }
 
     private func tokenRequest(identityToken: String?, cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy, timeoutInterval: TimeInterval = 15.seconds, scope: AuthenticationScope = .default) -> URLRequest? {

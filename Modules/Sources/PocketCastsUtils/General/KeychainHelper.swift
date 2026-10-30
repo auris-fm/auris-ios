@@ -62,7 +62,7 @@ public class KeychainHelper {
             query[kSecAttrService as String] = fullKey
             let status = SecItemDelete(query as CFDictionary)
 
-            return status == errSecSuccess
+            return status == errSecSuccess || status == errSecItemNotFound
         }
 
         var saveParams = createService()
@@ -72,13 +72,11 @@ public class KeychainHelper {
 
         var status = SecItemAdd(saveParams as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            var query = createQuery()
-            query[kSecAttrService as String] = fullKey
-            status = SecItemDelete(query as CFDictionary)
-
-            if status == errSecSuccess {
-                status = SecItemAdd(saveParams as CFDictionary, nil)
-            }
+            let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                        kSecAttrService as String: fullKey]
+            let attributes: [String: Any] = [kSecValueData as String: Data(value.utf8),
+                                             kSecAttrAccessible as String: accessibility]
+            status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         }
 
         return status == errSecSuccess

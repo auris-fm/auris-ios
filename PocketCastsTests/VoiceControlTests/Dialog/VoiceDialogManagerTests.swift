@@ -44,7 +44,21 @@ final class VoiceDialogManagerTests: XCTestCase {
         _ = manager.handle(.begin(targetTool: "queue", targetAction: "add_top"))
         let result = manager.handle(.newCommand(value: "pause"))
         XCTAssertNil(manager.pendingDialog)
-        XCTAssertEqual(result.question, "pause")
+        // new_command re-processes the value as a fresh transcript (spec 0443b70) — it does not
+        // render the value as a spoken question.
+        XCTAssertNil(result.question)
+        XCTAssertEqual(result.reprocessValue, "pause")
+    }
+
+    func test_newCommand_withNoPendingDialogDoesNotReprocess() {
+        // A new_command with nothing pending is a cancel of nothing — re-processing its value
+        // anyway would loop forever (each re-processed transcript that classifies as new_command
+        // would schedule itself again).
+        let manager = VoiceDialogManager()
+        let result = manager.handle(.newCommand(value: "pause"))
+        XCTAssertNil(result.intent)
+        XCTAssertNil(result.question)
+        XCTAssertNil(result.reprocessValue)
     }
 
     func test_missingSlot_generatesQuestion() {

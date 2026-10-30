@@ -29,6 +29,19 @@ struct AudioRouteIdentity: Equatable {
     let inputUID: String?
 }
 
+/// The service's acquisition dedup key: a route identity plus the epoch of the
+/// physical-device change it was observed on. See `IOSAudioRouteMonitor.acquisitionKey`.
+///
+/// The epoch is what makes a *physical route-change notification* grant one attempt
+/// even when the route identity is unchanged. It is deliberately per-notification:
+/// each received physical notification advances it, so each is entitled to one
+/// attempt on its own. Distinct notifications are NOT inferred to be one physical
+/// event (spec 5d418579) — that is not required, and the counter cannot establish it.
+struct AcquisitionRouteKey: Equatable {
+    let route: AudioRouteIdentity
+    let deviceChangeEpoch: UInt
+}
+
 enum MicExposureClassifier {
     static func classify(_ route: AudioRoute) -> MicExposure {
         guard let input = route.input else { return .noMic }
@@ -185,6 +198,26 @@ enum AudioSessionError: Error {
 class IOSAudioRouteMonitor: ObservableObject {
     @Published var currentRoute: AudioRoute = .unknown
     @Published var micExposure: MicExposure = .noMic
+    /// Whether ANY external microphone is available to capture from right now.
+    ///
+    /// The Debug-simulator diagnostic exception must apply ONLY when this is false. Reading it
+    /// from the session keeps the exception pinned to "the simulator genuinely has no external
+    /// route" rather than "the gate happens to be off".
+    /// Whether an external microphone is or COULD BE available.
+    ///
+    /// Deliberately conservative in the direction that preserves the requirement: it is true if an
+    /// external input is listed OR the current output is itself an external route that could carry
+    /// one. The narrower `availableInputs`-only check was not sufficient — a session reports no
+    /// available inputs until it is configured input-capable, so the gate could evaluate while the
+    /// real answer was still "external mic possible" and the diagnostic would wrongly admit the
+    /// built-in microphone. Erring toward "external possible" can only keep the requirement, never
+    /// relax it.
+    var hasExternalMicrophoneCandidate: Bool {
+        if audioSession.availableInputs.contains(where: { isExternalInput($0.portType) }) {
+            return true
+        }
+        return hasExternalOutputHint(currentRoute.output)
+    }
 
     private let gracePeriodSignal: GracePeriodSignal
     private let audioSession: AudioSessionControlling
@@ -258,6 +291,31 @@ class IOSAudioRouteMonitor: ObservableObject {
         )
     }
 
+    /// The acquisition dedup key: the live route identity **paired with the
+    /// physical-device-change epoch**.
+    ///
+    /// The identity alone cannot express the retry contract. After a headset
+    /// disconnect and reconnect the session is in `.playback`, so it selects no
+    /// input: the identity is type-level (`input: nil`) and *identical* to the
+    /// failed attempt that preceded the disconnect — yet the device is genuinely
+    /// re-presented and the contract grants one fresh attempt (spec 5d418579).
+    /// The epoch distinguishes the two: it advances once per received physical
+    /// route-change notification, so a later notification produces a key that
+    /// differs from the failed attempt's key even with an unchanged identity.
+    ///
+    /// Note the actual publication ordering — the epoch is incremented by the
+    /// monitor's route-change handler, not atomically with `refreshRoute()`. The
+    /// handler calls `refreshRoute()` first (which publishes `micExposure` →
+    /// one gate evaluation carrying the OLD epoch) and only then increments the
+    /// epoch and breaks grace (whose `isActive` publication → a second gate
+    /// evaluation carrying the NEW epoch). So a single physical notification can
+    /// reach `considerAcquisition` twice; the first sees the old key and is
+    /// deduped, and the second sees the new epoch and is the attempt the contract
+    /// grants. This key is read at each evaluation, so it is correct in both.
+    var acquisitionKey: AcquisitionRouteKey {
+        AcquisitionRouteKey(route: currentRouteIdentity, deviceChangeEpoch: physicalDeviceChangeEpoch)
+    }
+
     /// The live external input candidate (from `availableInputs`) — the physical
     /// device a route acquisition would select. Stable across the preferred-input
     /// release, unlike `currentRouteIdentity`, so it can key the "capture start
@@ -299,7 +357,23 @@ class IOSAudioRouteMonitor: ObservableObject {
 
         // Only an external output can carry an external microphone. A built-in
         // speaker/earpiece route has nothing to acquire, so do not touch the session.
-        guard hasExternalOutputHint(currentRoute.output) else { return .notApplicable }
+        guard hasExternalOutputHint(currentRoute.output) else {
+            // DIAGNOSTIC (Debug simulator only): there is no external route here, so the normal
+            // path can never open an input and the whole capture path goes unexercised on a
+            // simulator. Open the session input-capable so the BUILT-IN microphone can deliver
+            // samples. The real classification is untouched — `micExposure` still reads
+            // `.exposed`; only the acquisition decision differs, and only under the compile-time
+            // constants in `DiagnosticMicOverride`.
+            // `.noMic` TOO: a fresh simulator session reports NO input port at all until the
+            // session is configured input-capable, so requiring `.exposed` here made the
+            // diagnostic unreachable in the actual app (measured: the live simulator logs
+            // `off(noMicrophone)`, never `exposed`). `.isolated` is still refused — a real
+            // external microphone must never be traded for the built-in one.
+            guard DiagnosticMicOverride.isActive,
+                  micExposure == .exposed || micExposure == .noMic
+            else { return .notApplicable }
+            return await acquireBuiltInInputForDiagnostic(isPlaybackActive: isPlaybackActive)
+        }
         if micExposure == .isolated {
             return acquiredResult(activatedByAcquisition: false, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
         }
@@ -390,6 +464,62 @@ class IOSAudioRouteMonitor: ObservableObject {
         return .selectionFailed
     }
 
+    /// DIAGNOSTIC ONLY (Debug simulator): make the session input-capable so the built-in
+    /// microphone can be captured. Mirrors the normal path's configure/activate bookkeeping so
+    /// release-on-failure still undoes exactly what was opened, and reports `.acquired` only when
+    /// a built-in input is actually present in the live route.
+    ///
+    /// This is not a relaxation of the requirement: it is never reached on device or in Release
+    /// (both `DiagnosticMicOverride` constants are compile-time), it does not alter
+    /// `micExposure`, and it cannot select an external input.
+    @MainActor
+    private func acquireBuiltInInputForDiagnostic(isPlaybackActive: @escaping () -> Bool) async -> RouteAcquisitionResult {
+        FileLog.shared.addMessage("[VoicePipeline] acquisition: \(DiagnosticMicOverride.logLabel) — opening built-in input")
+        let sessionAlreadyInUse = audioSession.isActive || isPlaybackActive()
+        var activatedByAcquisition = false
+
+        do {
+            try audioSession.configureInputCapableSession()
+        } catch {
+            FileLog.shared.addMessage("[VoicePipeline] acquisition: diagnostic configure failed — \(error)")
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            refreshRoute()
+            return .sessionUnavailable
+        }
+
+        if audioSession.currentInputs.isEmpty, audioSession.availableInputs.isEmpty {
+            do {
+                try audioSession.setSessionActive(true)
+                activatedByAcquisition = !sessionAlreadyInUse
+            } catch {
+                FileLog.shared.addMessage("[VoicePipeline] acquisition: diagnostic activate failed — \(error)")
+                releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+                refreshRoute()
+                return .sessionUnavailable
+            }
+        }
+
+        refreshRoute()
+        if Task.isCancelled {
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            return .cancelled
+        }
+
+        let hasBuiltIn = audioSession.currentInputs.contains { $0.portType == .builtInMic }
+            || audioSession.availableInputs.contains { $0.portType == .builtInMic }
+        guard hasBuiltIn else {
+            // No built-in microphone either: this is a genuinely mic-less device, and the
+            // diagnostic must not invent one.
+            releaseAcquisitionRoute(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+            refreshRoute()
+            return .noCandidate
+        }
+
+        // Deliberately does NOT select a preferred input: on the built-in route there is nothing
+        // to select, and the diagnostic must not touch input selection at all.
+        return acquiredResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
+    }
+
     /// Bounded wait for the live route to confirm an external input. Re-reads
     /// the route on each step; a cancelled enclosing task aborts the wait and
     /// returns false (the caller releases whatever acquisition opened).
@@ -478,7 +608,7 @@ class IOSAudioRouteMonitor: ObservableObject {
         }
     }
 
-    private func isExternalInput(_ portType: AVAudioSession.Port) -> Bool {
+    func isExternalInput(_ portType: AVAudioSession.Port) -> Bool {
         switch portType {
         case .headsetMic, .bluetoothHFP, .bluetoothLE:
             return true
@@ -486,17 +616,46 @@ class IOSAudioRouteMonitor: ObservableObject {
             return false
         }
     }
+    func classifyOutputForTesting(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        classifyOutput(port)
+    }
 
-    private func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
-        guard let port else { return .builtInSpeaker }
-        switch port.portType {
+    /// Classifies the current output port, defaulting to `unknown` rather than to any named
+    /// route.
+    ///
+    /// A missing port and an unrecognised port type are both "not known to be the built-in
+    /// speaker", and they must not acquire its alignment: `forOutput` gives `.builtInSpeaker`
+    /// the correlation window, which is justified by that route's bounded local latency. A USB
+    /// DAC, car head unit, hearing aid or any future port type has codec latency this client
+    /// has not measured, so claiming the built-in window for it would align the filter against
+    /// a latency that is not there. `unknown` maps to `.external`, which is the honest scope
+    /// for a route whose behaviour has not been established.
+    /// The ABSTRACTION-side overload: `audioSession.currentOutputs` yields `AudioPort` values, so the
+    /// monitor's own callers classify through this. It dispatches on the port TYPE only, so it shares
+    /// the classification with the AVAudioSession overload rather than duplicating it.
+    func classifyOutput(_ port: AudioPort?) -> AudioRouteOutput {
+        classifyOutput(portType: port?.portType)
+    }
+
+    private func classifyOutput(_ port: AVAudioSessionPortDescription?) -> AudioRouteOutput {
+        classifyOutput(portType: port?.portType)
+    }
+
+    /// Shared classification: dispatches on the port TYPE raw value, so both overloads agree on every
+    /// route. A missing port and an unrecognised type both map to `unknown`.
+    private func classifyOutput(portType: AVAudioSession.Port?) -> AudioRouteOutput {
+        guard let portType else { return .unknown }
+        switch portType {
         case .headphones: return .headphones
         case .bluetoothHFP: return .bluetoothHFP
         case .bluetoothA2DP: return .bluetoothA2DP
         case .bluetoothLE: return .bluetoothLE
         case .builtInSpeaker: return .builtInSpeaker
         case .airPlay: return .airPlay
-        default: return .builtInSpeaker
+        // Every other port type — USB, car audio, hearing aids, and anything Apple adds — is
+        // unknown rather than assumed. The previous `.builtInSpeaker` default silently enabled
+        // the correlation window on routes the alignment does not hold for.
+        default: return .unknown
         }
     }
 

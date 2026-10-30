@@ -1,5 +1,22 @@
 #include "PocketCasts.base.xcconfig"
 
+// The staging/debug install IS this configuration now (Debug bakes the staging gateway and
+// carries the STAGING semantics — see below), so its launcher name is deliberately distinct
+// from the base app the hosted unit tests install alongside it.
+APP_DISPLAY_NAME = Auris Debug
+
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
-OTHER_SWIFT_FLAGS = -D DEBUG
+// -D STAGING (review 4371027569): Debug IS the staging build, so it must carry the STAGING
+// semantics the retired StagingDebug configuration used to supply. Without it a Debug build
+// compiles ServerSyncManager.production() == true and syncs against the production Pocket Casts
+// hosts, and CrashLoggingDataProvider reports the wrong build type. (The separate
+// PocketCasts.staging.xcconfig that used to provide this has been removed as a superseded
+// duplicate — its bundle id, gateway and flags all live here.)
+OTHER_SWIFT_FLAGS = -D STAGING -D DEBUG
+
+// Debug builds hit the staging gateway directly (owner request, task58 thread
+// 04dd0df2 item 1): no separate staging configuration needed for testing. The
+// \$() breaks up the // so xcconfig does not treat it as a comment delimiter.
+// Baked into the build so it survives reinstalls on a shared simulator.
+AURIS_CLOUD_BASE_URL = https:/$()/api-staging.auris.fm

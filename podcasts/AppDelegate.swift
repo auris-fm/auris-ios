@@ -41,6 +41,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         TraceManager.shared.setup(handler: traceHandler)
         #if DEBUG
         AsrIntentBenchmarkHarness.runIfRequested()
+        // NOT HERE: the acceptance run is started AFTER the normal defaults/migrations phase, because
+        // that phase can clear the keychain (measured: `checkDefaults v5Run clearTokensFromKeyChain`
+        // runs during launch). Starting the run first let initialization clear the session underneath
+        // it. It is deferred to the end of launch instead.
         #endif
 
         // Optional prefetch hint on playback start (edge-particle Item 5).
@@ -111,6 +115,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             ServerConfig.shared.syncDelegate = ServerSyncManager.shared
             ServerConfig.shared.playbackDelegate = PlaybackManager.shared
             checkDefaults()
+
+            #if DEBUG
+            // STARTED AFTER the defaults/migrations phase (which can clear the keychain), so
+            // initialization cannot clear the scratch session out from under the run.
+            runScratchAcceptanceIfRequested()
+            #endif
 
             logActiveDownloadTasks()
             logStaleDownloads()
@@ -203,6 +213,58 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             }
         }
         voiceControlService?.startIfAllowed()
+    }
+
+    /// SCRATCH ACCEPTANCE OPERATOR ENTRY.
+    ///
+    /// Disabled by default: it runs ONLY when the app is launched with the explicit scratch argument,
+    /// and it is restricted to the controlled acceptance protocol. It calls the production-factory
+    /// acceptance path and writes ONLY the allowlisted export (request id, conversation id, response
+    /// text, terminal, verdict) to a dedicated file in the app container, which the external runner
+    /// reads. It never logs general traffic and never reads a credential.
+    ///
+    ///   xcrun simctl launch <device> fm.auris --scratch-acceptance <nonce>
+    static let scratchAcceptanceArgument = "--scratch-acceptance"
+    static let scratchAcceptanceExportName = "scratch-acceptance-export.json"
+
+    private func runScratchAcceptanceIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        guard let flagIndex = args.firstIndex(of: Self.scratchAcceptanceArgument),
+              flagIndex + 1 < args.count else { return }
+        let nonce = args[flagIndex + 1]
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents")
+            .appendingPathComponent(Self.scratchAcceptanceExportName)
+        // A STALE EXPORT MUST NOT SURVIVE A NEW RUN. The previous run's file is removed BEFORE the
+        // turns start, so a run that is interrupted or crashes cannot leave an older result that the
+        // runner would read as this run's outcome.
+        //
+        // THE REMOVAL IS REQUIRED, not best-effort: `try?` would log success even when the stale file
+        // survived, which is the very defect this guards. A not-found error is expected and fine; any
+        // OTHER failure means a stale file may still be present, so the run REFUSES to proceed and
+        // writes no export at all.
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            // Expected: there was no prior export. THE DOMAIN IS CHECKED TOO: matching the code alone
+            // would treat any other domain's error with the same numeric code as a not-found, and the
+            // run would proceed believing no stale file exists.
+        } catch {
+            FileLog.shared.addMessage("[ScratchAcceptance] refusing to run: prior export could not be removed (\(error.localizedDescription))")
+            return
+        }
+        FileLog.shared.addMessage("[ScratchAcceptance] starting (nonce length \(nonce.count)); prior export cleared")
+        Task { @MainActor in
+            let export = await VoiceControlAssembly().runAcceptance(nonce: nonce)
+            do {
+                let data = try JSONEncoder().encode(export)
+                try data.write(to: url)
+                FileLog.shared.addMessage("[ScratchAcceptance] wrote export to \(url.path)")
+            } catch {
+                FileLog.shared.addMessage("[ScratchAcceptance] could not write export: \(error)")
+            }
+        }
     }
 
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {

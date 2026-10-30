@@ -45,7 +45,15 @@ class AudioFeedbackRenderer {
         }
     }
 
+    /// Observer for the earcon request, so a control can assert the presentation the user would
+    /// hear without the production renderer retaining a history.
+    ///
+    /// Deliberately not a stored array: nothing in production needs the history, and an unbounded
+    /// one would grow for the life of the process purely to satisfy tests.
+    var earconObserverForTesting: ((EarconId) -> Void)?
+
     func playEarcon(_ id: EarconId) {
+        earconObserverForTesting?(id)
         render(.earcon(id))
     }
 

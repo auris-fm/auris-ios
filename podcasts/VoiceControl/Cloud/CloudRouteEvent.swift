@@ -44,6 +44,8 @@ struct CloudAudioFrame: Equatable {
     /// PCM; there is no Opus decoder in this path. The sample rate is encoded
     /// in the negotiated codec name — the wire has no separate rate field.
     let data: Data
+    /// Ephemeral diagnostic metadata only; nil unless explicitly enabled in a Debug build.
+    var timingReceipt: CloudPlaybackTiming.Receipt? = nil
 }
 
 /// Usage reported in the `done` frame (cloud-assistant.md).
@@ -84,13 +86,25 @@ struct CloudSpeechUsage: Equatable {
 }
 
 /// Events from the cloud WebSocket route (cloud-assistant.md).
+/// The origin of a `CloudRouteEvent.error`.
+enum CloudRouteErrorSource: String, Equatable {
+    /// The client could not CONSTRUCT the request (bad URL, unencodable frame). The frame never left.
+    case requestConstruction
+    /// The TRANSFER failed or the connection dropped. The frame may or may not have been admitted.
+    case transport
+    /// An error FRAME parsed from the server.
+    case server
+}
+
 enum CloudRouteEvent: Equatable {
     /// Server handshake: the codec selected for this turn's audio frames.
     case connected(codec: CloudAudioCodec)
     /// Binary audio frame from the server's speech synthesiser.
     case audioFrame(CloudAudioFrame)
-    /// Server-directed local action (seek, pause, etc.).
-    case action(tool: String, action: String, params: [String: CloudRouteJSONValue])
+    /// Server-directed action. App operations carry `operationId`/`capabilityVersion` (wire
+    /// contract rev da327e624); existing local-path holds carry neither and parse as nils.
+    case action(tool: String, action: String, params: [String: CloudRouteJSONValue],
+                operationId: String?, capabilityVersion: String?)
     /// Text token the Worker sends on the socket. It rides the live transport
     /// rather than a retired one; the sink plays answers as audio instead of
     /// accumulating text, so this is parsed and then intentionally unused.
@@ -101,7 +115,10 @@ enum CloudRouteEvent: Equatable {
     /// Terminal success: answer model finished, final audio delivered.
     case done(usage: CloudTurnUsage)
     /// Terminal error.
-    case error(code: String, message: String)
+    /// WHERE the error originated, carried STRUCTURALLY so a consumer never has to infer it from the
+    /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks
+    /// like a client tag, and a client tag could be reworded.
+    case error(source: CloudRouteErrorSource, code: String, message: String)
 }
 
 /// JSON values that appear in action `params` (numbers normalized to Int64 when integral).
@@ -123,6 +140,49 @@ enum CloudRouteJSONValue: Equatable {
         return nil
     }
 
+    /// Total decoder from Foundation JSON (journal persistence of a settled state). Returns nil
+    /// for shapes this build does not model — callers treat nil as unreadable history, never as
+    /// an invented value.
+    init?(json: Any) {
+        switch json {
+        case let v as String: self = .string(v)
+        case let v as Int: self = .int(Int64(v))
+        case let v as Int64: self = .int(v)
+        case let v as Double: self = .double(v)
+        case let v as Bool: self = .bool(v)
+        case is NSNull: self = .null
+        case let dict as [String: Any]:
+            var decoded: [String: CloudRouteJSONValue] = [:]
+            for (key, value) in dict {
+                guard let item = CloudRouteJSONValue(json: value) else { return nil }
+                decoded[key] = item
+            }
+            self = .object(decoded)
+        case let arr as [Any]:
+            var decoded: [CloudRouteJSONValue] = []
+            for value in arr {
+                guard let item = CloudRouteJSONValue(json: value) else { return nil }
+                decoded.append(item)
+            }
+            self = .array(decoded)
+        default:
+            return nil
+        }
+    }
+
+    /// Plain Foundation JSON for outbound frame encoding (`app_operation_result` state).
+    func toJSONSerializable() -> Any {
+        switch self {
+        case .string(let v): return v
+        case .int(let v): return v
+        case .double(let v): return v
+        case .bool(let v): return v
+        case .null: return NSNull()
+        case .object(let dict): return dict.mapValues { $0.toJSONSerializable() }
+        case .array(let arr): return arr.map { $0.toJSONSerializable() }
+        }
+    }
+
     var int64Value: Int64? {
         switch self {
         case .int(let value): return value
@@ -140,10 +200,13 @@ enum CloudRouteJSONValue: Equatable {
 
 /// Request context body for `/api/v1/cloud/route`.
 struct CloudRouteContext: Equatable, Encodable {
-    let episodeId: String
+    /// Absent when no current episode exists. Nil rather than empty: an empty id names nothing
+    /// but still reads as a supplied value, and the contract forbids inventing one.
+    let episodeId: String?
     let podcastId: String?
     let referencePositionMs: Int64?
-    let clientPositionMs: Int64
+    /// Absent when there is no current episode to have a position in.
+    let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
 
@@ -166,10 +229,10 @@ struct CloudRouteContext: Equatable, Encodable {
     }
 
     init(
-        episodeId: String,
+        episodeId: String?,
         podcastId: String? = nil,
         referencePositionMs: Int64? = nil,
-        clientPositionMs: Int64,
+        clientPositionMs: Int64?,
         recentReferencePositions: [Int64] = [],
         previousReferencePositionMs: Int64? = nil
     ) {

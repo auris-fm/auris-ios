@@ -10,6 +10,25 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
 
+    #if !APPCLIP
+    /// Handoff the capture publishes into, set once by assembly before playback starts.
+    static var echoReferenceHandoff: EchoReferenceHandoff?
+
+    /// Captures this renderer's output as an echo-reference source.
+    ///
+    /// Installed on the output node once the engine starts, so it sees post-effects and
+    /// post-rate audio under both volume-boost configurations, and removed before the engine
+    /// stops so no callback arrives during teardown.
+    ///
+    /// **Inside `#if !APPCLIP` because this file compiles into two targets.** The App Clip
+    /// builds `EffectsPlayer` and does **not** compile the voice layer — its file list has no
+    /// `VoiceControl/` source at all — so an ungated reference fails that build with "cannot
+    /// find in scope". The App Clip has no echo-filter consumer, so gating loses nothing
+    /// there. **If this gate is removed, build both targets:** the `podcasts` target alone
+    /// will not show the failure.
+    private var emittedAudioTap: EpisodeOutputTap?
+    #endif
+
     private var timePitch: AVAudioUnitTimePitch?
     private var playbackSpeed = 0 as Double // AVAudioUnitTimePitch seems to not like us querying the rate sometimes, so store that as a separate variable
 
@@ -159,6 +178,17 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             strongSelf.audioFileSampleRate = strongSelf.audioFile!.fileFormat.sampleRate
 
             strongSelf.startReadAndPlayThreads()
+            #if !APPCLIP
+            // Installed here, with the graph, rather than after a successful `start()`.
+            //
+            // The tap reads the output node, and the output node exists as soon as the graph
+            // is built — a running engine is not a precondition. Installing it only after
+            // `start()` meant a graph that was built and then failed to start carried no tap,
+            // and it also put the installation behind a real audio device, which is why no
+            // test could reach it: the only way to observe it was to call this directly, and
+            // a case that calls it directly cannot tell whether `play` does.
+            strongSelf.installEmittedAudioTap()
+            #endif
             do {
                 strongSelf.engine?.prepare()
                 try strongSelf.engine?.start()
@@ -302,6 +332,14 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         }
 
         player?.stop()
+
+        #if !APPCLIP
+        // Removed before the engine stops, so no callback is delivered into a graph being
+        // torn down.
+        emittedAudioTap?.remove()
+        emittedAudioTap = nil
+        #endif
+
 
         engine?.stop()
     }
@@ -492,4 +530,34 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         // TODO: needs to be implemented here
         return 0
     }
+    #if !APPCLIP
+    /// Connects the episode renderer to the echo reference, on the real output node.
+    ///
+    /// Extracted from `play` so the wiring is reachable by a test rather than only by the
+    /// line of code that performed it inline: a case that sets `echoReferenceHandoff`
+    /// itself and asserts it is non-nil passes whether or not anything here runs, which is
+    /// how the tap stayed unconnected while its tests were green.
+    ///
+    /// - Returns: the installed tap, or nil when there is no engine to install on.
+    @discardableResult
+    func installEmittedAudioTap() -> EpisodeOutputTap? {
+        // A call with no engine leaves whatever is installed alone. Clearing it would report
+        // "no tap" for a graph whose tap is present, which is how this could read as a wiring
+        // failure while the wiring was intact.
+        guard let engine else { return emittedAudioTap }
+        let tap = EpisodeOutputTap(engine: engine)
+        tap.handoff = EffectsPlayer.echoReferenceHandoff
+        tap.install()
+        emittedAudioTap = tap
+        return tap
+    }
+
+    /// The tap installed by the start path, for the wiring test to inspect.
+    var emittedAudioTapForTesting: EpisodeOutputTap? { emittedAudioTap }
+
+    /// Swaps in an engine so the start path's tap installation can be exercised without
+    /// building the full graph `play` assembles.
+    func setEngineForTesting(_ engine: AVAudioEngine?) { self.engine = engine }
+    #endif
+
 }
