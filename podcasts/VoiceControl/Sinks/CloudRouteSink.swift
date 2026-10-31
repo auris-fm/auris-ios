@@ -596,8 +596,8 @@ struct AdmittedTurnIdentity: Equatable {
         // (trainer-reduced-local-scope @ 818c8f75): the support manifest this turn's
         // authenticate envelope advertises. Read ONCE per turn — one immutable snapshot per
         // admitted turn/socket — and the SAME value both serializes onto the frame and gates
-        // execution. Production ships the EMPTY declaration (nil): the machinery is dormant
-        // and the wire shape unchanged until a separately reviewed enablement commit.
+        // execution. Default stays nil (empty declaration); the production assembly wires
+        // `VoiceControlAssembly.declaredAppOperations` (pause only) as its provider.
         appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil }
     ) {
         self.onGracePlaybackHoldBegin = onGracePlaybackHoldBegin

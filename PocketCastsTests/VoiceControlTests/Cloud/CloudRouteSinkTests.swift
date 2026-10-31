@@ -1177,7 +1177,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let deliveredFixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
         playback.setPositionMs(0)
         let journal = OperationJournal(store: InMemoryOperationRecordStore())
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_to"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
 
         // PREMISE FIRST: the action line the sink RECEIVED carries NEITHER identity key. Checking
@@ -1282,7 +1282,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.pause"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-idempotent")
         let frame = try await awaitResultFrame(operationId: "5f0d9a34-2b61-4e8d-a5c7-9e1f3b8d0a52")
         XCTAssertEqual(frame["outcome"] as? String, "succeeded",
@@ -1312,7 +1312,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("pause-not-observed-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.pause"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         // Action boundary (pre-effect gate): the engine is PLAYING and the failed-pause knob is
         // armed HERE, after the legacy hold pause has run, and calls are cleared — the counted
         // pause is the identified user pause, whose engine genuinely fails to stop.
@@ -1351,7 +1351,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.pause"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         // Action boundary (pre-effect gate): the engine's intended underlying reading is
         // established FALSE (a paused engine exists), and only THEN the observation is made
         // UNAVAILABLE — unavailable is not the same fact as observed-paused, and this order is
@@ -1684,6 +1684,142 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
+    // MARK: - Production-declaration enablement controls (pause-only, task67)
+
+    // EVIDENCE BOUNDARY (rulings @ ff5c6621, 807e16b0): these controls bind THE PRODUCTION
+    // CONSTANT (`VoiceControlAssembly.declaredAppOperations`) so the tested manifest is the
+    // shipped value, but they run on test-built sinks — they prove the DECLARATION'S behavior,
+    // not the assembly's wiring (direct review evidence). The RESULT/REPLAY evidence claimed for
+    // this enablement is exercised on the same constant: `testCloudPauseOnAnAlreadyPausedEngine…`,
+    // `testCloudPauseStillPlayingAfterTheSinkReportsFailedWithNoState`,
+    // `testCloudPauseWithNoEngineObservationReportsUnknownWithNoState`, and the C1 control
+    // `testSettledPauseRedeliveryReplaysTheRecordedStateWithoutAnotherPause` are all bound to it.
+    // IDENTITYLESS LEGACY EXECUTION control (unchanged, empty declaration):
+    // `testLegacyIdentitylessFrameExecutesWithoutIdentityOrResultFrame`. NOTE: the
+    // nonadvertising-frame test is a FRAME-SHAPE control, not an execution control.
+
+    /// THE PRODUCTION CONSTANT ADVERTISES EXACTLY PAUSE on the real authenticate frame:
+    /// `app_operations_v1` plus a support manifest whose operations list is pause and nothing
+    /// else. Binding is by name, so this control and the assembly cannot drift apart.
+    func testProductionDeclarationAdvertisesExactlyPauseOnTheAuthenticateFrame() async throws {
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                        appOperationSupport: VoiceControlAssembly.declaredAppOperations)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-prod-frame")
+        let authFrameValue = await MainActor.run { capturedTask?.sentAuthFrame }
+        let frame = try XCTUnwrap(authFrameValue)
+        XCTAssertEqual(frame["capabilities"] as? [String], ["app_operations_v1"])
+        let support = try XCTUnwrap(frame["app_operation_support"] as? [String: Any])
+        XCTAssertEqual(support["schema_version"] as? String, "app-ops/1")
+        XCTAssertEqual(support["operations"] as? [String], ["playback.pause"])
+    }
+
+    /// IDENTIFIED PAUSE EXECUTES UNDER THE PRODUCTION CONSTANT and settles the SAME single
+    /// observation that gated success — the result and the wire state cannot come from
+    /// different readings.
+    func testProductionDeclarationExecutesIdentifiedPauseAndSettlesTheCapturedObservation() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"7c2f1e88-3a54-4c19-b7d0-9e6a2f4b8c31","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                        appOperationSupport: VoiceControlAssembly.declaredAppOperations)
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-prod-pause")
+        let frame = try await awaitResultFrame(operationId: "7c2f1e88-3a54-4c19-b7d0-9e6a2f4b8c31")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any])
+        XCTAssertEqual(state["playing"] as? Bool, false,
+                       "the settled state IS the observation that gated success")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(playback.observedPlayingReads, 1,
+                       "one post-pause observation settles both the gate and the wire")
+    }
+
+    /// EVERYTHING OUTSIDE THE PRODUCTION DECLARATION REFUSES, DURABLY, WITH NO EFFECT — and a
+    /// redelivery of the SAME bytes replays the recorded refusal. Bound to the production
+    /// constant, so the negative rides the SHIPPED manifest, not a fixture twin.
+    func testProductionDeclarationRefusesSeekRelativeDurablyAndReplaysTheRefusal() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prod-decl-refuse-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let seekFixture = try XCTUnwrap(self.pendingFixture)
+        let seekBytes = try XCTUnwrap(Self.deliveredPayload(for: "9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", in: seekFixture))
+        let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-prod-refuse", manager: manager, bytes: seekBytes))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal,
+                                        appOperationSupport: VoiceControlAssembly.declaredAppOperations)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-prod-refuse")
+        let firstTaskValue = await MainActor.run { capturedTask }
+        let firstTask = try XCTUnwrap(firstTaskValue)
+        let frame = try await awaitResultFrame(operationId: "9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", on: firstTask)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation,
+                       "seek_relative is contract-implemented but OUTSIDE the shipped pause-only manifest")
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "the undeclared action never reaches an effect")
+        if case .alreadyRun = journal.claim("9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", identity: identity) {} else {
+            XCTFail("the refusal must be settled durably")
+        }
+
+        // REDELIVERY on a FRESH journal over the SAME durable file replays the recorded refusal.
+        let reloaded = OperationJournal(store: FileOperationRecordStore(url: url))
+        self.pendingFixture = seekFixture
+        let rePresented = try XCTUnwrap(Self.mintedIdentity(for: "u-prod-refuse", manager: manager, bytes: seekBytes))
+        XCTAssertEqual(rePresented.actionDigest, identity.actionDigest)
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                         operationJournal: reloaded,
+                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-prod-refuse")
+        let replayTaskValue = await MainActor.run { capturedTask }
+        let replayTask = try XCTUnwrap(replayTaskValue)
+        let replayFrame = try await awaitResultFrame(operationId: "9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", on: replayTask)
+        XCTAssertEqual(replayFrame["outcome"] as? String, "refused")
+        XCTAssertEqual(replayFrame["reason"] as? String, OperationReason.unsupportedOperation)
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0)
+    }
+
+    /// THE PRODUCTION CONSTANT, BY VALUE: the shipped declaration supports pause and NOTHING
+    /// else — so the constant the assembly wires is proven here, not re-typed. ASSEMBLY WIRING
+    /// EVIDENCE BOUNDARY (ruling @ 807e16b0): that the constructor passes this constant as the
+    /// sink's provider is DIRECT REVIEW EVIDENCE — inspected on the real production constructor,
+    /// not proven here; the former source-mirror/string assertions were removed as a
+    /// machine-specific stale-source dependency. Runtime behavior of a constant-declared sink is
+    /// the three production-declaration controls above plus the constant-bound result/replay
+    /// controls (already-paused, still-playing, unavailable observation, settled-pause replay).
+    @MainActor
+    func testTheProductionDeclarationConstantSupportsPauseAndNothingElse() throws {
+        let declared = try XCTUnwrap(VoiceControlAssembly.declaredAppOperations,
+                                     "the shipped declaration literal must be well-formed, not nil")
+        XCTAssertTrue(declared.supports(tool: "playback", action: "pause"))
+        XCTAssertFalse(declared.supports(tool: "playback", action: "seek_relative"))
+        XCTAssertFalse(declared.supports(tool: "playback", action: "seek_to"))
+        XCTAssertFalse(declared.supports(tool: "playback", action: "resume"))
+        XCTAssertFalse(declared.supports(tool: "playback", action: "play_quote"))
+        XCTAssertFalse(declared.supports(tool: "playback", action: "stop_quote"))
+    }
+
     /// PAUSE REPLAY EVIDENCE (declaration candidate C1): a settled `playback.pause` redelivered
     /// within its turn replays the SAME SETTLED STATE through the journal — never re-executing,
     /// and never answering from LIVE playback state. The replay turn starts NOT playing so no
@@ -1715,7 +1851,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink1 = makeSinkWithConsumer(RecordingResultConsumer(),
                                          conversationManager: rehearsalManager,
                                          operationJournal: journal,
-                                         appOperationSupport: fixtureSupport("playback.pause"))
+                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         await MainActor.run {
             sink1.effectGate = { _ in
                 self.playback.setPlaying(true)
@@ -1762,7 +1898,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink2 = makeSinkWithConsumer(RecordingResultConsumer(),
                                          conversationManager: rehearsalManager,
                                          operationJournal: reloadedJournal,
-                                         appOperationSupport: fixtureSupport("playback.pause"))
+                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-replay")
         let task2Value = await MainActor.run { capturedTask }
         let task2 = try XCTUnwrap(task2Value, "turn 2's transport was captured")
