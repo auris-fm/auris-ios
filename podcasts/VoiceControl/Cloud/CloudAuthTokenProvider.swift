@@ -123,17 +123,29 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     }
 
     func token() async -> String? {
+        await authenticatedSession()?.accessToken
+    }
+
+    /// The validated snapshot: the access token handed out together with the account it belongs to.
+    ///
+    /// `token()` is exactly this snapshot's `accessToken`, so the WebSocket authenticate frame and
+    /// the journal's owner come from one acquisition and one set of guards.
+    func authenticatedSession() async -> CloudAuthenticatedSession? {
+        await resolveSession()
+    }
+
+    private func resolveSession() async -> CloudAuthenticatedSession? {
         // Account change without an app restart: never serve the previous
         // account's token (PR #20 review).
         dropCacheIfAccountChanged()
 
-        if let cached = cachedFreshToken() {
+        if let cached = cachedFreshSession() {
             return cached
         }
         // Past the proactive boundary but still inside the real lifetime: serve it
         // and refresh out of band, so the turn path never waits on a network round
         // trip — the contract this seam documents for `token()` (PR #20 review).
-        if let usable = cachedUsableToken() {
+        if let usable = cachedUsableSession() {
             refreshInBackground()
             return usable
         }
@@ -167,7 +179,11 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 // was repointed at another environment, must not be handed out —
                 // otherwise the turn is dialled as an abandoned account, or with a
                 // token minted by the old origin (PR #20 review).
-                return tokens.accessToken
+                // The account comes from THIS `Tokens` value — the one whose `accessToken` passed
+                // the guard above — never from a fresh `identityProvider()` read. A read taken now
+                // could observe a different account than the token was minted for, which is the
+                // exact pairing hole this signature exists to close.
+                return Self.session(from: tokens)
             case let .success(tokens):
                 // The in-flight work belonged to a previous account, arrived after
                 // the credential was withdrawn, or was minted against another
@@ -193,10 +209,23 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 return nil
             case let .inconclusive(reason):
                 Self.diagnose("token acquisition inconclusive: \(reason); no cached token was usable")
-                return cachedUsableToken()
+                return cachedUsableSession()
             }
         }
         return nil
+    }
+
+    /// Projects one stored `Tokens` value into the token-and-account pair.
+    ///
+    /// THE ONLY place a token is paired with an account, and it reads both off the same value.
+    /// A token whose `sourceIdentity` is missing cannot name an account, so it yields no session:
+    /// there is nothing to journal an operation under, and inventing one is worse than refusing.
+    private static func session(from tokens: Tokens) -> CloudAuthenticatedSession? {
+        guard !tokens.accessToken.isEmpty,
+              let accountId = tokens.sourceIdentity,
+              !accountId.isEmpty
+        else { return nil }
+        return CloudAuthenticatedSession(accountId: accountId, accessToken: tokens.accessToken)
     }
 
     /// Log-only diagnostics. Coarse reasons and booleans only: never a token,
@@ -407,11 +436,11 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     // MARK: - state
 
-    private func cachedFreshToken() -> String? {
+    private func cachedFreshSession() -> CloudAuthenticatedSession? {
         lock.lock()
         defer { lock.unlock() }
         guard let tokens, tokens.expiresAt > now(), !tokens.accessToken.isEmpty else { return nil }
-        return tokens.accessToken
+        return Self.session(from: tokens)
     }
 
     private func currentTokens() -> Tokens? {
@@ -435,11 +464,11 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     /// A token we may still use while a refresh is inconclusive: past the
     /// proactive-refresh boundary but within its real lifetime.
-    private func cachedUsableToken() -> String? {
+    private func cachedUsableSession() -> CloudAuthenticatedSession? {
         lock.lock()
         defer { lock.unlock() }
         guard let tokens, tokens.hardExpiresAt > now(), !tokens.accessToken.isEmpty else { return nil }
-        return tokens.accessToken
+        return Self.session(from: tokens)
     }
 
     private func currentRefreshToken() -> String? {
@@ -483,6 +512,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         lock.unlock()
         return result
     }
+
+    // MARK: - authenticated owner
 
     private var platformName: String {
         #if os(iOS)

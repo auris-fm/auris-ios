@@ -32,6 +32,11 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
     }
 
     private final class RecordingPlaybackSink: VoicePlaybackSink {
+
+    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
         private(set) var pauseCalls = 0
         private(set) var resumeCalls = 0
         /// Playback is RUNNING before the turn, so the sink takes a real hold (its

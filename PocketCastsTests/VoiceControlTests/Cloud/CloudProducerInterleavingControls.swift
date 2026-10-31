@@ -789,6 +789,11 @@ final class CloudProducerInterleavingControls: XCTestCase {
 /// Minimal playback collaborator: the turn's effect on playback is not under review here, only the
 /// audio the producer emits, so these answers are inert by construction.
 private final class SilentPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
+
+    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
     var isPlaying: Bool { false }
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }

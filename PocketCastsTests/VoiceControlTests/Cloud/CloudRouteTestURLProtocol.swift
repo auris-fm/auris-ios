@@ -102,6 +102,15 @@ final class CloudRouteTestURLProtocol: URLProtocol {
         lock.unlock()
     }
 
+    /// Installs NO responder, so the URLProtocol fails every request it loads
+    /// (`didFailWithError(.unknown)`). This is how a control asks for "the exchange cannot be
+    /// answered" — `onRequest` is only an observer and cannot express it.
+    static func clearStubHandler() {
+        lock.lock()
+        requestHandler = nil
+        lock.unlock()
+    }
+
     /// Number of requests handled since the last `stubJSON`/`reset`.
     static var requestCount: Int {
         lock.lock()
@@ -117,6 +126,12 @@ final class CloudRouteTestURLProtocol: URLProtocol {
         onRequest = nil
         _requestCount = 0
         lock.unlock()
+        // A process-wide observer surviving into the next test would report another test's sends
+        // as this one's, which is worse than no diagnostic at all.
+        StubWebSocketTask.onSendObservation = nil
+        // The sink diagnostic hooks are @MainActor and are NOT touched here: `reset()` is
+        // nonisolated, so assigning them from it is a concurrency violation. Each diagnostic
+        // method starts from nil and clears on every exit instead.
     }
 
     private static func httpResponse(
@@ -162,15 +177,121 @@ final class CloudRouteTestURLProtocol: URLProtocol {
 /// cases are about the transport rather than the credential.
 struct StubTokenProvider: CloudTokenProviding {
     let token: String?
+    /// The account this stub's credential authenticates. Defaulted only so the many transport
+    /// cases that never inspect ownership keep reading as "some account"; a case that asserts on
+    /// the journaled owner passes it explicitly.
+    var accountId: String = "test-owner"
+
     func token() async -> String? { token }
+
+    /// EXPLICIT. This provider previously inherited the protocol's `nil` default, so every
+    /// transport case silently ran unauthenticated — which is what "unauthorized" was doing in
+    /// the client suite. A stub with no token has no session, and says so here rather than by
+    /// omission.
+    func authenticatedSession() async -> CloudAuthenticatedSession? {
+        // An EMPTY account is "no principal", not an account named "". A session with a blank
+        // owner would satisfy `authenticatedSession != nil` while naming nobody, which is the
+        // fabricated-identity shape this whole change exists to prevent.
+        guard let token, !accountId.isEmpty else { return nil }
+        return CloudAuthenticatedSession(accountId: accountId, accessToken: token)
+    }
+
     func handleUnauthorized(rejectedToken: String?) async {}
+}
+
+/// A provider whose VALIDATED acquisition completes only when the test releases it. Proves the
+/// sink AWAITS the acquisition instead of sampling it: sampling binds an empty owner to a turn
+/// that subsequently authenticates perfectly well, and that window is invisible in a case whose
+/// subject is something else.
+final class DelayedAcquisitionTokenProvider: CloudTokenProviding, @unchecked Sendable {
+    private let credential: String
+    private let accountId: String
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var acquisitions = 0
+
+    init(credential: String, accountId: String) {
+        self.credential = credential
+        self.accountId = accountId
+    }
+
+    var acquisitionCount: Int { lock.lock(); defer { lock.unlock() }; return acquisitions }
+
+    func release() { gate.signal() }
+
+    func token() async -> String? {
+        withLock { acquisitions += 1 }
+        while gate.wait(timeout: .now() + 0.02) == .timedOut {}
+        return credential
+    }
+
+    /// The paired snapshot, arriving late. Transport falls back to `token()` only when this is
+    /// nil, so this path also proves the credential presented is the snapshot's own.
+    func authenticatedSession() async -> CloudAuthenticatedSession? {
+        withLock { acquisitions += 1 }
+        while gate.wait(timeout: .now() + 0.02) == .timedOut {}
+        return CloudAuthenticatedSession(accountId: accountId, accessToken: credential)
+    }
+
+    func transportCredential() async -> String? {
+        while gate.wait(timeout: .now() + 0.02) == .timedOut {}
+        return credential
+    }
+
+    func handleUnauthorized(rejectedToken: String?) async {}
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }; return body()
+    }
 }
 
 /// A test case whose sut builds its client through `CloudRouteClient.stubbed`,
 /// so the case can assert on the frames the client *sent*. Held per instance
 /// rather than in a process-wide global, which would leak between tests.
+/// Completion flag for the BOUNDED probe below: an INDEPENDENT signal set by a detached watcher,
+/// so the probe can poll it under a bound without awaiting the watched task's value.
+///
+/// Lives here, beside the only user, rather than privately inside one suite: the probe used to
+/// reference a flag that was `private` to a DIFFERENT file, and moving the consumer without its
+/// dependency is what made the shared helper fail to compile.
+final class ProbeCompletionFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func set() { lock.lock(); done = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); let d = done; lock.unlock(); return d }
+}
+
 class SocketCapturingTestCase: XCTestCase {
+    /// STABLE LABEL for the task the client actually dispatched on, recorded by the transport
+    /// itself. `capturedTask` is overwritten by EVERY factory call, so on a multi-turn test it
+    /// answers "which task was built last", not "which task received the frame". Those are
+    /// different questions, and conflating them is how a submitted frame looked unsent.
+    var dispatchedTaskLabel: String?
     var capturedTask: StubWebSocketTask?
+    /// The client built for the most recent turn, so a control can hand a PRIOR turn its own
+    /// transport instead of the live one.
+    var capturedClient: CloudRouteClient?
+    /// The sink a control hooked, so a first-frame hook can reach the object it is asserting on.
+    /// Hoisted here because more than one suite needs it and a per-suite `private` copy is how it
+    /// came to be referenced from the wrong class.
+    var hookedSink: CloudRouteSink?
+
+    /// BOUNDED completion probe: an INDEPENDENT completion flag set by a detached watcher; the
+    /// probe polls the flag under a bound and NEVER awaits the watched task's value inside the
+    /// group (a cancelled probe must not hang on the underlying wait).
+    func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
+        let flag = ProbeCompletionFlag()
+        let watcher = Task.detached { _ = await task.value; flag.set() }
+        var completed = false
+        var elapsed: UInt64 = 0
+        while elapsed < nanoseconds {
+            if flag.isSet { completed = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            elapsed += 50_000_000
+        }
+        if !completed { watcher.cancel() } // benign leak: the watcher cannot free the underlying wait
+        return completed
+    }
 }
 
 /// A valid prepared conversation for envelope construction in tests. Each call
@@ -248,7 +369,16 @@ extension CloudRouteClient {
         /// the binary payload the transport treats as audio, followed by the text event that
         /// follows it. Empty by default, so every existing text fixture behaves exactly as before.
         audioPayloads: [Data] = [],
-        prepareTask: @Sendable (StubWebSocketTask) -> Void = { _ in }
+        prepareTask: @Sendable (StubWebSocketTask) -> Void = { _ in },
+        /// The token provider the client actually acquires from — the ONE seam an owner can come
+        /// from. A control that asserts on the journaled owner passes a provider whose credential
+        /// AND account are the same fixture, so the pair travels together through the real
+        /// acquisition instead of being re-attached to the socket afterwards.
+        ///
+        /// `nil` means "derive it from `token`", keeping every existing case unchanged. Stated as
+        /// an explicit absence rather than defaulted inline so `token` cannot silently apply while
+        /// a provider is also supplied.
+        tokenProvider: (any CloudTokenProviding)? = nil
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
         var messages: [URLSessionWebSocketTask.Message] = []
         let textFrames = StubWebSocketTask.frames(fromFixture: fixture)
@@ -264,7 +394,7 @@ extension CloudRouteClient {
             baseURL: baseURL,
             userId: userId,
             requestTimeoutSeconds: 15,
-            tokenProvider: StubTokenProvider(token: token),
+            tokenProvider: tokenProvider ?? StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
         )
         return (client, task)
@@ -606,16 +736,64 @@ extension StubWebSocketTask {
 /// the client through `CloudRouteClient.WebSocketTasking` instead — the same
 /// seam, and the same frames the server would send.
 final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
+    /// THE SCRIPTED INBOX IS SHARED STATE. A test appends to it while the producer is looping in
+    /// `receive()`, so every read and every append takes this lock; without it the append races the
+    /// producer's `removeFirst()`.
+    private let inboxLock = NSLock()
     private var incoming: [URLSessionWebSocketTask.Message]
+    /// Signals that a control has appended a frame for a live, parked socket. Released ONCE, by the
+    /// control, and only when it actually appended — a park that is released for any other reason
+    /// (cancellation, retirement, timeout) must NOT be treated as evidence of new data.
+    private let appendedFrameLatch = HoldLatch()
     private(set) var sent: [URLSessionWebSocketTask.Message] = []
     private(set) var cancelled: (code: URLSessionWebSocketTask.CloseCode, reason: Data?)?
     var receiveError: Error?
+
+
     /// Set by the control: invoked when THIS socket retires (`cancel(with:reason:)`), so a
     /// parked receive wakes from the same retirement instead of polling a predicate.
     var retiredParkNotifier: (() -> Void)?
 
     init(_ incoming: [URLSessionWebSocketTask.Message]) {
         self.incoming = incoming
+    }
+
+    /// THE SERVER SENDS MORE MID-TURN. Appends an inbound frame to a LIVE socket and wakes a
+    /// receive parked at the awaited seam, so a control can deliver a genuinely late inbound frame
+    /// to a turn that is still running — instead of hand-invoking a testing entry point after every
+    /// turn has already ended, which proves nothing about ordering.
+    ///
+    /// Waking is an APPEND-SPECIFIC signal, not the retirement notifier: the park resumes on it and
+    /// serves the appended frame normally, because content is available again. A park released for
+    /// any other reason does not set it, so "released" is never confused with "new data arrived".
+    func appendInboundText(_ frame: String) {
+        inboxLock.lock()
+        incoming.append(.string(frame))
+        inboxLock.unlock()
+        // ONE-TIME, EXPLICIT release of the appended-frame latch. Deliberately NOT the retirement
+        // notifier: retirement means "this socket is going away", which is the opposite of "new
+        // data arrived", and reusing it made a cancellation look like a delivery.
+        appendedFrameLatch.release()
+    }
+
+    /// True when the producer is parked and a control has since appended new data for it.
+    var didAppendWhileParked: Bool { appendedFrameLatch.released }
+
+    /// Frames actually HANDED to the producer, in order. A control that needs "this exact frame was
+    /// consumed" must read this; a positive receive count only proves SOMETHING was read.
+    private(set) var servedInboundTexts: [String] = []
+
+    /// Take the head frame, or report the inbox as empty, under the inbox lock.
+    private func takeInbound() -> URLSessionWebSocketTask.Message? {
+        inboxLock.lock(); defer { inboxLock.unlock() }
+        guard !incoming.isEmpty else { return nil }
+        let next = incoming.removeFirst()
+        switch next {
+        case .string(let text): servedInboundTexts.append(text)
+        case .data: break
+        @unknown default: break
+        }
+        return next
     }
 
     convenience init(textFrames: [String]) {
@@ -632,9 +810,27 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// automatic recovery may re-drive.
     var throwsBeforeRecording = false
 
+    /// STABLE IDENTITY for this stub task, so a diagnostic can say WHICH task a frame landed on
+    /// rather than "the last one a factory happened to build".
+    let diagnosticLabel: String = UUID().uuidString.prefix(8).description
+
+    /// DIAGNOSTIC ONLY (test target): called for every frame that reaches the transport, with this
+    /// task's label and the frame's `type`. Lets a control observe the send from the RECEIVING
+    /// side, which is the only side that can distinguish "dispatched elsewhere" from "never sent".
+    static var onSendObservation: (@Sendable (String, String?) -> Void)?
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         sent.append(message)
+        if let observe = Self.onSendObservation {
+            var kind: String?
+            if case let .string(text) = message,
+               let data = text.data(using: .utf8),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                kind = json["type"] as? String
+            }
+            observe(diagnosticLabel, kind)
+        }
         if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
@@ -663,6 +859,10 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
 
     /// The first `receive()` was entered — the receiver is genuinely live and consuming.
     private(set) var receiveEntered = false
+    /// True only for the AWAITED `receive()` park, set inside `receive()` immediately before it
+    /// suspends. This — not `declaredParkDidPark` — is the observable proof that the producer is
+    /// blocked at the receive seam rather than having finished.
+    var didParkInReceive = false
     /// The scripted terminal (`done`/`error`) has been WITHHELD: the receive that would serve it is
     /// parked. This is the state a barge-in must be able to interrupt.
     private(set) var terminalWithheld = false
@@ -744,11 +944,16 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
                 await latch.wait(untilRetired: { self.isCancelledSocket })
             }
         } else if let park = armedReceivePark, framesServedForPark >= (declaredParkAfterFrames ?? 0) {
-            // Fallback park path. Note: this branch is NOT the mechanism the held-work control
-            // relies on — measurement showed the producer parks at the frame seam
-            // (`CloudRouteClient.onFrameReceived`) rather than by reaching another `receive()`.
+            // AWAITED park: the producer blocks HERE, inside `receive()`, holding the scripted
+            // frames behind it. Set the signal before suspending so a control can observe the
+            // hold as a fact about the producer rather than as a timing assumption.
             declaredParkDidPark = true
-            await park.wait(untilRetired: { self.isCancelledSocket })
+            didParkInReceive = true
+            // Wake on retirement OR on an explicitly appended frame. Both wake paths are explicit
+            // events; the appended-frame latch is separate from the retirement notifier so a
+            // cancellation is never mistaken for new data.
+            await park.wait(untilRetired: { self.isCancelledSocket || self.appendedFrameLatch.released })
+            didParkInReceive = false
         } else if let latch = firstReceiveHold, !firstReceiveHeld {
             firstReceiveHeld = true
             terminalWithheld = true
@@ -766,12 +971,12 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         }
         framesServedForPark += 1
         if let receiveError { throw receiveError }
-        guard !incoming.isEmpty else {
+        guard let next = takeInbound() else {
             // A closed socket: the server ended the stream without a terminal
             // event, which the client must surface rather than treat as success.
             throw URLError(.badServerResponse)
         }
-        return incoming.removeFirst()
+        return next
     }
 
     /// Cancellation observers with OWNERSHIP. Each entry carries its token so the observer that

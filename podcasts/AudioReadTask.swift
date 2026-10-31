@@ -133,26 +133,36 @@ class AudioReadTask {
         minRMS = minRMSForSilenceAmount()
     }
 
-    func seekTo(_ time: TimeInterval, completion: ((Bool) -> Void)?) {
+    /// ADDITIVE `typedCapture` (task67 seek-completion slice): delivers the immutable value
+    /// captured inside the locked seek operation, on the same callback path as the legacy
+    /// Bool — which is unchanged. Default nil keeps every existing caller identical.
+    func seekTo(_ time: TimeInterval, completion: ((Bool) -> Void)?, typedCapture: ((LockedSeekCapture) -> Void)? = nil) {
         DispatchQueue.global(qos: .default).async { () in
-            let seekResult = self.performSeek(time)
+            let capture = self.performSeek(time)
             self.bufferManager.bufferSemaphore.signal()
-            completion?(seekResult)
+            completion?(capture.seekedToEnd)
+            typedCapture?(capture)
         }
     }
 
-    private func performSeek(_ time: TimeInterval) -> Bool {
+    /// Returns the immutable capture built INSIDE the lock: the landed frame (nil on the EOF
+    /// branch — no frame is assigned there), the requested time, and the engine's own total
+    /// duration measure. Legacy Bool semantics preserved: true exactly when seekedToEnd.
+    private func performSeek(_ time: TimeInterval) -> LockedSeekCapture {
         objc_sync_enter(lock)
         defer { objc_sync_exit(lock) }
 
         let positionRequired = framePositionForTime(time)
+        let totalSeconds = Double(cachedFrameCount) / audioFile.fileFormat.sampleRate
         var seekedToEnd = false
 
         if positionRequired.passedEndOfFile {
+            let capture = LockedSeekCapture(seekedToEnd: true, landedFrame: nil, requestedTime: time, engineTotalSeconds: totalSeconds)
             bufferManager.removeAll()
             bufferManager.readToEOFSuccessfully.value = true
 
             seekedToEnd = true
+            return capture
         } else {
             currentFramePosition = positionRequired.framePosition
             audioFile.framePosition = currentFramePosition
@@ -172,7 +182,7 @@ class AudioReadTask {
             }
         }
 
-        return seekedToEnd
+        return LockedSeekCapture(seekedToEnd: seekedToEnd, landedFrame: positionRequired.framePosition, requestedTime: time, engineTotalSeconds: totalSeconds)
     }
 
     private func handleReachedEndOfFile() {

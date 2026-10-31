@@ -1,9 +1,25 @@
 import AVFoundation
 import Combine
 import PocketCastsDataModel
+import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
+    /// THE PRODUCTION APP-OPERATION DECLARATION (enablement slices, task67): pause + resume.
+    /// ONE value with two consumers that must never disagree: the CloudRouteSink construction
+    /// below wires it as the sink's `appOperationSupportProvider`, and the sink reads the
+    /// provider ONCE per admitted turn — the same captured value serializes the authenticate
+    /// frame (`app_operations_v1` + `app_operation_support`) and gates identified execution at
+    /// the `.claimed` boundary. Every other operation stays ABSENT: an identified
+    /// `seek_relative`/`seek_to`/quote request refuses `unsupported_operation`, durably,
+    /// until its own enablement slice. ADVERTISEMENT IS NOT END-TO-END AVAILABILITY: server
+    /// eligibility for resume is a separate Cloud slice, so this manifest alone must never be
+    /// reported as resume being available end-to-end. The failable init stays: a malformed
+    /// literal here must be nil (empty declaration), never a crash or a repaired shape. Tests
+    /// bind THIS value by name (`VoiceControlAssembly.declaredAppOperations`) so behavior
+    /// controls and the assembly cannot drift apart.
+    static let declaredAppOperations = CloudAppOperationSupport(operations: ["playback.pause", "playback.resume"])
+
     /// Retains the route-scope subscription for the lifetime of the assembly. The
     /// service holds the engine, so the binding must live at least as long.
     private var cancellables = Set<AnyCancellable>()
@@ -255,7 +271,12 @@ class VoiceControlAssembly {
                 // Eligibility survives the window it was admitted under (voice-control-core.md:270),
                 // so the dispatch fence must admit a claimed-but-expired origin. This is the
                 // PRODUCTION registration path; the authority reads the live admission state.
-                admittedWorkAuthority: { gracePeriodSignal.admittedWorkAuthority }
+                admittedWorkAuthority: { gracePeriodSignal.admittedWorkAuthority },
+                // APP-OPERATION ENABLEMENT (task67): the production declaration above, read by
+                // the sink once per turn — the SAME snapshot advertises on the authenticate
+                // frame and gates execution. Behavior controls bind the constant; the wiring
+                // HERE is pinned by the assembly source-audit control.
+                appOperationSupportProvider: { Self.declaredAppOperations }
             ),
             playbackContextProvider: playbackContextProvider,
             gracePeriodSignal: gracePeriodSignal,
