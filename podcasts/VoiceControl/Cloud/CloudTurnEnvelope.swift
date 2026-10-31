@@ -20,6 +20,9 @@ struct CloudTurnEnvelope: Equatable {
     /// every turn; nothing is sent when it is absent, so a caller that forgets it produces a
     /// frame the server must refuse rather than a silently stateless turn.
     let conversation: CloudPreparedConversation?
+    /// The app-operation support THIS turn negotiates, captured by the caller from the turn's
+    /// own declaration snapshot. nil = no app-ops advertisement: neither key is serialized.
+    let appOperationSupport: CloudAppOperationSupport?
 
     /// Builds an envelope for one logical turn: a fresh `request_id` (reuse the
     /// returned envelope for transport retries of the same turn) and a bounded
@@ -34,14 +37,16 @@ struct CloudTurnEnvelope: Equatable {
         capabilities: [String],
         routeHint: CloudRouteHint?,
         recentConversation: [RecentConversationTurn],
-        conversation: CloudPreparedConversation
+        conversation: CloudPreparedConversation,
+        appOperationSupport: CloudAppOperationSupport? = nil
     ) -> CloudTurnEnvelope {
         CloudTurnEnvelope(
             requestId: conversation.requestId,
             capabilities: capabilities,
             routeHint: routeHint,
             recentConversation: RecentConversation.bounded(recentConversation),
-            conversation: conversation
+            conversation: conversation,
+            appOperationSupport: appOperationSupport
         )
     }
 }
@@ -50,6 +55,7 @@ struct CloudTurnEnvelope: Equatable {
 /// only when the client implements its side of the contract.
 enum CloudClientCapabilities {
     static let searchResultsV1 = "search_results_v1"
+    static let appOperationsV1 = "app_operations_v1"
 
     /// - Parameter rendersStructuredResults: true only once the iOS renderer
     ///   handles the result/empty/unavailable states, scope, and play/seek
@@ -60,8 +66,55 @@ enum CloudClientCapabilities {
     /// operations is a separate question, owned by the operation admission path and, for any
     /// future v1 advertisement, a separately reviewed slice built from that turn's own
     /// authenticated acquisition. Gating this on a principal was out of scope here.
-    static func advertised(rendersStructuredResults: Bool) -> [String] {
-        rendersStructuredResults ? [searchResultsV1] : []
+    static func advertised(rendersStructuredResults: Bool,
+                           appOperationSupport: CloudAppOperationSupport? = nil) -> [String] {
+        var capabilities = rendersStructuredResults ? [searchResultsV1] : []
+        // app_operations_v1 rides ONLY alongside a well-formed support manifest; absence of
+        // either key preserves today's exact wire shape (search_results_v1 is independent).
+        if appOperationSupport != nil {
+            capabilities.append(appOperationsV1)
+        }
+        return capabilities
+    }
+}
+
+/// The `app_operation_support` object the owning contract (trainer-reduced-local-scope
+/// @ 818c8f75, cloud-assistant.md "App-operation protocol v1") requires alongside
+/// `app_operations_v1`: exact, unique `tool.action` keys the client fully implements —
+/// validation, execution, result observation AND durable replay handling.
+/// FAIL CLOSED: a manifest that cannot be constructed exactly is no manifest at all —
+/// `init?` returns nil, which grants no operations and serializes neither key. It never
+/// traps and never silently repairs (drops duplicates, trims) a malformed list.
+struct CloudAppOperationSupport: Equatable {
+    static let schemaVersion = "app-ops/1"
+
+    let operations: [String]
+
+    init?(operations: [String]) {
+        guard !operations.isEmpty else { return nil }
+        var seen = Set<String>()
+        for operation in operations {
+            // EXACT `tool.action` SHAPE, no trimming or repair: exactly one separator, both
+            // segments non-empty, and no whitespace anywhere IN the key. A key that only
+            // looks close ("playback..pause", "play back.pause", "a.b.c", " .pause") is
+            // malformed — nil, which grants no operations.
+            let segments = operation.split(separator: ".", omittingEmptySubsequences: false)
+            guard segments.count == 2,
+                  !segments[0].isEmpty, !segments[1].isEmpty,
+                  !operation.contains(where: { $0.isWhitespace }),
+                  seen.insert(operation).inserted else { return nil }
+        }
+        self.operations = operations
+    }
+
+    func supports(tool: String, action: String) -> Bool {
+        operations.contains("\(tool).\(action)")
+    }
+
+    /// The NATIVE JSON shape the authenticate serializer writes. JSONSerialization cannot
+    /// encode the `CloudRouteJSONValue` enum, so the frame carries plain Foundation values.
+    var nativeValue: [String: Any] {
+        ["schema_version": Self.schemaVersion, "operations": operations]
     }
 }
 
@@ -197,6 +250,17 @@ enum CloudRouteRequestBuilder {
         // path is the absence of the capability.
         if !turn.capabilities.isEmpty {
             payload["capabilities"] = turn.capabilities
+        }
+        // Omitted with the token when there is no support manifest: the server's fallback is
+        // the absence of the capability, so an empty declaration must not degrade the frame.
+        // PAIRING IS ENFORCED, FAIL CLOSED: support without the `app_operations_v1` token is
+        // dropped — a manifest the frame does not declare must never leak onto the wire. The
+        // reverse mismatch (token, no support) serializes nothing: without the required
+        // support object the contract grants no operations, so the token rides alone only in
+        // that explicitly broken construction and is tested as such.
+        if let appOperationSupport = turn.appOperationSupport,
+           turn.capabilities.contains(CloudClientCapabilities.appOperationsV1) {
+            payload["app_operation_support"] = appOperationSupport.nativeValue
         }
         // OPTIONAL source_language: the ASR pipeline's actual LID when it detected one. Unknown
         // is OMITTED, never invented (not the OS locale, not a default "en"): the wire field's

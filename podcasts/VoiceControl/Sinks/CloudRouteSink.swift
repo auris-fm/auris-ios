@@ -289,7 +289,8 @@ struct AdmittedTurnIdentity: Equatable {
         precondition: [String: CloudRouteJSONValue],
         admittedTurnBox: AdmittedTurnIdentityBox,
         admittedTurnSocket: AppOperationResultSocket?,
-        admittedTurnClient: CloudRouteClient
+        admittedTurnClient: CloudRouteClient,
+        negotiatedSupport: CloudAppOperationSupport? = nil
     ) async {
         await executeAction(
             tool: "playback", action: action, params: params,
@@ -298,7 +299,8 @@ struct AdmittedTurnIdentity: Equatable {
             parameterViolation: nil,
             admittedTurnBox: admittedTurnBox,
             admittedTurnSocket: admittedTurnSocket,
-            admittedTurnClient: admittedTurnClient
+            admittedTurnClient: admittedTurnClient,
+            negotiatedSupport: negotiatedSupport
         )
     }
 
@@ -341,6 +343,7 @@ struct AdmittedTurnIdentity: Equatable {
     /// Typed-only route hint for the current turn. Free-text turns pass nil and
     /// keep today's interpretation path.
     private let routeHintProvider: () -> CloudRouteHint?
+    private let appOperationSupportProvider: () -> CloudAppOperationSupport?
     /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by
     /// `RecentConversation.bounded`).
     private let recentConversationProvider: () -> [RecentConversationTurn]
@@ -588,13 +591,21 @@ struct AdmittedTurnIdentity: Equatable {
         // live now — otherwise the granted claim is refused one step later. Retirement
         // (privacy/route) still refuses, because a retired turn is not admitted work. Absent by
         // default, so a direct-constructed sink keeps the live-origin-only fence.
-        admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)? = nil
+        admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)? = nil,
+        // THE APP-OPERATION DECLARATION for the contract's capability negotiation
+        // (trainer-reduced-local-scope @ 818c8f75): the support manifest this turn's
+        // authenticate envelope advertises. Read ONCE per turn — one immutable snapshot per
+        // admitted turn/socket — and the SAME value both serializes onto the frame and gates
+        // execution. Production ships the EMPTY declaration (nil): the machinery is dormant
+        // and the wire shape unchanged until a separately reviewed enablement commit.
+        appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil }
     ) {
         self.onGracePlaybackHoldBegin = onGracePlaybackHoldBegin
         self.onGracePlaybackHoldEnd = onGracePlaybackHoldEnd
         self.admittedWorkAuthority = admittedWorkAuthority
         self.clientFactory = clientFactory
         self.isConfigured = isConfigured
+        self.appOperationSupportProvider = appOperationSupportProvider
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
         self.interruptionState = interruptionState
@@ -1233,11 +1244,18 @@ struct AdmittedTurnIdentity: Equatable {
             // (review 4fc59e2c).
             returnedEarly = false
         }
+        // ONE SNAPSHOT PER ADMITTED TURN/SOCKET: read once here, carried by value through the
+        // turn — the same value serializes onto the authenticate envelope and gates the
+        // execution boundary below. No per-turn recomputation path exists.
+        let negotiatedAppSupport = appOperationSupportProvider()
         let turn = CloudTurnEnvelope.make(
-            capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
+            capabilities: CloudClientCapabilities.advertised(
+                rendersStructuredResults: rendersStructuredResults,
+                appOperationSupport: negotiatedAppSupport),
             routeHint: routeHintProvider(),
             recentConversation: recentConversationProvider(),
-            conversation: conversation
+            conversation: conversation,
+            appOperationSupport: negotiatedAppSupport
         )
         // This turn's wire identity, used by the interruption state to bind an acknowledgement or a
         // refusal to the follow-up it resolves.
@@ -1445,7 +1463,8 @@ struct AdmittedTurnIdentity: Equatable {
                         parameterViolation: parameterViolation,
                         admittedTurnBox: admittedTurnBox,
                         admittedTurnSocket: turnSocket,
-                        admittedTurnClient: client
+                        admittedTurnClient: client,
+                        negotiatedSupport: negotiatedAppSupport
                     )
                 // .token is no longer accumulated — cloud answers are played as
                 // audio, not text (spec: "cloud answers are played, not spoken").
@@ -1733,7 +1752,8 @@ struct AdmittedTurnIdentity: Equatable {
         parameterViolation: AppOperationRequest.ParameterViolation? = nil,
         admittedTurnBox: AdmittedTurnIdentityBox,
         admittedTurnSocket: AppOperationResultSocket?,
-        admittedTurnClient: CloudRouteClient
+        admittedTurnClient: CloudRouteClient,
+        negotiatedSupport: CloudAppOperationSupport?
     ) async {
         guard tool == "playback" else { return }
         // COMPLETE ONCE, HERE, and store it in the turn-local box. Deferring to this point is what
@@ -1747,7 +1767,8 @@ struct AdmittedTurnIdentity: Equatable {
             actionBytes: actionBytes, parameterViolation: parameterViolation,
             admittedTurn: admittedTurn,
             admittedTurnSocket: admittedTurnSocket,
-            admittedTurnClient: admittedTurnClient
+            admittedTurnClient: admittedTurnClient,
+            negotiatedSupport: negotiatedSupport
         )
     }
 
@@ -1766,7 +1787,8 @@ struct AdmittedTurnIdentity: Equatable {
         parameterViolation: AppOperationRequest.ParameterViolation? = nil,
         admittedTurn: AdmittedTurnIdentity,
         admittedTurnSocket: AppOperationResultSocket?,
-        admittedTurnClient: CloudRouteClient
+        admittedTurnClient: CloudRouteClient,
+        negotiatedSupport: CloudAppOperationSupport?
     ) async {
         // THE ORIGINAL TURN'S ROUTE, resolved once and used by every result path below —
         // success, refusal, replay and unknown. Nil when the turn has no socket, which refuses to
@@ -1811,7 +1833,8 @@ struct AdmittedTurnIdentity: Equatable {
             operationId: operationId, capabilityVersion: capabilityVersion,
             actionBytes: actionBytes, parameterViolation: parameterViolation,
             admittedTurn: admittedTurn, admittedTurnSocket: admittedTurnSocket,
-            admittedTurnClient: admittedTurnClient, admittedTurnRoute: admittedTurnRoute)
+            admittedTurnClient: admittedTurnClient, admittedTurnRoute: admittedTurnRoute,
+            negotiatedSupport: negotiatedSupport)
     }
 
     /// Continues an IDENTIFIED operation through the fail-closed gates to its effect.
@@ -1826,7 +1849,8 @@ struct AdmittedTurnIdentity: Equatable {
         admittedTurn: AdmittedTurnIdentity,
         admittedTurnSocket: AppOperationResultSocket?,
         admittedTurnClient: CloudRouteClient,
-        admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)?
+        admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)?,
+        negotiatedSupport: CloudAppOperationSupport?
     ) async {
         // Reached only from the declared-identity branch, which admits a frame carrying at least
         // one identity field. A missing `operation_id` here is an incomplete pair and refuses
@@ -1953,6 +1977,14 @@ struct AdmittedTurnIdentity: Equatable {
                 targetMatch = .absent
             }
             var refusalReason: String? = {
+                // NEGOTIATED-SUPPORT RECHECK (trainer-reduced-local-scope @ 818c8f75): the
+                // manifest THIS TURN advertised is the negotiated truth. An operation outside
+                // it — including ANY operation under an empty declaration — is refused before
+                // its effect and the refusal settles durably. Identityless legacy playback
+                // never reaches this gate, so an absent manifest changes nothing for it.
+                if negotiatedSupport?.supports(tool: "playback", action: action) != true {
+                    return OperationReason.unsupportedOperation
+                }
                 if !knownActions.contains(action) { return OperationReason.unsupportedOperation }
                 if let parameterViolation { return Self.wireReason(for: parameterViolation) }
                 return nil

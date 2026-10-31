@@ -918,7 +918,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         StubTokenProvider(token: "test-credential", accountId: "test-owner")
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, currentEpisodeId: @escaping () -> String? = { CloudRouteSinkTests.testEpisodeId }) -> CloudRouteSink {
+    /// Explicit fixture manifest for a test's OWN action(s). Tests exercising identified v1
+    /// operations declare exactly what they test — an absent manifest refuses, per the
+    /// declaration contract, and the shared helper never advertises by default.
+    private func fixtureSupport(_ operations: String...) -> CloudAppOperationSupport? {
+        CloudAppOperationSupport(operations: operations)
+    }
+
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, currentEpisodeId: @escaping () -> String? = { CloudRouteSinkTests.testEpisodeId }, appOperationSupport: CloudAppOperationSupport? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
@@ -990,7 +997,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             // effect), so the default fixture supplies a working in-memory one. A case that wants
             // to observe durable state passes its own.
             operationJournal: operationJournal ?? OperationJournal(store: InMemoryOperationRecordStore()),
-            conversationManager: conversationManager ?? testConversationManager()
+            conversationManager: conversationManager ?? testConversationManager(),
+            appOperationSupportProvider: { appOperationSupport }
         )
     }
 
@@ -1010,7 +1018,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer)
+        let sink = makeSinkWithConsumer(consumer, appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-17")
 
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
@@ -1039,7 +1047,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         playback.setPositionMs(0)
-        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-18")
 
         // OBSERVATION SURFACE = THE ORIGINAL TURN'S SENT RESULT FRAME. `reportResult` sends through
@@ -1075,7 +1083,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // MATCHING LIVE OBSERVER: the frame states its target, so the sink must be able to confirm
         // it, or the refusal would be `stale_precondition` (a different fact) instead of the
         // mapping-unavailable reason this control exists to assert.
-        let sink = makeSink(currentEpisodeId: { Self.testEpisodeId })
+        let sink = makeSink(currentEpisodeId: { Self.testEpisodeId },
+                            appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-19")
 
         XCTAssertFalse(
@@ -1120,7 +1129,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         playback.setPositionMs(0)
-        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-20")
 
         // OBSERVATION SURFACE = THE ORIGINAL TURN'S SENT RESULT FRAME, and EXACTLY ONE of them:
@@ -1168,7 +1177,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let deliveredFixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
         playback.setPositionMs(0)
         let journal = OperationJournal(store: InMemoryOperationRecordStore())
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
 
         // PREMISE FIRST: the action line the sink RECEIVED carries NEITHER identity key. Checking
@@ -1238,7 +1247,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.pause"))
         // The ACTION boundary is the pre-effect gate: the answer-hold pause (legacy, contract-
         // preserved) has already run by then, so the engine is re-established to PLAYING and the
         // recorded calls are cleared there — what this control counts is the identified pause
@@ -1273,7 +1282,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.pause"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-idempotent")
         let frame = try await awaitResultFrame(operationId: "5f0d9a34-2b61-4e8d-a5c7-9e1f3b8d0a52")
         XCTAssertEqual(frame["outcome"] as? String, "succeeded",
@@ -1303,7 +1312,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("pause-not-observed-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.pause"))
         // Action boundary (pre-effect gate): the engine is PLAYING and the failed-pause knob is
         // armed HERE, after the legacy hold pause has run, and calls are cleared — the counted
         // pause is the identified user pause, whose engine genuinely fails to stop.
@@ -1342,7 +1351,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.pause"))
         // Action boundary (pre-effect gate): the engine's intended underlying reading is
         // established FALSE (a paused engine exists), and only THEN the observation is made
         // UNAVAILABLE — unavailable is not the same fact as observed-paused, and this order is
@@ -1380,7 +1389,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("cross-turn-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.pause"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-cross-1")
         let firstFrame = try await awaitResultFrame(operationId: "d91271a2-15d3-49ab-aacc-ccbc9e01cfca")
         XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
@@ -1446,6 +1455,392 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// is answered from the durable journal on the second delivery — the recorded outcome rides
     /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
+    // MARK: - Declaration controls (app_operations_v1 negotiation, trainer-reduced-local-scope @ 818c8f75)
+
+    /// THE ADVERTISED AUTHENTICATE FRAME: a turn whose declaration carries `playback.pause`
+    /// serializes the token AND the exact support object on the REAL authenticate frame.
+    func testAdvertisedTurnCarriesTokenAndSupportOnTheAuthenticateFrame() async throws {
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                        appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-decl-frame")
+        let authFrameValue = await MainActor.run { capturedTask?.sentAuthFrame }
+        let frame = try XCTUnwrap(authFrameValue)
+        XCTAssertEqual(frame["capabilities"] as? [String], ["app_operations_v1"],
+                       "no renderer: the advertised token rides alone with the support manifest")
+        let support = try XCTUnwrap(frame["app_operation_support"] as? [String: Any])
+        XCTAssertEqual(support["schema_version"] as? String, "app-ops/1")
+        XCTAssertEqual(support["operations"] as? [String], ["playback.pause"])
+    }
+
+    /// THE NON-ADVERTISING SHAPE IS TODAY'S SHAPE: neither app-ops key appears; nothing is
+    /// silently flipped by the machinery existing.
+    func testNonAdvertisingTurnOmitsBothAppOperationKeys() async throws {
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-decl-absent")
+        let authFrameValue = await MainActor.run { capturedTask?.sentAuthFrame }
+        let frame = try XCTUnwrap(authFrameValue)
+        XCTAssertNil(frame["capabilities"], "empty declaration: capabilities stay omitted")
+        XCTAssertNil(frame["app_operation_support"], "no manifest, no support key")
+    }
+
+    /// `search_results_v1` IS INDEPENDENT: present exactly as before with the renderer, and
+    /// unaffected by app-ops presence or absence.
+    func testSearchResultsTokenIsIndependentOfAppOperationSupport() {
+        let support = fixtureSupport("playback.pause")
+        XCTAssertEqual(CloudClientCapabilities.advertised(rendersStructuredResults: true),
+                       ["search_results_v1"], "absent support: legacy shape byte-preserved")
+        XCTAssertEqual(CloudClientCapabilities.advertised(rendersStructuredResults: true, appOperationSupport: support),
+                       ["search_results_v1", "app_operations_v1"])
+        XCTAssertEqual(CloudClientCapabilities.advertised(rendersStructuredResults: false, appOperationSupport: support),
+                       ["app_operations_v1"])
+    }
+
+    /// MALFORMED INPUT GRANTS NOTHING: every malformed shape fails closed to nil (no support,
+    /// no token) — never a trap, never a repair. Duplicate keys are malformed by contract.
+    func testMalformedAndDuplicateManifestsFailClosedToNoSupport() {
+        XCTAssertNil(CloudAppOperationSupport(operations: []), "empty grants nothing")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["playback.pause", "playback.pause"]),
+                     "duplicate keys are malformed")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["playback..pause"]), "empty segment")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["play back.pause"]), "whitespace inside key")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["playback.pause "]), "trailing whitespace")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["a.b.c"]), "arbitrary dotted string is not tool.action")
+        XCTAssertNil(CloudAppOperationSupport(operations: [".pause"]), "empty tool")
+        XCTAssertNil(CloudAppOperationSupport(operations: ["playback."]), "empty action")
+        XCTAssertNotNil(CloudAppOperationSupport(operations: ["playback.pause"]), "well-formed exact shape")
+    }
+
+    /// PAIRING FAILS CLOSED AT SERIALIZATION: a constructed envelope carrying support WITHOUT
+    /// the token serializes neither key — a manifest the frame does not declare must never
+    /// leak onto the wire.
+    func testSupportWithoutTheTokenIsDroppedAtSerialization() {
+        let support = fixtureSupport("playback.pause")
+        let turn = CloudTurnEnvelope.make(
+            capabilities: [], routeHint: nil, recentConversation: [],
+            conversation: CloudPreparedConversation(requestId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
+                                                    conversationId: "1c4b9a70-6d2e-4f38-a511-9b7c2d0e54a3",
+                                                    mode: "create"),
+            appOperationSupport: support)
+        let frame = CloudRouteRequestBuilder.envelope(request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn)
+        XCTAssertNil(frame["app_operation_support"],
+                     "support without the token is dropped — never serialized unpaired")
+    }
+
+    /// C5' TWO SEPARATE ONE-UTTERANCE SOCKETS: each turn gets its OWN connection and its own
+    /// snapshot built from the SAME declaration; the serialized support objects are
+    /// byte-identical and each frame carries the token.
+    func testSupportSnapshotIsIdenticalAcrossTwoSeparateOneUtteranceSockets() async throws {
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                        appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-sock-a")
+        let taskAValue = await MainActor.run { capturedTask }
+        let taskA = try XCTUnwrap(taskAValue)
+        let frameA = try XCTUnwrap(taskA.sentAuthFrame)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-sock-b")
+        let taskBValue = await MainActor.run { capturedTask }
+        let taskB = try XCTUnwrap(taskBValue)
+        XCTAssertFalse(taskA === taskB, "each utterance rode its OWN one-utterance connection")
+        let frameB = try XCTUnwrap(taskB.sentAuthFrame)
+        XCTAssertEqual(frameA["capabilities"] as? [String], ["app_operations_v1"])
+        XCTAssertEqual(frameB["capabilities"] as? [String], ["app_operations_v1"])
+        let bytesA = try JSONSerialization.data(withJSONObject: try XCTUnwrap(frameA["app_operation_support"]),
+                                                options: [.sortedKeys])
+        let bytesB = try JSONSerialization.data(withJSONObject: try XCTUnwrap(frameB["app_operation_support"]),
+                                                options: [.sortedKeys])
+        XCTAssertEqual(bytesA, bytesB,
+                       "two separate sockets serialize byte-identical support from the same declaration")
+    }
+
+    /// ABSENCE REFUSES AT EXECUTION, NOT JUST ON THE WIRE: an identified pause on a turn with
+    /// NO manifest is refused `unsupported_operation`, settled durably, and runs no effect —
+    /// serialization absence alone would not prove this half.
+    func testAbsentManifestRefusesIdentifiedPauseAtExecution() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("absent-manifest-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"a40b7c15-6d29-4e83-b1f7-90c4e5a2d836","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let fixtureBytes = try XCTUnwrap(Self.deliveredPayload(for: "a40b7c15-6d29-4e83-b1f7-90c4e5a2d836", in: self.pendingFixture ?? ""))
+        let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-absent", manager: manager, bytes: fixtureBytes))
+        // NO appOperationSupport: the default empty declaration.
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                       operationJournal: journal,
+                                       appOperationSupport: fixtureSupport("playback.seek_relative"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-absent")
+        let taskValue = await MainActor.run { capturedTask }
+        let task = try XCTUnwrap(taskValue)
+        let frame = try await awaitResultFrame(operationId: "a40b7c15-6d29-4e83-b1f7-90c4e5a2d836", on: task)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation,
+                       "an absent manifest refuses identified v1 operations at the execution boundary")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 0,
+                       "the refused identified pause never reaches an effect (engine not playing: no hold exists either)")
+        if case .alreadyRun = journal.claim("a40b7c15-6d29-4e83-b1f7-90c4e5a2d836", identity: identity) {} else {
+            XCTFail("the absence refusal must be settled durably")
+        }
+    }
+
+    /// THE DECLARED ACTION SUCCEEDS ON THE SAME DECLARATION: a pause-only advertised turn
+    /// executes `playback.pause` to a settled observed state — advertising gates, it does not
+    /// disable.
+    func testDeclaredPauseSucceedsOnAPauseOnlyAdvertisedTurn() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let manager = testConversationManager()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"e7c2a940-1b35-4d68-9f2a-3c8b7d5e0f14","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal,
+                                        appOperationSupport: fixtureSupport("playback.pause"))
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-decl-pause")
+        let taskValue = await MainActor.run { capturedTask }
+        let task = try XCTUnwrap(taskValue)
+        let frame = try await awaitResultFrame(operationId: "e7c2a940-1b35-4d68-9f2a-3c8b7d5e0f14", on: task)
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded",
+                       "the DECLARED action passes the negotiated gate and executes")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any])
+        XCTAssertEqual(state["playing"] as? Bool, false)
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+    }
+
+    /// C6' THE UNDECLARED ACTION ON A REAL ADVERTISED TURN: a pause-only manifest refuses
+    /// `seek_to` with `unsupported_operation`, settles the refusal DURABLY (a redelivery
+    /// replays it rather than re-deciding), and runs no effect — while a `playback.pause` on
+    /// the same declaration passes the gate.
+    func testUndeclaredSeekOnAPauseOnlyAdvertisedTurnIsRefusedDurablyAndReplays() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("undecl-seek-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // RETAIN THE EXACT ORIGINAL FIXTURE: the first route consumes `pendingFixture`, so the
+        // replay reinstalls THESE bytes — not a rebuilt stand-in.
+        let seekFixture = try XCTUnwrap(self.pendingFixture)
+        let seekBytes = try XCTUnwrap(Self.deliveredPayload(for: "c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90", in: seekFixture))
+        let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-undecl", manager: manager, bytes: seekBytes))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal,
+                                        appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-undecl")
+        let firstTaskValue = await MainActor.run { capturedTask }
+        let firstTask = try XCTUnwrap(firstTaskValue)
+        let frame = try await awaitResultFrame(operationId: "c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90", on: firstTask)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation,
+                       "seek_to is implemented in contracts but OUTSIDE the negotiated manifest")
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0,
+                       "the undeclared action never reaches an effect")
+        if case .alreadyRun = journal.claim("c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90", identity: identity) {} else {
+            XCTFail("the refusal must be settled durably")
+        }
+
+        // REDELIVERY of the same bytes on a FRESH journal over the SAME durable file replays
+        // the recorded refusal — no re-decision, no effect.
+        let reloaded = OperationJournal(store: FileOperationRecordStore(url: url))
+        // REINSTALL the original action fixture for the replay turn and capture from its own task.
+        self.pendingFixture = seekFixture
+        let rePresented = try XCTUnwrap(Self.mintedIdentity(for: "u-undecl", manager: manager, bytes: seekBytes))
+        XCTAssertEqual(rePresented.actionDigest, identity.actionDigest)
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                         operationJournal: reloaded,
+                                         appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-undecl")
+        let replayTaskValue = await MainActor.run { capturedTask }
+        let replayTask = try XCTUnwrap(replayTaskValue)
+        let replayFrame = try await awaitResultFrame(operationId: "c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90", on: replayTask)
+        XCTAssertEqual(replayFrame["outcome"] as? String, "refused")
+        XCTAssertEqual(replayFrame["reason"] as? String, OperationReason.unsupportedOperation)
+        XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
+    }
+
+    /// PAUSE REPLAY EVIDENCE (declaration candidate C1): a settled `playback.pause` redelivered
+    /// within its turn replays the SAME SETTLED STATE through the journal — never re-executing,
+    /// and never answering from LIVE playback state. The replay turn starts NOT playing so no
+    /// answer-hold pause exists; live position drifts after settlement and the ENTIRE settled
+    /// state — including the originally settled position — must survive the replay. Each frame is
+    /// captured from its own turn's transport task.
+    func testSettledPauseRedeliveryReplaysTheRecordedStateWithoutAnotherPause() async throws {
+        playback.setPlaying(true)
+        playback.setPositionMs(77_000)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pause-replay-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let rehearsalManager = testConversationManager()
+        let deliveredAction = try XCTUnwrap(
+            Self.deliveredPayload(for: "e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80", in: self.pendingFixture ?? ""))
+        let originalIdentity = try XCTUnwrap(
+            Self.mintedIdentity(for: "u-pause-replay", manager: rehearsalManager, bytes: deliveredAction))
+
+        // Turn 1: the pause executes and settles with the OBSERVED post-action state.
+        let sink1 = makeSinkWithConsumer(RecordingResultConsumer(),
+                                         conversationManager: rehearsalManager,
+                                         operationJournal: journal,
+                                         appOperationSupport: fixtureSupport("playback.pause"))
+        await MainActor.run {
+            sink1.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-replay")
+        let task1Value = await MainActor.run { capturedTask }
+        let task1 = try XCTUnwrap(task1Value, "turn 1's transport was captured")
+        let firstFrame = try await awaitResultFrame(operationId: "e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80", on: task1)
+        XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
+        let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any])
+        XCTAssertEqual(firstState["playing"] as? Bool, false, "premise: the pause settled observed-not-playing")
+        XCTAssertEqual(firstState["position_seconds"] as? Int, 77, "premise: settled at position 77")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+        let preReplayRecord = journal.result(for: "e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80")
+
+        // LIVE STATE MOVES AFTER SETTLEMENT: position drifts, and the engine returns to playing.
+        // If the replay read live playback instead of the record, this drift would leak into the
+        // answered state.
+        playback.setPlaying(true)
+        playback.setPositionMs(4321_000)
+
+        // Turn 2 (REPLAY): the engine starts NOT PLAYING — an already-paused engine suppresses
+        // the answer-hold pause entirely, so any pause call in this turn would be a re-execution.
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // A FRESH journal INSTANCE over the SAME durable file: the replay answers from the RECORD.
+        let reloadedJournal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let rePresentedIdentity = try XCTUnwrap(
+            Self.mintedIdentity(for: "u-pause-replay", manager: rehearsalManager, bytes: deliveredAction))
+        XCTAssertEqual(rePresentedIdentity.conversation, originalIdentity.conversation)
+        XCTAssertEqual(rePresentedIdentity.turn, originalIdentity.turn)
+        XCTAssertEqual(rePresentedIdentity.actionDigest, originalIdentity.actionDigest,
+                       "replay compares digests, so the bytes must be the delivered pause verbatim")
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(),
+                                         conversationManager: rehearsalManager,
+                                         operationJournal: reloadedJournal,
+                                         appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-replay")
+        let task2Value = await MainActor.run { capturedTask }
+        let task2 = try XCTUnwrap(task2Value, "turn 2's transport was captured")
+        XCTAssertFalse(task1 === task2, "the replay rode its own turn transport")
+        let secondFrame = try await awaitResultFrame(operationId: "e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80", on: task2)
+        XCTAssertEqual(secondFrame["outcome"] as? String, "succeeded", "the settled pause replays succeeded")
+        let secondState = try XCTUnwrap(secondFrame["state"] as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: secondState), NSDictionary(dictionary: firstState),
+                       "the ENTIRE settled state replays — position 77, not the drifted 4321; playing false, not live")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 0,
+                       "the replay turn must not pause at all — no hold exists and no re-execution may fire")
+
+        // THE DURABLE PROOF: a freshly reopened store over the same file must hold the SAME
+        // settled record it held before the replay — `journal.result` on a live instance can be
+        // a cached value and does not prove the file was unchanged.
+        let reopened = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(reopened.result(for: "e39f52a7-8c04-4b16-9d78-5a2b1c4e6f80"), preReplayRecord,
+                       "replay must not rewrite the durable record")
+    }
+
+    /// PAUSE CRASH-BOUNDARY EVIDENCE (declaration candidate C2): a previous process claimed a
+    /// `playback.pause` on a DURABLE FILE store and died before completing. Recovery runs through
+    /// a NEWLY constructed store and journal from the same path — the actual restart path — and
+    /// the reconstructed unknown replays through the bound transport WITHOUT re-executing: the
+    /// engine is not playing from the start, so ZERO pause calls exist to hide behind.
+    func testRestartReconstructedPauseReplaysUnknownWithoutEffect() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // The PRIOR process: claims on a durable file store and dies before completing.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pause-crash-\(UUID().uuidString).json")
+        let manager = testConversationManager()
+        let originalIdentity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-pause-crash", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14", in: self.pendingFixture ?? ""))
+        ))
+        let priorJournal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(priorJournal.claim("7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14", identity: originalIdentity), OperationClaim.claimed)
+
+        // THE RESTART: a NEW store AND journal built from the same path — not the same instances.
+        let restartedJournal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let reconstructed = restartedJournal.reconstructInterrupted("7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14")
+        XCTAssertEqual(reconstructed?.outcome, .unknown)
+
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-pause-crash", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14", in: self.pendingFixture ?? ""))
+        ))
+        XCTAssertEqual(identity.actionDigest, originalIdentity.actionDigest,
+                       "recovery re-presents the EXACT delivered pause bytes")
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: restartedJournal, appOperationSupport: fixtureSupport("playback.pause"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-crash")
+
+        // The engine was NOT playing from the start, so no answer-hold pause exists anywhere in
+        // this turn: a re-executed pause would be the ONLY pause call on record.
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 0,
+                       "a reconstructed-unknown pause must never re-execute — zero pause calls")
+        let crashTaskValue = await MainActor.run { capturedTask }
+        let crashTask = try XCTUnwrap(crashTaskValue, "the restart turn's transport was captured")
+        let frame = try await awaitResultFrame(operationId: "7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14", on: crashTask,
+                                               label: "restart turn")
+        XCTAssertEqual(frame["operation_id"] as? String, "7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.interruptedInFlight)
+        XCTAssertNil(frame["state"], "unknown carries no state")
+        if case .alreadyRun = restartedJournal.claim("7d41c6b9-2e83-4a50-b927-8f6e3d0c5a14", identity: identity) {} else {
+            XCTFail("the reconstructed record must be settled")
+        }
+    }
+
     func testRedeliveredIdentifiedOperationReplaysTheRecordedOutcomeWithoutReExecution() async throws {
         // seek_to, not pause: the turn's own auto-duck also pauses, which would
         // contaminate a pause-call count. A seek has no such second writer.
@@ -1481,7 +1876,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // rehearsal and the real claim must be the same manager, not two independently opened ones.
         let sink1 = makeSinkWithConsumer(RecordingResultConsumer(),
                                          conversationManager: rehearsalManager,
-                                         operationJournal: journal)
+                                         operationJournal: journal,
+                                         appOperationSupport: fixtureSupport("playback.pause", "playback.seek_to"))
         _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
         let firstFrame = try await awaitResultFrame(operationId: "283bc9cc-1700-4596-af9e-94b930efccfd")
         XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
@@ -1498,7 +1894,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.pause", "playback.seek_to"))
         _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-23")
         _ = try await awaitResultFrame(operationId: "3e8af81c-fb7d-4f05-ae9b-9cf72b0b48b3")
         // T: unrelated live drift AFTER A settled.
@@ -1521,7 +1917,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // redelivering the same id is a conflict, and the separate later-turn control asserts that.
         let sink2 = makeSinkWithConsumer(RecordingResultConsumer(),
                                          conversationManager: rehearsalManager,
-                                         operationJournal: reloadedJournal)
+                                         operationJournal: reloadedJournal,
+                                         appOperationSupport: fixtureSupport("playback.pause", "playback.seek_to"))
         _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
         // THE REPLAY REALLY IS THE ORIGINAL IDENTITY, not merely a green frame: re-preparation of
         // the retained utterance must yield the very same request turn and conversation the claim
@@ -1574,7 +1971,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                        conversationManager: testConversationManager(),
                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
-                                       currentEpisodeId: { Self.testEpisodeId })
+                                       currentEpisodeId: { Self.testEpisodeId },
+                                       appOperationSupport: fixtureSupport("playback.seek_relative"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-match")
 
@@ -1602,7 +2000,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                        conversationManager: testConversationManager(),
                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
-                                       currentEpisodeId: { "ep-now-playing" })
+                                       currentEpisodeId: { "ep-now-playing" },
+                                       appOperationSupport: fixtureSupport("playback.seek_relative"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-nomatch")
 
@@ -1799,7 +2198,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             cloudPlaybackContextState: contextState,
             analytics: voiceAnalytics,
             operationJournal: journal,
-            conversationManager: testConversationManager()
+            conversationManager: testConversationManager(),
+            appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
 
         // The turn has been routed but the acquisition is still shut.
@@ -1867,7 +2267,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                         conversationManager: testConversationManager(),
-                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()))
+                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+                                        appOperationSupport: fixtureSupport("playback.seek_to"))
         await MainActor.run {
             sink.effectGate = { _ in
                 entered.release()                      // bounded "entered" signal
@@ -2025,7 +2426,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             cloudPlaybackContextState: contextState,
             analytics: voiceAnalytics,
             operationJournal: journal,
-            conversationManager: manager
+            conversationManager: manager,
+            appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
         self.pendingFixture = """
             event: done
@@ -2056,7 +2458,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
                 """)?.data(using: .utf8),
             precondition: ["episode_id": .string(Self.testEpisodeId)],
-            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client
+            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client,
+            negotiatedSupport: fixtureSupport("playback.seek_relative")
         )
 
         // The account on the live socket switches BEFORE the second action is handled.
@@ -2073,7 +2476,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
                 """)?.data(using: .utf8),
             precondition: ["episode_id": .string(Self.testEpisodeId)],
-            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client
+            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client,
+            negotiatedSupport: fixtureSupport("playback.seek_relative")
         )
 
         let records = store.load()
@@ -2122,7 +2526,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         self.pendingDeclaredPark = aDelivery
         self.pendingDeclaredParkAfterFrames = 0
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
-                                       operationJournal: journal)
+                                       operationJournal: journal,
+                                       appOperationSupport: fixtureSupport("playback.seek_relative"))
 
         let operationId = "e07c4b23-6a1d-4f89-b5c2-3d8e9a0f1b47"
         self.pendingFixture = ""
@@ -2244,7 +2649,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             operationId: operationId, capabilityVersion: "app-ops/1",
             actionBytes: Data(Self.lateActionPayload(operationId).utf8),
             precondition: ["episode_id": .string(Self.testEpisodeId)],
-            admittedTurnBox: box, admittedTurnSocket: resultSocketA, admittedTurnClient: clientA
+            admittedTurnBox: box, admittedTurnSocket: resultSocketA, admittedTurnClient: clientA,
+            negotiatedSupport: fixtureSupport("playback.seek_relative")
         )
 
         // A FRESH READ OF THE SAME BOX AFTER THE SESSION MOVED. Asserting on a local copy taken
@@ -2311,7 +2717,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             let manager = testConversationManager()
             let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                            conversationManager: manager,
-                                           operationJournal: journal)
+                                           operationJournal: journal,
+                                           appOperationSupport: fixtureSupport("playback.seek_relative"))
             // The turn is held inside the socket, so routing does NOT return yet.
             turn = Task {
                 await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
@@ -2393,7 +2800,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 precondition: ["episode_id": .string(Self.testEpisodeId)],
                 admittedTurnBox: turnBox,
                 admittedTurnSocket: liveSocket,
-                admittedTurnClient: liveClient
+                admittedTurnClient: liveClient,
+                negotiatedSupport: fixtureSupport("playback.seek_relative")
             )
 
             XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
@@ -2446,9 +2854,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             self.pendingDeclaredPark = turnGate
             self.pendingDeclaredParkAfterFrames = 0
             let manager = testConversationManager()
+            // ONE FROZEN VALUE at both boundaries: the routed sink's provider and the seam's
+            // negotiatedSupport are the same support object, as the ruling requires.
+            let declaredSupport = fixtureSupport("playback.seek_relative")
             let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                            conversationManager: manager,
-                                           operationJournal: journal)
+                                           operationJournal: journal,
+                                           appOperationSupport: declaredSupport)
             turn = Task {
                 await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                         origin: cloudTestOrigin, selection: nil, utteranceId: "u-matched")
@@ -2489,7 +2901,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 precondition: ["episode_id": .string(Self.testEpisodeId)],
                 admittedTurnBox: turnBox,
                 admittedTurnSocket: liveSocket,
-                admittedTurnClient: try XCTUnwrap(capturedClient)
+                admittedTurnClient: try XCTUnwrap(capturedClient),
+                negotiatedSupport: declaredSupport
             )
 
             // THE POSITIVE: one effect, and a durable settlement under the same owner.
@@ -2548,7 +2961,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             cloudPlaybackContextState: contextState,
             analytics: voiceAnalytics,
             operationJournal: journal,
-            conversationManager: testConversationManager()
+            conversationManager: testConversationManager(),
+            appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-noprincipal")
@@ -2604,7 +3018,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             cloudPlaybackContextState: contextState,
             analytics: voiceAnalytics,
             operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
-            conversationManager: testConversationManager()
+            conversationManager: testConversationManager(),
+            appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-nobserve")
@@ -2642,7 +3057,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             bytes: try XCTUnwrap(Self.deliveredPayload(for: operationId, in: self.pendingFixture ?? ""))
         ))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
-                                       operationJournal: journal)
+                                       operationJournal: journal,
+                                       appOperationSupport: fixtureSupport("playback.seek_relative"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-invalid")
 
@@ -2678,7 +3094,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                        conversationManager: testConversationManager(),
-                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()))
+                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+                                       appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-noep")
         let frame = try await awaitResultFrame(operationId: operationId)
@@ -2704,7 +3121,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                        conversationManager: testConversationManager(),
                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
-                                       currentEpisodeId: { "ep-now-playing" })
+                                       currentEpisodeId: { "ep-now-playing" },
+                                       appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-stale")
         let frame = try await awaitResultFrame(operationId: operationId)
@@ -2735,7 +3153,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             for: "u-25", manager: manager,
             bytes: try XCTUnwrap(Self.deliveredPayload(for: "02365fa8-ee9a-4000-a8bd-943c9da8859a", in: self.pendingFixture ?? ""))
         ))
-        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-25")
 
         // The turn's own auto-duck may pause/resume; the unknown action itself must effect nothing.
@@ -2781,8 +3199,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             RecordingResultConsumer(),
             conversationManager: manager,
             operationJournal: journal,
-            episodeAvailable: { false }
-        )
+            episodeAvailable: { false },
+        appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-26")
         let frame = try await awaitResultFrame(operationId: "3933547d-c3c2-4003-a81f-94a43f67b972")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
@@ -2808,7 +3226,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
+        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false }, appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-27")
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refusal for the reference-form seek")
@@ -2828,7 +3246,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false })
+        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false }, appOperationSupport: fixtureSupport("playback.resume"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-28")
         // The ACTION refused durably (the turn's own host-playback restore is separate
         // machinery and not observable here — the action-level outcome is what matters).
@@ -2851,7 +3269,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(consumer, playbackManager: PlaybackManager.shared)
+        let sink = makeSinkWithConsumer(consumer, playbackManager: PlaybackManager.shared, appOperationSupport: fixtureSupport("playback.seek_to"))
         // ESTABLISH the premise against the REAL production state: the shared queue must have
         // no current episode. The test host's shared container can legitimately carry one from
         // launch, so the premise is established through the production queue API — never assumed.
@@ -2950,7 +3368,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             for: "u-31", manager: manager,
             bytes: try XCTUnwrap(Self.deliveredPayload(for: "9433422b-78ee-4676-a1fe-71f898fcd638", in: self.pendingFixture ?? ""))
         ))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.play_quote"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-31")
         let frame = try await awaitResultFrame(operationId: "9433422b-78ee-4676-a1fe-71f898fcd638")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
@@ -2982,7 +3400,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             for: "u-32", manager: manager,
             bytes: try XCTUnwrap(Self.deliveredPayload(for: "df99ef63-7bbe-4c29-a608-576f6d645833", in: self.pendingFixture ?? ""))
         ))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.stop_quote"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-32")
         let frame = try await awaitResultFrame(operationId: "df99ef63-7bbe-4c29-a608-576f6d645833")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
@@ -3316,7 +3734,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil,
         currentEpisodeId: (() -> String?)? = nil,
-        injectIdentity: Bool = true
+        injectIdentity: Bool = true,
+        appOperationSupport: CloudAppOperationSupport? = nil
     ) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
@@ -3341,7 +3760,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             rendersStructuredResults: rendersStructuredResults,
             routeHintProvider: { routeHint },
             operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
-            conversationManager: testConversationManager()
+            conversationManager: testConversationManager(),
+            appOperationSupportProvider: { appOperationSupport }
         )
     }
 
@@ -3494,7 +3914,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             bytes: try XCTUnwrap(Self.deliveredPayload(for: "1a59989a-5e54-44cf-a59c-3c06b9f34658", in: self.pendingFixture ?? ""))
         ))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
-                                        operationJournal: journal)
+                                        operationJournal: journal,
+                                        appOperationSupport: fixtureSupport("playback.seek_relative"))
         // CANCELLATION-INSENSITIVE effect hold: no cancellation handler of any kind. ONLY
         // `release.release()` frees it, so owner cancellation cannot open it.
         let release = HoldLatch()
@@ -3615,7 +4036,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             for: "u-45", manager: manager,
             bytes: try XCTUnwrap(Self.deliveredPayload(for: "e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e", in: self.pendingFixture ?? ""))
         ))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.pause"))
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-45")
         }
@@ -3664,7 +4085,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             "the exact payload this control delivers is retained before routing")
         let identity = try XCTUnwrap(
             Self.mintedIdentity(for: "u-46", manager: manager, bytes: deliveredBytes))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_relative"))
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-46")
         }
@@ -3766,7 +4187,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 
             """
         let journal = OperationJournal(store: AlwaysFailingOperationRecordStore())
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_relative"))
         await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-47")
         let effectCount = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count
         XCTAssertEqual(effectCount, 0, "a failed claim write must prevent the effect entirely")
@@ -3850,7 +4271,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         XCTAssertEqual(identity.turn, originalIdentity.turn)
         XCTAssertEqual(identity.actionDigest, originalIdentity.actionDigest,
                        "replay compares digests, so the bytes must be the delivered action verbatim")
-        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal)
+        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal, appOperationSupport: fixtureSupport("playback.seek_to"))
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-48")
 
         // The effect must NOT have run: no seek reached playback.
@@ -4181,7 +4602,8 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 
             """
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
-                                        operationJournal: journal)
+                                        operationJournal: journal,
+                                        appOperationSupport: fixtureSupport("playback.seek_relative"))
         let firstPayload = try XCTUnwrap(
             Self.deliveredPayload(for: "1bcc78d9-a144-4f8b-a04f-146c49aa9f81", in: self.pendingFixture ?? ""))
         let firstIdentityOrNil = Self.mintedIdentity(
