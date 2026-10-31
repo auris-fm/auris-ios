@@ -1457,9 +1457,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
     // MARK: - Resume result-path controls (voice-intents.md @ df5def09; task67)
 
-    // Result-path slice only: the production manifest stays pause-only. These controls run on
-    // EXPLICIT fixture support (`playback.resume`); the manifest flip is a separate reviewed
-    // enablement commit. Result table: observed true (incl. already-playing) succeeds with the
+    // ENABLEMENT SLICE: these controls are bound to THE PRODUCTION CONSTANT
+    // (`VoiceControlAssembly.declaredAppOperations`, now pause + resume) so the result table is
+    // exercised on the branch declaration. ADVERTISEMENT IS NOT END-TO-END AVAILABILITY: server
+    // eligibility is a separate Cloud slice, so nothing here claims resume is available
+    // end-to-end. Result table: observed true (incl. already-playing) succeeds with the
     // captured state; false fails `resume_not_observed`; unavailable is
     // `unknown`/`playback_state_unavailable`; non-success carries no state. Replay replays the
     // recorded result with NO extra effect and NO new observation.
@@ -1480,7 +1482,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         // THE MATCHING TARGET OBSERVER... none needed (engine-level action). The ACTION boundary
         // is the pre-effect gate: re-establish PAUSED there (the answer hold has already run by
         // then) and clear the hold's calls, so what this control counts is the identified resume
@@ -1514,7 +1516,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         // Action boundary: re-establish PLAYING there so the answer hold cannot turn this into
         // another transition test — the engine is already playing when resume runs.
         await MainActor.run {
@@ -1545,7 +1547,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         // The DOUBLE-ONLY failure knob: the resume sink completes but the engine stays paused,
         // so the fresh post-sink observation reads `false` — the resume_not_observed arm.
         await MainActor.run { self.playback.setSimulatesFailedResume(true) }
@@ -1571,7 +1573,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         await MainActor.run { self.playback.setSimulateUnavailableObservation(true) }
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-unavail")
         let frame = try await awaitResultFrame(operationId: "b47f6a02-9d15-4e83-a7c9-1f3b8e5d2a40")
@@ -1611,7 +1613,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-mismatch", manager: manager, bytes: resumeBytes))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
                                         operationJournal: journal,
-                                        appOperationSupport: fixtureSupport("playback.resume"))
+                                        appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-mismatch")
         let taskValue = await MainActor.run { capturedTask }
         let task = try XCTUnwrap(taskValue)
@@ -1646,7 +1648,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let consumer = RecordingResultConsumer()
         let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false },
-                                        appOperationSupport: fixtureSupport("playback.resume"))
+                                        appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-noep")
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
         XCTAssertEqual(refusals.count, 1, "exactly one refusal for the unavailable resume")
@@ -1681,7 +1683,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let originalIdentity = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-replay", manager: manager, bytes: resumeBytes))
         let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
                                          operationJournal: journal,
-                                         appOperationSupport: fixtureSupport("playback.resume"))
+                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         await MainActor.run {
             sink1.effectGate = { _ in
                 self.playback.setPlaying(false)
@@ -1708,7 +1710,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let rePresented = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-replay", manager: manager, bytes: resumeBytes))
         let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
                                          operationJournal: reloaded,
-                                         appOperationSupport: fixtureSupport("playback.resume"))
+                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-replay")
         let replayFrame = try await awaitResultFrame(operationId: "f61b9e24-3c07-4d58-a9e2-84b6d0f7c315")
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded",
@@ -1756,7 +1758,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "the delivered legacy frame must carry no operation_id: \(deliveredFixture)")
         XCTAssertFalse(deliveredFixture.contains("capability_version"),
                        "the delivered legacy frame must carry no capability_version")
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-legacy-resume")
         XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 1,
                        "the identityless resume executes the legacy effect")
@@ -1993,7 +1995,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
-    // MARK: - Production-declaration enablement controls (pause-only, task67)
+    // MARK: - Production-declaration enablement controls (task67)
 
     // EVIDENCE BOUNDARY (rulings @ ff5c6621, 807e16b0): these controls bind THE PRODUCTION
     // CONSTANT (`VoiceControlAssembly.declaredAppOperations`) so the tested manifest is the
@@ -2007,10 +2009,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     // `testLegacyIdentitylessFrameExecutesWithoutIdentityOrResultFrame`. NOTE: the
     // nonadvertising-frame test is a FRAME-SHAPE control, not an execution control.
 
-    /// THE PRODUCTION CONSTANT ADVERTISES EXACTLY PAUSE on the real authenticate frame:
-    /// `app_operations_v1` plus a support manifest whose operations list is pause and nothing
-    /// else. Binding is by name, so this control and the assembly cannot drift apart.
-    func testProductionDeclarationAdvertisesExactlyPauseOnTheAuthenticateFrame() async throws {
+    /// THE PRODUCTION CONSTANT ADVERTISES EXACTLY PAUSE AND RESUME on the real authenticate
+    /// frame: `app_operations_v1` plus a branch-declaration support manifest whose operations
+    /// list is exactly those two. Binding is by name, so this control and the assembly cannot
+    /// drift apart.
+    func testProductionDeclarationAdvertisesExactlyPauseAndResumeOnTheAuthenticateFrame() async throws {
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                         appOperationSupport: VoiceControlAssembly.declaredAppOperations)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-prod-frame")
@@ -2019,7 +2022,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(frame["capabilities"] as? [String], ["app_operations_v1"])
         let support = try XCTUnwrap(frame["app_operation_support"] as? [String: Any])
         XCTAssertEqual(support["schema_version"] as? String, "app-ops/1")
-        XCTAssertEqual(support["operations"] as? [String], ["playback.pause"])
+        XCTAssertEqual(support["operations"] as? [String], ["playback.pause", "playback.resume"],
+                       "the candidate is exactly pause and resume — no third operation")
     }
 
     /// IDENTIFIED PAUSE EXECUTES UNDER THE PRODUCTION CONSTANT and settles the SAME single
@@ -2085,7 +2089,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let frame = try await awaitResultFrame(operationId: "9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", on: firstTask)
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation,
-                       "seek_relative is contract-implemented but OUTSIDE the shipped pause-only manifest")
+                       "seek_relative is contract-implemented but OUTSIDE the shipped pause+resume manifest")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
                        "the undeclared action never reaches an effect")
         if case .alreadyRun = journal.claim("9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46", identity: identity) {} else {
@@ -2118,13 +2122,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// the three production-declaration controls above plus the constant-bound result/replay
     /// controls (already-paused, still-playing, unavailable observation, settled-pause replay).
     @MainActor
-    func testTheProductionDeclarationConstantSupportsPauseAndNothingElse() throws {
+    func testTheProductionDeclarationConstantSupportsPauseAndResumeOnly() throws {
         let declared = try XCTUnwrap(VoiceControlAssembly.declaredAppOperations,
                                      "the shipped declaration literal must be well-formed, not nil")
         XCTAssertTrue(declared.supports(tool: "playback", action: "pause"))
+        XCTAssertTrue(declared.supports(tool: "playback", action: "resume"))
         XCTAssertFalse(declared.supports(tool: "playback", action: "seek_relative"))
         XCTAssertFalse(declared.supports(tool: "playback", action: "seek_to"))
-        XCTAssertFalse(declared.supports(tool: "playback", action: "resume"))
         XCTAssertFalse(declared.supports(tool: "playback", action: "play_quote"))
         XCTAssertFalse(declared.supports(tool: "playback", action: "stop_quote"))
     }

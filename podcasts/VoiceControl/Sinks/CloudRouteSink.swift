@@ -597,7 +597,7 @@ struct AdmittedTurnIdentity: Equatable {
         // authenticate envelope advertises. Read ONCE per turn — one immutable snapshot per
         // admitted turn/socket — and the SAME value both serializes onto the frame and gates
         // execution. Default stays nil (empty declaration); the production assembly wires
-        // `VoiceControlAssembly.declaredAppOperations` (pause only) as its provider.
+        // `VoiceControlAssembly.declaredAppOperations` (pause + resume) as its provider.
         appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil }
     ) {
         self.onGracePlaybackHoldBegin = onGracePlaybackHoldBegin

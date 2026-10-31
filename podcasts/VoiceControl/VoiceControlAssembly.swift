@@ -5,19 +5,20 @@ import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
-    /// THE PRODUCTION APP-OPERATION DECLARATION (enablement slice, task67): pause only.
+    /// THE PRODUCTION APP-OPERATION DECLARATION (enablement slices, task67): pause + resume.
     /// ONE value with two consumers that must never disagree: the CloudRouteSink construction
     /// below wires it as the sink's `appOperationSupportProvider`, and the sink reads the
     /// provider ONCE per admitted turn — the same captured value serializes the authenticate
     /// frame (`app_operations_v1` + `app_operation_support`) and gates identified execution at
     /// the `.claimed` boundary. Every other operation stays ABSENT: an identified
-    /// `seek_relative`/`seek_to`/`resume`/quote request refuses `unsupported_operation`, durably,
-    /// until its own enablement slice. The failable init stays: a malformed literal here must be
-    /// nil (empty declaration), never a crash or a repaired shape. Tests bind THIS value by name
-    /// (`VoiceControlAssembly.declaredAppOperations`) so behavior controls and the assembly
-    /// cannot drift apart; the assembly wiring itself is checked by a dedicated source-audit
-    /// control, which is stated as inspection, not runtime execution.
-    static let declaredAppOperations = CloudAppOperationSupport(operations: ["playback.pause"])
+    /// `seek_relative`/`seek_to`/quote request refuses `unsupported_operation`, durably,
+    /// until its own enablement slice. ADVERTISEMENT IS NOT END-TO-END AVAILABILITY: server
+    /// eligibility for resume is a separate Cloud slice, so this manifest alone must never be
+    /// reported as resume being available end-to-end. The failable init stays: a malformed
+    /// literal here must be nil (empty declaration), never a crash or a repaired shape. Tests
+    /// bind THIS value by name (`VoiceControlAssembly.declaredAppOperations`) so behavior
+    /// controls and the assembly cannot drift apart.
+    static let declaredAppOperations = CloudAppOperationSupport(operations: ["playback.pause", "playback.resume"])
 
     /// Retains the route-scope subscription for the lifetime of the assembly. The
     /// service holds the engine, so the binding must live at least as long.
