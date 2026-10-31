@@ -142,6 +142,12 @@ enum OperationReason {
     /// refusal: the mutation was attempted, so the wire's table places it under `failed`.
     static let pauseNotObserved = "pause_not_observed"
 
+    /// A cloud `playback.resume` was attempted and completed, but a fresh post-sink observation
+    /// still found the engine paused (voice-intents.md @ df5def09, resume observation contract).
+    /// A FAILED resume, not a refusal: the mutation was attempted, so the wire's table places it
+    /// under `failed`. Mirror of `pause_not_observed`; carries no state.
+    static let resumeNotObserved = "resume_not_observed"
+
     /// A post-action playback observation could not be produced (voice-intents.md
     /// @ 818c8f75): the wire's `playback_state_unavailable`. Produced when the engine exposes
     /// no current reading — `PlaybackManager.observedPlaybackState()` returns `nil` for a

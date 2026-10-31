@@ -2142,6 +2142,33 @@ struct AdmittedTurnIdentity: Equatable {
                 return (nil, ["position_seconds": .int(playbackPositionMs() / 1000), "playing": .bool(false)])
             }
         }
+        if action == "resume" {
+            // IDENTIFIED resume (voice-intents.md @ df5def09): the existing target-precondition
+            // STAYS IN FORCE — resume's sink (PlaybackManager.play) early-returns on no current
+            // episode, so the availability precondition runs BEFORE the effect; its refusal is
+            // `stale_precondition`, never a dressed-up success. Note the order against the gate:
+            // a SUPPLIED episode_id that does not match the live target already refused at the
+            // `.claimed` gate (`invalid_request` never applies — resume declares no required
+            // precondition; `stale_precondition` there); this guard is the NO-stated-target case.
+            if let precondition = currentEpisodePrecondition { return (precondition, nil) }
+            _ = playbackSink.resume()
+            didAutoPause = false
+            // ONE fresh post-sink observation classifies AND populates: a v1 `succeeded` result
+            // requires observed `{"playing": true}` (an already-playing engine satisfies this
+            // idempotently); still-paused is a FAILED resume (`resume_not_observed`), not a
+            // refusal — the mutation was attempted; unavailable is `unknown`/
+            // `playback_state_unavailable`. Non-success carries no state. Success is never
+            // derived from the request, a silent `VoiceResponse`, a cached pre-action value or
+            // answer-hold bookkeeping — the same reading settles both the gate and the wire.
+            switch playbackSink.observedPlaying {
+            case nil:
+                return (.nonSuccess(.unknown, reason: OperationReason.playbackStateUnavailable), nil)
+            case .some(false):
+                return (.nonSuccess(.failed, reason: OperationReason.resumeNotObserved), nil)
+            case .some(true):
+                return (nil, ["position_seconds": .int(playbackPositionMs() / 1000), "playing": .bool(true)])
+            }
+        }
         let refusal = performMutation(action: action, params: params)
         return (refusal, refusal == nil ? currentPlaybackState() : nil)
     }

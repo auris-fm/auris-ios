@@ -237,11 +237,27 @@ enum AppOperationRequest {
             }
             statedIdentities[field] = stated
         }
+        // OPTIONAL SUPPLIED TARGET IDENTITIES. Actions that declare no required precondition
+        // (pause/resume address the engine) still cannot let a SUPPLIED episode_id escape the
+        // live check: a frame that states a target has stated one, whoever required it.
+        // Absence stays optional where the contract declares nothing; a PRESENT null/EMPTY/
+        // non-string is "no usable identity was stated" — the same `invalid_request` table as
+        // the required fields (identityValue keeps its existing opaque semantics: no trimming,
+        // no repair); a valid supplied ID goes through the SAME current-target match
+        // below (mismatch/absent live target → `stale_precondition`; `.notEvaluated` leaves the
+        // live decision to the sink).
+        var suppliedEpisode = statedIdentities["episode_id"]
+        if suppliedEpisode == nil, precondition["episode_id"] != nil {
+            guard let stated = precondition["episode_id"]?.identityValue, !stated.isEmpty else {
+                return .failure(.missingPrecondition("episode_id"))
+            }
+            suppliedEpisode = stated
+        }
         // CURRENT-TARGET MATCH — only when the caller can answer the question. `.notEvaluated`
         // means this caller does not own playback state (the parser), so the match is left to the
         // sink; treating it as "no current episode" would refuse every valid request at the
         // parser and prevent the sink from ever seeing a request it should run.
-        if let statedEpisode = statedIdentities["episode_id"] {
+        if let statedEpisode = suppliedEpisode {
             switch target {
             case .notEvaluated:
                 break

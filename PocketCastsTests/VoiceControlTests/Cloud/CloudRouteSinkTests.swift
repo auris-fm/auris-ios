@@ -1455,6 +1455,315 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// is answered from the durable journal on the second delivery — the recorded outcome rides
     /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
+    // MARK: - Resume result-path controls (voice-intents.md @ df5def09; task67)
+
+    // Result-path slice only: the production manifest stays pause-only. These controls run on
+    // EXPLICIT fixture support (`playback.resume`); the manifest flip is a separate reviewed
+    // enablement commit. Result table: observed true (incl. already-playing) succeeds with the
+    // captured state; false fails `resume_not_observed`; unavailable is
+    // `unknown`/`playback_state_unavailable`; non-success carries no state. Replay replays the
+    // recorded result with NO extra effect and NO new observation.
+
+    /// EXECUTE (transition evidence): the engine is PAUSED before the action and the RESUME
+    /// EFFECT ITSELF produces the false→true transition — the pre-action state is never
+    /// already-playing, so this is not the idempotence case (that control is separate below).
+    /// The identified resume runs once and succeeds from the ONE fresh post-sink observation —
+    /// the same reading classifies the outcome and populates the state.
+    func testIdentifiedResumeSucceedsWithTheCapturedPlayingTrueObservation() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"31e7c9a4-5b82-4d06-9f3a-7c1e8b2d4a59","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        // THE MATCHING TARGET OBSERVER... none needed (engine-level action). The ACTION boundary
+        // is the pre-effect gate: re-establish PAUSED there (the answer hold has already run by
+        // then) and clear the hold's calls, so what this control counts is the identified resume
+        // alone — and resume ITSELF produces the false→true transition the observation reads.
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(false)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-run")
+        let frame = try await awaitResultFrame(operationId: "31e7c9a4-5b82-4d06-9f3a-7c1e8b2d4a59")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any], "success carries the captured observation")
+        XCTAssertEqual(state["playing"] as? Bool, true,
+                       "the settled state IS the observation that gated success")
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(playback.observedPlayingReads, 1,
+                       "classification and settlement must come from ONE post-resume observation")
+    }
+
+    /// IDEMPOTENT: an already-playing engine satisfies resume with the observed true state.
+    func testIdentifiedResumeOnAnAlreadyPlayingEngineSucceedsWithTheObservedState() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"5a93d2c7-84e1-4b5f-8a26-9d0e3f7c1b68","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        // Action boundary: re-establish PLAYING there so the answer hold cannot turn this into
+        // another transition test — the engine is already playing when resume runs.
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-idem")
+        let frame = try await awaitResultFrame(operationId: "5a93d2c7-84e1-4b5f-8a26-9d0e3f7c1b68")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded",
+                       "an already-playing engine is an idempotent success, not a refusal")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any])
+        XCTAssertEqual(state["playing"] as? Bool, true)
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 1)
+    }
+
+    /// STILL PAUSED: the resume sink completed but the fresh observation still reads `false` —
+    /// a FAILED resume (`resume_not_observed`), not a refusal, and it carries NO state.
+    func testIdentifiedResumeStillPausedReportsFailedResumeNotObservedWithNoState() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"8c04e1b9-27f3-4a68-b95d-6e2a4c8f0d73","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        // The DOUBLE-ONLY failure knob: the resume sink completes but the engine stays paused,
+        // so the fresh post-sink observation reads `false` — the resume_not_observed arm.
+        await MainActor.run { self.playback.setSimulatesFailedResume(true) }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-notobs")
+        let frame = try await awaitResultFrame(operationId: "8c04e1b9-27f3-4a68-b95d-6e2a4c8f0d73")
+        XCTAssertEqual(frame["outcome"] as? String, "failed")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.resumeNotObserved)
+        XCTAssertNil(frame["state"], "a non-success outcome carries no state")
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 1,
+                       "the mutation WAS attempted: failed, not refused")
+        await MainActor.run { self.playback.setSimulatesFailedResume(false) }
+    }
+
+    /// UNAVAILABLE: no current observation before the deadline is `unknown` with
+    /// `playback_state_unavailable`, NO state — never a success built on a cached read.
+    func testIdentifiedResumeWithNoEngineObservationReportsUnknownWithNoState() async throws {
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"b47f6a02-9d15-4e83-a7c9-1f3b8e5d2a40","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        await MainActor.run { self.playback.setSimulateUnavailableObservation(true) }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-unavail")
+        let frame = try await awaitResultFrame(operationId: "b47f6a02-9d15-4e83-a7c9-1f3b8e5d2a40")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.playbackStateUnavailable)
+        XCTAssertNil(frame["state"])
+        // RESTORE the knob: the fixture sink is fresh per test, but an explicit restore keeps
+        // this control from ever leaking the unavailable simulation into a later assertion.
+        await MainActor.run { self.playback.setSimulateUnavailableObservation(false) }
+    }
+
+    /// NEGATIVE CASE 1 — SUPPLIED target that cannot be matched live: a stated episode_id other
+    /// than the current one refuses at the `.claimed` gate (`stale_precondition` via the
+    /// request's own validation), settles durably, and NEVER reaches the effect. Distinct guard
+    /// from the no-stated-target case below.
+    func testIdentifiedResumeWithMismatchedStatedTargetRefusesAtTheGateBeforeEffect() async throws {
+        // HOST PLAYBACK STARTS PAUSED (same premise as the no-current-episode control): a turn
+        // over playing audio takes an answer hold whose turn-end restore calls `resume` through
+        // separate machinery — the confound the gate caught. Paused, the zero-resume assertion
+        // below measures the OPERATION alone.
+        await MainActor.run { self.playback.setPlaying(false) }
+        playback.clearCalls()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resume-mismatch-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"d28a5f31-40c7-49be-8e64-b7a09c3d5e12","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{},"precondition":{"episode_id":"ep-OTHER"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let resumeFixture = try XCTUnwrap(self.pendingFixture)
+        let resumeBytes = try XCTUnwrap(Self.deliveredPayload(for: "d28a5f31-40c7-49be-8e64-b7a09c3d5e12", in: resumeFixture))
+        let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-mismatch", manager: manager, bytes: resumeBytes))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal,
+                                        appOperationSupport: fixtureSupport("playback.resume"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-mismatch")
+        let taskValue = await MainActor.run { capturedTask }
+        let task = try XCTUnwrap(taskValue)
+        let frame = try await awaitResultFrame(operationId: "d28a5f31-40c7-49be-8e64-b7a09c3d5e12", on: task)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition,
+                       "a supplied target that cannot be matched live is a stale precondition at the gate")
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 0,
+                       "the mismatched target never reaches the effect")
+        if case .alreadyRun = journal.claim("d28a5f31-40c7-49be-8e64-b7a09c3d5e12", identity: identity) {} else {
+            XCTFail("the gate refusal must be settled durably")
+        }
+    }
+
+    /// NEGATIVE CASE 2 — NO stated target and NO live episode: the retained sink-side
+    /// availability precondition refuses `stale_precondition` BEFORE the effect. The mirror of
+    /// the pause branch's engine-level contract: a silent no-op must never dress up as success.
+    func testIdentifiedResumeWithNoCurrentEpisodeRefusesBeforeEffect() async throws {
+        // HOST PLAYBACK STARTS PAUSED: a turn over playing audio takes an answer hold and its
+        // turn-end restore calls `resume` through separate machinery — the exact confound the
+        // gate caught. Paused, the turn takes no hold, so the zero-resume assertion below
+        // measures the OPERATION alone.
+        await MainActor.run { self.playback.setPlaying(false) }
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"ef013c58-7a29-4d4b-92f6-0c8e7b1a3d94","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let consumer = RecordingResultConsumer()
+        let sink = makeSinkWithConsumer(consumer, episodeAvailable: { false },
+                                        appOperationSupport: fixtureSupport("playback.resume"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-noep")
+        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
+        XCTAssertEqual(refusals.count, 1, "exactly one refusal for the unavailable resume")
+        XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 0,
+                       "the availability precondition runs BEFORE the effect")
+    }
+
+    /// DURABLE REPLAY: a settled identified resume redelivered on a FRESH journal over the SAME
+    /// durable file replays the recorded succeeded state with NO extra effect and NO new
+    /// observation — the recorded result rides the socket, never a re-decision.
+    func testSettledResumeRedeliveryReplaysTheRecordedStateWithoutAnotherResume() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"f61b9e24-3c07-4d58-a9e2-84b6d0f7c315","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resume-replay-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        // RETAIN THE EXACT ORIGINAL FIXTURE AND ACTION BYTES: the replay turn reinstalls THESE
+        // bytes — redelivery is proved by the identical presented payload, not by reusing the
+        // utterance ID alone.
+        let resumeFixture = try XCTUnwrap(self.pendingFixture)
+        let resumeBytes = try XCTUnwrap(Self.deliveredPayload(for: "f61b9e24-3c07-4d58-a9e2-84b6d0f7c315", in: resumeFixture))
+        let originalIdentity = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-replay", manager: manager, bytes: resumeBytes))
+        let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                         operationJournal: journal,
+                                         appOperationSupport: fixtureSupport("playback.resume"))
+        await MainActor.run {
+            sink1.effectGate = { _ in
+                self.playback.setPlaying(false)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-replay")
+        let firstFrame = try await awaitResultFrame(operationId: "f61b9e24-3c07-4d58-a9e2-84b6d0f7c315")
+        XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
+
+        // REDELIVERY: same durable file, fresh journal, resumed playback state flipped back so a
+        // NEW effect/observation would be visible if the replay re-executed.
+        await MainActor.run {
+            self.playback.setPlaying(false)
+            self.playback.clearCalls()
+        }
+        // `clearCalls()` clears CALLS only — `observedPlayingReads` is cumulative. Capture the
+        // baseline after the first settlement and assert the replay adds NOTHING to it.
+        let readsBeforeReplay = await MainActor.run { self.playback.observedPlayingReads }
+        let callsBeforeReplay = await MainActor.run { self.playback.calls.filter { if case .resume = $0 { return true }; return false }.count }
+        let reloaded = OperationJournal(store: FileOperationRecordStore(url: url))
+        // REINSTALL the original action fixture for the replay turn.
+        self.pendingFixture = resumeFixture
+        let rePresented = try XCTUnwrap(Self.mintedIdentity(for: "u-resume-replay", manager: manager, bytes: resumeBytes))
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                         operationJournal: reloaded,
+                                         appOperationSupport: fixtureSupport("playback.resume"))
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-resume-replay")
+        let replayFrame = try await awaitResultFrame(operationId: "f61b9e24-3c07-4d58-a9e2-84b6d0f7c315")
+        XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded",
+                       "the recorded result replays byte-for-byte in outcome")
+        // The COMPLETE recorded state replays — outcome, position AND playing — not a fresh
+        // observation of the flipped engine and not a partial key.
+        let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any])
+        let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: replayState), NSDictionary(dictionary: firstState),
+                       "the replayed state is the COMPLETE recorded observation, value-equal")
+        XCTAssertEqual(rePresented.actionDigest, originalIdentity.actionDigest,
+                       "the redelivered bytes are the original action bytes")
+        let callsAfterReplay = await MainActor.run { self.playback.calls.filter { if case .resume = $0 { return true }; return false }.count }
+        let readsAfterReplay = await MainActor.run { self.playback.observedPlayingReads }
+        XCTAssertEqual(callsAfterReplay, callsBeforeReplay,
+                       "replay must not invoke resume again")
+        XCTAssertEqual(readsAfterReplay, readsBeforeReplay,
+                       "replay must not take a new observation")
+    }
+
+    /// FOCUSED IDENTITYLESS RESUME LEGACY CONTROL (ruling @ 3c5576de): a resume frame with NO
+    /// operation identity takes the legacy path exactly as before — the effect runs, and NO
+    /// app-operation result frame is produced. General identityless separation remains covered
+    /// by `testLegacyIdentitylessFrameExecutesWithoutIdentityOrResultFrame` (seek_to); this pins
+    /// the resume-specific legacy behavior under the new identified branch.
+    func testIdentitylessResumeExecutesWithoutIdentityOrResultFrame() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        // The `LEGACY_ACTION` marker is the injector's documented opt-out: without it,
+        // `makeSinkWithConsumer` would inject the identity pair and the frame would take the v1
+        // gate, not the legacy path.
+        self.pendingFixture = """
+            event: action
+            data: {"tool":"playback","action":"resume","params":{},"note":"LEGACY_ACTION"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // PREMISE FIRST: what the sink RECEIVED carries NEITHER identity key — the injector
+        // must have left the marked frame unwritten, exactly as the seek_to legacy control
+        // asserts for its own fixture.
+        let deliveredFixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
+        XCTAssertFalse(deliveredFixture.contains("operation_id"),
+                       "the delivered legacy frame must carry no operation_id: \(deliveredFixture)")
+        XCTAssertFalse(deliveredFixture.contains("capability_version"),
+                       "the delivered legacy frame must carry no capability_version")
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), appOperationSupport: fixtureSupport("playback.resume"))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-legacy-resume")
+        XCTAssertEqual(playback.calls.filter { if case .resume = $0 { return true }; return false }.count, 1,
+                       "the identityless resume executes the legacy effect")
+        let frames = await Self.resultFrames(on: capturedTask)
+        XCTAssertEqual(frames.count, 0, "a legacy turn never produces an app-operation result frame")
+    }
+
     // MARK: - Declaration controls (app_operations_v1 negotiation, trainer-reduced-local-scope @ 818c8f75)
 
     /// THE ADVERTISED AUTHENTICATE FRAME: a turn whose declaration carries `playback.pause`
@@ -4853,6 +5162,14 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     /// `pause()` records the call but leaves the engine playing, so the sink's fresh post-sink
     /// observation reads `true` — the only way the `pause_not_observed` arm is reachable.
     private var simulatesFailedPause = false
+    /// voice-intents.md @ df5def09 knob (TEST DOUBLE ONLY): the resume sink "completed" but the
+    /// engine stayed paused, so the post-sink observation still reads `false` — the
+    /// `resume_not_observed` arm is otherwise unreachable because this double always flips
+    /// `storedIsPlaying` to true in `resume()`.
+    private var simulatesFailedResume = false
+    func setSimulatesFailedResume(_ on: Bool) {
+        lock.lock(); simulatesFailedResume = on; lock.unlock()
+    }
     func setSimulatesFailedPause(_ on: Bool) {
         lock.lock(); simulatesFailedPause = on; lock.unlock()
     }
@@ -4901,7 +5218,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     func resume() -> VoiceResponse {
         lock.lock()
         storedCalls.append(.resume)
-        storedIsPlaying = true
+        if !simulatesFailedResume { storedIsPlaying = true }
         lock.unlock()
         resumeLatch.broadcast()
         return .silent

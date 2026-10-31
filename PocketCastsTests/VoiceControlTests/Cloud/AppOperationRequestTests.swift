@@ -332,6 +332,50 @@ final class AppOperationRequestTests: XCTestCase {
                        message: "resume addresses the engine")
     }
 
+    /// OPTIONAL SUPPLIED TARGET IDENTITIES (task67 resume gate finding): an action that declares
+    /// no required precondition still cannot let a SUPPLIED episode_id escape the live check.
+    /// Absence stays optional; a present null/blank/non-string is the required-table's
+    /// `invalid_request`; a valid supplied ID runs the SAME current-target match.
+    func testSuppliedOptionalEpisodeIdentityIsTargetChecked() {
+        // ABSENCE stays optional where declared — and a live target does not make it required.
+        assertSucceeds(action: "resume", params: [:], precondition: [:],
+                       target: .available("ep-1"),
+                       message: "resume may omit the identity even with a live target")
+        assertSucceeds(action: "pause", params: [:], precondition: [:],
+                       target: .available("ep-1"),
+                       message: "pause may omit the identity even with a live target")
+        // MALFORMED SUPPLIED IDs: present but null/blank/non-string is "no usable identity
+        // stated" — the required table's violation, NOT a silent ignore.
+        for bad: CloudRouteJSONValue in [.null, .string(""), .int(7)] {
+            assertViolation(.missingPrecondition("episode_id"), action: "resume",
+                            params: [:], precondition: ["episode_id": bad],
+                            message: "supplied \(bad) is not a target identity")
+        }
+        // MATCHING supplied target succeeds; MISMATCHING and ABSENT live targets are stale.
+        assertSucceeds(action: "resume", params: [:],
+                       precondition: ["episode_id": .string("ep-1")],
+                       target: .available("ep-1"),
+                       message: "a supplied matching identity passes the live match")
+        assertViolation(.stalePrecondition, action: "resume", params: [:],
+                        precondition: ["episode_id": .string("ep-old")],
+                        target: .available("ep-new"),
+                        message: "a supplied identity for an episode the user left is stale")
+        assertViolation(.stalePrecondition, action: "resume", params: [:],
+                        precondition: ["episode_id": .string("ep-old")],
+                        target: .absent,
+                        message: "a supplied identity cannot match an absent live target")
+        // NOT-EVALUATED leaves the live decision to the sink, for supplied identities too.
+        assertSucceeds(action: "resume", params: [:],
+                       precondition: ["episode_id": .string("ep-1")],
+                       target: .notEvaluated,
+                       message: "not-evaluated must not read a supplied identity as stale")
+        // The pause contract accepts the same optional supplied identity.
+        assertViolation(.stalePrecondition, action: "pause", params: [:],
+                        precondition: ["episode_id": .string("ep-old")],
+                        target: .available("ep-new"),
+                        message: "pause-supplied identities are target-checked identically")
+    }
+
     /// A proposal formed for an episode the user has since left is STALE, and that is a distinct
     /// refusal from "no identity stated".
     func testTargetThatIsNoLongerCurrentIsStale() {
