@@ -13,6 +13,11 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
         func token() async -> String? { "t" }
         func prepare() async {}
         func handleUnauthorized(rejectedToken: String?) async {}
+        /// Explicit: `"t"` is a credential, so the traversal cases run authenticated. Inheriting
+        /// the protocol's former `nil` default is what silently unauthenticated this whole suite.
+        func authenticatedSession() async -> CloudAuthenticatedSession? {
+            CloudAuthenticatedSession(accountId: "traversal-owner", accessToken: "t")
+        }
     }
 
     private func client() -> CloudRouteClient {
@@ -113,6 +118,11 @@ final class AcceptanceRunPathTests: XCTestCase {
         func token() async -> String? { "t" }
         func prepare() async {}
         func handleUnauthorized(rejectedToken: String?) async {}
+        /// Explicit: `"t"` is a credential, so the traversal cases run authenticated. Inheriting
+        /// the protocol's former `nil` default is what silently unauthenticated this whole suite.
+        func authenticatedSession() async -> CloudAuthenticatedSession? {
+            CloudAuthenticatedSession(accountId: "traversal-owner", accessToken: "t")
+        }
     }
 
     private final class ScriptedSubmit {
@@ -222,6 +232,11 @@ final class AcceptanceAssemblyWiringTests: XCTestCase {
         func token() async -> String? { "t" }
         func prepare() async {}
         func handleUnauthorized(rejectedToken: String?) async {}
+        /// Explicit: `"t"` is a credential, so the traversal cases run authenticated. Inheriting
+        /// the protocol's former `nil` default is what silently unauthenticated this whole suite.
+        func authenticatedSession() async -> CloudAuthenticatedSession? {
+            CloudAuthenticatedSession(accountId: "traversal-owner", accessToken: "t")
+        }
     }
 
     private final class CountingFactory {

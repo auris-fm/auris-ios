@@ -103,8 +103,18 @@ enum CloudRouteEvent: Equatable {
     case audioFrame(CloudAudioFrame)
     /// Server-directed action. App operations carry `operationId`/`capabilityVersion` (wire
     /// contract rev da327e624); existing local-path holds carry neither and parse as nils.
+    ///
+    /// `actionBytes` are the action frame's serialized UTF-8 bytes EXACTLY as received: replay
+    /// identity is byte equality (cloud-assistant.md @ bf5fb219), so re-serializing parsed
+    /// parts would lose the identity the server can reproduce. Nil only for events a test
+    /// constructs directly, which then carry no replay identity.
     case action(tool: String, action: String, params: [String: CloudRouteJSONValue],
-                operationId: String?, capabilityVersion: String?)
+                operationId: String?, capabilityVersion: String?,
+                actionBytes: Data? = nil, precondition: [String: CloudRouteJSONValue] = [:],
+                // A request whose identity is intact but whose parameters do not match its
+                // action. It is still DELIVERED, so the operation can be settled with the honest
+                // refusal instead of vanishing; the sink must refuse before any effect.
+                parameterViolation: AppOperationRequest.ParameterViolation? = nil)
     /// Text token the Worker sends on the socket. It rides the live transport
     /// rather than a retired one; the sink plays answers as audio instead of
     /// accumulating text, so this is parsed and then intentionally unused.
@@ -140,16 +150,52 @@ enum CloudRouteJSONValue: Equatable {
         return nil
     }
 
+    /// The string this value carries when it is usable as an IDENTITY (a non-empty string).
+    /// Blank is not an identity, so it yields nil exactly like an absent field.
+    var identityValue: String? {
+        guard case let .string(value) = self, !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// True when this value is the JSON kind a declared parameter requires.
+    ///
+    /// The cases are already separated (`.int`/`.double`/`.bool` are distinct), which is the whole
+    /// point: decoding kept them apart, so validation can refuse a string where an integer is
+    /// declared WITHOUT any coercion being possible in the first place.
+    func matches(_ parameter: AppOperationRequest.ActionParameter) -> Bool {
+        switch (self, parameter) {
+        case (.int, .integer), (.double, .number), (.int, .number), (.string, .string):
+            return true
+        case let (.string(value), .enumerated(allowed)):
+            // A closed set: the string must be one of the declared values, exactly.
+            return allowed.contains(value)
+        case let (.string(value), .identity):
+            return !value.isEmpty
+        default:
+            // Includes `.bool` for every declared type: a boolean is never a number or a string,
+            // however readily `NSNumber` would let it masquerade as one.
+            return false
+        }
+    }
+
     /// Total decoder from Foundation JSON (journal persistence of a settled state). Returns nil
     /// for shapes this build does not model — callers treat nil as unreadable history, never as
     /// an invented value.
     init?(json: Any) {
+        // BOOLEANS FIRST, AS NSNumber. `JSONSerialization` bridges every JSON scalar to
+        // `NSNumber`, and `NSNumber(true)` also satisfies `as Int` — so the obvious
+        // String/Int/Double/Bool order silently turns a persisted `true` into `.int(1)`. A
+        // settled state read back from the journal would then disagree with the frame that was
+        // sent for it. `CFGetTypeID` is the supported way to tell the two apart.
+        if let number = json as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+            self = .bool(number.boolValue)
+            return
+        }
         switch json {
         case let v as String: self = .string(v)
         case let v as Int: self = .int(Int64(v))
         case let v as Int64: self = .int(v)
         case let v as Double: self = .double(v)
-        case let v as Bool: self = .bool(v)
         case is NSNull: self = .null
         case let dict as [String: Any]:
             var decoded: [String: CloudRouteJSONValue] = [:]

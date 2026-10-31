@@ -61,7 +61,7 @@ final class CloudRouteClientTests: XCTestCase {
     func testOperationResultRidesTheLiveTurnSocketAndReportsUndeliveredAfterClose() async throws {
         let liveFixture = [
             "event: action",
-            "data: {\"operation_id\":\"op-live\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "data: {\"operation_id\":\"b204e0b4-21c1-4cea-a7f8-8c736a9ea06e\",\"capability_version\":\"app-ops/1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
             "",
             "event: done",
             "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}",
@@ -93,7 +93,7 @@ final class CloudRouteClientTests: XCTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         let frame = AppOperationResultFrame(
-            operationId: "op-live", outcome: .refused,
+            operationId: "b204e0b4-21c1-4cea-a7f8-8c736a9ea06e", outcome: .refused,
             reason: OperationReason.referenceMappingUnavailable
         )
         let midTurnReport = await client.sendOperationResult(try XCTUnwrap(frame), via: resultSocket)
@@ -105,7 +105,7 @@ final class CloudRouteClientTests: XCTestCase {
             "the result left as a text frame on the turn's own socket"
         )
         XCTAssertEqual(captured["type"] as? String, "app_operation_result")
-        XCTAssertEqual(captured["operation_id"] as? String, "op-live")
+        XCTAssertEqual(captured["operation_id"] as? String, "b204e0b4-21c1-4cea-a7f8-8c736a9ea06e")
         XCTAssertEqual(captured["outcome"] as? String, "refused")
         XCTAssertEqual(captured["reason"] as? String, "reference_mapping_unavailable")
 
@@ -126,7 +126,7 @@ final class CloudRouteClientTests: XCTestCase {
     func testADuplicateLiveRequestIDIsNotRetiredByThePredecessorsClose() async throws {
         let openFixture = [
             "event: action",
-            "data: {\"operation_id\":\"op-a\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "data: {\"operation_id\":\"186bd4fb-e29f-41e2-af60-16cb798706d7\",\"capability_version\":\"app-ops/1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
             "",
         ].joined(separator: "\n")
         let gateA = Gate()
@@ -168,7 +168,7 @@ final class CloudRouteClientTests: XCTestCase {
         gateA.release()
         _ = await readerA.value
         let frame = AppOperationResultFrame(
-            operationId: "op-a", outcome: .refused,
+            operationId: "186bd4fb-e29f-41e2-af60-16cb798706d7", outcome: .refused,
             reason: OperationReason.malformedSeekTarget
         )
         let successorReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedB.resultSocket)
@@ -368,6 +368,48 @@ final class CloudRouteClientTests: XCTestCase {
     /// The socket the most recent client in this test was built on, so a case
     /// can assert on the frames the client *sent*.
     private var capturedTask: StubWebSocketTask?
+
+    /// LEGACY TURN STILL AUTHENTICATES. A real `CloudStaticIdentityTokenProvider` has NO
+    /// established principal, and its `authenticatedSession()` is nil. If the client used that nil
+    /// to decide "unauthorized", every ordinary turn in the shipping app would stop dialling. This
+    /// control builds the client on the real static provider and asserts the turn reaches its
+    /// events, with the transport bearer in the authenticate frame.
+    func testLegacyStaticBearerStillOpensAnOrdinaryTurn() async {
+        let defaults = UserDefaults(suiteName: "legacy-turn-\(UUID().uuidString)")!
+        self.pendingFixture = """
+            event: token
+            data: {"text":"hello"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let identity = CloudIdentity(defaults: defaults)
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: nextFixture()))
+        let provider = CloudStaticIdentityTokenProvider(identity: identity)
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: identity.userId,
+            tokenProvider: provider,
+            webSocketTaskFactory: { _ in task }
+        )
+        let events = await collect(client.route(request: "hi", context: sampleContext, turn: testTurnEnvelope()))
+
+        XCTAssertFalse(events.contains { event in
+            if case .error(_, let code, _) = event { return code == "unauthorized" }
+            return false
+        }, "a legacy bearer must not produce unauthorized: \(events)")
+        XCTAssertTrue(events.contains { if case .token("hello") = $0 { return true }; return false },
+                      "the ordinary turn ran: \(events)")
+
+        // And the frame carried the bearer rather than refusing to dial.
+        let authFrame = task.sentTextFrames.compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }.first { ($0["type"] as? String) == "authenticate" }
+        XCTAssertEqual(authFrame?["access_token"] as? String, identity.userId,
+                       "the TOT bearer is what the server's middleware accepts")
+        defaults.removePersistentDomain(forName: defaults.description)
+    }
 
     private func client() -> CloudRouteClient {
         let built = CloudRouteClient.stubbed(userId: userId, fixture: nextFixture())
@@ -628,7 +670,7 @@ extension CloudRouteClientTests {
     private func makeResultSocketClient(actionId: String) -> (CloudRouteClient, CloudTurnEnvelope, StubWebSocketTask) {
         let fixture = [
             "event: action",
-            "data: {\"operation_id\":\"\(actionId)\",\"capability_version\":\"v1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
+            "data: {\"operation_id\":\"\(actionId)\",\"capability_version\":\"app-ops/1\",\"tool\":\"playback\",\"action\":\"pause\",\"params\":{}}",
             "",
             "event: done",
             "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}",
@@ -656,7 +698,7 @@ extension CloudRouteClientTests {
     /// A CLAIMED consumer held past the bounded grace deadline keeps its registration: the
     /// producer-finish grace cleanup applies only while no consumer has claimed ownership.
     func testGraceCleanupDoesNotSeverAClaimedConsumerHeldPastTheDeadline() async throws {
-        let (client, turn, _) = makeResultSocketClient(actionId: "op-grace-claim")
+        let (client, turn, _) = makeResultSocketClient(actionId: "dab29d32-e8e6-41a8-a0cf-5818848ce1f1")
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
         let socket = routed.resultSocket
@@ -666,21 +708,21 @@ extension CloudRouteClientTests {
         socket.claimConsumerOwnership()
         try await Task.sleep(nanoseconds: 2_400_000_000)
         let report = await client.sendOperationResult(
-            resultFrame(operationId: "op-grace-claim"), via: socket
+            resultFrame(operationId: "dab29d32-e8e6-41a8-a0cf-5818848ce1f1"), via: socket
         )
         XCTAssertEqual(report, .submitted, "a claimed consumer must keep its registration past the grace deadline")
     }
 
     /// A turn whose stream is never consumed is cleaned up on a bound, not held forever.
     func testNeverConsumedTurnSocketIsCleanedUpByTheBoundedGrace() async throws {
-        let (client, turn, _) = makeResultSocketClient(actionId: "op-grace-orphan")
+        let (client, turn, _) = makeResultSocketClient(actionId: "ffc70631-f978-4cff-abc2-33f48b9f01a4")
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         // Deliberately never iterate. The producer finishes; the grace timer owns cleanup.
         var report: CloudRouteClient.AppOperationResultSendReport?
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             report = await client.sendOperationResult(
-                resultFrame(operationId: "op-grace-orphan"), via: routed.resultSocket
+                resultFrame(operationId: "ffc70631-f978-4cff-abc2-33f48b9f01a4"), via: routed.resultSocket
             )
             if report == .undelivered { break }
             try await Task.sleep(nanoseconds: 200_000_000)
@@ -693,7 +735,7 @@ extension CloudRouteClientTests {
         // Cancellation cleanup is bound to the task that owns consumer execution via
         // withTaskCancellationHandler (the sink's production pattern), not to AsyncStream
         // termination, which does not fire on task cancellation.
-        let (client, turn, liveTask) = makeResultSocketClient(actionId: "op-cancel-close")
+        let (client, turn, liveTask) = makeResultSocketClient(actionId: "5a073159-5d01-448f-a8f1-fb600e5466cf")
         // Hold the producer open so the consumer is genuinely SUSPENDED in the handler when
         // cancellation strikes — the production shape (a live turn mid-stream), not a stream
         // that already finished and deregistered the handler.
@@ -720,7 +762,7 @@ extension CloudRouteClientTests {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             report = await client.sendOperationResult(
-                resultFrame(operationId: "op-cancel-close"), via: routed.resultSocket
+                resultFrame(operationId: "5a073159-5d01-448f-a8f1-fb600e5466cf"), via: routed.resultSocket
             )
             if report == .undelivered { break }
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -730,13 +772,13 @@ extension CloudRouteClientTests {
 
     /// finishTurn is idempotent: a second call neither traps nor resurrects the registration.
     func testFinishTurnIsIdempotent() async throws {
-        let (client, turn, _) = makeResultSocketClient(actionId: "op-idem")
+        let (client, turn, _) = makeResultSocketClient(actionId: "b9350b2f-7223-48dc-afab-ae043af8f171")
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         routed.resultSocket.claimConsumerOwnership()
         routed.resultSocket.finishTurn()
         routed.resultSocket.finishTurn()
         let report = await client.sendOperationResult(
-            resultFrame(operationId: "op-idem"), via: routed.resultSocket
+            resultFrame(operationId: "b9350b2f-7223-48dc-afab-ae043af8f171"), via: routed.resultSocket
         )
         XCTAssertEqual(report, .undelivered)
     }
@@ -751,7 +793,7 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
     /// the frame cannot be built at all, so the operation stays unresolved toward the honest
     /// `unknown` rather than settling success with nothing to show.
     func testSuccessWithoutStateIsNotAWireFrame() {
-        XCTAssertNil(AppOperationResultFrame(operationId: "op-1", outcome: .succeeded),
+        XCTAssertNil(AppOperationResultFrame(operationId: "bdc53855-0a6a-4bd3-a1ea-fd9c8deecc2f", outcome: .succeeded),
                      "a stateless success cannot be reported")
     }
 
@@ -759,7 +801,7 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
     /// empty queue read) remains wire-legal. Blanket non-empty was never the contract rule.
     func testSuccessWithEmptyStateObjectIsLegal() throws {
         let frame = try XCTUnwrap(
-            AppOperationResultFrame(operationId: "op-2", outcome: .succeeded, state: [:])
+            AppOperationResultFrame(operationId: "94bfac69-5a86-48aa-a82b-da670dbf0451", outcome: .succeeded, state: [:])
         )
         let json = frame.jsonFrame()
         XCTAssertEqual(json["outcome"] as? String, "succeeded")
@@ -773,13 +815,13 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
     func testOversizeStateIsNotAWireFrame() {
         let huge = String(repeating: "x", count: 9_000)
         XCTAssertNil(
-            AppOperationResultFrame(operationId: "op-3", outcome: .succeeded, state: ["blob": .string(huge)]),
+            AppOperationResultFrame(operationId: "3bbfcf0b-fb18-47bc-a03a-34906d5666e8", outcome: .succeeded, state: ["blob": .string(huge)]),
             "an oversize state must not settle success"
         )
         // The same payload just under the bound IS a frame: the guard is a bound, not a ban.
         let fits = String(repeating: "x", count: 7_000)
         XCTAssertNotNil(
-            AppOperationResultFrame(operationId: "op-4", outcome: .succeeded, state: ["blob": .string(fits)])
+            AppOperationResultFrame(operationId: "01b7b5ed-90d8-4da3-a95d-35c12c97d65e", outcome: .succeeded, state: ["blob": .string(fits)])
         )
     }
 
@@ -789,7 +831,7 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
         // "é" is 2 UTF-8 bytes: 400 of them = 800 bytes, so the bound lands at 256 characters.
         let multibyte = String(repeating: "é", count: 400)
         let frame = try XCTUnwrap(
-            AppOperationResultFrame(operationId: "op-5", outcome: .refused,
+            AppOperationResultFrame(operationId: "ef5cf2fe-9f63-4f48-ab75-c885f96ed8da", outcome: .refused,
                                     reason: OperationReason.unsupportedOperation, detail: multibyte)
         )
         let detail = try XCTUnwrap(frame.detail)
@@ -800,7 +842,7 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
         // A 4-byte scalar that would straddle the bound is dropped whole rather than halved.
         let four: String = String(repeating: "😀", count: 200) // 800 bytes
         let frame2 = try XCTUnwrap(
-            AppOperationResultFrame(operationId: "op-6", outcome: .refused,
+            AppOperationResultFrame(operationId: "0da2b3ee-5deb-4b97-a78c-e31ea1eb2e23", outcome: .refused,
                                     reason: OperationReason.unsupportedOperation, detail: four)
         )
         XCTAssertEqual(frame2.detail?.utf8.count, 512)
@@ -811,7 +853,7 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
     func testDetailUnderBoundIsUnchanged() throws {
         let detail = String(repeating: "é", count: 10)
         let frame = try XCTUnwrap(
-            AppOperationResultFrame(operationId: "op-7", outcome: .refused,
+            AppOperationResultFrame(operationId: "40736873-b1c0-48ab-a239-3cb0711fc2f9", outcome: .refused,
                                     reason: OperationReason.unsupportedOperation, detail: detail)
         )
         XCTAssertEqual(frame.detail, detail)
@@ -835,8 +877,8 @@ final class AppOperationResultFrameCodecTests: XCTestCase {
         XCTAssertFalse(AppOperationResultFrame.isWireReason("1leading"), "digits do not start a reason")
 
         // Negative control at the frame seam: a malformed reason cannot be built into a frame.
-        XCTAssertNil(AppOperationResultFrame(operationId: "op-8", outcome: .refused, reason: "Bad Reason!"))
-        XCTAssertNotNil(AppOperationResultFrame(operationId: "op-9", outcome: .refused,
+        XCTAssertNil(AppOperationResultFrame(operationId: "9b910a9d-ad36-493d-ad8c-beb89f6259b9", outcome: .refused, reason: "Bad Reason!"))
+        XCTAssertNotNil(AppOperationResultFrame(operationId: "6d99ef9f-3c66-4b45-a182-6886927d01a9", outcome: .refused,
                                                 reason: OperationReason.unsupportedOperation))
     }
 

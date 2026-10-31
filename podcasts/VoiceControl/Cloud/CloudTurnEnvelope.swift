@@ -55,6 +55,11 @@ enum CloudClientCapabilities {
     ///   handles the result/empty/unavailable states, scope, and play/seek
     ///   eligibility (`search_results_v1`). Until then the server falls back to
     ///   deterministic short `token` text plus `done`.
+    ///
+    /// This is a RENDERER capability and nothing more. Whether the client may CLAIM app
+    /// operations is a separate question, owned by the operation admission path and, for any
+    /// future v1 advertisement, a separately reviewed slice built from that turn's own
+    /// authenticated acquisition. Gating this on a principal was out of scope here.
     static func advertised(rendersStructuredResults: Bool) -> [String] {
         rendersStructuredResults ? [searchResultsV1] : []
     }

@@ -14,6 +14,43 @@ import AVFoundation
 @testable import podcasts
 
 final class CloudRouteSinkTests: SocketCapturingTestCase {
+
+    /// The identity the tests' turns are admitted under. Journal replay identity is owner +
+    /// conversation + turn + the ORIGINAL action bytes; the first three are the sink's admitted
+    /// turn, so a check that re-claims an operation must use the same triple the sink used. The
+    /// bytes are empty here because these test doubles carry no raw payload.
+    /// The identity the sink's OWN preparation mints for an utterance: the conversation manager
+    /// mints a fresh conversation per origin window, so the conversation id is not known ahead of
+    /// the turn — this asks the sink's manager for it rather than guessing.
+    ///
+    /// `bytes` must be the EXACT serialized `data:` payload the fixture delivers, because replay
+    /// identity is byte equality on the received frame. `injectOperationIdentity` rewrites the
+    /// fixture to insert the id pair, so the payload is not the fixture line verbatim — pass the
+    /// post-injection payload.
+    /// THE COMPLETE SERIALIZED ACTION PAYLOAD this control delivers, as a literal. Replay identity
+    /// is byte equality on the exact payload the sink receives, so an id-only fragment would hash
+    /// something that was never delivered and make every comparison meaningless.
+    static func lateActionPayload(_ operationId: String) -> String {
+        #"{"operation_id":"\#(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\#(testEpisodeId)"}}"#
+    }
+
+    static func mintedIdentity(
+        for utteranceId: String,
+        manager: CloudConversationManager,
+        bytes: String = ""
+    ) -> OperationIdentity? {
+        guard let prepared = manager.prepare(selection: .wakeWord, origin: cloudTestOrigin,
+                                             utteranceId: utteranceId) else { return nil }
+        return OperationIdentity(owner: "test-owner",
+                                 conversation: prepared.conversationId,
+                                 turn: prepared.requestId,
+                                 actionBytes: Data(bytes.utf8))
+    }
+
+    static func turnIdentity(conversation: String, turn: String, bytes: String = "") -> OperationIdentity {
+        OperationIdentity(owner: "test-owner", conversation: conversation, turn: turn,
+                          actionBytes: Data(bytes.utf8))
+    }
     private var playback: RecordingPlaybackSink!
     private var mapper: RecordingFingerprintMapper!
     private var contextState: CloudPlaybackContextState!
@@ -60,7 +97,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
         playback.setPositionMs(500_000)
 
-        let response = await makeSink().routeToCloud(
+        let response = await makeSink(injectIdentity: false).routeToCloud(
             request: "What did she mean?",
             tier: .free,
             context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-1")
@@ -158,7 +195,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [500.0: 510.0]
         playback.setPositionMs(900_000)
 
-        let response = await makeSink().routeToCloud(
+        let response = await makeSink(injectIdentity: false).routeToCloud(
             request: "play that",
             tier: .free,
             context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-5")
@@ -185,13 +222,19 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.setPositionMs(120_000)
 
-        let response = await makeSink().routeToCloud(
+        // LEGACY CONTROL, stated explicitly: the fixture carries no identity fields and is
+        // delivered verbatim, so this exercises the pre-v1 effect path rather than being promoted
+        // into a v1 request that would demand a target precondition. No observer is needed —
+        // target admission is a v1 concern and this frame never claims to be one.
+        let sink = makeSink(injectIdentity: false)
+        let response = await sink.routeToCloud(
             request: "forward 15 seconds",
             tier: .free,
             context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-6")
 
         XCTAssertEqual(response.response, .silent)
-        XCTAssertTrue(playback.calls.contains(.seekRelative(15, .forward)))
+        XCTAssertTrue(playback.calls.contains(.seekRelative(15, .forward)),
+                      "the identified seek must run: \(playback.calls)")
         // Previous position must be captured so "go back to where I was" works.
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 1)
     }
@@ -208,7 +251,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.setPositionMs(120_000)
 
-        _ = await makeSink().routeToCloud(
+        _ = await makeSink(injectIdentity: false).routeToCloud(
             request: "go back",
             tier: .free,
             context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-7")
@@ -229,7 +272,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         playback.setPositionMs(120_000)
 
-        _ = await makeSink().routeToCloud(
+        _ = await makeSink(injectIdentity: false).routeToCloud(
             request: "skip forward",
             tier: .free,
             context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-8")
@@ -272,7 +315,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         mapper.playbackSecondsForReference = [100.0: 110.0]
         playback.setPositionMs(50_000)
 
-        let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
+        let response = await makeSink(injectIdentity: false).routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
 
         // This case is about the ERROR PATH's buffer/seek rollback. The remote `message` is never
         // spoken (spec 961fab07) and `rate_limited` has no local template, so the user hears the
@@ -296,7 +339,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         // No mapping at all: the ordinary form must not depend on one.
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-11")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(95)))
@@ -315,7 +358,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-12")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
@@ -335,7 +378,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-13")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
@@ -355,7 +398,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-14")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
@@ -377,7 +420,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-15")
 
         XCTAssertFalse(
@@ -400,7 +443,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-16")
 
         XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false })
@@ -863,18 +906,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         fatalError("expected an owner disposition")
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
+    /// The episode identity every identified playback fixture targets. The wire requires an
+    /// episode-relative action to name its target, and requires that target to be the CURRENT one,
+    /// so a fixture and the sink's live target must agree by construction.
+    static let testEpisodeId = "ep-task67"
+
+    /// The account these controls' operations are journaled under. One fixture for BOTH halves —
+    /// credential and account — so the owner can only ever be the one that supplied the
+    /// authenticate frame.
+    static func pairedTestProvider() -> StubTokenProvider {
+        StubTokenProvider(token: "test-credential", accountId: "test-owner")
+    }
+
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, currentEpisodeId: @escaping () -> String? = { CloudRouteSinkTests.testEpisodeId }) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
-        let producerHold = pendingProducerHold
-        pendingProducerHold = nil
-        let armedHold = pendingArmedReceiveHold
-        pendingArmedReceiveHold = nil
-        let declaredPark = pendingDeclaredPark
-        pendingDeclaredPark = nil
-        let parkAfterFrames = pendingDeclaredParkAfterFrames
-        pendingDeclaredParkAfterFrames = nil
         return CloudRouteSink(
             clientFactory: {
+                // EACH TURN TAKES ITS OWN FIXTURE AND ITS OWN HOLD, AT THE MOMENT ITS CLIENT IS
+                // BUILT. Reading them once outside this closure wired the FIRST client only: a
+                // second turn's hold and fixture were dropped on the floor, so the second turn
+                // could never be parked at all.
+                let producerHold = self.pendingProducerHold
+                self.pendingProducerHold = nil
+                let armedHold = self.pendingArmedReceiveHold
+                self.pendingArmedReceiveHold = nil
+                let declaredPark = self.pendingDeclaredPark
+                self.pendingDeclaredPark = nil
+                let parkAfterFrames = self.pendingDeclaredParkAfterFrames
+                self.pendingDeclaredParkAfterFrames = nil
                 let fixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
                 self.pendingFixture = nil
                 let built = CloudRouteClient.stubbed(
@@ -886,7 +945,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                         // served, then engages only after the scripted frames ahead of it.
                         task.armedReceivePark = declaredPark
                         task.declaredParkAfterFrames = parkAfterFrames
-                    }
+                    },
+                    // The authenticated account these operations are journaled under. The account
+                    // and the credential are ONE fixture travelling through the REAL acquisition,
+                    // so the owner recorded is necessarily the one that supplied the authenticate
+                    // frame — never a session re-attached to the socket afterwards.
+                    tokenProvider: Self.pairedTestProvider()
                 )
                 // MEASURED production parking point: the producer parks at the frame seam, not at
                 // a later receive (the stub only receives twice for this fixture). After the
@@ -905,6 +969,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                     Task { await declaredPark?.wait(untilRetired: { task.isCancelledSocket }) }
                 }
                 self.capturedTask = built.task
+                // Capture the CLIENT for this turn too: a prior turn's result must travel on its
+                // OWN transport, and proving that needs that turn's client — not whichever one
+                // the sink used last.
+                self.capturedClient = built.client
                 self.clientCreationCount += 1
                 return built.client
             },
@@ -914,10 +982,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
             episodeAvailable: episodeAvailable,
+            currentEpisodeIdProvider: currentEpisodeId,
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
             operationResultConsumer: consumer,
-            operationJournal: operationJournal,
+            // A journal is REQUIRED for an identified operation to run at all (no journal = no
+            // effect), so the default fixture supplies a working in-memory one. A case that wants
+            // to observe durable state passes its own.
+            operationJournal: operationJournal ?? OperationJournal(store: InMemoryOperationRecordStore()),
             conversationManager: conversationManager ?? testConversationManager()
         )
     }
@@ -926,9 +998,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// the mapping-unavailable reason — the production read of the outcome that previously only
     /// landed in a test-only stored field.
     func testUnmappedReferenceSeekReachesTheOperationResultConsumer() async {
+        // Same reasoning as the malformed-seek control above: an identified request is required
+        // for there to be a result to consume at all, and the target must be stated.
+        let operationId = "8a1f6c42-7b3d-4e09-a257-6d9e4b0c8315"
         self.pendingFixture = """
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -943,22 +1018,46 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.referenceMappingUnavailable)
     }
 
-    /// A malformed seek (both target forms) reaches the consumer too.
-    func testMalformedSeekReachesTheOperationResultConsumer() async {
+    /// A malformed seek (BOTH target forms supplied) is answered on the turn's own socket with a
+    /// TYPED refusal, and does not move playback.
+    ///
+    /// RENAMED from `…ReachesTheOperationResultConsumer`: `reportResult` sends through the retained
+    /// route and never touches `RecordingResultConsumer`, so the consumer was the wrong observation
+    /// surface and the control could not have passed however correct the product was.
+    func testMalformedSeekIsRefusedWithTypedReasonOnTheTurnSocket() async {
+        // EXPLICIT v1 IDENTITY: this control asserts a TYPED refusal (`malformed_seek_target`) on
+        // the result path, which only exists for an identified operation. Relying on the injector
+        // to add the identity would leave the precondition unstated as well, and the frame would
+        // refuse `invalid_request` before the malformation was ever judged.
+        let operationId = "4d2b8e17-3c95-4a60-b7f1-8e5c0d9a2631"
         self.pendingFixture = """
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000}}
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer)
+        playback.setPositionMs(0)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-18")
 
-        let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
-        XCTAssertEqual(refusals.first?.result.reason, OperationReason.malformedSeekTarget)
+        // OBSERVATION SURFACE = THE ORIGINAL TURN'S SENT RESULT FRAME. `reportResult` sends through
+        // the retained route and never calls `RecordingResultConsumer`, so asserting on the consumer
+        // asserted on a surface this path does not use. The socket is where the refusal actually
+        // goes.
+        //
+        // EVIDENCE LIMIT: a frame on the transport proves SUBMISSION, not server receipt.
+        let frames = await Self.resultFrames(on: capturedTask)
+        XCTAssertEqual(frames.count, 1, "exactly one result frame for one refused operation; got \(frames)")
+        XCTAssertEqual(frames.first?["operation_id"] as? String, operationId)
+        XCTAssertEqual(frames.first?["outcome"] as? String, "refused")
+        XCTAssertEqual(frames.first?["reason"] as? String, OperationReason.malformedSeekTarget)
+        // The refusal must not have moved playback.
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "a malformed seek must not become a playback position; calls: \(playback.calls)"
+        )
     }
 
     /// THROUGH-TRANSPORT control: an IDENTIFIED unmapped reference seek must send the
@@ -967,13 +1066,16 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testIdentifiedUnmappedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-seek-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+            data: {"operation_id":"acb9d6cc-0b7f-4710-ab0c-76e7f5f0fa64","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let sink = makeSink()
+        // MATCHING LIVE OBSERVER: the frame states its target, so the sink must be able to confirm
+        // it, or the refusal would be `stale_precondition` (a different fact) instead of the
+        // mapping-unavailable reason this control exists to assert.
+        let sink = makeSink(currentEpisodeId: { Self.testEpisodeId })
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-19")
 
         XCTAssertFalse(
@@ -991,55 +1093,119 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
-        XCTAssertEqual(frame["operation_id"] as? String, "op-seek-1")
+        XCTAssertEqual(frame["operation_id"] as? String, "acb9d6cc-0b7f-4710-ab0c-76e7f5f0fa64")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.referenceMappingUnavailable)
     }
 
-    /// THROUGH-TRANSPORT control: an identified MALFORMED seek (both target forms) sends the
-    /// refused frame with the malformed-target reason.
+    /// THROUGH-TRANSPORT control: an identified MALFORMED seek sends the refused frame with the
+    /// malformed-target reason.
+    ///
+    /// The malformation used is `position_seconds: null` — PRESENT (so action admission passes)
+    /// but not a number, which is exactly a request the sink must refuse in its own terms rather
+    /// than execute with a guessed target.
+    ///
+    /// CORRECTION: an earlier version of this comment claimed that supplying BOTH target forms
+    /// would be dropped by the parser and never reach the sink. The measured trace contradicts
+    /// that — the both-forms fixture reaches `executeCloudMutation` with
+    /// `violation=ambiguousSeekTarget` and is refused there. The wrong-type fixture is kept
+    /// regardless, because it exercises a DIFFERENT violation (`wrongType`) on the same path.
     func testIdentifiedMalformedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-seek-2","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":95,"reference_position_ms":200000}}
+            data: {"operation_id":"66de3931-3507-47be-a2a2-7bb01e199fa6","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":null,"reference_position_ms":200000},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
-        let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer)
+        playback.setPositionMs(0)
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-20")
-        XCTAssertEqual(consumer.consumed.first?.result.reason, OperationReason.malformedSeekTarget,
-                       "diagnostic: the refusal reached the consumer surface")
 
-        let deadline = Date().addingTimeInterval(5)
-        var resultFrame: [String: Any]?
-        while Date() < deadline && resultFrame == nil {
-            resultFrame = await MainActor.run {
-                capturedTask?.sentTextFrames.compactMap {
-                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
-                }.first { ($0["type"] as? String) == "app_operation_result" }
-            }
-            if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        }
-        let frame = try XCTUnwrap(resultFrame, "the refused outcome rode the turn socket")
-        XCTAssertEqual(frame["operation_id"] as? String, "op-seek-2")
-        XCTAssertEqual(frame["outcome"] as? String, "refused")
-        XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
+        // OBSERVATION SURFACE = THE ORIGINAL TURN'S SENT RESULT FRAME, and EXACTLY ONE of them:
+        // a duplicate send is a defect, so `first` would hide it.
+        //
+        // EVIDENCE LIMIT: a frame on the transport proves SUBMISSION, not server receipt.
+        let frames = await Self.resultFrames(on: capturedTask)
+        XCTAssertEqual(frames.count, 1, "exactly one result frame for one refused operation; got \(frames)")
+        XCTAssertEqual(frames.first?["operation_id"] as? String, "66de3931-3507-47be-a2a2-7bb01e199fa6")
+        XCTAssertEqual(frames.first?["outcome"] as? String, "refused")
+        XCTAssertEqual(frames.first?["reason"] as? String, OperationReason.malformedSeekTarget)
+        // The refusal must not have moved playback.
+        XCTAssertFalse(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "a malformed seek must not become a playback position; calls: \(playback.calls)"
+        )
     }
 
     /// LEGACY refusal case (explicit, per the runtime gate): an identity-less cloud mutation
     /// does NOT execute and sends NO result frame (there is no server identity to tie it to);
     /// the refusal is recorded for the executor surface.
-    func testLegacyIdentitylessMutationRefusesWithoutExecutingAndWithoutAResultFrame() async throws {
-        // LEGACY_ACTION marker: the fixture-boundary injector skips it, so this fixture stays a
-        // genuine identity-less cloud mutation — exactly what the strict runtime gate must refuse.
+    /// THE ESTABLISHED LEGACY BEHAVIOUR, asserted directly so the compatibility ruling has a
+    /// control of its own.
+    ///
+    /// A frame with NEITHER identity field is pre-v1 playback: it executes, produces no journal
+    /// record, and sends no result frame. It is deliberately NOT subject to v1 required
+    /// preconditions — this fixture states none, and requiring `episode_id` here would break the
+    /// compatibility path the ruling protects.
+    func testLegacyIdentitylessFrameExecutesWithoutIdentityOrResultFrame() async throws {
+        // THE FIXTURE MUST REACH THE SINK UNREWRITTEN. `makeSinkWithConsumer` injects the identity
+        // pair into any action line carrying `"tool"`, so the previous revision's "identityless"
+        // frame was delivered WITH `operation_id`/`capability_version` and took the v1 gate, not
+        // the legacy path — the control was asserting about a frame it never sent. The
+        // `LEGACY_ACTION` marker is the injector's documented opt-out.
         self.pendingFixture = """
-            LEGACY_ACTION
-
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95}}
+            data: {"tool":"playback","action":"seek_to","params":{"position_seconds":95},"note":"LEGACY_ACTION"}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // What actually goes out: the post-injection fixture, which for this control must equal
+        // the literal above.
+        let deliveredFixture = Self.injectOperationIdentity(self.pendingFixture ?? "")
+        playback.setPositionMs(0)
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
+
+        // PREMISE FIRST: the action line the sink RECEIVED carries NEITHER identity key. Checking
+        // the intended fixture instead of the delivered one is what hid the defect.
+        let actionLine = try XCTUnwrap(
+            deliveredFixture.split(separator: "\n")
+                .first { $0.contains("\"action\"") && $0.contains("playback") },
+            "the delivered fixture carries an action line")
+        XCTAssertFalse(actionLine.contains("operation_id"),
+                       "the delivered frame must have NO operation_id: \(actionLine)")
+        XCTAssertFalse(actionLine.contains("capability_version"),
+                       "the delivered frame must have NO capability_version: \(actionLine)")
+
+        XCTAssertTrue(
+            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+            "a frame with neither identity field is pre-v1 playback and still executes; calls: \(playback.calls)"
+        )
+        // Hoisted: `XCTAssertFalse`'s autoclosure is not async, so the awaited value is read first.
+        let legacySentFrames = await MainActor.run { capturedTask?.sentTextFrames ?? [] }
+        XCTAssertFalse(
+            legacySentFrames.contains { $0.contains("app_operation_result") },
+            "legacy playback has no operation to settle, so no result frame is sent"
+        )
+    }
+
+    /// "MALFORMED v1 NEVER FALLS BACK" — the subject is an INCOMPLETE IDENTITY-BEARING v1 frame,
+    /// not an identity-less one.
+    ///
+    /// The earlier version of this control sent no identity at all and asserted a refusal. That
+    /// contradicted the compatibility ruling: a frame with neither field is the established
+    /// pre-v1 playback path and is supposed to run. Here the frame DECLARES v1 by sending
+    /// `operation_id` and omitting `capability_version`, so it is an app-operation attempt that
+    /// cannot be admitted — it must refuse and never reach legacy playback.
+    func testIncompleteIdentityBearingV1FrameRefusesWithoutExecutingAndWithoutALegacyEffect() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"3f8b2d61-4c07-4a93-9e15-7b02d8c64af0","tool":"playback","action":"seek_to","params":{"position_seconds":95}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1051,34 +1217,90 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         XCTAssertFalse(
             playback.calls.contains { if case .seekTo = $0 { return true }; return false },
-            "an identity-less cloud mutation must not execute (no legacy fallback)"
+            "an incomplete v1 identity must not execute, by the v1 gate or as legacy playback"
         )
-        let refused = consumer.consumed.filter { $0.result.outcome == .refused }
-        XCTAssertEqual(refused.first?.result.reason, OperationReason.unsupportedOperation)
-        try await Task.sleep(nanoseconds: 100_000_000)
-        let sentFrames = await MainActor.run { capturedTask?.sentTextFrames ?? [] }
-        XCTAssertFalse(
-            sentFrames.contains { $0.contains("app_operation_result") },
-            "no result frame is sent for an operation the server never identified"
-        )
+        // The parser drops a malformed identity entirely (`classify` → `.malformedIdentity` → no
+        // event), so zero effects is the whole claim here; there is no consumed result to assert.
+        XCTAssertTrue(consumer.consumed.isEmpty, "no result is consumed for a frame the server never admitted")
+    }
+
+    /// CROSS-TURN CONFLICTING ID (cloud-assistant.md @ bf5fb219): an operation id is
+    /// turn-bound. The same id arriving in a LATER turn is a different operation — refined from
+    /// the earlier turn's admission — so it is refused before any effect and never resolved
+    /// against the earlier turn's record. What must NOT happen is the dangerous middle: executing
+    /// a later turn's action under an identity the journal already holds.
+    func testSameOperationIdInALaterTurnIsAConflictNotAReplay() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"d91271a2-15d3-49ab-aacc-ccbc9e01cfca","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cross-turn-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-cross-1")
+        let firstFrame = try await awaitResultFrame(operationId: "d91271a2-15d3-49ab-aacc-ccbc9e01cfca")
+        XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
+
+        // A SECOND turn (its own request id and its own admitted turn) redelivers the same id.
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"d91271a2-15d3-49ab-aacc-ccbc9e01cfca","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-cross-2")
+        let secondFrame = try await awaitResultFrame(operationId: "d91271a2-15d3-49ab-aacc-ccbc9e01cfca")
+        XCTAssertEqual(secondFrame["outcome"] as? String, "refused",
+                       "an id from another turn is not replayed as this turn's operation")
+        XCTAssertEqual(secondFrame["reason"] as? String, OperationReason.invalidRequest)
+        XCTAssertNoThrow(try XCTUnwrap(secondFrame))
     }
 
     // MARK: - Typed journal persistence/replay + action-outcome propagation
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-    private func awaitResultFrame(operationId: String, timeout: TimeInterval = 5) async throws -> [String: Any] {
+    ///
+    /// `on:` names the EXACT task to inspect. Defaulting to `capturedTask` is only correct when a
+    /// suite's factory is the one assigning it; a test that builds its own client must hand over
+    /// its own task, or the helper silently inspects nil and reports zero frames for a send that
+    /// happened. The label is carried purely so a failure says which task was read.
+    private func awaitResultFrame(operationId: String, timeout: TimeInterval = 5,
+                                  on explicitTask: StubWebSocketTask? = nil,
+                                  label taskLabel: String = "capturedTask") async throws -> [String: Any] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let frame: [String: Any]? = await MainActor.run {
-                capturedTask?.sentTextFrames.compactMap {
+                let task = explicitTask ?? self.capturedTask
+                return task?.sentTextFrames.compactMap {
                     try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
                 }.first { ($0["type"] as? String) == "app_operation_result" && ($0["operation_id"] as? String) == operationId }
             }
             if let frame { return frame }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        throw XCTSkip("no result frame arrived") // replaced by a hard failure below
+        // A MISSING FRAME IS A FAILURE, NOT A SKIP. This helper previously threw `XCTSkip`, which
+        // silently converted "the operation was never answered" — the exact behavior these
+        // controls exist to catch — into a green-looking skip. Six controls were reporting as
+        // skipped for that reason alone.
+        let sent = await MainActor.run { (explicitTask ?? self.capturedTask)?.sentTextFrames ?? [] }
+        let label = await MainActor.run {
+            (explicitTask ?? self.capturedTask)?.diagnosticLabel ?? "none"
+        }
+        XCTFail("""
+            no app_operation_result frame arrived for \(operationId) within \(timeout)s.
+            inspected task: \(taskLabel) (label \(label))
+            frames on it (\(sent.count)): \(sent)
+            """)
+        throw CancellationError()
     }
 
     /// FULL TYPED REPLAY control: the same server-issued operation_id delivered across two turns
@@ -1090,7 +1312,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // contaminate a pause-call count. A seek has no such second writer.
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-redeliver-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1102,10 +1324,27 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // A's SETTLED state S: position 77 at the moment A finishes.
         playback.setPositionMs(77_000)
 
+        // ONE MANAGER FOR THE WHOLE CONTROL: the identity is prepared here, the initial claim is
+        // recorded by a turn routed on THIS manager, and the replay re-presents it on the same one.
+        // `prepare` retains every utterance prepared inside the live window, so re-preparing "u-22"
+        // yields the SAME requestId and conversationId — the real preparation path, not a
+        // fabricated identity and not two independently opened conversations.
+        let rehearsalManager = testConversationManager()
+        // BOTH identities carry the ACTUAL delivered action bytes. Omitting them would compare two
+        // empty digests — agreement between two helper defaults, not evidence about the claim.
+        let deliveredAction = try XCTUnwrap(
+            Self.deliveredPayload(for: "283bc9cc-1700-4596-af9e-94b930efccfd", in: self.pendingFixture ?? ""))
+        let originalIdentity = try XCTUnwrap(
+            Self.mintedIdentity(for: "u-22", manager: rehearsalManager, bytes: deliveredAction))
+
         // Turn 1: executes and settles succeeded with the typed state.
-        let sink1 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        // THE ORIGINAL MANAGER: this is the turn whose identity the claim is recorded under, so the
+        // rehearsal and the real claim must be the same manager, not two independently opened ones.
+        let sink1 = makeSinkWithConsumer(RecordingResultConsumer(),
+                                         conversationManager: rehearsalManager,
+                                         operationJournal: journal)
         _ = await sink1.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
-        let firstFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
+        let firstFrame = try await awaitResultFrame(operationId: "283bc9cc-1700-4596-af9e-94b930efccfd")
         XCTAssertEqual(firstFrame["outcome"] as? String, "succeeded")
         let firstState = try XCTUnwrap(firstFrame["state"] as? [String: Any], "a success frame carries the resulting state")
         XCTAssertEqual(firstState["position_seconds"] as? Int, 77, "S: A settled at position 77")
@@ -1114,7 +1353,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Turn 2: an UNRELATED operation B settles and moves the LIVE state (playing=false).
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-unrelated-b","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+            data: {"operation_id":"3e8af81c-fb7d-4f05-ae9b-9cf72b0b48b3","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1122,7 +1361,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
         _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-23")
-        _ = try await awaitResultFrame(operationId: "op-unrelated-b")
+        _ = try await awaitResultFrame(operationId: "3e8af81c-fb7d-4f05-ae9b-9cf72b0b48b3")
         // T: unrelated live drift AFTER A settled.
         playback.setPositionMs(9999_000)
 
@@ -1131,16 +1370,43 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // not the live state T that B created.
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-redeliver-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         let reloadedJournal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: reloadedJournal)
-        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-24")
-        let replayFrame = try await awaitResultFrame(operationId: "op-redeliver-1")
+        // THE SAME RETAINED TURN RE-PRESENTING A: the replay arrives on the identity the claim was
+        // recorded under — same owner, conversation, turn and delivered bytes. A DIFFERENT turn
+        // redelivering the same id is a conflict, and the separate later-turn control asserts that.
+        let sink2 = makeSinkWithConsumer(RecordingResultConsumer(),
+                                         conversationManager: rehearsalManager,
+                                         operationJournal: reloadedJournal)
+        _ = await sink2.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-22")
+        // THE REPLAY REALLY IS THE ORIGINAL IDENTITY, not merely a green frame: re-preparation of
+        // the retained utterance must yield the very same request turn and conversation the claim
+        // was recorded under. If this drifted, the replay control would be passing on a conflict
+        // path rather than a replay path.
+        let replayedIdentity = try XCTUnwrap(
+            Self.mintedIdentity(for: "u-22", manager: rehearsalManager, bytes: deliveredAction))
+        XCTAssertEqual(replayedIdentity.owner, originalIdentity.owner)
+        XCTAssertEqual(replayedIdentity.conversation, originalIdentity.conversation,
+                       "re-presenting a retained utterance keeps its conversation")
+        XCTAssertEqual(replayedIdentity.turn, originalIdentity.turn,
+                       "a redelivery is the SAME turn re-presenting, not a newly admitted one")
+        XCTAssertEqual(replayedIdentity.actionDigest, originalIdentity.actionDigest,
+                       "the delivered bytes are identical, so the digest is too")
+        // REAL STORED CLAIM, not a helper self-comparison. The journal exposes no record reader, so
+        // the claim itself is the probe: an identity that matches the durable record answers
+        // `.alreadyRun` with the settled result, and anything else is `.identityConflict`.
+        // The stored state is asserted as ITSELF, not merely as "some settled result": a replay that
+        // matched the identity but answered with a different envelope would still be wrong.
+        XCTAssertEqual(journal.claim("283bc9cc-1700-4596-af9e-94b930efccfd", identity: originalIdentity),
+                       OperationClaim.alreadyRun(.succeeded(state: ["position_seconds": .int(77),
+                                                                   "playing": .bool(false)])),
+                       "the durable record is settled under exactly this identity and state")
+        let replayFrame = try await awaitResultFrame(operationId: "283bc9cc-1700-4596-af9e-94b930efccfd")
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
         let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success carries A's SETTLED state")
         XCTAssertEqual(replayState["position_seconds"] as? Int, 77, "A's SETTLED position S, not the live drift T")
@@ -1153,13 +1419,1169 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1, "the effect never runs twice")
     }
 
+    /// POSITIVE live parser→sink case: a request whose stated episode IS the current one must
+    /// EXECUTE exactly once. This is the control that the v5 defect failed — the parser attached a
+    /// stale violation to every well-formed request, so nothing ever ran.
+    func testMatchingEpisodeExecutesExactlyOnceThroughTheLivePath() async throws {
+        let operationId = "5c8b1e40-7d92-4a36-b8f1-09c7d2e3a4b5"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                       conversationManager: testConversationManager(),
+                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+                                       currentEpisodeId: { Self.testEpisodeId })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-match")
+
+        let relativeSeeks = playback.calls.filter {
+            if case .seekRelative = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(relativeSeeks.count, 1, "a matching target must execute exactly once")
+        let frame = try await awaitResultFrame(operationId: operationId)
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded",
+                       "a valid request is not refused: \(String(describing: frame["reason"]))")
+    }
+
+    /// NEGATIVE: the same request with a target that is no longer current runs ZERO effects.
+    func testNonMatchingEpisodeExecutesNothing() async throws {
+        let operationId = "7e2d9f51-8a63-4b47-9c02-1d3e4f5a6b7c"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-abandoned"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                       conversationManager: testConversationManager(),
+                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+                                       currentEpisodeId: { "ep-now-playing" })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-nomatch")
+
+        XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                      "a non-matching target must run nothing: \(playback.calls)")
+        let frame = try await awaitResultFrame(operationId: operationId)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
+    }
+
+    /// A TURN THAT DIES BEFORE AUTHENTICATION MUST STILL TERMINATE the consumer. The owner is
+    /// completed at first action, so nothing waits on it — but the previous design blocked stream
+    /// consumption on a continuation that only the publish path resolved, and an invalid URL
+    /// returns before publishing. This control pins the observable property either way: the turn
+    /// completes and the identified operation is refused rather than hanging.
+    func testInvalidURLTurnTerminatesWithoutPublishingAnOwner() async throws {
+        let operationId = "9d41c7ba-50e3-4a62-b1f8-7c0d3e5a8b29"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let store = InMemoryOperationRecordStore()
+        let journal = OperationJournal(store: store)
+        // A base URL that cannot be turned into a websocket URL: the client returns BEFORE it ever
+        // acquires a credential, so the socket never publishes a session.
+        let sink = CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient(
+                    baseURL: "not-a-url",
+                    userId: "user_test",
+                    requestTimeoutSeconds: 5,
+                    tokenProvider: Self.pairedTestProvider()
+                )
+            },
+            isConfigured: { true },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: testConversationManager()
+        )
+        let completed = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-badurl")
+        }
+        let terminated = try await timeoutProbe(completed, nanoseconds: 5_000_000_000)
+        XCTAssertTrue(terminated, "the turn must terminate, not strand the consumer")
+        XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                      "no principal ⇒ no effect: \(playback.calls)")
+        XCTAssertNil(store.load()[operationId], "and nothing is journaled")
+    }
+
+    /// CANCELLATION WHILE THE ACQUISITION IS SUSPENDED. The provider never releases the gate, so
+    /// the turn can only end by cancellation — and it must end for the consumer, not wait on
+    /// provider cooperation that will never come.
+    func testCancellationDuringAcquisitionStillTerminatesTheTurn() async throws {
+        let provider = DelayedAcquisitionTokenProvider(
+            credential: "never-released", accountId: "never-owner")
+        let sink = CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    baseURL: "https://cloud.test",
+                    fixture: "",
+                    tokenProvider: provider
+                ).client
+            },
+            isConfigured: { true },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            conversationManager: testConversationManager()
+        )
+        let turn = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-cancel-acq")
+        }
+        // Let it reach the acquisition, then cancel while the provider is still suspended.
+        var reached = false
+        for _ in 0..<200 {
+            if provider.acquisitionCount > 0 { reached = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(reached, "the turn reached the acquisition seam")
+        turn.cancel()
+        let terminated = try await timeoutProbe(turn, nanoseconds: 5_000_000_000)
+        XCTAssertTrue(terminated,
+                      "cancellation must terminate the turn without waiting for the provider")
+    }
+
+    /// THE OWNER IS COMPLETED AT FIRST USE, NOT SAMPLED AT ADMISSION. `routeWithResultSocket`
+    /// starts the transport in an unstructured Task and returns, so the validated acquisition can
+    /// complete well after the sink resumed. Sampling the socket then binds an EMPTY owner to a
+    /// turn that subsequently authenticates fine — the operation refuses, silently, for no reason
+    /// the caller can see.
+    ///
+    /// This control holds the acquisition shut through admission, then releases it, and asserts
+    /// the journaled owner came from that same late fixture — and that the credential on the wire
+    /// is the fixture's, so owner and credential are provably one acquisition rather than two
+    /// reads that happen to agree.
+    /// THE TWO ANSWERS THAT MUST NOT BE CONFLATED. Before this turn acquires, the ownership
+    /// question is OPEN and the box must stay incomplete; once the acquisition is frozen — even as
+    /// an explicit nil, i.e. "this turn has no principal" — the question is SETTLED and asking
+    /// again must not change the answer. Marking the box complete while the freeze is absent
+    /// settled the identity as "no owner" before acquisition could ever be observed, which is how
+    /// a late acquisition could never reach the gate.
+    func testOwnerBoxDistinguishesNotYetAcquiredFromAnExplicitNoPrincipal() async throws {
+        let box = await MainActor.run {
+            CloudRouteSink.admittedTurnBoxForTesting(conversation: "c-notyet", turn: "t-notyet")
+        }
+        let socket = AppOperationResultSocket(requestId: "u-notyet")
+
+        // (1) NOT YET ACQUIRED: asking is non-destructive and leaves the box open.
+        let beforeAcquisition = await MainActor.run { box.completing(from: socket) }
+        XCTAssertTrue(beforeAcquisition.owner.isEmpty,
+                      "an unacquired turn has no owner yet — and that is NOT an answer")
+        XCTAssertEqual(beforeAcquisition.conversation, "c-notyet")
+        XCTAssertEqual(beforeAcquisition.turn, "t-notyet")
+        XCTAssertEqual(beforeAcquisition.sessionCredential, "",
+                       "no credential may be invented before any acquisition")
+
+        // (2) THE ACQUISITION LANDS: now the SAME socket answers, proving (1) did not settle it.
+        await MainActor.run { socket.freezeAcquisition(CloudAuthenticatedSession(
+            accountId: "acct-late", accessToken: "credential-late")) }
+        let afterAcquisition = await MainActor.run { box.completing(from: socket) }
+        XCTAssertEqual(afterAcquisition.owner, "acct-late",
+                       "a late acquisition completes the owner, so the earlier ask settled nothing")
+        XCTAssertEqual(afterAcquisition.sessionCredential, "credential-late")
+
+        // (3) AN EXPLICIT NO-PRINCIPAL IS A COMPLETED ANSWER on a box that has not completed.
+        let blankBox = await MainActor.run {
+            CloudRouteSink.admittedTurnBoxForTesting(conversation: "c-noprincipal", turn: "t-noprincipal")
+        }
+        let blankSocket = AppOperationResultSocket(requestId: "u-noprincipal")
+        await MainActor.run { blankSocket.freezeAcquisition(nil) }
+        let noPrincipal = await MainActor.run { blankBox.completing(from: blankSocket) }
+        XCTAssertTrue(noPrincipal.owner.isEmpty,
+                      "a frozen nil is no trusted owner, and the gate refuses it")
+        // ...and it is STICKY: a principal arriving afterwards must not take over the answer.
+        await MainActor.run { blankSocket.authenticatedSession = CloudAuthenticatedSession(
+            accountId: "acct-intruder", accessToken: "credential-intruder") }
+        let stillNoPrincipal = await MainActor.run { blankBox.completing(from: blankSocket) }
+        XCTAssertEqual(stillNoPrincipal.owner, "",
+                       "the completed no-principal answer must not be relabelled afterwards")
+    }
+
+    func testOwnerIsCompletedAtFirstActionWhenAcquisitionLandsAfterRouting() async throws {
+        let operationId = "5c1e8f42-7a3b-4d05-9c68-2f4b7e9a1d03"
+        let provider = DelayedAcquisitionTokenProvider(
+            credential: "delayed-credential", accountId: "delayed-owner")
+        let store = InMemoryOperationRecordStore()
+        let journal = OperationJournal(store: store)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // CAPTURE THE TASK THE FACTORY BUILDS. Returning only `.client` discarded the transport the
+        // frames were written to, so the later XCTUnwrap(capturedTask) inspected nil and the
+        // credential assertion below could never have observed the wire.
+        var turnTask: StubWebSocketTask?
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    tokenProvider: provider
+                )
+                turnTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            // THE MATCHING TARGET OBSERVER. The fixture's precondition names `ep-task67`, so without
+            // a provider the sink cannot confirm the current target and the operation is refused as
+            // unavailable — which would make the late-acquisition variable untestable here. The
+            // missing-observer NEGATIVE lives in its own control
+            // (`testSinkWithNoTargetObserverRefusesEpisodeRelativeEffect`) and stays untouched.
+            // Declared in SIGNATURE order: the provider precedes the context state.
+            currentEpisodeIdProvider: { Self.testEpisodeId },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: testConversationManager()
+        )
+
+        // The turn has been routed but the acquisition is still shut.
+        let turn = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-delayed")
+        }
+        var observedWaiting = false
+        for _ in 0..<200 {
+            if provider.acquisitionCount > 0 { observedWaiting = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(observedWaiting, "the client did reach the acquisition seam")
+
+        provider.release()
+        _ = await turn.value
+        // The refusal path is not what is being tested; if the action ran, ownership resolved.
+        let seeks = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }
+        XCTAssertEqual(seeks.count, 1,
+                       "ownership is completed at first use, so a late acquisition is not a denial: \(playback.calls)")
+        // Read the DURABLE record, not an in-sink field: the owner that matters is the one the
+        // exactly-once record carries, since that is what a restart replays against.
+        let persisted = try XCTUnwrap(store.load()[operationId],
+                                      "the operation was admitted, so it is durably recorded")
+        guard case let .finished(identity, _) = persisted else {
+            return XCTFail("expected a settled record, got \(persisted)")
+        }
+        XCTAssertEqual(identity.owner, "delayed-owner",
+                       "the journaled owner is the one that supplied the credential")
+        // THE NEGATIVE CASES STAY: the target observer is live (`ep-task67`), so this operation is
+        // not refused for lack of a target, and the only thing under test is late ownership.
+        let liveTarget = await MainActor.run { sink.activeResultSocketForTesting != nil }
+        XCTAssertTrue(liveTarget, "the turn published a result socket, so admission completed")
+        let captured = try XCTUnwrap(turnTask, "the factory returned the task this turn wrote to")
+        let sent = await MainActor.run { captured.sentTextFrames }
+        let authFrame = try XCTUnwrap(sent.first { $0.contains("\"type\":\"authenticate\"") })
+        XCTAssertTrue(authFrame.contains("delayed-credential"),
+                      "the transmitted credential is the SAME fixture: \(authFrame)")
+    }
+
+    /// POST-TERMINAL PREDECESSOR CLEANUP MUST NOT CLOSE THE SUCCESSOR.
+    ///
+    /// A successor can only become live through the contract's OWN acknowledgement path: the
+    /// predecessor's `done` resolves the interruption (`markAcknowledgement(.acknowledged)`), and
+    /// only then may B submit. An earlier revision of this control held A mid-receive with no
+    /// terminal, which the production ordering can never acknowledge — B was built and then ended
+    /// locally without ever receiving. This control therefore drives the real ordering:
+    /// A runs a real action, A's `done` acknowledges, B parks at its own receive, and only THEN is
+    /// A cancelled. The property is stated for what it is — post-terminal predecessor cleanup —
+    /// and does NOT claim cancellation of an unfinished effect while B is live.
+    func testPostTerminalPredecessorCleanupDoesNotCloseTheSuccessorSocket() async throws {
+        let operationId = "d95b1e23-4f60-4c80-b137-a02e8d5f9c74"
+        // A's action is held at the effect gate BEFORE its effect. `done` is already behind that
+        // action in the same receive loop, so it cannot be consumed until the gate is released —
+        // releasing the gate is what lets the acknowledgement happen at all.
+        let entered = HoldLatch()
+        let release = HoldLatch()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":120},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                        conversationManager: testConversationManager(),
+                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()))
+        await MainActor.run {
+            sink.effectGate = { _ in
+                entered.release()                      // bounded "entered" signal
+                await release.waitUntilReleased()      // suspension, not a spin
+            }
+        }
+        let clientsBeforeA = await MainActor.run { self.clientCreationCount }
+        let owner = Task {
+            await sink.routeToCloud(request: "a", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-held-prior")
+        }
+        let successorGate = HoldLatch()
+        var successor: Task<CloudRouteResult, Never>?
+        // AWAITED CLEANUP ON EVERY PATH, including a throw: `defer` cannot await, so the work
+        // below is wrapped and the catch joins before rethrowing.
+        func cleanupTurns() async {
+            successorGate.release()
+            release.release()
+            owner.cancel()
+            successor?.cancel()
+            _ = await owner.value
+            if let successor { _ = await successor.value }
+        }
+        do {
+        await entered.waitUntilReleased()
+        let socketA = try XCTUnwrap(capturedTask, "A's socket")
+        let publishedASocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let resultSocketA = try XCTUnwrap(publishedASocket, "A published its own result socket")
+        let aOpenWhileHeld = await MainActor.run { socketA.cancelled == nil }
+        XCTAssertTrue(aOpenWhileHeld, "premise: A's socket is open while its effect is held")
+
+        // B is admitted WHILE A is still held, so its interrupt is claimed against a live prior
+        // turn — the real barge-in shape. B then waits for that interruption to be acknowledged.
+        self.pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        self.pendingDeclaredPark = successorGate
+        self.pendingDeclaredParkAfterFrames = 0
+        successor = Task {
+            await sink.routeToCloud(request: "b", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-successor")
+        }
+        // B MUST HAVE ACTUALLY INTERRUPTED A LIVE A. Merely starting B's Task and releasing A's
+        // gate at once proves nothing about ordering: the interrupt could be attempted after A had
+        // already terminated. So wait, bounded, for the interrupt frame to LEAVE ON A'S SOCKET
+        // while A is still held, and fail the premise if it never appears.
+        var interruptSeen = false
+        var waitedInterrupt = 0
+        while !interruptSeen && waitedInterrupt < 500 {
+            let held = await MainActor.run { socketA.cancelled == nil }
+            if !held { break }
+            interruptSeen = await MainActor.run { socketA.sentInterrupt }
+            if !interruptSeen { try await Task.sleep(nanoseconds: 10_000_000) }
+            waitedInterrupt += 1
+        }
+        guard interruptSeen else {
+            await cleanupTurns()
+            return XCTFail("premise failed: B never sent an interrupt on A's socket while A was live")
+        }
+        let aStillHeldAtInterrupt = await MainActor.run { socketA.cancelled == nil }
+        XCTAssertTrue(aStillHeldAtInterrupt,
+                      "the interrupt was sent while A was still live — a real barge-in, not a sequel")
+
+        // RELEASING A'S EFFECT GATE IS WHAT PRODUCES THE ACKNOWLEDGEMENT: A's action completes,
+        // A's receive loop reaches `done`, and that terminal marks the interruption acknowledged.
+        release.release()
+        _ = await owner.value
+
+        // NOW B PROCEEDS — through the ordinary path, not a bypass — to its own receive park.
+        var socketB: StubWebSocketTask?
+        var waited = 0
+        var premise = "no second client was ever built"
+        while waited < 500 {
+            let observation = await MainActor.run {
+                (count: self.clientCreationCount,
+                 task: self.capturedTask,
+                 parked: self.capturedTask?.didParkInReceive ?? false)
+            }
+            if observation.count < clientsBeforeA + 2 {
+                premise = "only \(observation.count - clientsBeforeA) of 2 client(s) built"
+            } else if let task = observation.task, task !== socketA {
+                if observation.parked {
+                    socketB = task
+                    break
+                }
+                premise = "B's own task is built but never parked in its receive"
+            } else {
+                premise = "a client was built but capturedTask is still A's"
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            waited += 1
+        }
+        guard let socketB else {
+            await cleanupTurns()
+            return XCTFail("premise failed after 5s: \(premise)")
+        }
+        XCTAssertFalse(socketA === socketB, "the turns have distinct sockets")
+        let sentByBBefore = await MainActor.run { socketB.sentTextFrames.count }
+        let bOpenWhileLive = await MainActor.run { socketB.cancelled == nil }
+        XCTAssertTrue(bOpenWhileLive, "premise: B's socket is open while B is genuinely live")
+
+        // REPEATED PREDECESSOR-REGISTRATION CLEANUP. `owner.cancel()` after the owner has already
+        // RETURNED cancels a completed task and runs no cancellation handler, so it would not
+        // execute the cleanup being claimed. Instead the turn's OWN retained result socket is
+        // exercised through its existing idempotent `finishTurn()`, which is exactly what a
+        // repeated post-terminal cleanup does to that registration.
+        let aRetiredBefore = await MainActor.run { socketA.cancelled != nil }
+        XCTAssertTrue(aRetiredBefore, "A's socket retired when its own turn ended")
+        await MainActor.run { resultSocketA.finishTurn() }
+        await MainActor.run { resultSocketA.finishTurn() }
+
+        let bClosed = await MainActor.run { socketB.cancelled != nil }
+        XCTAssertFalse(bClosed, "repeated predecessor-registration cleanup must not close the successor")
+        let bStillOpenAfter = await MainActor.run { socketB.cancelled == nil }
+        XCTAssertTrue(bStillOpenAfter, "B remains open after the predecessor's registration is cleaned")
+
+        let sentByBAfter = await MainActor.run { socketB.sentTextFrames.count }
+        XCTAssertEqual(sentByBAfter, sentByBBefore,
+                       "no result for A's operation may be sent on B's socket")
+        } catch {
+            await cleanupTurns()
+            throw error
+        }
+        await cleanupTurns()
+    }
+
+    /// TWO ACTIONS, ONE TURN, SESSION SWITCHED IN BETWEEN. The identity is completed once and
+    /// stored, so the second action must be judged against the account the turn ADMITTED, not
+    /// against whatever the socket names at the moment it is handled. A pure "complete per call"
+    /// function passes this test only if the socket never changes — which is the case it misses.
+    func testSecondActionOnOneTurnCannotRecaptureADifferentAccount() async throws {
+        let manager = testConversationManager()
+        let store = InMemoryOperationRecordStore()
+        let journal = OperationJournal(store: store)
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let firstId = "b73f9c01-2d4e-4a86-9f15-8c0e6b3d7a52"
+        let secondId = "c84a0d12-3e5f-4b97-a026-9d1f7c4e8b63"
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(""),
+                    tokenProvider: Self.pairedTestProvider()
+                )
+                self.capturedTask = built.task
+                self.capturedClient = built.client
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: manager
+        )
+        self.pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        hookedSink = sink
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-two-actions")
+        // Resolved into a local BEFORE XCTUnwrap: its argument is an autoclosure, which cannot
+        // carry an `await`. Swept wherever this shape appears, not just here.
+        let liveSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let socket = try XCTUnwrap(liveSocket)
+        let client = try XCTUnwrap(capturedClient)
+        let box = await MainActor.run {
+            CloudRouteSink.admittedTurnBoxForTesting(
+                conversation: "2d5b0e81-7c3a-4f62-b904-18e3c5a9d7f1",
+                turn: "8e0c35f6-9d4b-4a17-8f26-42c6b1f05e99")
+        }
+
+        // FIRST action: the turn's own account.
+        await sink.executeActionForTesting(
+            action: "seek_relative", params: ["delta_seconds": .int(5)],
+            operationId: firstId, capabilityVersion: "app-ops/1",
+            actionBytes: Self.deliveredPayload(for: firstId, in: """
+                event: action
+                data: {"operation_id":"\(firstId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+                """)?.data(using: .utf8),
+            precondition: ["episode_id": .string(Self.testEpisodeId)],
+            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client
+        )
+
+        // The account on the live socket switches BEFORE the second action is handled.
+        socket.authenticatedSession = CloudAuthenticatedSession(
+            accountId: "account-SWITCHED", accessToken: "credential-SWITCHED")
+
+        // SECOND action on the SAME turn and the SAME box.
+        await sink.executeActionForTesting(
+            action: "seek_relative", params: ["delta_seconds": .int(7)],
+            operationId: secondId, capabilityVersion: "app-ops/1",
+            actionBytes: Self.deliveredPayload(for: secondId, in: """
+                event: action
+                data: {"operation_id":"\(secondId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":7},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+                """)?.data(using: .utf8),
+            precondition: ["episode_id": .string(Self.testEpisodeId)],
+            admittedTurnBox: box, admittedTurnSocket: socket, admittedTurnClient: client
+        )
+
+        let records = store.load()
+        let first = try XCTUnwrap(records[firstId], "the first action was admitted")
+        guard case let .finished(firstIdentity, _) = first else {
+            return XCTFail("expected the first action to settle, got \(first)")
+        }
+        XCTAssertEqual(firstIdentity.owner, "test-owner",
+                       "the first action belongs to the account that authenticated")
+        // The second must ALSO be judged against that account. Under the switched socket, if the
+        // identity were recaptured per call, it would be journaled under account-SWITCHED.
+        if let second = records[secondId] {
+            guard case let .finished(secondIdentity, _) = second else { return }
+            XCTAssertEqual(secondIdentity.owner, "test-owner",
+                           "a second action cannot be relabelled by a later account switch")
+        }
+        XCTAssertFalse(records.values.contains { record in
+            if case let .finished(identity, _) = record { return identity.owner == "account-SWITCHED" }
+            return false
+        }, "no operation may be journaled under an account the turn never admitted: \(records)")
+    }
+
+    /// A DELAYED PRIOR-TURN ACTION MUST NOT RIDE THE SUCCESSOR. Turn A's action is delivered after
+    /// turn B has been admitted and has replaced the live socket. The operation must be refused and
+    /// answered on A's OWN socket — never attributed to B, never sent on B's socket.
+    ///
+    /// This is the control for reading the mutable `activeResultSocket` as evidence of ownership:
+    /// with that read, A's late action would be checked against B's session, pass the
+    /// "still the admitted one" test on the wrong turn, and send a result frame on B.
+    /// BOUNDARY-LEVEL ACCOUNT CONTINUITY: THE CHECK MUST READ THE ADMITTED SOCKET, NOT THE LIVE ONE.
+    ///
+    /// A and B are admitted SEQUENTIALLY, so `activeResultSocket` now points at B while A's own
+    /// socket is retained. If the session re-check read the sink's live socket instead of the one
+    /// the identity was captured from, it would compare B's account against A's admitted owner and
+    /// — when those happened to agree — authorise A's operation. Here they deliberately DISAGREE:
+    /// A's mutable paired session is moved to a different account while B keeps the original, so a
+    /// control that read the live socket would journal and execute, and this one must refuse.
+    ///
+    /// This is a BOUNDARY-LEVEL ACCOUNT-CONTINUITY test of that binding, nothing wider:
+    /// `executeActionForTesting` enters below the turnLoop's cancellation/supersession guards, so
+    /// nothing here asserts anything about delivery ordering or turn liveness in production.
+    func testRetainedSocketAccountContinuityRefusesEvenWhenTheLiveSocketDisagrees() async throws {
+        let manager = testConversationManager()
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let aDelivery = HoldLatch()
+        self.pendingDeclaredPark = aDelivery
+        self.pendingDeclaredParkAfterFrames = 0
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                       operationJournal: journal)
+
+        let operationId = "e07c4b23-6a1d-4f89-b5c2-3d8e9a0f1b47"
+        self.pendingFixture = ""
+        let clientsBeforeA = await MainActor.run { self.clientCreationCount }
+        let turnA = Task {
+            await sink.routeToCloud(request: "a", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-prior")
+        }
+        let successorGate = HoldLatch()
+        var turnB: Task<CloudRouteResult, Never>?
+        func cleanupTurns() async {
+            aDelivery.release()
+            successorGate.release()
+            turnA.cancel()
+            turnB?.cancel()
+            _ = await turnA.value
+            if let turnB { _ = await turnB.value }
+        }
+        do {
+        var aParked = false
+        var waitedA = 0
+        while !aParked && waitedA < 500 {
+            aParked = await MainActor.run { self.capturedTask?.didParkInReceive ?? false }
+            if !aParked { try await Task.sleep(nanoseconds: 10_000_000) }
+            waitedA += 1
+        }
+        guard aParked else {
+            await cleanupTurns()
+            return XCTFail("premise failed: A never parked, so it is not a live prior turn")
+        }
+        let transportA = try XCTUnwrap(capturedTask, "turn A's transport was captured")
+        let clientA = try XCTUnwrap(capturedClient, "turn A's client was captured")
+        let publishedSocketA = await MainActor.run { sink.activeResultSocketForTesting }
+        let resultSocketA = try XCTUnwrap(publishedSocketA, "A published its own result socket")
+
+        // A'S BOX AND IDENTITY ARE COMPLETED FROM A'S OWN FROZEN ACQUISITION, BEFORE ITS TERMINAL.
+        let identity = try XCTUnwrap(Self.mintedIdentity(for: "u-prior", manager: manager,
+                                                         bytes: Self.lateActionPayload(operationId)))
+        let box = await MainActor.run {
+            CloudRouteSink.admittedTurnBoxForTesting(
+                conversation: identity.conversation, turn: identity.turn)
+        }
+        let aIdentity = await MainActor.run { box.completing(from: resultSocketA) }
+        XCTAssertEqual(aIdentity.owner, "test-owner",
+                       "A's box is completed from A's OWN frozen acquisition, not a later account")
+
+        // A TERMINATES FIRST, ON ITS OWN. No B exists yet, so this is not an acknowledgement.
+        await MainActor.run { transportA.appendInboundText(#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#) }
+        aDelivery.release()
+        var aServed = false
+        var waitedServed = 0
+        while !aServed && waitedServed < 500 {
+            aServed = await MainActor.run { transportA.servedInboundTexts.contains { $0.contains(#""type":"done""#) } }
+            if !aServed { try await Task.sleep(nanoseconds: 10_000_000) }
+            waitedServed += 1
+        }
+        XCTAssertTrue(aServed, "premise: A's own terminal was served, ending A's turn")
+        _ = await turnA.value
+
+        // ORDINARY SEQUENTIAL ADMISSION: B is simply the next turn and parks with the ORIGINAL
+        // account, so a live-socket read would find a session that AGREES with A's admitted owner.
+        self.pendingFixture = """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        self.pendingDeclaredPark = successorGate
+        self.pendingDeclaredParkAfterFrames = 0
+        turnB = Task {
+            await sink.routeToCloud(request: "b", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-successor")
+        }
+        var transportB: StubWebSocketTask?
+        var waitedB = 0
+        var premise = "no second client was ever built"
+        while waitedB < 500 {
+            let observation = await MainActor.run {
+                (count: self.clientCreationCount,
+                 task: self.capturedTask,
+                 parked: self.capturedTask?.didParkInReceive ?? false)
+            }
+            if observation.count < clientsBeforeA + 2 {
+                premise = "only \(observation.count - clientsBeforeA) of 2 client(s) built"
+            } else if let task = observation.task, task !== transportA {
+                if observation.parked {
+                    transportB = task
+                    break
+                }
+                premise = "B's own task is built but never parked in its receive"
+            } else {
+                premise = "a client was built but capturedTask is still A's"
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            waitedB += 1
+        }
+        guard let transportB else {
+            await cleanupTurns()
+            return XCTFail("premise failed after 5s: \(premise)")
+        }
+        XCTAssertFalse(transportA === transportB, "the turns have distinct transports")
+        let sentByBBefore = await MainActor.run { transportB.sentTextFrames.count }
+
+        // THE DISAGREEMENT THIS CONTROL EXISTS FOR: the sink's live socket is now B's, and B still
+        // holds the ORIGINAL account, so reading the live socket would authorise A's operation.
+        let liveSocketIsB = await MainActor.run { sink.activeResultSocketForTesting !== resultSocketA }
+        XCTAssertTrue(liveSocketIsB, "the live socket is B's, not A's — the contrast is real")
+        let liveAccountIsOriginal = await MainActor.run {
+            sink.activeResultSocketForTesting?.authenticatedSession?.accountId
+        }
+        XCTAssertEqual(liveAccountIsOriginal, "test-owner",
+                       "a live-socket read would find an account that AGREES with A's owner")
+
+        // ONLY A'S OWN MUTABLE SESSION MOVES. A's frozen identity and full payload are untouched.
+        await MainActor.run { resultSocketA.authenticatedSession = CloudAuthenticatedSession(
+            accountId: "account-CHANGED", accessToken: "credential-CHANGED") }
+
+        await sink.executeActionForTesting(
+            action: "seek_relative", params: ["delta_seconds": .int(5)],
+            operationId: operationId, capabilityVersion: "app-ops/1",
+            actionBytes: Data(Self.lateActionPayload(operationId).utf8),
+            precondition: ["episode_id": .string(Self.testEpisodeId)],
+            admittedTurnBox: box, admittedTurnSocket: resultSocketA, admittedTurnClient: clientA
+        )
+
+        // A FRESH READ OF THE SAME BOX AFTER THE SESSION MOVED. Asserting on a local copy taken
+        // before the change would only re-assert what was already true then, which proves nothing
+        // about what the gate now sees; the box is asked again through the same socket.
+        let afterChangeOwner = await MainActor.run { box.completing(from: resultSocketA).owner }
+        XCTAssertEqual(afterChangeOwner, "test-owner",
+                       "the admitted owner stays frozen from A's original acquisition despite the change")
+        XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                      "the changed session must refuse before any effect: \(playback.calls)")
+        let sentByBAfter = await MainActor.run { transportB.sentTextFrames.count }
+        XCTAssertEqual(sentByBAfter, sentByBBefore,
+                       "nothing from A's operation may travel on B's socket")
+        XCTAssertNil(journal.result(for: operationId),
+                     "nothing may be settled under any account — including B's or the changed one")
+        } catch {
+            await cleanupTurns()
+            throw error
+        }
+        await cleanupTurns()
+    }
+
+    /// ACCOUNT SWITCH: the session on the turn's own socket no longer names the admitted account,
+    /// so the operation is refused rather than journaled under an identity that no longer holds.
+    func testAccountSwitchAfterAdmissionRefusesWithoutExecuting() async throws {
+    // Declared OUTSIDE `do` so the throwing path can release and join the turn.
+    let turnGate = HoldLatch()
+    var turn: Task<CloudRouteResult, Never>?
+    do {
+            let operationId = "a1d8e365-4f70-4c92-8b03-6e5f2a9d7c18"
+            let journal = OperationJournal(store: InMemoryOperationRecordStore())
+            // THE ORIGINAL ACTION FRAME, RETAINED INDEPENDENTLY OF ROUTING. `routeToCloud` CONSUMES
+            // `pendingFixture`, so the previous revision derived `actionBytes` from a fixture that by
+            // then contained only `done` — the bytes were nil and the operation was refused as
+            // unaccountable without the switch ever being consulted. The payload is captured here from
+            // the fixture text BEFORE routing hands it to the turn, and the routed turn itself carries
+            // no action, so nothing executes during admission.
+            let actionFixture = """
+                event: action
+                data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+                """
+            let retainedActionBytes = try XCTUnwrap(
+                Self.deliveredPayload(for: operationId, in: actionFixture),
+                "the original action payload is retained for the whole control").data(using: .utf8)
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+                """
+            // HOLD THE ORIGINAL TURN ALIVE AT AN AWAITED PARK, INSIDE `receive()`.
+            // `armedReceivePark` is awaited by the producer itself, so it BLOCKS that producer. The
+            // `onFrameReceived` hook that sets `declaredParkDidPark` only launches an unawaited Task
+            // and blocks nothing — it is not the hold and must not be treated as one.
+            // Threshold 0: `framesServedForPark` counts inbound `receive()` calls, and outbound
+            // authenticate is not one of them. This fixture's only inbound frame is the terminal
+            // `done`, so the FIRST `receive()` — which happens after credential acquisition — must
+            // park. That is the ordering this control needs: acquired, not yet terminated.
+            self.pendingDeclaredPark = turnGate
+            self.pendingDeclaredParkAfterFrames = 0
+            let manager = testConversationManager()
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                           conversationManager: manager,
+                                           operationJournal: journal)
+            // The turn is held inside the socket, so routing does NOT return yet.
+            turn = Task {
+                await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                        origin: cloudTestOrigin, selection: nil, utteranceId: "u-switch")
+            }
+            // RELEASE AND AWAIT ON EVERY EXIT: a failed assertion must not leave a parked producer, and
+            // the released turn must be JOINED so it cannot leak into the next test.
+            defer { turnGate.release() }
+            // PARKED SIGNAL FROM THE AWAITED PARK ITSELF: `didParkInReceive` is set inside `receive()`
+            // immediately before it suspends, so it reports the producer blocked AT the receive seam —
+            // the sole inbound frame is `done` and it has not been served.
+            var heldAtReceive = false
+            var waited = 0
+            while !heldAtReceive && waited < 500 {
+                heldAtReceive = await MainActor.run { self.capturedTask?.didParkInReceive ?? false }
+                if !heldAtReceive { try await Task.sleep(nanoseconds: 10_000_000) }
+                waited += 1
+            }
+            XCTAssertTrue(heldAtReceive,
+                          "the producer is parked inside the awaited receive() — the real hold")
+            // Hoisted: `XCTUnwrap` takes an autoclosure, which cannot carry `await`.
+            let publishedSocketValue = await MainActor.run { sink.activeResultSocketForTesting }
+            let publishedSocket = try XCTUnwrap(
+                publishedSocketValue, "the turn published a result socket")
+            let liveTurn = try XCTUnwrap(turn as Task<CloudRouteResult, Never>?, "the turn was started")
+            XCTAssertFalse(liveTurn.isCancelled, "the original turn is still live while the action is delivered")
+            // THE IDENTITY THIS TURN WAS ADMITTED UNDER, read back through the manager's own retained
+            // preparation (`prepare` memoises per utterance), so the gate is given the turn's REAL
+            // conversation/turn rather than minted stand-ins.
+            let admitted = try XCTUnwrap(Self.mintedIdentity(
+                for: "u-switch", manager: manager, bytes: ""),
+                "the turn's admitted identity is retained")
+            let admittedConversation = admitted.conversation
+            let admittedTurn = admitted.turn
+
+            // PRECONDITION: routing alone ran no effect. Without this the gate below would be
+            // unfalsifiable — an earlier execution would masquerade as this one's zero.
+            XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                          "the routed turn carried no action, so nothing executed: \(playback.calls)")
+
+            // The published session now belongs to a different account than the admitted one. This is
+            // the very object the turn published through, mutated WHILE THE TURN IS STILL LIVE and
+            // before the action is handed to the gate.
+            let liveSocket = publishedSocket
+            let liveClient = try XCTUnwrap(capturedClient, "the turn's own client")
+            // The ADMITTED account is still that of the turn that opened this socket; only now does the
+            // live session disagree. Recorded so the assertion below is about a real divergence.
+            let admittedAccount = await MainActor.run { liveSocket.authenticatedSession?.accountId }
+            XCTAssertFalse(admittedAccount?.isEmpty ?? true,
+                           "the turn admitted a real paired account to begin with")
+
+            // COMPLETE THE TURN'S OWNER **BEFORE** THE SWITCH. `completingOwner` derives the owner from
+            // the socket's CURRENT session, so completing after the switch would anchor the owner to
+            // the account that arrived second — and the gate would then (rightly) call it a conflict
+            // for the wrong reason. First completion wins and is sticky, so this capture is the turn's
+            // original owner for the rest of the control.
+            let turnBox = await MainActor.run {
+                CloudRouteSink.admittedTurnBoxForTesting(
+                    conversation: admittedConversation, turn: admittedTurn)
+            }
+            let completedOwner = await MainActor.run { turnBox.completing(from: liveSocket).owner }
+            XCTAssertEqual(completedOwner, admittedAccount,
+                           "the turn's completed owner IS the original account that opened this socket")
+
+            // NOW the switch: same socket object, different account.
+            liveSocket.authenticatedSession = CloudAuthenticatedSession(
+                accountId: "acct-SWITCHED", accessToken: "credential-SWITCHED")
+            let switchedAccount = await MainActor.run { liveSocket.authenticatedSession?.accountId }
+            XCTAssertNotEqual(switchedAccount, admittedAccount,
+                              "the live session genuinely diverged from the admitted one")
+            let reCompletedOwner = await MainActor.run { turnBox.completing(from: liveSocket).owner }
+            XCTAssertEqual(reCompletedOwner, completedOwner,
+                           "the completed owner stays sticky across the switch — the box is not relabelled")
+            let params: [String: CloudRouteJSONValue] = ["delta_seconds": .int(5)]
+            await sink.executeActionForTesting(
+                action: "seek_relative", params: params,
+                operationId: operationId, capabilityVersion: "app-ops/1",
+                actionBytes: retainedActionBytes,
+                precondition: ["episode_id": .string(Self.testEpisodeId)],
+                admittedTurnBox: turnBox,
+                admittedTurnSocket: liveSocket,
+                admittedTurnClient: liveClient
+            )
+
+            XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                          "an account switch must not execute under the old identity: \(playback.calls)")
+            XCTAssertNil(journal.result(for: operationId),
+                         "and must not be journaled under either account")
+
+            // JOIN THE ORIGINAL TURN. It is still parked; release it and wait for it to finish so no
+            // surviving task can leak into the next test.
+            turnGate.release()
+            _ = await turn?.value
+            XCTAssertTrue(turnGate.released, "the park was released exactly once")
+
+        } catch {
+            turnGate.release()
+            _ = await turn?.value
+            throw error
+        }
+    }
+
+    /// MATCHED-ACCOUNT POSITIVE CONTROL for the seam above: the SAME held-live turn, the SAME
+    /// completed owner, the SAME retained bytes and the SAME direct injection — but the live session
+    /// is never switched. It must EXECUTE once and settle durably. Without this, the zero-effect
+    /// result in the switch control could be explained by the turn being retired or by the
+    /// injection path being unable to run at all, neither of which is the account gate.
+    func testAccountUnchangedAtTheSameSeamExecutesOnceAndSettles() async throws {
+    // Declared OUTSIDE `do` so the throwing path can release and join the turn.
+    let turnGate = HoldLatch()
+    var turn: Task<CloudRouteResult, Never>?
+    do {
+            let operationId = "c4f2a9d8-1b63-4e07-8a52-6d9e3b0f7c15"
+            let journal = OperationJournal(store: InMemoryOperationRecordStore())
+            let actionFixture = """
+                event: action
+                data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+                """
+            let retainedActionBytes = try XCTUnwrap(
+                Self.deliveredPayload(for: operationId, in: actionFixture)).data(using: .utf8)
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+                """
+            // IDENTICAL SEAM to the switch control: the SAME AWAITED park inside `receive()`, entered
+            // by the first (post-acquisition) inbound receive, i.e. before the terminal `done`.
+            self.pendingDeclaredPark = turnGate
+            self.pendingDeclaredParkAfterFrames = 0
+            let manager = testConversationManager()
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                           conversationManager: manager,
+                                           operationJournal: journal)
+            turn = Task {
+                await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                        origin: cloudTestOrigin, selection: nil, utteranceId: "u-matched")
+            }
+            defer { turnGate.release() }
+            // EXPLICIT PARKED SIGNAL from the awaited park, same as the switch control.
+            var parked = false
+            var waited = 0
+            while !parked && waited < 500 {
+                parked = await MainActor.run { self.capturedTask?.didParkInReceive ?? false }
+                if !parked { try await Task.sleep(nanoseconds: 10_000_000) }
+                waited += 1
+            }
+            XCTAssertTrue(parked, "the producer is parked inside the awaited receive()")
+            let parkedSocketValue = await MainActor.run { sink.activeResultSocketForTesting }
+            let liveSocket = try XCTUnwrap(
+                parkedSocketValue, "the turn published a result socket")
+            let liveTurnA = try XCTUnwrap(turn as Task<CloudRouteResult, Never>?, "the turn was started")
+            XCTAssertFalse(liveTurnA.isCancelled, "the turn is still live when the action is delivered")
+
+            let admitted = try XCTUnwrap(Self.mintedIdentity(
+                for: "u-matched", manager: manager, bytes: ""))
+            let turnBox = await MainActor.run {
+                CloudRouteSink.admittedTurnBoxForTesting(
+                    conversation: admitted.conversation, turn: admitted.turn)
+            }
+            let owner = await MainActor.run { turnBox.completing(from: liveSocket).owner }
+            XCTAssertFalse(owner.isEmpty, "a paired account was established at admission")
+            let liveAccount = await MainActor.run { liveSocket.authenticatedSession?.accountId }
+            XCTAssertEqual(owner, liveAccount,
+                           "the live session still names the admitted account — the ONLY difference")
+
+            let params: [String: CloudRouteJSONValue] = ["delta_seconds": .int(5)]
+            await sink.executeActionForTesting(
+                action: "seek_relative", params: params,
+                operationId: operationId, capabilityVersion: "app-ops/1",
+                actionBytes: retainedActionBytes,
+                precondition: ["episode_id": .string(Self.testEpisodeId)],
+                admittedTurnBox: turnBox,
+                admittedTurnSocket: liveSocket,
+                admittedTurnClient: try XCTUnwrap(capturedClient)
+            )
+
+            // THE POSITIVE: one effect, and a durable settlement under the same owner.
+            XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 1,
+                           "with the account unchanged the operation executes exactly once: \(playback.calls)")
+            XCTAssertNotNil(journal.result(for: operationId),
+                            "and it settles durably — the seam is capable of a settlement")
+
+            // JOIN THE TURN so a surviving task cannot leak into the next test.
+            turnGate.release()
+            _ = await turn?.value
+
+        } catch {
+            turnGate.release()
+            _ = await turn?.value
+            throw error
+        }
+    }
+
+    /// NO PRINCIPAL: an identified app operation is REFUSED with zero effects and is NOT
+    /// journaled under a fabricated owner. This is the production shape today — the TOT bearer
+    /// carries the turn but establishes no principal — so it is a control, not a hypothetical.
+    func testAppOperationWithoutAnEstablishedPrincipalIsRefusedAndNotJournaled() async throws {
+        let operationId = "3f7b2c19-5d84-4e26-b093-8c1a7f4d6e02"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let cloudConfig = CloudConfig(defaults: defaults)
+        // CAPTURE THIS SINK'S OWN STUB TASK. The factory previously returned only `.client`, so the
+        // task the frames were written to was discarded and `awaitResultFrame` inspected a nil
+        // `capturedTask` — reporting "no frame arrived" for a refusal that may well have been sent.
+        // A nil observation is not the refusal outcome; the turn's own task has to be read.
+        var turnTask: StubWebSocketTask?
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    // PRODUCTION SHAPE: no principal — the turn authenticates with a bare
+                    // transport bearer, so the real acquisition yields no paired session.
+                    tokenProvider: StubTokenProvider(token: "test_token", accountId: "")
+                )
+                turnTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: testConversationManager()
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-noprincipal")
+
+        XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                      "no principal means no authority: \(playback.calls)")
+        // THE ASSERTION SOURCE IS THE TURN'S OWN TASK, not the production diagnostic observer.
+        let entry = try XCTUnwrap(turnTask, "the factory returned the task this turn wrote to")
+        let frame = try await awaitResultFrame(
+            operationId: operationId,
+            on: entry,
+            label: "the sink's own clientFactory task")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.invalidRequest,
+                       "an unaccountable operation is invalid_request, not a fabricated success")
+        XCTAssertNil(journal.result(for: operationId),
+                     "nothing may be journaled under an owner that was never established")
+    }
+
+    /// FAIL CLOSED: a sink that cannot observe the current target must NOT authorize an
+    /// episode-relative effect. "I cannot check whether this proposal is still for the current
+    /// episode" is not permission — it is an unavailable target, refused with zero effects.
+    func testSinkWithNoTargetObserverRefusesEpisodeRelativeEffect() async throws {
+        let operationId = "8f3a5c62-1b94-4d68-a0e7-5c2d9b1f3a86"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // Neither an injected provider nor a manager: this sink cannot answer the question.
+        let cloudConfig = CloudConfig(defaults: defaults)
+        // CAPTURE THIS SINK'S OWN STUB TASK. The factory used to return only `.client`, so nothing
+        // recorded the task the frames were actually written to and the assertion inspected a nil
+        // `capturedTask` — reporting 0 frames for a send that demonstrably happened.
+        var turnTask: StubWebSocketTask?
+        let sink = CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    tokenProvider: Self.pairedTestProvider()
+                )
+                turnTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+            conversationManager: testConversationManager()
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-nobserve")
+        XCTAssertTrue(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.isEmpty,
+                      "an unverifiable target must not release an effect: \(playback.calls)")
+        // THE ASSERTION SOURCE IS THE TURN'S OWN TASK, not the production diagnostic observer.
+        let entry = try XCTUnwrap(turnTask, "the factory returned the task this turn wrote to")
+        let frame = try await awaitResultFrame(
+            operationId: operationId,
+            on: entry,
+            label: "the sink's own clientFactory task")
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
+    }
+
+    /// A REQUEST THAT CANNOT RUN IS STILL ANSWERED. A wrong-typed parameter must reach the sink,
+    /// run ZERO effects, and settle a TYPED refusal the server can read — not disappear at the
+    /// parser, which would leave the issued operation unanswered.
+    func testInvalidParametersReachATypedRefusalWithNoEffect() async throws {
+        let operationId = "b1a7c9d2-4e35-4c81-9f60-2d8e5a71c4fb"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":"5"},"precondition":{"episode_id":"\(Self.testEpisodeId)"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("invalid-params-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-invalid", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: operationId, in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                       operationJournal: journal)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-invalid")
+
+        let relativeSeeks = playback.calls.filter {
+            if case .seekRelative = $0 { return true }
+            return false
+        }
+        XCTAssertTrue(relativeSeeks.isEmpty, "a string delta must never become a seek: \(playback.calls)")
+
+        let frame = try await awaitResultFrame(operationId: operationId)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
+        XCTAssertNil(frame["state"], "a refusal carries no state")
+        // And the refusal is durable: a redelivery replays it instead of re-deciding.
+        if case .alreadyRun(let recorded) = journal.claim(operationId, identity: identity) {
+            XCTAssertEqual(recorded.outcome, .refused)
+        } else {
+            XCTFail("the refusal was not durably recorded")
+        }
+    }
+
+    /// A MISSING TARGET IDENTITY is the wire's generic `invalid_request`, and it is a different
+    /// answer from an unexecutable action — the distinction the server acts on.
+    func testMissingEpisodeIdentityIsRefusedInvalidRequest() async throws {
+        let operationId = "c4e18d73-9b26-4f50-8a17-6e2b3c9d0f5a"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                       conversationManager: testConversationManager(),
+                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-noep")
+        let frame = try await awaitResultFrame(operationId: operationId)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.invalidRequest)
+        XCTAssertTrue(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.isEmpty,
+                      "no effect for an unattributed target")
+    }
+
+    /// A TARGET THAT IS NO LONGER CURRENT is `stale_precondition`: the server can act on it,
+    /// because the proposal was formed for an episode the user has left.
+    func testStaleTargetIsRefusedStalePrecondition() async throws {
+        let operationId = "d9f20a64-3c78-4b19-95ee-7a1f8b02c3d6"
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"\(operationId)","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-abandoned"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // The app has moved to a different episode since the proposal was formed.
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(),
+                                       conversationManager: testConversationManager(),
+                                       operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+                                       currentEpisodeId: { "ep-now-playing" })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-stale")
+        let frame = try await awaitResultFrame(operationId: operationId)
+        XCTAssertEqual(frame["outcome"] as? String, "refused")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
+        XCTAssertTrue(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.isEmpty,
+                      "a stale proposal must not seek in whatever episode is loaded now")
+    }
+
     /// ACTION-OUTCOME PROPAGATION: an unknown action under the runtime gate is a REFUSAL
     /// (unsupported_operation) with nothing executed and no fabricated success — the server
     /// reads an honest outcome for an operation it identified.
     func testUnknownIdentifiedActionIsRefusedUnsupportedOperationNotFabricatedSuccess() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-unknown-1","capability_version":"v1","tool":"playback","action":"teleport","params":{}}
+            data: {"operation_id":"02365fa8-ee9a-4000-a8bd-943c9da8859a","capability_version":"app-ops/1","tool":"playback","action":"teleport","params":{}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1169,18 +2591,23 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("unknown-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-25", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "02365fa8-ee9a-4000-a8bd-943c9da8859a", in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-25")
 
         // The turn's own auto-duck may pause/resume; the unknown action itself must effect nothing.
         let effectCalls = playback.calls.filter { switch $0 { case .pause, .resume: return false; default: return true } }
         XCTAssertTrue(effectCalls.isEmpty, "an unknown action executes nothing: \(playback.calls)")
-        let frame = try await awaitResultFrame(operationId: "op-unknown-1")
+        let frame = try await awaitResultFrame(operationId: "02365fa8-ee9a-4000-a8bd-943c9da8859a")
         XCTAssertEqual(frame["outcome"] as? String, "refused", "the server is not told an unknown action succeeded")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.unsupportedOperation)
         XCTAssertNil(frame["state"], "a refusal carries no state")
         // The refusal is also the journal's record: a redelivery replays the refusal.
-        if case .alreadyRun(let recorded) = journal.claim("op-unknown-1") {
+        if case .alreadyRun(let recorded) = journal.claim("02365fa8-ee9a-4000-a8bd-943c9da8859a", identity: identity) {
             XCTAssertEqual(recorded.outcome, .refused)
         } else {
             XCTFail("the refusal was not durably recorded")
@@ -1197,7 +2624,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testSeekToWithNoCurrentEpisodeIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-seek-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":42}}
+            data: {"operation_id":"3933547d-c3c2-4003-a81f-94a43f67b972","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1206,18 +2633,24 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("seek-noep-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-26", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "3933547d-c3c2-4003-a81f-94a43f67b972", in: self.pendingFixture ?? ""))
+        ))
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
+            conversationManager: manager,
             operationJournal: journal,
             episodeAvailable: { false }
         )
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-26")
-        let frame = try await awaitResultFrame(operationId: "op-seek-noep")
+        let frame = try await awaitResultFrame(operationId: "3933547d-c3c2-4003-a81f-94a43f67b972")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0,
                        "no seek is attempted without an episode")
-        if case .alreadyRun(let recorded) = journal.claim("op-seek-noep") {
+        if case .alreadyRun(let recorded) = journal.claim("3933547d-c3c2-4003-a81f-94a43f67b972", identity: identity) {
             XCTAssertEqual(recorded.outcome, .refused)
         } else {
             XCTFail("the refusal was not durably settled")
@@ -1229,7 +2662,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testSeekToReferenceFormWithNoEpisodeIsRefusedBeforeMapping() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-seek-ref-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000}}
+            data: {"operation_id":"1bf6d033-6a20-4cd7-ab32-a62548b2f17c","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1249,7 +2682,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testResumeWithNoEpisodeIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-resume-noep","capability_version":"v1","tool":"playback","action":"resume","params":{}}
+            data: {"operation_id":"a6701e82-0fc1-40a9-a8c7-378f9301e1d4","capability_version":"app-ops/1","tool":"playback","action":"resume","params":{}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1273,7 +2706,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let consumer = RecordingResultConsumer()
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-prod-noep","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000}}
+            data: {"operation_id":"fb36a011-ba98-418a-a177-39bcef233b16","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1354,12 +2787,17 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
     }
 
-    /// PER-ACTION TRUE RESULT: play_quote WITHOUT its reference target refuses
-    /// (malformed target) and settles durably — it is never reported as a success.
+    /// PER-ACTION TRUE RESULT: play_quote WITHOUT a reference target refuses (malformed target)
+    /// and settles durably — it is never reported as a success.
+    ///
+    /// Note the fixture carries `reference_position_ms` as `null`: the field is PRESENT, which is
+    /// what action admission requires, but not a number, so the sink's own malformed-target
+    /// refusal is what settles this. Omitting the field entirely would be refused by the PARSER
+    /// (required-field violation), which would prove nothing about the sink's outcome.
     func testPlayQuoteWithoutReferenceIsRefusedAndDurablySettled() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-pq-noref","capability_version":"v1","tool":"playback","action":"play_quote","params":{}}
+            data: {"operation_id":"9433422b-78ee-4676-a1fe-71f898fcd638","capability_version":"app-ops/1","tool":"playback","action":"play_quote","params":{"reference_position_ms":null},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1368,16 +2806,21 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("pq-noref-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-31", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "9433422b-78ee-4676-a1fe-71f898fcd638", in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-31")
-        let frame = try await awaitResultFrame(operationId: "op-pq-noref")
+        let frame = try await awaitResultFrame(operationId: "9433422b-78ee-4676-a1fe-71f898fcd638")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.malformedSeekTarget)
         XCTAssertNil(frame["state"])
-        if case .alreadyRun(let recorded) = journal.claim("op-pq-noref") {
+        if case .alreadyRun(let recorded) = journal.claim("9433422b-78ee-4676-a1fe-71f898fcd638", identity: identity) {
             XCTAssertEqual(recorded.outcome, .refused)
         } else {
-            XCTFail("the refusal was not durably settled")
+            XCTFail("the refusal was not durably settled; claim=\(journal.claim("9433422b-78ee-4676-a1fe-71f898fcd638", identity: identity)) testIdentity=\(identity) inProgress=\(journal.interruptedOperationIDs()) result=\(String(describing: journal.result(for: "9433422b-78ee-4676-a1fe-71f898fcd638")))")
         }
     }
 
@@ -1386,7 +2829,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testStopQuoteWithoutASavedPositionIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-sq-nosave","capability_version":"v1","tool":"playback","action":"stop_quote","params":{}}
+            data: {"operation_id":"df99ef63-7bbe-4c29-a608-576f6d645833","capability_version":"app-ops/1","tool":"playback","action":"stop_quote","params":{},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1395,12 +2838,17 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("sq-nosave-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-32", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "df99ef63-7bbe-4c29-a608-576f6d645833", in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-32")
-        let frame = try await awaitResultFrame(operationId: "op-sq-nosave")
+        let frame = try await awaitResultFrame(operationId: "df99ef63-7bbe-4c29-a608-576f6d645833")
         XCTAssertEqual(frame["outcome"] as? String, "refused")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.stalePrecondition)
-        if case .alreadyRun(let recorded) = journal.claim("op-sq-nosave") {
+        if case .alreadyRun(let recorded) = journal.claim("df99ef63-7bbe-4c29-a608-576f6d645833", identity: identity) {
             XCTAssertEqual(recorded.outcome, .refused)
         } else {
             XCTFail("the refusal was not durably settled")
@@ -1421,7 +2869,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-33")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(215)))
@@ -1443,7 +2891,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-34")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(215)))
@@ -1456,7 +2904,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // RecordingFingerprintMapper is a struct — configure it before the sink copies it.
         mapper.playbackSecondsForReference = [500.0: 510.0]
         playback.setPositionMs(900_000)
-        let sink = makeSink()
+        let sink = makeSink(injectIdentity: false)
 
         // Turn 1 captures a pre-quote position via play_quote.
         self.pendingFixture =
@@ -1561,12 +3009,135 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(hint["operation"] as? String, "search_spoken_content")
     }
 
+    // MARK: - deliveredPayload helper controls
+
+    /// MULTIPLE EVENTS, MULTIPLE IDS: the helper must find the operation by id and not be defeated
+    /// by the fixture also carrying a `done` event. The old implementation handed the whole SSE
+    /// document to the JSON parser and returned nil for every such fixture.
+    func testDeliveredPayloadFindsEachOperationAcrossAMultiEventFixture() {
+        let first = "0b5e2d47-8a19-4c63-9f28-4d71c6e30ab5"
+        let second = "5c83a1f6-2e07-4b94-8d51-7a39b0c26ef4"
+        let fixture = """
+            event: action
+            data: {"operation_id":"\(first)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+
+            event: action
+            data: {"operation_id":"\(second)","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":7}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let firstPayload = Self.deliveredPayload(for: first, in: fixture)
+        let secondPayload = Self.deliveredPayload(for: second, in: fixture)
+        XCTAssertNotNil(firstPayload, "the first operation's payload must be found")
+        XCTAssertNotNil(secondPayload, "the second operation's payload must be found")
+        XCTAssertNotEqual(firstPayload, secondPayload, "each result belongs to its own operation")
+        XCTAssertTrue(firstPayload?.contains("\"delta_seconds\":5") ?? false)
+        XCTAssertTrue(secondPayload?.contains("\"delta_seconds\":7") ?? false)
+        XCTAssertNil(
+            Self.deliveredPayload(for: "00000000-0000-4000-8000-000000000000", in: fixture),
+            "an absent operation id must return nil rather than some other frame's bytes"
+        )
+    }
+
+    /// BYTE PRESERVATION: the returned string is the payload's own UTF-8, not a re-encoding. A
+    /// reserialization would normalise key order and spacing and silently give one operation two
+    /// different replay-identity digests.
+    func testDeliveredPayloadReturnsTheFramesExactBytesWithoutReserialization() throws {
+        let operationId = "9a47c1e8-6b02-4f35-a8d1-3c5e70b924fd"
+        // Deliberately non-canonical: key order and interior spacing `JSONSerialization` would not
+        // reproduce — `params` precedes `tool` rather than following `action`, a serialiser emits
+        // `{"delta_seconds":5}` instead of `{ "delta_seconds" : 5 }`, and there are two spaces
+        // before `"action"`. A re-encoding would normalise all of it.
+        let rawPayload = #"{"operation_id":"\#(operationId)","capability_version":"app-ops/1","params":{ "delta_seconds" : 5 },"tool":"playback",  "action":"seek_relative"}"#
+        let fixture = """
+            event: action
+            data: \(rawPayload)
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // INDEPENDENTLY WRITTEN EXPECTATION. `frames(fromFixture:)` merges the event name in as a
+        // leading `"type"` field, so the payload the socket delivers is the fixture's payload with
+        // that one member prepended and every other byte untouched. Written out as a literal here —
+        // not rebuilt from the fixture and not produced by the code under test.
+        let expectedSocketPayload = #"{"type":"action","operation_id":"\#(operationId)","capability_version":"app-ops/1","params":{ "delta_seconds" : 5 },"tool":"playback",  "action":"seek_relative"}"#
+        let delivered = try XCTUnwrap(Self.deliveredPayload(for: operationId, in: fixture))
+        XCTAssertEqual(delivered, expectedSocketPayload,
+                       "the delivered payload is the socket frame's payload, byte for byte")
+        // Kept separate: the helper's bytes must equal what the live converter actually yields.
+        let liveFrames = StubWebSocketTask.frames(fromFixture: fixture)
+        XCTAssertEqual(liveFrames.count, 2, "action + done become two socket frames")
+        let extracted = try XCTUnwrap(
+            liveFrames.compactMap { AppOperationRequest.actionPayloadBytes(rawFrame: Data($0.utf8)) }.first)
+        XCTAssertEqual(Data(delivered.utf8), extracted,
+                       "helper bytes == the bytes the socket actually delivers")
+        XCTAssertEqual(Data(delivered.utf8), Data(expectedSocketPayload.utf8),
+                       "and both equal the independently written literal")
+    }
+
     // MARK: - Helpers
+
+    /// The `app_operation_result` frames a turn actually put on ITS OWN socket.
+    ///
+    /// Waits briefly because the send is awaited inside the turn loop but the transport records it
+    /// asynchronously. Returns every match so a control can require EXACTLY one — a duplicate send
+    /// is a defect, and `first` would hide it.
+    ///
+    /// EVIDENCE LIMIT, stated once: a frame here proves the client SUBMITTED it on the transport.
+    /// It is not evidence the server received or acted on it.
+    static func resultFrames(
+        on task: StubWebSocketTask?,
+        timeout: TimeInterval = 5
+    ) async -> [[String: Any]] {
+        let deadline = Date().addingTimeInterval(timeout)
+        var frames: [[String: Any]] = []
+        while Date() < deadline {
+            frames = await MainActor.run {
+                (task?.sentTextFrames ?? []).compactMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+                }.filter { ($0["type"] as? String) == "app_operation_result" }
+            }
+            if !frames.isEmpty { return frames }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return frames
+    }
+
 
     /// Under the strict runtime gate (wire contract rev da327e624), valid cloud app operations
     /// carry the server-issued `operation_id` and `capability_version`. Fixtures are upgraded AT
     /// THE SOCKET BOUNDARY so every valid-operation case exercises the identified envelope; the
     /// explicit legacy/malformed refusal cases opt out with the `LEGACY_ACTION` marker.
+    /// The EXACT replay-identity bytes the LIVE parser produces for the named operation.
+    ///
+    /// This must not rebuild JSON and must not trim framing or whitespace: it runs the production
+    /// extractor over the same frame the socket delivers, so the bytes a case asserts on are, by
+    /// construction, the bytes the sink journals. A second extractor is how one operation acquires
+    /// two identities — which is exactly the mismatch this replaces.
+    static func deliveredPayload(for operationId: String, in fixture: String) -> String? {
+        // THE SAME CONVERSION THE LIVE STUB USES. The fixture is an SSE document with several
+        // `event:`/`data:` pairs; the stub turns each `data:` pair into ONE socket frame. This
+        // helper used to hand the whole document to `actionPayloadBytes` and then call
+        // `JSONSerialization` on that document rather than on the extracted payload — a multi-event
+        // SSE text is not a JSON object, so the object guard could never be satisfied and the
+        // helper returned nil for every fixture with more than one event, regardless of operation.
+        let injected = injectOperationIdentity(fixture)
+        for frameText in StubWebSocketTask.frames(fromFixture: injected) {
+            let frameData = Data(frameText.utf8)
+            guard let payload = AppOperationRequest.actionPayloadBytes(rawFrame: frameData),
+                  let json = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any],
+                  json["operation_id"] as? String == operationId
+            else { continue }
+            // RETURNED VERBATIM: no reserialization, so the bytes a case asserts on are exactly the
+            // bytes the socket delivers and the sink journals.
+            return String(data: payload, encoding: .utf8)
+        }
+        return nil
+    }
+
     static func injectOperationIdentity(_ fixture: String) -> String {
         guard fixture.contains("event: action"), !fixture.contains("LEGACY_ACTION") else { return fixture }
         var counter = 0
@@ -1580,7 +3151,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 counter += 1
                 line.replaceSubrange(
                     toolRange,
-                    with: "\"operation_id\":\"op-fixture-\(counter)\",\"capability_version\":\"v1\",\"tool\""
+                    // A REAL UUID per operation: the wire pins `operation_id` to a server-issued
+                    // UUID, so a fixture must emit one or it is not a frame a conforming server
+                    // could send. Counter keeps them distinct within a fixture.
+                    with: "\"operation_id\":\"77d9ee31-a3b8-47cd-a43e-\(String(format: "%012d", counter))\",\"capability_version\":\"app-ops/1\",\"tool\""
                 )
             }
             lines.append(line)
@@ -1588,16 +3162,30 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         return lines.joined(separator: "\n")
     }
 
+    /// `currentEpisodeId` is OPT-IN and defaults to `nil`, which is the existing behaviour for
+    /// every caller: a sink with no observer must fail closed at the effect boundary, and silently
+    /// giving all sinks a target would erase that control. A test that needs the sink to confirm a
+    /// stated `episode_id` passes the observer explicitly.
+    /// `injectIdentity: false` delivers the fixture VERBATIM, so a control written against the
+    /// pre-v1 protocol actually exercises it.
+    ///
+    /// The default stays `true` because the identity-injecting path is what most cases want, but
+    /// the implicit promotion is precisely why the legacy controls broke: a frame written with no
+    /// identity fields was rewritten into an identified v1 request that then had to state
+    /// `precondition.episode_id`, and refused when it did not. A legacy control must say so.
     private func makeSink(
         rendersStructuredResults: Bool = false,
-        routeHint: CloudRouteHint? = nil
+        routeHint: CloudRouteHint? = nil,
+        currentEpisodeId: (() -> String?)? = nil,
+        injectIdentity: Bool = true
     ) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
+                let raw = self.nextFixture()
                 let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl,
-                    fixture: Self.injectOperationIdentity(self.nextFixture())
+                    fixture: injectIdentity ? Self.injectOperationIdentity(raw) : raw
                 )
                 self.capturedTask = built.task
                 return built.client
@@ -1606,10 +3194,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
+            // Declared order in `CloudRouteSink.init`: `currentEpisodeIdProvider` precedes
+            // `cloudPlaybackContextState`.
+            currentEpisodeIdProvider: currentEpisodeId,
             cloudPlaybackContextState: contextState,
             analytics: voiceAnalytics,
             rendersStructuredResults: rendersStructuredResults,
             routeHintProvider: { routeHint },
+            operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
             conversationManager: testConversationManager()
         )
     }
@@ -1734,7 +3326,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-held-mid","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+            data: {"operation_id":"1a59989a-5e54-44cf-a59c-3c06b9f34658","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1753,7 +3345,17 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let receivePark = HoldLatch()
         pendingDeclaredPark = receivePark
         pendingDeclaredParkAfterFrames = 2
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let manager = testConversationManager()
+        // THE DIGEST MUST DESCRIBE THE DELIVERED ACTION. `mintedIdentity` defaults `bytes` to "",
+        // so the earlier revision recorded a digest of nothing while the turn claimed with the real
+        // payload — any later claim for the same turn was then an identity conflict. Derived here
+        // from the exact bytes the socket delivers, through the same conversion the stub performs.
+        let heldIdentity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-43", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "1a59989a-5e54-44cf-a59c-3c06b9f34658", in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal)
         // CANCELLATION-INSENSITIVE effect hold: no cancellation handler of any kind. ONLY
         // `release.release()` frees it, so owner cancellation cannot open it.
         let release = HoldLatch()
@@ -1799,7 +3401,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Wait until the OWNER is provably inside the awaited hold: the suspension is the owner's.
         await entered.waitUntilReleased()
         XCTAssertEqual(gateEntryCount, 1, "the owner itself must enter the awaited gate exactly once")
-        XCTAssertEqual(journal.interruptedOperationIDs(), ["op-held-mid"], "operation durably claimed while held")
+        XCTAssertEqual(journal.interruptedOperationIDs(), ["1a59989a-5e54-44cf-a59c-3c06b9f34658"], "operation durably claimed while held")
         XCTAssertTrue(capturedTask?.declaredParkDidPark ?? false,
                       "the declared transport park must actually engage, or the wake assertion is vacuous")
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
@@ -1834,11 +3436,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Mandatory recovery through RECREATED stores: second reconstructs persisted unknown,
         // THIRD reload proves the settlement itself is durable with no in-progress id.
         let recreated = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-held-mid"], "claimed interrupted case stays in progress")
-        XCTAssertEqual(recreated.reconstructInterrupted("op-held-mid")?.outcome, .unknown)
+        XCTAssertEqual(recreated.interruptedOperationIDs(), ["1a59989a-5e54-44cf-a59c-3c06b9f34658"], "claimed interrupted case stays in progress")
+        XCTAssertEqual(recreated.reconstructInterrupted("1a59989a-5e54-44cf-a59c-3c06b9f34658")?.outcome, .unknown)
         let third = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertTrue(third.interruptedOperationIDs().isEmpty, "settled unknown must be durable, no in-progress id")
-        XCTAssertEqual(third.claim("op-held-mid"),
+        XCTAssertEqual(third.claim("1a59989a-5e54-44cf-a59c-3c06b9f34658", identity: heldIdentity),
                        OperationClaim.alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)))
     }
 
@@ -1862,14 +3464,19 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testOwnerTaskCancellationDoesNotDoubleExecuteTheIdentifiedMutation() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-owner-cancel","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+            data: {"operation_id":"e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
         let journal = OperationJournal(store: InMemoryOperationRecordStore())
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let manager = testConversationManager()
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-45", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e", in: self.pendingFixture ?? ""))
+        ))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-45")
         }
@@ -1882,13 +3489,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let pauses = playback.calls.filter { if case .pause = $0 { return true }; return false }
         let effectPauses = pauses.dropFirst()
         XCTAssertLessThanOrEqual(effectPauses.count, 1, "the identified effect executes at most once")
-        if case .alreadyRun = journal.claim("op-owner-cancel") {
+        if case .alreadyRun = journal.claim("e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e", identity: identity) {
             // The turn completed before cancellation: the effect MUST have executed exactly once.
             XCTAssertEqual(effectPauses.count, 1, "a completed operation's effect ran exactly once")
         }
-        if journal.claim("op-owner-cancel") == OperationClaim.inProgress {
-            XCTAssertEqual(journal.reconstructInterrupted("op-owner-cancel")?.outcome, .unknown)
-            if case .alreadyRun = journal.claim("op-owner-cancel") {} else {
+        if journal.claim("e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e", identity: identity) == OperationClaim.inProgress {
+            XCTAssertEqual(journal.reconstructInterrupted("e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e")?.outcome, .unknown)
+            if case .alreadyRun = journal.claim("e96e71aa-a6ca-4f05-ad2d-9bb9fb7bdb6e", identity: identity) {} else {
                 XCTFail("reconstructed record must settle")
             }
         }
@@ -1897,7 +3504,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordState() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-held-cancel","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+            data: {"operation_id":"f0c729f0-ff82-4cf0-a314-657f0056b6d4","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1906,7 +3513,19 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        let manager = testConversationManager()
+        // THE EXPECTED IDENTITY MUST CARRY THE SAME BYTES THE SINK ACTUALLY PERSISTED. The previous
+        // revision omitted `bytes`, so `mintedIdentity` hashed an EMPTY payload while the sink
+        // hashed the real delivered one. `OperationIdentity` equality covers the digest, so the
+        // recreated journal answered `.identityConflict` — and the control reported that as
+        // "durable record lost", conflating two different outcomes.
+        let operationId = "f0c729f0-ff82-4cf0-a314-657f0056b6d4"
+        let deliveredBytes = try XCTUnwrap(
+            Self.deliveredPayload(for: operationId, in: self.pendingFixture ?? ""),
+            "the exact payload this control delivers is retained before routing")
+        let identity = try XCTUnwrap(
+            Self.mintedIdentity(for: "u-46", manager: manager, bytes: deliveredBytes))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager, operationJournal: journal)
         let owner = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-46")
         }
@@ -1936,16 +3555,37 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // reconstruct as persisted unknown.
         let restarted = OperationJournal(store: FileOperationRecordStore(url: url))
         let effectPausesOrRelatives = effectCount
-        switch restarted.claim("op-held-cancel") {
+        // A RECREATED STORE WITH NO ROWS IS THE ONLY "RECORD LOST". `.identityConflict` means the
+        // row IS there but was claimed under a different identity, which is a WEAKER and different
+        // complaint — reporting both as "record lost" hid which had actually happened.
+        switch restarted.claim(operationId, identity: identity) {
         case .alreadyRun:
             XCTAssertLessThanOrEqual(effectPausesOrRelatives, 1)
         case .inProgress:
-            XCTAssertEqual(restarted.reconstructInterrupted("op-held-cancel")?.outcome, .unknown)
-            if case .alreadyRun = restarted.claim("op-held-cancel") {} else {
+            XCTAssertEqual(restarted.reconstructInterrupted(operationId)?.outcome, .unknown)
+            if case .alreadyRun = restarted.claim(operationId, identity: identity) {} else {
                 XCTFail("reconstructed record must settle")
             }
-        default:
-            XCTFail("durable record lost across recreation")
+        case .identityConflict:
+            XCTFail("the recreated record exists but was claimed under a DIFFERENT identity — "
+                    + "the expected identity must carry the exact persisted bytes, not an empty digest")
+        case .claimed:
+            XCTFail("durable record lost across recreation: the recreated store claims the "
+                    + "operation as NEW, so nothing was persisted")
+        case .interrupted:
+            // A RECREATED STORE REPORTING `interrupted` PROVES THE ROUND TRIP SUCCEEDED. A previous
+            // process claimed it and died without recording an outcome; `claim` surfaces that as
+            // explicitly unknowable rather than re-executing it. That is exactly the recovery the
+            // durability requirement asks for, so it is a PASS, not a lost record.
+            XCTAssertEqual(restarted.result(for: operationId)?.outcome, .unknown,
+                           "an interrupted operation must surface as unknown, never as a replay")
+        case .persistenceUnavailable:
+            // A THIRD, DISTINCT OUTCOME — neither "wrong identity" nor "nothing persisted". The
+            // recreated store could not be READ or WRITTEN at all, so this control cannot conclude
+            // anything about the round trip: the record's fate is unknown, not lost.
+            XCTFail("the recreated store could not be accessed or persisted, so the durable round "
+                    + "trip is UNPROVEN rather than lost — this is not an identity mismatch and not "
+                    + "a fresh claim")
         }
     }
 
@@ -1955,13 +3595,15 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testRecreatedDurableStoreReconstructsUnknownWithoutReplay() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
+        let diedIdentity = OperationIdentity(owner: "test-owner", conversation: "c-died",
+                                             turn: "u-died", actionBytes: Data(#"{"a":1}"#.utf8))
         let first = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(first.claim("op-died"), OperationClaim.claimed)
+        XCTAssertEqual(first.claim("eb6cd868-9ac4-482d-abfb-2ebe86a44666", identity: diedIdentity), OperationClaim.claimed)
         // Process death: no complete() ever runs. A NEW store+journal over the same URL:
         let restarted = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(restarted.interruptedOperationIDs(), ["op-died"])
-        XCTAssertEqual(restarted.reconstructInterrupted("op-died")?.outcome, .unknown)
-        if case .alreadyRun = restarted.claim("op-died") {} else {
+        XCTAssertEqual(restarted.interruptedOperationIDs(), ["eb6cd868-9ac4-482d-abfb-2ebe86a44666"])
+        XCTAssertEqual(restarted.reconstructInterrupted("eb6cd868-9ac4-482d-abfb-2ebe86a44666")?.outcome, .unknown)
+        if case .alreadyRun = restarted.claim("eb6cd868-9ac4-482d-abfb-2ebe86a44666", identity: diedIdentity) {} else {
             XCTFail("reconstructed record must settle")
         }
         // THIRD store+journal: the settlement itself must be durable, not just in the second
@@ -1969,7 +3611,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let third = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertTrue(third.interruptedOperationIDs().isEmpty, "no in-progress id may survive settlement")
         XCTAssertEqual(
-            third.claim("op-died"),
+            third.claim("eb6cd868-9ac4-482d-abfb-2ebe86a44666", identity: diedIdentity),
             OperationClaim.alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight))
         )
     }
@@ -1978,7 +3620,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testFailingClaimPersistenceRefusesEffectWithoutExecution() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-no-persist","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5}}
+            data: {"operation_id":"14c7a45d-b3b2-4b4c-a5ce-0cbfc5b0b1c9","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1997,16 +3639,19 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testFailingSettlementWriteNeverReplaysTheOperation() async {
         let store = SettlementFailingOperationRecordStore()
         let journal = OperationJournal(store: store)
-        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
-        XCTAssertFalse(journal.complete("op-settle-fail", result: .succeeded(state: ["position_seconds": .int(0)])), "failed settlement must be reported")
+        let settleIdentity = OperationIdentity(owner: "test-owner", conversation: "c-settle",
+                                               turn: "u-settle", actionBytes: Data(#"{"a":1}"#.utf8))
+        XCTAssertEqual(journal.claim("475d2d01-52f3-4f90-a7df-02e15aca195d", identity: settleIdentity), OperationClaim.claimed)
+        XCTAssertFalse(journal.complete("475d2d01-52f3-4f90-a7df-02e15aca195d", identity: settleIdentity,
+                                        result: .succeeded(state: ["position_seconds": .int(0)])), "failed settlement must be reported")
         // Live-memory observation: the record did NOT publish as finished-succeeded.
-        XCTAssertNil(journal.result(for: "op-settle-fail"), "failed settlement must not publish success")
-        XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.inProgress, "unsettled operation stays in progress, never replayable")
+        XCTAssertNil(journal.result(for: "475d2d01-52f3-4f90-a7df-02e15aca195d"), "failed settlement must not publish success")
+        XCTAssertEqual(journal.claim("475d2d01-52f3-4f90-a7df-02e15aca195d", identity: settleIdentity), OperationClaim.inProgress, "unsettled operation stays in progress, never replayable")
         // Recreated-store observation through the same write path:
         let recreated = OperationJournal(store: SettlementFailingOperationRecordStore(backing: store))
-        XCTAssertEqual(recreated.interruptedOperationIDs(), ["op-settle-fail"], "durable record must still be in progress")
-        XCTAssertNil(recreated.reconstructInterrupted("op-settle-fail"), "failed recovery settlement must not report settled unknown")
-        XCTAssertEqual(recreated.claim("op-settle-fail"), OperationClaim.inProgress)
+        XCTAssertEqual(recreated.interruptedOperationIDs(), ["475d2d01-52f3-4f90-a7df-02e15aca195d"], "durable record must still be in progress")
+        XCTAssertNil(recreated.reconstructInterrupted("475d2d01-52f3-4f90-a7df-02e15aca195d"), "failed recovery settlement must not report settled unknown")
+        XCTAssertEqual(recreated.claim("475d2d01-52f3-4f90-a7df-02e15aca195d", identity: settleIdentity), OperationClaim.inProgress)
     }
 
     /// Semantically corrupt durable history (bogus outcome, unknown state) must fail closed:
@@ -2014,11 +3659,13 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testSemanticallyCorruptHistoryIsUnreadableNeverExecutable() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
-        try? Data("{\"op-x\":{\"state\":\"weird\"},\"op-y\":{\"state\":\"finished\",\"outcome\":\"bogus\"}}".utf8)
+        try? Data("{\"33206aea-bc23-42d4-ac36-16d8d3f9fec0\":{\"state\":\"weird\"},\"0bc20d23-3dc7-4cd2-adb5-25d026015620\":{\"state\":\"finished\",\"outcome\":\"bogus\"}}".utf8)
             .write(to: url)
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(journal.claim("op-x"), .persistenceUnavailable, "unknown-state history must refuse, not re-claim")
-        XCTAssertEqual(journal.claim("op-y"), .persistenceUnavailable, "bogus-outcome history must refuse, not re-claim")
+        let corruptProbe = OperationIdentity(owner: "test-owner", conversation: "c", turn: "u",
+                                             actionBytes: Data(#"{"a":1}"#.utf8))
+        XCTAssertEqual(journal.claim("33206aea-bc23-42d4-ac36-16d8d3f9fec0", identity: corruptProbe), .persistenceUnavailable, "unknown-state history must refuse, not re-claim")
+        XCTAssertEqual(journal.claim("0bc20d23-3dc7-4cd2-adb5-25d026015620", identity: corruptProbe), .persistenceUnavailable, "bogus-outcome history must refuse, not re-claim")
     }
 
     /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
@@ -2027,7 +3674,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testRestartReconstructedUnknownReplaysThroughTransportWithoutReExecution() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-restart","capability_version":"v1","tool":"playback","action":"seek_to","params":{"position_seconds":30}}
+            data: {"operation_id":"7138bc14-6823-45bc-a8a2-4a90f47ab9eb","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":30},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2036,13 +3683,35 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // A previous process died after claiming and before completing.
         let store = InMemoryOperationRecordStore()
         let journal = OperationJournal(store: store)
-        XCTAssertEqual(journal.claim("op-restart"), OperationClaim.claimed)
+        // The previous process claimed under the identity of the turn it was serving — the REAL
+        // prepared identity and the EXACT delivered action bytes. An earlier revision used a
+        // different conversation/turn plus an id-only JSON stand-in here, so the digest described
+        // bytes the socket never carried and any later claim could only ever be an identity
+        // conflict. RECOVERY is not identity-bound, but REPLAY of the reconstructed record is.
+        let manager = testConversationManager()
+        let originalIdentity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-48", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "7138bc14-6823-45bc-a8a2-4a90f47ab9eb", in: self.pendingFixture ?? ""))
+        ))
+        let diedIdentity = originalIdentity
+        XCTAssertEqual(journal.claim("7138bc14-6823-45bc-a8a2-4a90f47ab9eb", identity: diedIdentity), OperationClaim.claimed)
         // The restart recovery path the assembly runs at launch:
-        let reconstructed = journal.reconstructInterrupted("op-restart")
+        let reconstructed = journal.reconstructInterrupted("7138bc14-6823-45bc-a8a2-4a90f47ab9eb")
         XCTAssertEqual(reconstructed?.outcome, .unknown)
 
         let consumer = RecordingResultConsumer()
-        let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
+        // RE-PRESENT THE ORIGINAL IDENTITY: the same manager (which retains the prepared turn) and
+        // the same utterance, so owner/conversation/turn and delivered bytes all match the record.
+        let identity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-48", manager: manager,
+            bytes: try XCTUnwrap(Self.deliveredPayload(for: "7138bc14-6823-45bc-a8a2-4a90f47ab9eb", in: self.pendingFixture ?? ""))
+        ))
+        XCTAssertEqual(identity.conversation, originalIdentity.conversation,
+                       "the restart case re-presents the identity the record was claimed under")
+        XCTAssertEqual(identity.turn, originalIdentity.turn)
+        XCTAssertEqual(identity.actionDigest, originalIdentity.actionDigest,
+                       "replay compares digests, so the bytes must be the delivered action verbatim")
+        let sink = makeSinkWithConsumer(consumer, conversationManager: manager, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-48")
 
         // The effect must NOT have run: no seek reached playback.
@@ -2062,11 +3731,11 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             if resultFrame == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         let frame = try XCTUnwrap(resultFrame, "the reconstructed unknown must ride the turn socket")
-        XCTAssertEqual(frame["operation_id"] as? String, "op-restart")
+        XCTAssertEqual(frame["operation_id"] as? String, "7138bc14-6823-45bc-a8a2-4a90f47ab9eb")
         XCTAssertEqual(frame["outcome"] as? String, "unknown")
         XCTAssertEqual(frame["reason"] as? String, OperationReason.interruptedInFlight)
         // And the record stays settled: a further claim replays, not re-claims.
-        if case .alreadyRun = journal.claim("op-restart") {} else {
+        if case .alreadyRun = journal.claim("7138bc14-6823-45bc-a8a2-4a90f47ab9eb", identity: identity) {} else {
             XCTFail("the reconstructed record must be settled")
         }
     }
@@ -2161,6 +3830,264 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let stillPending = await MainActor.run { sink.interruptionStateForTesting.hasPendingReport }
         XCTAssertFalse(stillPending)
     }
+
+    // MARK: - operation gate: refuse BEFORE any effect when identity is incomplete
+
+    /// No journal at all = no durable record of the operation, so an identified operation must
+    /// not run. This used to be replaced with a fabricated `.claimed`.
+    func testIdentifiedActionWithoutAJournalRefusesBeforeAnyEffect() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"7e14606e-e88e-4c39-a857-12294cd9dd32","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let sink = CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    tokenProvider: Self.pairedTestProvider()
+                ).client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            conversationManager: testConversationManager()
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-no-journal")
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "without durable storage the mutation must not run")
+    }
+
+    /// A missing trusted owner is a refusal, never an empty-string owner in the journal: an
+    /// operation journaled under "" could not be told apart from another account's.
+    func testIdentifiedActionWithoutATrustedOwnerRefusesBeforeAnyEffect() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"9df43bff-7093-4c40-a12b-d339d50e949d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let sink = CloudRouteSink(
+            clientFactory: {
+                CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    tokenProvider: StubTokenProvider(token: "test_token", accountId: "")
+                ).client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: testConversationManager()
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-no-owner")
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "an unowned operation must not run")
+        XCTAssertEqual(journal.interruptedOperationIDs(), [],
+                       "a refused operation must not be journaled")
+        XCTAssertNil(journal.result(for: "9df43bff-7093-4c40-a12b-d339d50e949d"))
+    }
+
+    /// AN ACCOUNT SWITCH MID-TURN must not get its operation journaled under the account that
+    /// opened the turn. The owner is captured at admission, so the gate has to re-check the LIVE
+    /// session before claiming — a stale captured owner alone would happily settle under the old
+    /// account.
+    func testAccountSwitchAfterAdmissionRefusesBeforeAnyEffect() async throws {
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"132b2d8b-c918-4062-a684-59b1e314944d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        let manager = testConversationManager()
+        let cloudConfig = CloudConfig(defaults: defaults)
+        let operationId = "132b2d8b-c918-4062-a684-59b1e314944d"
+        // ORIGINAL BYTES, taken from the fixture BEFORE routing: the admission path consumes
+        // `pendingFixture`, so reading it afterwards would describe a frame that was never sent.
+        let originalActionBytes = try XCTUnwrap(
+            Self.deliveredPayload(for: operationId, in: self.pendingFixture ?? "")).data(using: .utf8)
+        // THE TURN'S OWN TASK, captured on its own first build.
+        var turnTask: StubWebSocketTask?
+        // THE ORDERING SEAM IS THE AWAITED RECEIVE PARK, NOT A SENDABLE CLOSURE.
+        // `CloudRouteSink` is `@MainActor`, so a `@Sendable` `onFrameReceived` closure cannot read or
+        // mutate the sink's socket, and a `Task { @MainActor }` hop would be unordered. Instead the
+        // producer PARKS inside `receive()` after acquisition; while it is parked the TEST reads the
+        // original socket on MainActor, switches its lock-guarded session there, and only then
+        // releases the producer to deliver the action. Switch strictly precedes action, with no
+        // actor-isolated state touched from the producer's task.
+        let actionDeliveryGate = HoldLatch()
+        let sink = CloudRouteSink(
+            clientFactory: {
+                // THIS METHOD BUILDS THE SINK DIRECTLY, so it must install the park itself: a
+                // `self.pendingDeclaredPark` assignment is only read by `makeSinkWithConsumer` and
+                // would hold nothing here. Installed at CREATION so the park exists before the
+                // first frame is served; threshold 0 parks the first inbound receive, which is the
+                // action frame arriving after credential acquisition.
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl,
+                    fixture: Self.injectOperationIdentity(self.pendingFixture ?? ""),
+                    prepareTask: { task in
+                        task.armedReceivePark = actionDeliveryGate
+                        task.declaredParkAfterFrames = 0
+                    },
+                    tokenProvider: Self.pairedTestProvider()
+                )
+                // Retirement wake: a cancelled socket releases the parked receive from the SAME
+                // cancellation, so cleanup cannot hang on a hold nobody releases.
+                built.task.retiredParkNotifier = { actionDeliveryGate.notifyRetired() }
+                turnTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: mapper,
+            playbackPositionMs: { self.playback.positionMs },
+            // THE MATCHING TARGET OBSERVER, so the ONLY variable in this control is the account
+            // switch. Without it `targetMatch` is `.absent` and an episode-relative action is
+            // refused `stale_precondition` BEFORE any effect (CloudRouteSink.swift:1930-1936) and
+            // that refusal is then settled into the journal (:1990-1993) — a target-unavailable
+            // refusal wearing the switch's clothes. Declared in SIGNATURE order: after
+            // `playbackPositionMs`, before `cloudPlaybackContextState`.
+            // The missing-observer NEGATIVE lives in its own control
+            // (`testSinkWithNoTargetObserverRefusesEpisodeRelativeEffect`) and stays untouched.
+            currentEpisodeIdProvider: { Self.testEpisodeId },
+            cloudPlaybackContextState: contextState,
+            analytics: voiceAnalytics,
+            operationJournal: journal,
+            conversationManager: manager
+        )
+        // The turn is held inside `receive()`, so routing does NOT return yet.
+        let turn = Task {
+            await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-switched")
+        }
+        defer { actionDeliveryGate.release() }
+        // Wait, bounded, for the AWAITED park to report itself.
+        var parked = false
+        var waited = 0
+        while !parked && waited < 500 {
+            parked = await MainActor.run { turnTask?.didParkInReceive ?? false }
+            if !parked { try await Task.sleep(nanoseconds: 10_000_000) }
+            waited += 1
+        }
+        XCTAssertTrue(parked, "the producer is parked inside the awaited receive()")
+        // ACQUISITION HAS HAPPENED, and the action has NOT been delivered. Switch the session on the
+        // turn's OWN socket, on MainActor, while the producer is parked.
+        let parkedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let preSwitchAccount = await MainActor.run { parkedSocket?.authenticatedSession?.accountId }
+        XCTAssertEqual(preSwitchAccount, "test-owner",
+                       "the turn acquired a real session before the park")
+        await MainActor.run {
+            parkedSocket?.authenticatedSession = CloudAuthenticatedSession(
+                accountId: "account-b", accessToken: "test-credential")
+        }
+        let switched = await MainActor.run { parkedSocket?.authenticatedSession?.accountId }
+        XCTAssertEqual(switched, "account-b", "the live session was switched after admission")
+        // ONLY NOW release the producer so the action frame is delivered under the new session.
+        actionDeliveryGate.release()
+        _ = await turn.value
+
+        // THE SWITCH ACTUALLY HAPPENED, and it happened on this turn's own socket. Without this
+        // the zero-effect result below would be equally consistent with a switch that never ran.
+        let publishedSession = await MainActor.run { sink.activeResultSocketForTesting?.authenticatedSession }
+        XCTAssertEqual(publishedSession?.accountId, "account-b",
+                       "the socket that would carry the result now names a different account")
+        XCTAssertNotNil(turnTask, "the turn's own transport was captured")
+        let sentFrames = await MainActor.run { turnTask?.sentTextFrames ?? [] }
+        XCTAssertTrue(sentFrames.contains { $0.contains(operationId) },
+                      "the operation was delivered to this turn, so its refusal is about the switch")
+
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "an operation whose session changed under it must not run")
+        // KEPT AS SPECIFIED: a refusal may still be SENT on the original authorised route, but it
+        // must not SETTLE under either account. The assertion is on the journal, not the wire.
+        XCTAssertNil(journal.result(for: operationId),
+                     "and must not be settled under either account")
+        XCTAssertTrue(originalActionBytes?.isEmpty == false,
+                      "the control carries the original delivered bytes, not a re-encoded stand-in")
+    }
+
+    /// The SECOND turn of one sink must not inherit the first turn's identity: the identity is
+    /// captured per admitted turn, so turn 2's settlement is bound to turn 2.
+    func testTwoTurnsOnOneSinkJournalUnderTheirOwnIdentities() async throws {
+        let manager = testConversationManager()
+        let journal = OperationJournal(store: InMemoryOperationRecordStore())
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"1bcc78d9-a144-4f8b-a04f-146c49aa9f81","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager,
+                                        operationJournal: journal)
+        let firstPayload = try XCTUnwrap(
+            Self.deliveredPayload(for: "1bcc78d9-a144-4f8b-a04f-146c49aa9f81", in: self.pendingFixture ?? ""))
+        let firstIdentityOrNil = Self.mintedIdentity(
+            for: "u-turn-1", manager: manager, bytes: firstPayload)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-turn-1")
+
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"b426dd7e-28e0-43a1-aaf1-14846dba4065","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":6},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let secondPayload = try XCTUnwrap(
+            Self.deliveredPayload(for: "b426dd7e-28e0-43a1-aaf1-14846dba4065", in: self.pendingFixture ?? ""))
+        let secondIdentity = try XCTUnwrap(Self.mintedIdentity(
+            for: "u-turn-2", manager: manager, bytes: secondPayload))
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: "u-turn-2")
+
+        let firstIdentity = try XCTUnwrap(firstIdentityOrNil)
+        XCTAssertNotEqual(firstIdentity.turn, secondIdentity.turn, "the two turns are distinct")
+        if case .alreadyRun = journal.claim("1bcc78d9-a144-4f8b-a04f-146c49aa9f81", identity: firstIdentity) {} else {
+            XCTFail("turn 1's operation must be settled under turn 1's identity")
+        }
+        if case .alreadyRun = journal.claim("b426dd7e-28e0-43a1-aaf1-14846dba4065", identity: secondIdentity) {} else {
+            XCTFail("turn 2's operation must be settled under turn 2's identity")
+        }
+        // Cross-turn: the same id under the other turn's identity is a conflict, not a replay.
+        XCTAssertEqual(journal.claim("1bcc78d9-a144-4f8b-a04f-146c49aa9f81", identity: secondIdentity), OperationClaim.identityConflict)
+    }
+}
+
+private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
+    func listeningTime(period: String?) -> VoiceResponse { .silent }
+    func topPodcasts(period: String?) -> VoiceResponse { .silent }
+    func episodesFinished(period: String?) -> VoiceResponse { .silent }
+    func listeningStreak() -> VoiceResponse { .silent }
+    func subscriptionCount() -> VoiceResponse { .silent }
+    func unplayedTotal() -> VoiceResponse { .silent }
+    func downloadStats() -> VoiceResponse { .silent }
+    func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
+    func timeSinceLastListen() -> VoiceResponse { .silent }
 }
 
 
@@ -2301,12 +4228,6 @@ private final class RecordingAnalytics: AnalyticsService {
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
 /// Independent completion flag for bounded completion probes (review 9fc2603e).
-private final class ProbeCompletionFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
-    func set() { lock.lock(); done = true; lock.unlock() }
-    var isSet: Bool { lock.lock(); let d = done; lock.unlock(); return d }
-}
 
 final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
@@ -2488,7 +4409,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(aEnqueued, "A's audio is enqueued while its producer is parked")
         let aTask = capturedTask
-        // Withhold stop-notification delivery: B's admission await suspends on the retire stop.
+        // Withhold stf6241f37-b493-47f2-aaf4-6dcdf6120103 delivery: B's admission await suspends on the retire stop.
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
                 box.store(deliver)
@@ -2796,7 +4717,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(strictlyIncreasing && recorded.count >= 1,
                       "no stop identity is confirmed twice (got \(recorded))")
         // (No resume pin here: with no engine ever started, transient restore is a no-op by
-        // design — the discriminator is the stop-identity log above.)
+        // design — the discriminator is the stff4cd5fe-3b75-400a-a2cd-7ede3e65ff57 log above.)
     }
 
     /// PHYSICAL STOP OPERATION HELD (spec ea755ba1; reviewer 6453dfaa/3d4f5619/76215282):
@@ -3117,7 +5038,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // And C RETIRED before admitting: E1's clear (A's leftovers) plus C's own retire clear.
         // A C that skipped its wait (queued stop invisible) never performs the second clear.
         let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
-        XCTAssertEqual(clears, 2, "C retired B's queued-stop-window output before admitting")
+        XCTAssertEqual(clears, 2, "C retired B's queued-st8447de34-fd39-4d9d-a94b-e174f39a3d24 output before admitting")
         // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -3428,23 +5349,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
 
-    /// BOUNDED completion probe (review 9fc2603e): an INDEPENDENT completion flag set by a
-    /// detached watcher; the probe polls the flag under a bound and NEVER awaits the watched
-    /// task's value inside the group (a cancelled probe must not hang on the underlying wait).
-    private func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
-        let flag = ProbeCompletionFlag()
-        let watcher = Task.detached { _ = await task.value; flag.set() }
-        var completed = false
-        var elapsed: UInt64 = 0
-        while elapsed < nanoseconds {
-            if flag.isSet { completed = true; break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-            elapsed += 50_000_000
-        }
-        if !completed { watcher.cancel() } // benign leak: the watcher cannot free the underlying wait
-        return completed
-    }
-
     private func holdNextTurn() -> Gate {
         let gate = Gate()
         pendingHeldGate = gate
@@ -3467,11 +5371,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// test itself injects, to move the shared latest identity AFTER a captured retire).
     private var cancelPlayerOnFirstFrameForNextBuild = false
     private var injectedStopDone = false
-    private var hookedSink: CloudRouteSink?
     /// Opt-in action on the NEXT built client's first frame (ownership-snapshot probes).
     private var firstFrameActionForNextBuild: (@Sendable () -> Void)?
     /// Grace hold lifecycle counters for ownership controls.
     private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
+
 
     final class AtomicInteger: @unchecked Sendable {
         private let lock = NSLock(); private var n = 0
@@ -3979,7 +5883,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(playback.isPlaying, "the hold is still in effect before the drain")
 
         // RELEASE the drain. The player then drains for real and emits its OWN stop notification —
-        // no manual stop-callback invocation, so the deferred callback is reached through the
+        // no manual st5d348fc7-d46c-4c64-a4be-9b24093c93d4 invocation, so the deferred callback is reached through the
         // production path rather than being called by the test.
         await MainActor.run { owningPlayer.setDrainHoldForTesting(false) }
 
@@ -4962,7 +6866,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
     }
 
     /// REVIEWER 47f67d4d: coalesced accounting must include in-flight claim work — the
-    /// pending-stop-notification counter must return to ZERO after every parked scenario,
+    /// pending-stf6241f37-b493-47f2-aaf4-6dcdf6120103 counter must return to ZERO after every parked scenario,
     /// or a stranded increment refuses every future admission.
     private func assertNoStrandedStopNotifications(_ player: CloudAudioPlayer, _ label: String) {
         XCTAssertEqual(
@@ -5238,7 +7142,6 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
     }
 }
 
-
 /// Store that fails every write and reports unreadable history — fail-closed fixtures.
 final class AlwaysFailingOperationRecordStore: OperationRecordStore {
     private var records: [String: StoredRecord] = [:]
@@ -5380,19 +7283,4 @@ private final class NoOpCloudPlaybackQuerySink: VoicePlaybackQuerySink {
     func episodeDescription() -> VoiceResponse { .silent }
     func downloadStatus() -> VoiceResponse { .silent }
     func episodeTitle() -> VoiceResponse { .silent }
-}
-
-private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
-    func listeningTime(period: String?) -> VoiceResponse { .silent }
-    func topPodcasts(period: String?) -> VoiceResponse { .silent }
-    func episodesFinished(period: String?) -> VoiceResponse { .silent }
-    func listeningStreak() -> VoiceResponse { .silent }
-    func subscriptionCount() -> VoiceResponse { .silent }
-    func unplayedTotal() -> VoiceResponse { .silent }
-    func downloadStats() -> VoiceResponse { .silent }
-    func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
-    func timeSinceLastListen() -> VoiceResponse { .silent }
-
-    // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
-
 }

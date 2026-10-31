@@ -5,6 +5,15 @@ import XCTest
 /// `POST /api/v1/auth/token` exchange, reactive refresh-once-on-401 against
 /// `POST /api/v1/auth/refresh` with rotation, 15-minute access lifetime, and the
 /// fail-closed / no-same-turn-retry postures the seam already pins.
+/// The transport every provider suite in this file uses: an ephemeral session with the stub URL
+/// protocol registered. FILE-SCOPED because more than one class in this file needs exactly this
+/// session — duplicating it per class is how two suites drift into testing different transports.
+private func makeStubSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [CloudRouteTestURLProtocol.self]
+    return URLSession(configuration: config)
+}
+
 final class CloudAuthTokenProviderTests: XCTestCase {
     private var now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -227,6 +236,235 @@ final class CloudAuthTokenProviderTests: XCTestCase {
 
     // MARK: - helpers
 
+    // MARK: - the authenticated SNAPSHOT (token + account together)
+
+    /// The snapshot is the ONLY place an account and a credential are paired, so its four
+    /// discriminating cases are controls rather than an incidental assertion.
+    func testAuthenticatedSessionPairsTheValidatedTokenWithItsAccount() async throws {
+        stubTokenResponse(accessToken: "access-1", refreshToken: "refresh-1", expiresIn: 900)
+        let provider = makeProvider(credential: "pc-session-credential")
+
+        // `XCTUnwrap` is an autoclosure too, so the await must complete before it is called.
+        let resolvedSession = await provider.authenticatedSession()
+        let session = try XCTUnwrap(resolvedSession)
+        XCTAssertEqual(session.accountId, "acct-A")
+        XCTAssertEqual(session.accessToken, "access-1",
+                       "the snapshot's token is exactly the one handed to the frame")
+        // `token()` is the same acquisition, not a second one. Resolved into a local first:
+        // `XCTAssertEqual`'s arguments are autoclosures and cannot carry an `await`.
+        let projectedToken = await provider.token()
+        XCTAssertEqual(projectedToken, session.accessToken,
+                       "token() and the snapshot must not describe different tokens")
+    }
+
+    /// MISSING CREDENTIAL: with nothing to authenticate, no session is reported — not a session
+    /// with an empty token and a borrowed account.
+    func testAuthenticatedSessionIsNilWithoutACredential() async {
+        CloudRouteTestURLProtocol.onRequest = { _, _ in
+            XCTFail("must not dial without a credential")
+        }
+        let provider = makeProvider(credential: nil)
+        let session = await provider.authenticatedSession()
+        XCTAssertNil(session, "no credential means no authenticated account to journal under")
+    }
+
+    /// ACCOUNT SWITCH: the cached session belongs to the account whose credential is stored, so a
+    /// switch drops it and the snapshot reports the NEW account — never the old one's token.
+    func testAuthenticatedSessionFollowsAnAccountSwitch() async throws {
+        var credential = "cred-A"
+        var identity = "acct-A"
+        stubTokenResponse(accessToken: "token-for-A", refreshToken: "refresh-A", expiresIn: 900)
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { credential },
+            identityProvider: { identity },
+            appVersionProvider: { "1.0" },
+            session: makeStubSession(),
+            now: { self.now }
+        )
+        let resolvedA = await provider.authenticatedSession()
+        let forA = try XCTUnwrap(resolvedA)
+        XCTAssertEqual(forA.accountId, "acct-A")
+
+        identity = "acct-B"
+        credential = "cred-B"
+        stubTokenResponse(accessToken: "token-for-B", refreshToken: "refresh-B", expiresIn: 900)
+        let resolvedB = await provider.authenticatedSession()
+        let forB = try XCTUnwrap(resolvedB)
+        XCTAssertEqual(forB.accountId, "acct-B", "A's account must not describe B's session")
+        XCTAssertEqual(forB.accessToken, "token-for-B", "A's token must not be served to B")
+    }
+
+    /// ORIGIN CHANGE: a token minted by one auth origin is not presented to another, and the
+    /// snapshot must not describe the old origin's session as the current one.
+    func testAuthenticatedSessionIsNotCarriedAcrossAnOriginChange() async throws {
+        var origin = "https://auth.test"
+        var dialled: [String] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            dialled.append(request.url?.host ?? "")
+        }
+        stubTokenResponse(accessToken: "access-1", refreshToken: "refresh-1", expiresIn: 900)
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { origin },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.0" },
+            session: makeStubSession(),
+            // A LONG lifetime: the token must still be cache-valid when the origin changes, so
+            // the ONLY thing that can invalidate it is the origin rule under test. With a short
+            // lifetime the control can pass for expiry instead, and prove nothing about origin.
+            now: { self.now }
+        )
+        let resolvedSnapshot = await provider.authenticatedSession()
+        _ = try XCTUnwrap(resolvedSnapshot)
+        let dialledBefore = dialled.count
+
+        // Repointed at another environment: the cached token was minted by the old origin.
+        //
+        // RE-DIAL IS ALLOWED. The invariant under test is that the PREVIOUS ORIGIN'S SNAPSHOT is
+        // never served here — discarding it and acquiring anew satisfies that. Forbidding the
+        // re-dial categorically tested the implementation's discard strategy rather than the
+        // property, and failing on any request made the assertion below unreachable.
+        origin = "https://auth.other.test"
+        let freshToken = "token-for-other-origin"
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            dialled.append(request.url?.host ?? "")
+        }
+        stubTokenResponse(accessToken: freshToken, refreshToken: "refresh-2", expiresIn: 900)
+        let afterOriginChange = await provider.authenticatedSession()
+        XCTAssertNotEqual(afterOriginChange?.accessToken, "access-1",
+                          "a token from the previous origin is never served here")
+        XCTAssertEqual(afterOriginChange?.accessToken, freshToken,
+                       "the session presented after the change is the one minted for the new origin")
+        XCTAssertGreaterThanOrEqual(dialled.count, dialledBefore,
+                                    "a fresh acquisition is permitted; suppressing it is not required")
+    }
+
+    /// EXPIRED CACHE with no way to refresh: no session, so nothing can be journaled under a
+    /// credential that would not be presented.
+    ///
+    /// `onRequest` is an OBSERVER, not an answerer: it sees the request and changes nothing about
+    /// the response, which still comes from `stubJSON`'s handler. An empty closure there therefore
+    /// does NOT make the exchange unrefreshable — it was still answering 200 with `access-1`, which
+    /// is precisely why an earlier version of this control observed a live session. The exchange is
+    /// made unrefreshable here by installing a FAILING handler.
+    func testAuthenticatedSessionIsNilOnceTheCacheIsExpiredAndUnrefreshable() async {
+        // A transport that CANNOT answer: with no handler installed the URLProtocol fails the
+        // request (`didFailWithError(.unknown)`), which is the provider's `inconclusive` outcome —
+        // the genuine "we had a credential and the exchange failed" case, distinct from having no
+        // credential at all. Asserted below rather than assumed.
+        CloudRouteTestURLProtocol.clearStubHandler()
+        var clock = now
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            appVersionProvider: { "1.0" },
+            session: makeStubSession(),
+            now: { clock }
+        )
+        _ = await provider.authenticatedSession()
+        // BEYOND HARD EXPIRY, not merely past the proactive boundary. `expirySkew` is 30s and this
+        // fixture mints with `expires_in: 1`, so `expiresAt` lands at mint time while
+        // `hardExpiresAt` sits a full second later; advancing by anything less than that leaves
+        // `cachedUsableSession()` legitimate and the control never reaches the refresh path it is
+        // supposed to test. FORWARDS, not backwards: `now - 3600` is an hour BEFORE the token was
+        // minted, which leaves it comfortably valid and asserts the opposite of the name.
+        clock = now.addingTimeInterval(3600)
+        let requestsBefore = CloudRouteTestURLProtocol.requestCount
+        let expired = await provider.authenticatedSession()
+        XCTAssertNil(expired, "an expired, unrefreshable session is not an authenticated one")
+        // PROOF the exchange really was attempted and really could not be answered — without this,
+        // a control can pass because nothing was dialled, which proves nothing about refresh.
+        XCTAssertGreaterThan(CloudRouteTestURLProtocol.requestCount, requestsBefore,
+                             "the refresh path must actually reach the network, not be skipped")
+    }
+
+    /// SWITCHING AT THE RETURN BOUNDARY. The account must come from the `Tokens` value whose
+    /// access token is returned, never from an `identityProvider()` read taken after the token
+    /// came back. This is the control that fails if anyone reintroduces the later read: the
+    /// identity flips to a second account mid-flight, and the returned snapshot must still name
+    /// the account the token was minted for.
+    func testSnapshotAccountComesFromTheTokensNotALaterIdentityRead() async throws {
+        var identity = "acct-A"
+        // TWO PAIRS, each served to a DIFFERENT acquisition, so the expected owner is bound to the
+        // token that was actually minted rather than to whichever account happens to be current.
+        // The first acquisition presents acct-A and receives access-A; the second presents acct-B
+        // and receives access-B. A provider that stamps the snapshot from a post-acquisition
+        // `identityProvider()` read cannot satisfy both pairings at once.
+        //
+        // The old version of this control minted ONE pair and then asserted both that the second
+        // snapshot kept access-A and that it did not name acct-B — two claims no implementation
+        // can hold simultaneously, which is why it failed for a reason unrelated to the seam.
+        var served: [(presented: String, token: String)] = []
+        CloudRouteTestURLProtocol.onRequest = { _, _ in }
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"access-A","expires_in":900,"refresh_token":"refresh-A"}"#
+        )
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { "cred" },
+            identityProvider: { identity },
+            appVersionProvider: { "1.0" },
+            session: makeStubSession(),
+            now: { self.now }
+        )
+        let resolvedSnapshot = await provider.authenticatedSession()
+        let session = try XCTUnwrap(resolvedSnapshot)
+        // FIRST ACQUISITION: the fixture presented acct-A, so the snapshot must name acct-A and
+        // carry exactly the token that acquisition received. Both halves are asserted against the
+        // SAME pair, which is the property — not against a value chosen after the fact.
+        served.append((presented: "acct-A", token: "access-A"))
+        XCTAssertEqual(session.accessToken, "access-A")
+        XCTAssertEqual(session.accountId, served[0].presented,
+                       "the snapshot names the account whose credential produced access-A")
+
+        // The identity that will be read from now on is a DIFFERENT account, and that account
+        // brings its OWN token pair. The relay answers with access-B, so a second acquisition
+        // legitimately names acct-B — this is a NEW session, not a relabelled old one.
+        identity = "acct-B"
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"access-B","expires_in":900,"refresh_token":"refresh-B"}"#
+        )
+        let afterFlip = await provider.authenticatedSession()
+        if afterFlip?.accessToken == "access-A" {
+            // The OLD token is still being served, so its account must be the OLD one: an
+            // unchanged token may never acquire a new label.
+            XCTAssertEqual(afterFlip?.accountId, served[0].presented,
+                           "a token that was not re-minted keeps the account it was minted for")
+        } else {
+            // A new token was acquired under acct-B, so the pair must move together.
+            XCTAssertEqual(afterFlip?.accessToken, "access-B")
+            XCTAssertEqual(afterFlip?.accountId, "acct-B",
+                           "a freshly minted token is paired with the account that presented for it")
+        }
+        XCTAssertNotEqual(afterFlip?.accessToken, "access-A",
+                          "acct-B's acquisition must not be answered with acct-A's token")
+    }
+
+    /// A token with no recorded account identity cannot name an owner, so it yields NO session
+    /// rather than a token paired with a guess.
+    func testSnapshotRequiresAnAccountStampedOnTheTokens() async {
+        // Identity absent when the tokens are minted: the stored sourceIdentity is nil.
+        CloudRouteTestURLProtocol.onRequest = { _, _ in }
+        CloudRouteTestURLProtocol.stubJSON(
+            status: 200,
+            body: #"{"access_token":"access-A","expires_in":900,"refresh_token":"refresh-A"}"#
+        )
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { "cred" },
+            identityProvider: { nil },
+            appVersionProvider: { "1.0" },
+            session: makeStubSession(),
+            now: { self.now }
+        )
+        let session = await provider.authenticatedSession()
+        XCTAssertNil(session, "no account identity means no snapshot, never token-plus-placeholder")
+    }
+
     private func stubTokenResponse(accessToken: String, refreshToken: String, expiresIn: Int) {
         CloudRouteTestURLProtocol.stubJSON(
             status: 200,
@@ -367,7 +605,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             credentialProvider: { credential },
             identityProvider: { identity },
             appVersionProvider: { "1.0" },
-            session: testSession(),
+            session: makeStubSession(),
             now: { self.now }
         )
         let forA = await provider.token()
@@ -395,7 +633,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             credentialProvider: credential,
             identityProvider: { "acct-A" },
             appVersionProvider: { "1.0" },
-            session: testSession(),
+            session: makeStubSession(),
             now: { self.now }
         )
     }

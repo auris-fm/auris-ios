@@ -126,6 +126,53 @@ final class AppOperationResultSocket: @unchecked Sendable {
         get { bindingLock.lock(); defer { bindingLock.unlock() }; return _boundIdentity }
         set { bindingLock.lock(); _boundIdentity = newValue; bindingLock.unlock() }
     }
+
+    /// The validated token-and-account snapshot THIS turn authenticated with, published by the
+    /// client at the same moment it builds the authenticate frame.
+    ///
+    /// Bound here rather than passed down a second path because the socket is already the
+    /// turn-scoped object both sides hold: the sink reads the owner for an app operation off the
+    /// very socket that would carry its result. One turn, one registration, one account — an
+    /// operation can no longer be journaled under an account whose credential never opened this
+    /// turn's connection.
+    private var _authenticatedSession: CloudAuthenticatedSession?
+
+    var authenticatedSession: CloudAuthenticatedSession? {
+        get { bindingLock.lock(); defer { bindingLock.unlock() }; return _authenticatedSession }
+        set { bindingLock.lock(); _authenticatedSession = newValue; bindingLock.unlock() }
+    }
+
+    /// The acquisition THIS turn authenticated with, FROZEN at the moment it happened.
+    ///
+    /// `authenticatedSession` above is mutable: a test seam (or any later rebinding) can replace
+    /// it mid-turn. That is correct for the "is this still the same live session?" re-check, which
+    /// must observe the CURRENT session, but it is the wrong source for the turn's OWNER — an
+    /// owner taken from a mutable session can be relabelled after the fact, and the operation then
+    /// settles under an account whose credential never opened this turn's connection.
+    ///
+    /// FIRST WRITE WINS, under the same lock, so the freeze happens exactly once at publication
+    /// and cannot be overwritten afterwards. A no-principal acquisition is frozen as `.some(nil)`
+    /// — a settled fact, distinct from "not yet asked", so a later principal never leaks in.
+    private var _originalAcquisition: CloudAcquisitionFreeze?
+
+    /// Freeze the acquisition result once. Callers must pass exactly what the provider returned,
+    /// including `nil` for "no principal".
+    func freezeAcquisition(_ session: CloudAuthenticatedSession?) {
+        bindingLock.lock(); defer { bindingLock.unlock() }
+        guard _originalAcquisition == nil else { return }
+        _originalAcquisition = CloudAcquisitionFreeze(session: session)
+    }
+
+    /// The frozen acquisition, or `nil` while this turn has not acquired yet.
+    var frozenAcquisition: CloudAcquisitionFreeze? {
+        bindingLock.lock(); defer { bindingLock.unlock() }; return _originalAcquisition
+    }
+}
+
+/// A settled record of what this turn's single acquisition produced. `session == nil` means the
+/// turn genuinely had no principal — a completed answer, not a pending one.
+struct CloudAcquisitionFreeze: Sendable, Equatable {
+    let session: CloudAuthenticatedSession?
 }
 
 extension AppOperationResultSocket {

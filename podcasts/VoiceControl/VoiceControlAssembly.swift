@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import PocketCastsDataModel
+import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {

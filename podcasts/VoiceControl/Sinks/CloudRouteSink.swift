@@ -150,16 +150,166 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the sink. On expiry the hold is dropped and the expiry is logged, never assumed away.
     static let interruptionAcknowledgementTimeout: TimeInterval = 10
 
-    /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
+    /// WHO and WHERE an operation was issued, captured when its turn was admitted.
+///
+/// Deliberately a value: the journal's replay identity is this triple plus the operation's
+/// original bytes, and an identity read from "the latest turn" at effect time would relabel an
+/// earlier turn's operation the moment a successor was admitted.
+/// TURN-LOCAL memory of the admitted identity. `completingOwner` alone was a pure function: the
+/// turn loop kept passing its original empty-owner value, so each action could re-derive a
+/// DIFFERENT account from a socket that changed in between. The completed value must be stored
+/// once, per turn, and reused — including the "completed with no principal" answer, which is a
+/// settled fact and not something to keep re-asking.
+final class AdmittedTurnIdentityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identity: AdmittedTurnIdentity
+    private var completed: Bool
+
+    init(_ identity: AdmittedTurnIdentity, completed: Bool = false) {
+        self.identity = identity
+        self.completed = completed
+    }
+
+    /// Complete from the turn's own socket exactly once, then always return the stored value.
+    /// Sticky even when the socket later names a different account: an identity already captured
+    /// for this turn must not be relabelled by a switch that happens afterwards.
+    func completing(from socket: AppOperationResultSocket?) -> AdmittedTurnIdentity {
+        lock.lock()
+        defer { lock.unlock() }
+        // FIRST COMPLETION WINS, and the comparison is made under the SAME lock that performs
+        // the write. The previous version released the lock to derive, then re-took it: two
+        // callers could both observe `completed == false`, and the loser's freshly derived
+        // identity could overwrite the winner's — so a turn could still be relabelled by an
+        // account that arrived second.
+        if completed { return identity }
+        // NOT YET ACQUIRED IS NOT A COMPLETED ANSWER. With owner frozen at publication, an absent
+        // freeze means this turn has not acquired yet: the question is still open, so the box must
+        // stay INCOMPLETE. Marking it complete here would settle the identity as "no owner" before
+        // the acquisition ever happened, and the late acquisition could never be observed.
+        // A FROZEN nil IS completed, and `completingOwner` returns the unchanged (empty-owner)
+        // identity for it — that is the genuine "this turn has no principal" answer.
+        guard socket?.frozenAcquisition != nil else { return identity }
+        // Deriving here rather than outside keeps read-derive-write atomic. `completingOwner`
+        // only reads the socket's own lock-guarded freeze, and never calls back into this box, so
+        // holding our lock across it cannot re-enter this lock.
+        identity = identity.completingOwner(from: socket)
+        completed = true
+        return identity
+    }
+
+    var current: AdmittedTurnIdentity {
+        lock.lock(); defer { lock.unlock() }; return identity
+    }
+}
+
+struct AdmittedTurnIdentity: Equatable {
+    let conversation: String
+    let turn: String
+    /// The authenticated account. EMPTY means "no trusted owner is available", which is a
+    /// fail-closed condition at the operation gate — never journaled as a real identity.
+    let owner: String
+    /// The credential that account was authenticated with, captured at admission.
+    ///
+    /// The operation gate re-checks that this session is still the live one before it claims, so
+    /// an account switch part-way through a turn cannot get its operation journaled under the
+    /// account that opened the turn. Compared, never persisted and never logged.
+    let sessionCredential: String
+
+    init(conversation: String, turn: String, owner: String, sessionCredential: String = "") {
+        self.conversation = conversation
+        self.turn = turn
+        self.owner = owner
+        self.sessionCredential = sessionCredential
+    }
+
+    /// COMPLETE the owner from the turn's own socket, at the moment the answer exists.
+    ///
+    /// The client publishes its validated acquisition asynchronously, so at admission there may be
+    /// nothing to read yet. Rather than block the consumer waiting for it, the owner is taken when
+    /// the first action is handled — by which point the turn has authenticated, if it is going to.
+    ///
+    /// Idempotent and STICKY: once completed the values never change again, so a later account
+    /// switch on the socket cannot relabel an identity already captured, and a successor turn can
+    /// never reach it (this value is captured by value per turn).
+    ///
+    /// No session ⇒ both fields stay empty, which the operation gate refuses. That is the same
+    /// fail-closed answer whether the turn had no principal or the acquisition never happened.
+    func completingOwner(from socket: AppOperationResultSocket?) -> AdmittedTurnIdentity {
+        guard owner.isEmpty else { return self }
+        // THE OWNER BELONGS TO THE CREDENTIAL PAIR THIS TURN ACTUALLY ACQUIRED, not to whichever
+        // mutable session happens to exist when the first action is handled. Reading
+        // `authenticatedSession` here let a mid-turn rebinding relabel the owner: the box adopted
+        // the NEW account, the live-session re-check then compared that account against itself,
+        // and the operation settled under an account whose credential never opened this turn.
+        //
+        // The client freezes the acquisition result once, at publication. Reading that immutable
+        // snapshot preserves delayed acquisition (the answer simply is not there until it
+        // happens) and freezes the explicit no-principal answer too, without rereading the
+        // provider and without capturing a premature nil before acquisition has occurred.
+        guard let frozen = socket?.frozenAcquisition else { return self }
+        // A frozen nil session is a COMPLETED "no principal" answer: both fields stay empty, which
+        // the gate refuses. An empty account is not an owner either — treating it as one would
+        // turn "unauthenticated" into a journaled identity.
+        guard let session = frozen.session, !session.accountId.isEmpty else { return self }
+        return AdmittedTurnIdentity(
+            conversation: conversation,
+            turn: turn,
+            owner: session.accountId,
+            sessionCredential: session.accessToken
+        )
+    }
+}
+
+/// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
     /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
     /// conversation), so this is the id the retained report must carry.
     @MainActor private var lastAdmittedConversationId: String?
+
 
     /// The turn socket currently open, so an ordering control can establish that a PRIOR turn is
     /// genuinely in flight before it starts a successor. Without this the interruption path never
     /// runs in a test and a control about interruption ordering passes vacuously.
     @MainActor
     var activeResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
+
+
+
+    /// Drives the action-admission path with an EXPLICIT admitted identity and the socket that
+    /// identity came from. TEST-ONLY: it exists so a control can deliver a delay-arriving action
+    /// from a prior turn without pretending the current live socket is its own — the exact
+    /// mistake a global `activeResultSocket` read invites. Production always reaches this path
+    /// through the turn loop, which passes the turn's own `turnSocket`.
+    @MainActor
+    func executeActionForTesting(
+        action: String,
+        params: [String: CloudRouteJSONValue],
+        operationId: String?,
+        capabilityVersion: String?,
+        actionBytes: Data?,
+        precondition: [String: CloudRouteJSONValue],
+        admittedTurnBox: AdmittedTurnIdentityBox,
+        admittedTurnSocket: AppOperationResultSocket?,
+        admittedTurnClient: CloudRouteClient
+    ) async {
+        await executeAction(
+            tool: "playback", action: action, params: params,
+            operationId: operationId, capabilityVersion: capabilityVersion,
+            actionBytes: actionBytes, precondition: precondition,
+            parameterViolation: nil,
+            admittedTurnBox: admittedTurnBox,
+            admittedTurnSocket: admittedTurnSocket,
+            admittedTurnClient: admittedTurnClient
+        )
+    }
+
+    /// Builds the turn-local identity a control drives through `executeActionForTesting`, so the
+    /// control reuses ONE box across several actions exactly as a real turn does.
+    static func admittedTurnBoxForTesting(
+        conversation: String, turn: String
+    ) -> AdmittedTurnIdentityBox {
+        AdmittedTurnIdentityBox(
+            AdmittedTurnIdentity(conversation: conversation, turn: turn, owner: ""))
+    }
 
     /// The interruption state this sink carries, so a service-level control can observe the
     /// cross-turn state the production service actually uses rather than assuming its contents.
@@ -207,6 +357,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let playbackManager: PlaybackManager?
     /// Injectable episode-AVAILABILITY source (test seam); nil falls back to the manager.
     private let episodeAvailable: (() -> Bool)?
+    /// The episode the app is currently targeting. `nil` provider falls back to the real manager.
+    private let currentEpisodeIdProvider: (() -> String?)?
 
     /// Playback position captured before `seek_to` / `play_quote` for `stop_quote`.
     private var preQuotePositionMs: Int64?
@@ -401,6 +553,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         fingerprintMapper: FingerprintMappingProviding,
         playbackPositionMs: @escaping () -> Int64,
         episodeAvailable: (() -> Bool)? = nil,
+        // The episode the app is CURRENTLY targeting, for the wire's target-match precondition.
+        // Production reads the manager's own current episode; the closure exists so a control can
+        // state "the user moved to a different episode" without a real player.
+        currentEpisodeIdProvider: (() -> String?)? = nil,
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: VoiceAnalytics? = nil,
         rendersStructuredResults: Bool = false,
@@ -448,6 +604,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.fingerprintMapper = fingerprintMapper
         self.playbackPositionMs = playbackPositionMs
         self.episodeAvailable = episodeAvailable
+        self.currentEpisodeIdProvider = currentEpisodeIdProvider
         self.cloudPlaybackContextState = cloudPlaybackContextState
         self.analytics = analytics
         self.rendersStructuredResults = rendersStructuredResults
@@ -1089,6 +1246,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // can be discarded if the user abandons that conversation.
         let turnConversationId = conversation.conversationId
         lastAdmittedConversationId = turnConversationId
+        // THE identity of THIS admitted turn, captured ONCE and by value. The action-delivery
+        // closure below captures this constant rather than reading "the latest turn" later:
+        // turns overlap, and a later turn's admission must not relabel an earlier turn's
+        // operations.
+        //
+        // The IMMUTABLE half (conversation, turn) is bound here. The OWNER half cannot be: it is
+        // only knowable from the authenticated acquisition on THIS turn's socket, which does not
+        // exist until the client has routed the turn. Reading a global instead would let a
+        // delayed action be attributed to whatever turn happens to be current, so the identity is
+        // completed below from `routed.resultSocket` — the object this turn owns — and never from
+        // `activeResultSocket`, which a successor may already have replaced.
+        let admittedConversation = turnConversationId
+        let admittedTurnId = turnRequestId
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
         defer {
@@ -1175,6 +1345,27 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         activeResultSocket = routed.resultSocket
         resultSendClient = client
 
+        // The admitted turn's identity. The OWNER is left unset here on purpose and completed
+        // when the first action is consumed — see `AdmittedTurnIdentity.completingOwner(from:)`
+        // and its use in the action path.
+        //
+        // `routeWithResultSocket` returns as soon as it has STARTED the transport task, so the
+        // client has not necessarily acquired a credential yet: nil at this instant means "not
+        // yet asked", not "no principal". AWAITING it here was the first instinct and is wrong —
+        // it blocks stream consumption on a second continuation system, and then every early
+        // return that skips publication strands the consumer. Completing at first use defers the
+        // question until the answer genuinely exists, with no wait and no extra termination
+        // path. The conversation/turn pair is already bound, so the identity cannot drift.
+        // The turn-local identity, completed ONCE and reused by every action of this turn.
+        let admittedTurnBox = AdmittedTurnIdentityBox(
+            AdmittedTurnIdentity(
+                conversation: admittedConversation,
+                turn: admittedTurnId,
+                owner: "",
+                sessionCredential: ""
+            )
+        )
+
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
         routed.resultSocket.claimConsumerOwnership()
@@ -1212,8 +1403,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Loop-exit immediate check: `onCancel` fires synchronously at cancel time and marks the
         // flag; when the suspended loop returns here after cancellation, retire the ORIGINAL
         // registration NOW — before any release-dependent held work can reach its effect check.
+        //
+        // `turnSocket`, NOT `activeResultSocket`: this turn may already have been superseded, and
+        // retiring whatever is live would close a SUCCESSOR's still-open turn.
         if ownerCancelledFlag.isSet || Task.isCancelled {
-            activeResultSocket?.finishTurn()
+            turnSocket.finishTurn()
         }
         var turnResult: CloudRouteOutcome?
         var turnResponse: VoiceResponse = .silent
@@ -1237,7 +1431,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     audioPlayer.enqueue(frame)
-                case let .action(tool, action, params, operationId, capabilityVersion):
+                case let .action(tool, action, params, operationId, capabilityVersion, actionBytes,
+                                 precondition, parameterViolation):
                     // BUFFERED ADMISSION CHECK: an event drained from the buffer after the owner
                     // was cancelled must not admit any later effect or a completed result. The
                     // handler's mark (or Task.isCancelled) stops consumption here; the turn is
@@ -1245,7 +1440,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     await executeAction(
                         tool: tool, action: action, params: params,
-                        operationId: operationId, capabilityVersion: capabilityVersion
+                        operationId: operationId, capabilityVersion: capabilityVersion,
+                        actionBytes: actionBytes, precondition: precondition,
+                        parameterViolation: parameterViolation,
+                        admittedTurnBox: admittedTurnBox,
+                        admittedTurnSocket: turnSocket,
+                        admittedTurnClient: client
                     )
                 // .token is no longer accumulated — cloud answers are played as
                 // audio, not text (spec: "cloud answers are played, not spoken").
@@ -1527,51 +1727,198 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         action: String,
         params: [String: CloudRouteJSONValue],
         operationId: String?,
-        capabilityVersion: String?
+        capabilityVersion: String?,
+        actionBytes: Data?,
+        precondition: [String: CloudRouteJSONValue],
+        parameterViolation: AppOperationRequest.ParameterViolation? = nil,
+        admittedTurnBox: AdmittedTurnIdentityBox,
+        admittedTurnSocket: AppOperationResultSocket?,
+        admittedTurnClient: CloudRouteClient
     ) async {
         guard tool == "playback" else { return }
+        // COMPLETE ONCE, HERE, and store it in the turn-local box. Deferring to this point is what
+        // makes the read correct without waiting: by now the client has either published its
+        // acquisition or the turn produced no credential. Storing it means a LATER action of the
+        // same turn cannot recapture a different account.
+        let admittedTurn = admittedTurnBox.completing(from: admittedTurnSocket)
         await executeCloudMutation(
-            action: action, params: params,
-            operationId: operationId, capabilityVersion: capabilityVersion
+            action: action, params: params, precondition: precondition,
+            operationId: operationId, capabilityVersion: capabilityVersion,
+            actionBytes: actionBytes, parameterViolation: parameterViolation,
+            admittedTurn: admittedTurn,
+            admittedTurnSocket: admittedTurnSocket,
+            admittedTurnClient: admittedTurnClient
         )
     }
 
-    /// The wire contract's runtime gate (rev da327e624 §1): every cloud app operation carries
-    /// `operation_id` and `capability_version`; an identity-less app operation does NOT execute
-    /// as a legacy fallback — it is refused (no mutation) and the refusal is reported.
+    /// The wire contract's runtime gate (rev da327e624 §1, amended @ bf5fb219): every cloud app
+    /// operation carries `operation_id` AND `capability_version`, both non-empty; an operation
+    /// missing either is MALFORMED — refused before any effect, never executed as a legacy
+    /// playback frame. A missing half is the amendment's explicit "incomplete pair is
+    /// malformed, not legacy playback".
     private func executeCloudMutation(
         action: String,
         params: [String: CloudRouteJSONValue],
+        precondition: [String: CloudRouteJSONValue],
         operationId: String?,
-        capabilityVersion: String?
+        capabilityVersion: String?,
+        actionBytes: Data?,
+        parameterViolation: AppOperationRequest.ParameterViolation? = nil,
+        admittedTurn: AdmittedTurnIdentity,
+        admittedTurnSocket: AppOperationResultSocket?,
+        admittedTurnClient: CloudRouteClient
     ) async {
-        guard let operationId, !operationId.isEmpty, capabilityVersion != nil else {
+        // THE ORIGINAL TURN'S ROUTE, resolved once and used by every result path below —
+        // success, refusal, replay and unknown. Nil when the turn has no socket, which refuses to
+        // send rather than borrowing a successor's.
+        let admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)? =
+            admittedTurnSocket.map { (socket: $0, client: admittedTurnClient) }
+        // THE CLASSIFICATION BOUNDARY, stated once because it is the difference between a
+        // CONTRACT REFUSAL and an AUTHORIZATION:
+        //
+        //  • NO identity field at all — no `operation_id` AND no `capability_version`. This is a
+        //    pre-v1 legacy playback frame. The amendment's rule is that an incomplete or invalid
+        //    identity-bearing frame must not EXECUTE VIA THE LEGACY PATH; it does not forbid a
+        //    frame that never claimed an identity. Such a frame keeps its original behaviour and
+        //    runs the effect below with no journal, no owner and no result frame — it was never
+        //    part of the app-operation protocol, so there is nothing to claim or settle.
+        //
+        //  • ANY identity field present — even one half, a blank string or a wrong type. This IS
+        //    an app-operation attempt, and it may never fall back to the legacy path. It is
+        //    answered on the wire with a pinned reason and produces zero effects: `.unsupported`
+        //    when the pair is absent-or-empty in a way the parser could not classify, and
+        //    `invalid_request` when an `operation_id` exists but cannot be accounted for.
+        //
+        // `classify` already made this decision upstream; re-deriving it here from the two
+        // values that survived parsing keeps the sink's boundary identical to the parser's.
+        //
+        // THE TEST IS PRESENCE, NOT EMPTINESS. `(operationId ?? "").isEmpty` collapses two
+        // different frames into one: a frame that never sent an identity field, and a frame that
+        // sent an explicit blank. The parser already tells them apart — `classify` keys on
+        // `json[...] != nil` and returns `.malformedIdentity` (no event) for the blank case — so
+        // a blank-declaring frame never reaches here at all. At this boundary both optionals are
+        // `nil` precisely when no identity field was present, and nil-vs-empty is expressible.
+        if operationId == nil && capabilityVersion == nil {
+            // No identity field of any kind: the established pre-v1 playback path. Deliberately
+            // keeps its existing behaviour, including NOT applying v1 required preconditions —
+            // the compatibility ruling covers these frames, and retrofitting v1 rules onto them
+            // would break them.
+            await runLegacyMutation(action: action, params: params)
+            return
+        }
+        await continueIdentifiedOperation(
+            action: action, params: params, precondition: precondition,
+            operationId: operationId, capabilityVersion: capabilityVersion,
+            actionBytes: actionBytes, parameterViolation: parameterViolation,
+            admittedTurn: admittedTurn, admittedTurnSocket: admittedTurnSocket,
+            admittedTurnClient: admittedTurnClient, admittedTurnRoute: admittedTurnRoute)
+    }
+
+    /// Continues an IDENTIFIED operation through the fail-closed gates to its effect.
+    private func continueIdentifiedOperation(
+        action: String,
+        params: [String: CloudRouteJSONValue],
+        precondition: [String: CloudRouteJSONValue],
+        operationId: String?,
+        capabilityVersion: String?,
+        actionBytes: Data?,
+        parameterViolation: AppOperationRequest.ParameterViolation?,
+        admittedTurn: AdmittedTurnIdentity,
+        admittedTurnSocket: AppOperationResultSocket?,
+        admittedTurnClient: CloudRouteClient,
+        admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)?
+    ) async {
+        // Reached only from the declared-identity branch, which admits a frame carrying at least
+        // one identity field. A missing `operation_id` here is an incomplete pair and refuses
+        // `unsupported_operation` — never legacy playback.
+        guard let operationId, !operationId.isEmpty else {
             let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
             recordSeekRejection(refused)
-            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
+            return
+        }
+        // FAIL-CLOSED PREREQUISITES, all checked BEFORE any effect. An identified operation is
+        // only executable when the client can actually account for it: a malformed identity pair,
+        // a missing journal, a missing owner, a missing conversation/turn, or missing original
+        // bytes all refuse. Substituting empty values instead would silently produce a record
+        // that cannot distinguish one operation from another.
+        // SESSION RE-CHECK AT THE POINT OF USE. The owner was captured at admission; an account
+        // switch since then must not get its operation journaled under the account that opened
+        // the turn. No live paired session ⇒ treated as no trusted owner.
+        // Read from the SAME socket object the identity was captured from. `sessionCredential`
+        // being non-empty proves this turn HAD an established principal at admission; asking that
+        // turn's socket now is what detects a later account switch on the live connection.
+        //
+        // Deliberately NOT `activeResultSocket`: a successor turn has already replaced it, so a
+        // delayed action from a prior turn would be checked against the SUCCESSOR's session —
+        // passing the "still the admitted one" test on the wrong turn and sending a result on a
+        // socket that is not its own. Reading this turn's own socket is what keeps the check
+        // attached to the identity it was performed for.
+        let liveOwner: CloudAuthenticatedSession? = admittedTurn.sessionCredential.isEmpty
+            ? nil
+            : admittedTurnSocket?.authenticatedSession
+        let sessionIsStillTheAdmittedOne = liveOwner?.accountId == admittedTurn.owner
+            && !admittedTurn.owner.isEmpty
+
+        let identityPrerequisites: OperationIdentity? = {
+            guard !operationId.isEmpty else { return nil }
+            guard let capabilityVersion, !capabilityVersion.isEmpty else { return nil }
+            guard sessionIsStillTheAdmittedOne else { return nil }
+            guard !admittedTurn.conversation.isEmpty, !admittedTurn.turn.isEmpty else { return nil }
+            guard let actionBytes, !actionBytes.isEmpty else { return nil }
+            return OperationIdentity(
+                owner: admittedTurn.owner,
+                conversation: admittedTurn.conversation,
+                turn: admittedTurn.turn,
+                actionBytes: actionBytes
+            )
+        }()
+        guard let identity = identityPrerequisites, let capabilityVersion else {
+            // `invalid_request` (wire-pinned): the request cannot be accounted for, so nothing was
+            // attempted. The settlement names the malformation rather than claiming the operation
+            // is unsupported — and no effect runs.
+            let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.invalidRequest)
+            recordSeekRejection(refused)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         }
         // Exactly-once: the durable claim happens BEFORE the effect, so an interruption leaves a
-        // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run.
-        switch operationJournal?.claim(operationId) ?? .claimed {
+        // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run. NO
+        // JOURNAL = NO EFFECT: a sink without durable storage cannot claim anything, and an
+        // unclaimable operation must not execute.
+        guard let operationJournal else {
+            let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.persistenceUnavailable)
+            recordSeekRejection(refused)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
+            return
+        }
+        switch operationJournal.claim(operationId, identity: identity) {
+        case .identityConflict:
+            // Same id, different contents or a different owner/conversation/turn: this is a
+            // DIFFERENT operation. It is refused, never executed under the old identity — that
+            // would apply an effect no record accounts for.
+            let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.invalidRequest)
+            recordSeekRejection(refused)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
+            return
         case .alreadyRun(let recorded):
             // REPLAY CONTRACT: answer from the DURABLE RECORD — the outcome AND the state settled
             // with it. The live playback state is not read: an unrelated operation may have moved
             // it since, and a settled answer must not be rewritten by later events.
-            await reportRecorded(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
+            await reportRecorded(recorded, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         case .inProgress:
             return
         case .interrupted(let result):
             // The effect is not knowable: answer `unknown`, never re-execute.
-            await reportResult(result, operationId: operationId, capabilityVersion: capabilityVersion)
+            await reportResult(result, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         case .persistenceUnavailable:
             // Fail closed: the exactly-once record could not be durably persisted (or durable
             // history is unreadable). Refuse before any effect — never execute unrecorded.
             let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.persistenceUnavailable)
             recordSeekRejection(refused)
-            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+            await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         case .claimed:
             // Runtime gate: an identified operation whose action this build does not implement
@@ -1581,14 +1928,49 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // (there is no legacy fallback that authorizes a mutation without
             // operation_id + capability_version).
             let knownActions: Set<String> = ["seek_to", "play_quote", "stop_quote", "seek_relative", "pause", "resume"]
-            if !knownActions.contains(action) {
-                let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
-                let settled = operationJournal?.complete(operationId, result: refused) ?? true
+            // A REQUEST THAT CANNOT RUN IS STILL ANSWERED. Two distinct classes reach here, and
+            // they get distinct wire reasons:
+            //  - an action this build does not implement → `unsupported_operation`;
+            //  - an implemented action whose parameters/targets do not satisfy its contract →
+            //    `invalid_request` (or the more specific malformed/stale target reason).
+            // Both are settled durably, so a redelivery replays the refusal instead of
+            // re-deciding it, and neither runs an effect.
+            // The CURRENT-TARGET half of admission needs live playback state, so it is decided
+            // here rather than at the parser: the proposal may have been formed for an episode the
+            // user has since left. A parser cannot see that; the sink can.
+            // FAIL CLOSED AT THE EFFECT BOUNDARY. `.notEvaluated` is the PARSER's answer — a
+            // caller that owns no playback state. Here, at the boundary where an effect would be
+            // released, a sink that cannot observe the current target cannot prove the proposal
+            // is still for the episode the user is on, and "I cannot check" must never authorise
+            // a mutation. It is reported as an unavailable target (`.absent`), which refuses
+            // `stale_precondition` with zero effects.
+            let targetMatch: AppOperationRequest.TargetMatch
+            if let currentEpisodeIdProvider {
+                targetMatch = currentEpisodeIdProvider().map { .available($0) } ?? .absent
+            } else if let playbackManager {
+                targetMatch = playbackManager.currentEpisode.map { .available($0.uuid) } ?? .absent
+            } else {
+                targetMatch = .absent
+            }
+            var refusalReason: String? = {
+                if !knownActions.contains(action) { return OperationReason.unsupportedOperation }
+                if let parameterViolation { return Self.wireReason(for: parameterViolation) }
+                return nil
+            }()
+            if refusalReason == nil,
+               case let .failure(violation) = AppOperationRequest.validate(
+                   action: action, params: params, precondition: precondition,
+                   target: targetMatch) {
+                refusalReason = Self.wireReason(for: violation)
+            }
+            if let refusalReason {
+                let refused = OperationResult.nonSuccess(.refused, reason: refusalReason)
+                let settled = operationJournal.complete(operationId, identity: identity, result: refused)
                 if settled {
-                    await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
+                    await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
                 } else {
                     let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
-                    await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+                    await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
                 }
                 return
             }
@@ -1612,22 +1994,25 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Immediate, synchronous retirement of the ORIGINAL registration (idempotent; the
             // turn-wide defer re-runs it harmlessly): the held work cannot proceed to the effect
             // on a live socket and late results report undelivered against the retired identity.
-            activeResultSocket?.finishTurn()
+            //
+            // `admittedTurnSocket`, NOT `activeResultSocket`: a superseded turn's cancellation
+            // must retire ITS registration. Reaching through the global would close the successor.
+            admittedTurnSocket?.finishTurn()
             let unexecuted = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
-            await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion)
+            await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         }
         let refusal = performMutation(action: action, params: params)
         if let refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
             // record in progress, so the honest report is unknown, never a replayable refusal.
-            let settled = operationJournal?.complete(operationId, result: refusal) ?? true
+            let settled = operationJournal.complete(operationId, identity: identity, result: refusal)
             recordSeekRejection(refusal)
             if settled {
-                await reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion)
+                await reportResult(refusal, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             } else {
                 let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
-                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             }
         } else {
             // Persist the settlement FIRST and observe it: a failed settlement write must not
@@ -1636,7 +2021,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Settle with the state CAPTURED AT SETTLEMENT: replay must answer with what was
             // true when THIS operation finished, never a later reading.
             let settledResult = OperationResult.succeeded(state: currentPlaybackState())
-            let settled = operationJournal?.complete(operationId, result: settledResult) ?? true
+            let settled = operationJournal.complete(operationId, identity: identity, result: settledResult)
             if settled {
                 // The FIRST send is the SAME CAPTURED envelope that was settled — not a second
                 // live snapshot (review 5295572f): between settlement and send the state could
@@ -1645,16 +2030,52 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     AppOperationResultFrame(
                         operationId: operationId, outcome: .succeeded, state: settledResult.state
                     ),
-                    capabilityVersion: capabilityVersion
+                    capabilityVersion: capabilityVersion,
+                    route: admittedTurnRoute
                 )
             } else {
                 let unsettled = OperationResult.nonSuccess(.unknown, reason: OperationReason.persistenceUnavailable)
-                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion)
+                await reportResult(unsettled, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             }
         }
     }
 
+    /// The wire reason for a parameter-admission violation.
+    ///
+    /// Each violation states a DIFFERENT fact, and the reason must not flatten them into one:
+    /// an unstated target is the wire's generic `invalid_request`, a target that is no longer the
+    /// current episode is the specific `stale_precondition` (the server can act on that — the
+    /// proposal was formed for an episode the user has moved away from), and a malformed or
+    /// ambiguous seek target is `malformed_seek_target`, which is a fact about the REQUEST rather
+    /// than about state.
+    static func wireReason(for violation: AppOperationRequest.ParameterViolation) -> String {
+        switch violation {
+        case .unsupportedAction:
+            return OperationReason.unsupportedOperation
+        case .stalePrecondition:
+            return OperationReason.stalePrecondition
+        case .ambiguousSeekTarget, .wrongType, .missingField:
+            return OperationReason.malformedSeekTarget
+        case .missingPrecondition:
+            return OperationReason.invalidRequest
+        }
+    }
+
     /// Runs the mutation. Returns the refusal to record (nil = executed).
+    /// The LEGACY playback path: a frame that never claimed an identity. It runs the same
+    /// effect, and NOTHING else — no journal claim (there is no identity to claim under), no
+    /// owner, no result frame (the pre-v1 protocol expects no answer), no refusal settlement.
+    ///
+    /// Deliberately NOT routed through `executeCloudMutation`'s post-effect tail: everything
+    /// after the claim there is about durably settling an identified operation, and inventing an
+    /// identity for a legacy frame to reuse it is exactly the fabrication the amendment forbids.
+    private func runLegacyMutation(action: String, params: [String: CloudRouteJSONValue]) async {
+        if let refusal = performMutation(action: action, params: params) {
+            // A precondition failure on a legacy frame is observable to the user, not silent.
+            recordSeekRejection(refusal)
+        }
+    }
+
     private func performMutation(action: String, params: [String: CloudRouteJSONValue]) -> OperationResult? {
         switch action {
         case "seek_to":
@@ -1985,9 +2406,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private func reportResult(
         _ result: OperationResult,
         operationId: String?,
-        capabilityVersion: String?
+        capabilityVersion: String?,
+        route: (socket: AppOperationResultSocket, client: CloudRouteClient)?
     ) async {
-        guard let operationId, let socket = activeResultSocket else { return }
+        // THE ORIGINAL TURN'S ROUTE, threaded in. Reading `activeResultSocket`/`resultSendClient`
+        // here let a superseded turn's refusal ride whatever successor happened to be live — the
+        // same defect the admission fix was supposed to close, left open on the send side.
+        guard let operationId, let route else { return }
+        let socket = route.socket
         guard let frame = AppOperationResultFrame(
             operationId: operationId,
             outcome: result.outcome,
@@ -1996,26 +2422,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         _ = capabilityVersion // validated at the gate; rides the action frame, not the result
         // AWAITED inside the turn loop: a fire-and-forget Task can be scheduled after the turn's
         // socket closed, turning a deliverable result into a spurious undelivered (measured).
-        guard let client = resultSendClient else {
-            return
-        }
-        let report = await client.sendOperationResult(frame, via: socket)
+        _ = await route.client.sendOperationResult(frame, via: socket)
     }
 
     /// Diagnostic: this turn's bound result socket handle.
 
-
-    /// Success carries the ACTUAL resulting state, typed per the owning family (wire contract §3):
-    /// playback seeks state position and playing; identity-less successes cannot occur (the gate).
-    private func reportSuccess(operationId: String, capabilityVersion: String?) async {
-        await reportFrame(
-            AppOperationResultFrame(
-                operationId: operationId, outcome: .succeeded,
-                state: currentPlaybackState()
-            ),
-            capabilityVersion: capabilityVersion
-        )
-    }
 
     /// The live typed playback state, captured at settlement (fresh executions only — replay
     /// answers from the journal's stored state).
@@ -2031,24 +2442,29 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private func reportRecorded(
         _ recorded: OperationResult,
         operationId: String,
-        capabilityVersion: String?
+        capabilityVersion: String?,
+        route: (socket: AppOperationResultSocket, client: CloudRouteClient)?
     ) async {
-        guard let socket = activeResultSocket,
+        // The route is REQUIRED and comes from the ORIGINAL turn: a replayed answer answers that
+        // turn's operation, not whatever turn is live when the replay lands.
+        guard let route,
               let frame = AppOperationResultFrame(
                 operationId: operationId,
                 outcome: recorded.outcome,
                 reason: recorded.reason,
                 state: recorded.state
               ) else { return }
-        await reportFrame(frame, capabilityVersion: capabilityVersion)
+        await reportFrame(frame, capabilityVersion: capabilityVersion, route: route)
     }
 
-    private func reportFrame(_ frame: AppOperationResultFrame?, capabilityVersion: String?) async {
+    private func reportFrame(
+        _ frame: AppOperationResultFrame?,
+        capabilityVersion: String?,
+        route: (socket: AppOperationResultSocket, client: CloudRouteClient)?
+    ) async {
         _ = capabilityVersion // validated at the gate; rides the action frame, not the result
-        guard let frame else { return }
-        guard let client = resultSendClient else { return }
-        guard let socket = activeResultSocket else { return }
-        _ = await client.sendOperationResult(frame, via: socket)
+        guard let frame, let route else { return }
+        _ = await route.client.sendOperationResult(frame, via: route.socket)
     }
 
     private func capturePreActionPosition(referenceMs: Int64) {
