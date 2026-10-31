@@ -2002,8 +2002,8 @@ struct AdmittedTurnIdentity: Equatable {
             await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         }
-        let refusal = performMutation(action: action, params: params)
-        if let refusal {
+        let outcome = performIdentifiedMutation(action: action, params: params)
+        if let refusal = outcome.refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
             // record in progress, so the honest report is unknown, never a replayable refusal.
             let settled = operationJournal.complete(operationId, identity: identity, result: refusal)
@@ -2018,9 +2018,13 @@ struct AdmittedTurnIdentity: Equatable {
             // Persist the settlement FIRST and observe it: a failed settlement write must not
             // be reported as success — the durable record is still in progress, so the honest
             // answer is unknown, never a replayable success.
-            // Settle with the state CAPTURED AT SETTLEMENT: replay must answer with what was
-            // true when THIS operation finished, never a later reading.
-            let settledResult = OperationResult.succeeded(state: currentPlaybackState())
+            // Settle with the SINGLE OBSERVATION the classification used (voice-intents.md
+            // @ 818c8f75): `performIdentifiedMutation` captured it once, so the gate that
+            // decided success and the state on the wire cannot come from different readings —
+            // for a pause, a gate on observed `false` can never settle `playing: true`.
+            Swift.precondition(outcome.settledState != nil,
+                               "a succeeded identified mutation must carry its captured state")
+            let settledResult = OperationResult.succeeded(state: outcome.settledState!)
             let settled = operationJournal.complete(operationId, identity: identity, result: settledResult)
             if settled {
                 // The FIRST send is the SAME CAPTURED envelope that was settled — not a second
@@ -2074,6 +2078,40 @@ struct AdmittedTurnIdentity: Equatable {
             // A precondition failure on a legacy frame is observable to the user, not silent.
             recordSeekRejection(refusal)
         }
+    }
+
+    /// The IDENTIFIED-operation mutation path (voice-intents.md @ 818c8f75): for `playback.pause`
+    /// it produces ONE fresh post-sink observation and returns it as the state the caller must
+    /// settle and send, so classification and wire state cannot come from different readings.
+    /// Every other action, and the whole legacy path, behave exactly as `performMutation` does.
+    ///
+    /// Returns `(refusal, settledState)`: a non-nil refusal is settled and reported as-is with
+    /// NO state; a nil refusal means the mutation succeeded and `settledState` is the captured
+    /// observation to settle and send.
+    private func performIdentifiedMutation(
+        action: String, params: [String: CloudRouteJSONValue]
+    ) -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
+        if action == "pause" {
+            _ = playbackSink.pause()
+            didAutoPause = false
+            // A v1 `succeeded` result requires a fresh observed `{"playing": false}` after the
+            // pause sink completes; an already-paused engine satisfies this idempotently. The
+            // value is the engine's current reading — never the request, an earcon, a cached
+            // pre-action read or an answer hold. Unavailable: `unknown`/
+            // `playback_state_unavailable`. Still playing: a FAILED pause
+            // (`pause_not_observed`), not a refusal — the mutation was attempted. Non-success
+            // carries no state.
+            switch playbackSink.observedPlaying {
+            case nil:
+                return (.nonSuccess(.unknown, reason: OperationReason.playbackStateUnavailable), nil)
+            case .some(true):
+                return (.nonSuccess(.failed, reason: OperationReason.pauseNotObserved), nil)
+            case .some(false):
+                return (nil, ["position_seconds": .int(playbackPositionMs() / 1000), "playing": .bool(false)])
+            }
+        }
+        let refusal = performMutation(action: action, params: params)
+        return (refusal, refusal == nil ? currentPlaybackState() : nil)
     }
 
     private func performMutation(action: String, params: [String: CloudRouteJSONValue]) -> OperationResult? {
@@ -2141,6 +2179,10 @@ struct AdmittedTurnIdentity: Equatable {
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
             return nil
         case "pause":
+            // LEGACY path: unchanged response behaviour (voice-intents.md @ 818c8f75). The
+            // OBSERVED pause classification lives only in the identified-operation path —
+            // `performIdentifiedMutation` below — so a legacy turn never reports an
+            // app-operation result and never classifies a pause at all.
             _ = playbackSink.pause()
             didAutoPause = false
             return nil

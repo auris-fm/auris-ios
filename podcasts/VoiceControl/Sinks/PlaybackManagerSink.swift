@@ -9,6 +9,9 @@ protocol PlaybackManagerProtocol {
     /// this to decide whether a turn may pause and later release playback (a
     /// pause the user made themselves must not be released).
     var isPlaying: Bool { get }
+    /// Tri-state post-action observation (voice-intents.md @ 818c8f75): `nil` = no engine
+    /// reading exists, `.some(false)` = observed not playing, `.some(true)` = observed playing.
+    func observedPlaybackState() -> Bool?
     func duration() -> TimeInterval
     func currentTime() -> TimeInterval
     func seekTo(time: TimeInterval)
@@ -31,6 +34,8 @@ class PlaybackManagerSink: VoicePlaybackSink {
     }
 
     var isPlaying: Bool { playbackManager.isPlaying }
+
+    var observedPlaying: Bool? { playbackManager.observedPlaybackState() }
 
     func pause() -> VoiceResponse {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands

@@ -1224,6 +1224,145 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(consumer.consumed.isEmpty, "no result is consumed for a frame the server never admitted")
     }
 
+    /// OBSERVED PAUSE — TRUE→FALSE TRANSITION (voice-intents.md @ 818c8f75): the engine is
+    /// playing, the pause stops it, and the single fresh observation reads `false`, which is
+    /// both the success gate AND the settled wire state.
+    func testCloudPauseOnAPlayingEngineThatStopsSucceedsWithTheObservedState() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"41a8e5c2-77d3-4b09-a2f6-8c3e1d5b9a04","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        // The ACTION boundary is the pre-effect gate: the answer-hold pause (legacy, contract-
+        // preserved) has already run by then, so the engine is re-established to PLAYING and the
+        // recorded calls are cleared there — what this control counts is the identified pause
+        // alone, not the hold pause that precedes it.
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-transition")
+        let frame = try await awaitResultFrame(operationId: "41a8e5c2-77d3-4b09-a2f6-8c3e1d5b9a04")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any], "success carries the captured observation")
+        XCTAssertEqual(state["playing"] as? Bool, false,
+                       "the settled state IS the observation that gated success")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(playback.observedPlayingReads, 1,
+                       "classification and settlement must come from ONE post-pause observation")
+    }
+
+    /// OBSERVED PAUSE — ALREADY-PAUSED (voice-intents.md @ 818c8f75): an engine observed `false`
+    /// before and after the pause satisfies the idempotent operation.
+    func testCloudPauseOnAnAlreadyPausedEngineSucceedsWithAnObservedNotPlayingState() async throws {
+        playback.setPlaying(false)
+        playback.clearCalls()
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"5f0d9a34-2b61-4e8d-a5c7-9e1f3b8d0a52","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-idempotent")
+        let frame = try await awaitResultFrame(operationId: "5f0d9a34-2b61-4e8d-a5c7-9e1f3b8d0a52")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded",
+                       "an already-paused engine is an idempotent success, not a refusal")
+        let state = try XCTUnwrap(frame["state"] as? [String: Any])
+        XCTAssertEqual(state["playing"] as? Bool, false)
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+    }
+
+    /// OBSERVED PAUSE — STILL PLAYING (voice-intents.md @ 818c8f75): the pause sink completed
+    /// but the fresh observation still reads `true` (a real engine can fail to stop). The
+    /// result is `failed` with reason `pause_not_observed` — a FAILED pause, not a refusal —
+    /// and carries NO state. The legacy VoiceResponse earcon behaviour of the pause itself is
+    /// untouched.
+    func testCloudPauseStillPlayingAfterTheSinkReportsFailedWithNoState() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        defer { playback.setSimulatesFailedPause(false) }
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"9c4e7b18-83a2-4f60-b1d4-2a7e5c9f6b31","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pause-not-observed-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
+        // Action boundary (pre-effect gate): the engine is PLAYING and the failed-pause knob is
+        // armed HERE, after the legacy hold pause has run, and calls are cleared — the counted
+        // pause is the identified user pause, whose engine genuinely fails to stop.
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(true)
+                self.playback.setSimulatesFailedPause(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-unobserved")
+        let frame = try await awaitResultFrame(operationId: "9c4e7b18-83a2-4f60-b1d4-2a7e5c9f6b31")
+        XCTAssertEqual(frame["outcome"] as? String, "failed",
+                       "still playing after the pause is a FAILED pause, not a refusal and not a success")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.pauseNotObserved)
+        XCTAssertNil(frame["state"],
+                     "a non-success result carries no state — nothing was observed to report")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1,
+                       "the mutation was attempted exactly once")
+    }
+
+    /// OBSERVED PAUSE — UNAVAILABLE (voice-intents.md @ 818c8f75): no current engine reading
+    /// exists (a missing engine — `PlaybackManager.isPlaying` collapses this into `false`,
+    /// which the tri-state `observedPlaying` must not). The result is `unknown` with reason
+    /// `playback_state_unavailable` and carries NO state: it must NOT report a success built
+    /// from the collapsed reading.
+    func testCloudPauseWithNoEngineObservationReportsUnknownWithNoState() async throws {
+        playback.setPlaying(true)
+        playback.clearCalls()
+        defer { playback.setSimulateUnavailableObservation(false) }
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"c7b2f094-5e18-4d73-9a06-b4f8e2c1d7a3","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
+        // Action boundary (pre-effect gate): the engine's intended underlying reading is
+        // established FALSE (a paused engine exists), and only THEN the observation is made
+        // UNAVAILABLE — unavailable is not the same fact as observed-paused, and this order is
+        // what the arm distinguishes. Calls are cleared so only the identified pause counts.
+        await MainActor.run {
+            sink.effectGate = { _ in
+                self.playback.setPlaying(false)
+                self.playback.setSimulateUnavailableObservation(true)
+                self.playback.clearCalls()
+            }
+        }
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-pause-unavailable")
+        let frame = try await awaitResultFrame(operationId: "c7b2f094-5e18-4d73-9a06-b4f8e2c1d7a3")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown",
+                       "an unobservable engine is unknown, never a success from a collapsed reading")
+        XCTAssertEqual(frame["reason"] as? String, OperationReason.playbackStateUnavailable)
+        XCTAssertNil(frame["state"], "a non-success result carries no state")
+        XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
+    }
+
     /// CROSS-TURN CONFLICTING ID (cloud-assistant.md @ bf5fb219): an operation id is
     /// turn-bound. The same id arriving in a LATER turn is a different operation — refined from
     /// the earlier turn's admission — so it is refused before any effect and never resolved
@@ -4099,6 +4238,33 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
 /// behind one lock, and `awaitResume()` waits on the lock rather than polling a copied array, so a
 /// test observes the state the double actually holds.
 private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
+
+    /// voice-intents.md @ 818c8f75 knob: no current engine reading exists (a missing engine),
+    /// so the observation is UNAVAILABLE rather than observed-paused.
+    private var simulateUnavailableObservation = false
+    func setSimulateUnavailableObservation(_ on: Bool) {
+        lock.lock(); simulateUnavailableObservation = on; lock.unlock()
+    }
+
+    /// The single observation the identified pause path reads: unavailable, observed playing,
+    /// or observed paused — never collapsing a missing engine into `false`.
+    private var storedObservedPlayingReads = 0
+    /// voice-intents.md @ 818c8f75 guard: classification and settlement must come from ONE
+    /// observation, so the identified pause path may read this EXACTLY ONCE after its pause.
+    var observedPlayingReads: Int {
+        lock.lock(); defer { lock.unlock() }
+        return storedObservedPlayingReads
+    }
+    var observedPlaying: Bool? {
+        lock.lock()
+        storedObservedPlayingReads += 1
+        let unavailable = simulateUnavailableObservation
+        let playing = storedIsPlaying
+        lock.unlock()
+        if unavailable { return nil }
+        return playing
+    }
+
     /// Host playing at the moment the turn reads it. `pause()` and `resume()`
     /// keep it true to playback: a constant `true` hides a lost hold, because a
     /// turn that inherits an outstanding pause would still read "playing".
@@ -4123,6 +4289,14 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     /// player that is running. `pause()`/`resume()` maintain it thereafter.
     func setPlaying(_ playing: Bool) {
         lock.lock(); storedIsPlaying = playing; lock.unlock()
+    }
+
+    /// voice-intents.md @ 818c8f75 control knob: a real engine can fail to stop. When set,
+    /// `pause()` records the call but leaves the engine playing, so the sink's fresh post-sink
+    /// observation reads `true` — the only way the `pause_not_observed` arm is reachable.
+    private var simulatesFailedPause = false
+    func setSimulatesFailedPause(_ on: Bool) {
+        lock.lock(); simulatesFailedPause = on; lock.unlock()
     }
 
     var calls: [Call] {
@@ -4161,7 +4335,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     func pause() -> VoiceResponse {
         lock.lock()
         storedCalls.append(.pause)
-        storedIsPlaying = false
+        if !simulatesFailedPause { storedIsPlaying = false }
         lock.unlock()
         return .earcon(.success)
     }
@@ -7204,6 +7378,11 @@ private struct NoOpCloudPlaybackContextProvider: PlaybackContextProvider {
 }
 
 private final class NoOpCloudPlaybackSink: VoicePlaybackSink {
+
+    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
     var isPlaying: Bool { false }
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }

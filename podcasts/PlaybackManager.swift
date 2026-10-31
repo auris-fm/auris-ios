@@ -161,6 +161,18 @@ class PlaybackManager: ServerPlaybackDelegate {
         return player?.playing() ?? false
     }
 
+    /// A post-action playback observation that keeps UNAVAILABLE separate from OBSERVED-PAUSED
+    /// (voice-intents.md @ 818c8f75). `isPlaying` collapses a missing engine into `false`, which
+    /// would report an unobservable state as a successful pause; this returns `nil` when there
+    /// is no engine to read (no player), `.some(false)` for an observed not-playing state (an
+    /// already-paused engine included), and `.some(true)` for an observed playing state. It
+    /// reads ONLY the actual current engine: `aboutToPlay` is pending intent, not an engine
+    /// reading, and keeps its legacy role in `isPlaying` only.
+    func observedPlaybackState() -> Bool? {
+        guard let player else { return nil }
+        return player.playing()
+    }
+
     /// True while the shared audio session is still in use by playback.
     ///
     /// `isPlaying` goes false the instant the user pauses, but playback keeps

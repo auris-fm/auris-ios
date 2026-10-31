@@ -137,6 +137,17 @@ enum OperationReason {
     /// parsed. Nothing was sought: the request does not say where to go.
     static let malformedSeekTarget = "malformed_seek_target"
 
+    /// A cloud `playback.pause` was attempted and completed, but a fresh post-sink observation
+    /// still found the engine playing (voice-intents.md @ 818c8f75). A FAILED pause, not a
+    /// refusal: the mutation was attempted, so the wire's table places it under `failed`.
+    static let pauseNotObserved = "pause_not_observed"
+
+    /// A post-action playback observation could not be produced (voice-intents.md
+    /// @ 818c8f75): the wire's `playback_state_unavailable`. Produced when the engine exposes
+    /// no current reading — `PlaybackManager.observedPlaybackState()` returns `nil` for a
+    /// missing player — distinct from an observed paused engine.
+    static let playbackStateUnavailable = "playback_state_unavailable"
+
     /// The target is expressed in reference (transcript) time, and this client cannot map it to
     /// playback time. No position was changed, and the seek must not be performed at the raw
     /// reference value: on a mapped episode that is a different position.

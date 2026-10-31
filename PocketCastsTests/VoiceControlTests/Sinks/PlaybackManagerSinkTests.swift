@@ -3,6 +3,10 @@ import XCTest
 
 // Mock PlaybackManagerProtocol that captures seekTo calls and provides controlled duration.
 final class MockPlaybackManager: PlaybackManagerProtocol {
+    /// voice-intents.md @ 818c8f75: tri-state engine observation, settable per control.
+    var observedPlaying: Bool?
+    func observedPlaybackState() -> Bool? { observedPlaying }
+
     var capturedSeekTime: TimeInterval?
     var durationValue: TimeInterval = 0
     var currentTimeValue: TimeInterval = 0
@@ -63,6 +67,24 @@ final class PlaybackManagerSinkTests: XCTestCase {
         let sink = PlaybackManagerSink(playbackManager: PlaybackManager.shared)
         let response = sink.seekRelative(deltaSeconds: nil, direction: .backward)
         XCTAssertEqual(response, .silent)
+    }
+
+    /// OBSERVED PAUSE DELEGATION (voice-intents.md @ 818c8f75): `PlaybackManagerSink`
+    /// forwards `observedPlaying` to the manager's tri-state engine reading, through the
+    /// protocol seam — no singleton construction. Unavailable stays `nil`, observed values
+    /// pass through untouched; delegation never collapses one into the other.
+    func test_observedPlaying_delegatesToTheManagerTriStateReading() {
+        let manager = MockPlaybackManager()
+        let sink = PlaybackManagerSink(playbackManager: manager)
+
+        manager.observedPlaying = nil
+        XCTAssertNil(sink.observedPlaying, "no engine reading stays unavailable")
+
+        manager.observedPlaying = false
+        XCTAssertEqual(sink.observedPlaying, false, "observed paused passes through as false")
+
+        manager.observedPlaying = true
+        XCTAssertEqual(sink.observedPlaying, true, "observed playing passes through as true")
     }
 
     func test_seekTo_withNegativePosition_resolvesAgainstDuration() {

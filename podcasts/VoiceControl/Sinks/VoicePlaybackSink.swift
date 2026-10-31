@@ -12,6 +12,12 @@ protocol VoicePlaybackSink {
     /// hold: a pause of ours may only be released if it stopped playback that
     /// was already running.
     var isPlaying: Bool { get }
+    /// A post-action playback observation for the identified app-operation path
+    /// (voice-intents.md @ 818c8f75): `nil` = no current engine reading could be produced
+    /// (unavailable), `.some(false)` = observed not playing (an already-paused engine
+    /// included), `.some(true)` = observed playing. Unlike `isPlaying`, this keeps
+    /// unavailable separate from observed-paused.
+    var observedPlaying: Bool? { get }
     func pause() -> VoiceResponse
     func resume() -> VoiceResponse
     /// Seek relative to the current position.
