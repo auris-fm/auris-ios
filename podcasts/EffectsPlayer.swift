@@ -41,8 +41,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private let useVoiceBoostN = AtomicBool()
     private var audioFileSampleRate: Double = 0
 
-    private var playBufferManager: PlayBufferManager?
-    private var audioReadTask: AudioReadTask?
+    var playBufferManager: PlayBufferManager?
+    /// Internally settable (task67 seek controls): the typed-surface controls inject real
+    /// read tasks; production wiring still assigns via loadEpisode.
+    var audioReadTask: AudioReadTask?
     private var audioPlayTask: AudioPlayTask?
     private var audioFile: AVAudioFile?
 
@@ -249,11 +251,32 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         }
     }
 
+    /// Original two-argument signature required by `PlaybackProtocol` — forwards to the
+    /// typed overload with no typed completion. Unchanged behavior for every legacy caller.
     func seekTo(_ time: TimeInterval, completion: (() -> Void)?) {
-        guard let readOperation = audioReadTask else { return }
+        seekTo(time, completion: completion, typedCompletion: nil)
+    }
+
+    /// ADDITIVE typed overload (task67 seek-completion slice): identity-carrying outcomes
+    /// alongside the unchanged legacy completion.
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?) {
+        // The identity is minted BY VALUE before the queues, so a typed delivery never
+        // depends on `self` being alive.
+        guard let readOperation = audioReadTask else {
+            // Actual surface capability: the read task is absent — decided synchronously at
+            // the initiating call; nothing is scheduled and nothing awaits.
+            typedCompletion?(.engineUnavailable(identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)))
+            return
+        }
+        let identity = SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: ObjectIdentifier(readOperation), itemID: nil)
 
         serialSeekQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                // Engine gone BEFORE scheduling: the typed evidence still delivers (it is all
+                // by value); the legacy path stays silent here, exactly as it is today.
+                typedCompletion?(.engineUnavailable(identity: identity))
+                return
+            }
 
             lastSeekTime = max(0.1, time)
             seeking = true
@@ -267,6 +290,15 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                 }
 
                 self?.seeking = false
+            }, typedCapture: { capture in
+                // The immutable locked capture travels with the per-invocation identity by
+                // value; this closure never touches `self`, so weak-self disappearance cannot
+                // block a typed delivery.
+                if capture.seekedToEnd {
+                    typedCompletion?(.endOfFile(identity: identity, requestedTime: capture.requestedTime, engineTotalSeconds: capture.engineTotalSeconds))
+                } else if let frame = capture.landedFrame {
+                    typedCompletion?(.cursorRepositioned(identity: identity, requestedTime: capture.requestedTime, landedFrame: frame))
+                }
             })
         }
     }
