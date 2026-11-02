@@ -93,21 +93,22 @@ extension L10n {
         return capitalized ? result.localizedCapitalized : result
     }
 
+    static func playlistEpisodeCount(_ count: Int) -> String {
+        count == 1 ? L10n.podcastEpisodeCountSingular : L10n.playlistEpisodesCount(count)
+    }
+
     static func downloadedFilesConf(_ count: Int) -> String {
         count == 1 ? L10n.downloadedFilesConfSingular : L10n.downloadedFilesConfPluralFormat(count.localized())
     }
 
-    static func selectedPodcastCount(_ count: Int, capitalized: Bool = false) -> String {
-        let result: String
+    static func selectedPodcastCount(_ count: Int) -> String {
         if count == 0 {
-            result = L10n.settingsAutoDownloadsNoPodcastsSelected
+            return L10n.settingsAutoDownloadsNoPodcastsSelected
         } else if count == 1 {
-            result = L10n.settingsAutoDownloadsPodcastsSelectedSingular
+            return L10n.settingsAutoDownloadsPodcastsSelectedSingular
         } else {
-            result = L10n.settingsAutoDownloadsPodcastsSelectedFormat(count.localized())
+            return L10n.settingsAutoDownloadsPodcastsSelectedFormat(count.localized())
         }
-
-        return capitalized ? result.localizedCapitalized : result
     }
 
     static func timeShorthand(_ time: Int) -> String {
@@ -175,7 +176,9 @@ private final class BundleToken {
     }()
 
     static let baseBundle: Bundle = {
-        let path = Bundle.main.path(forResource: "en", ofType: "lproj")
-        return Bundle(path: path!)!
+        guard let path = Bundle.main.path(forResource: "en", ofType: "lproj"), let bundle = Bundle(path: path) else {
+            return Bundle.main
+        }
+        return bundle
     }()
 }

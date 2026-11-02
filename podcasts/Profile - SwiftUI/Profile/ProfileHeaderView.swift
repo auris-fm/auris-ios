@@ -9,15 +9,27 @@ struct ProfileHeaderView: View {
 
     /// Update the UI depending on the size of the screen
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    private var isShowingVertically: Bool {
-        sizeClass == .compact
+    private func rowLayout<Content: View>(
+        alignment: VerticalAlignment = .center,
+        spacing: CGFloat? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(spacing: spacing))
+            : AnyLayout(HStackLayout(alignment: alignment, spacing: spacing))
+        return layout(content)
+    }
+
+    private func isShowingVertically(width: CGFloat) -> Bool {
+        sizeClass == .compact || width < 720
     }
 
     var body: some View {
         container { geometryProxy in
             profileImage(geometryProxy)
-            profileInfo()
+            profileInfo(isShowingVertically: isShowingVertically(width: geometryProxy.size.width))
             stats()
         }
     }
@@ -54,7 +66,7 @@ struct ProfileHeaderView: View {
 
     /// Shows the display name, email, and account/share buttons
     @ViewBuilder
-    private func profileInfo() -> some View {
+    private func profileInfo(isShowingVertically: Bool) -> some View {
         let alignment: HorizontalAlignment = isShowingVertically ? .center : .leading
 
         VStack(alignment: alignment, spacing: Constants.spacing) {
@@ -62,7 +74,7 @@ struct ProfileHeaderView: View {
 
             if viewModel.profile.isLoggedIn {
                 if FeatureFlag.shareProfile.enabled {
-                    HStack(spacing: 12) {
+                    rowLayout(spacing: 12) {
                         Button {
                             viewModel.accountTapped()
                         } label: {
@@ -126,7 +138,7 @@ struct ProfileHeaderView: View {
     /// Renders the podcast, listening, and saved time stats
     private func stats() -> some View {
         // Stats
-        HStack(alignment: .top) {
+        rowLayout(alignment: .top) {
             let stats = viewModel.stats
 
             // Podcast Count
@@ -176,7 +188,7 @@ struct ProfileHeaderView: View {
     @ViewBuilder
     /// Wraps the content in an HStack on wide screens like iPad, and a VStack on compact ones like iPhone
     private func contentWrapper<Content: View>(size: CGSize, @ViewBuilder _ content: @escaping () -> Content) -> some View {
-        if isShowingVertically {
+        if isShowingVertically(width: size.width) {
             VStack(spacing: Constants.spacing) {
                 content()
             }

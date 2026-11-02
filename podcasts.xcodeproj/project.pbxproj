@@ -2183,7 +2183,6 @@
 		BD1F07F71BAAA6F0007A768D /* CategoryPodcastsViewController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CategoryPodcastsViewController.swift; sourceTree = "<group>"; };
 		BD1F07F81BAAA6F0007A768D /* CategoryPodcastsViewController.xib */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.xib; path = CategoryPodcastsViewController.xib; sourceTree = "<group>"; };
 		BD1F977B1FD7894C00F89CCD /* MiniPlayerShadowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerShadowView.swift; sourceTree = "<group>"; };
-		BD2063301B5351D500DBB592 /* podcasts-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "podcasts-Bridging-Header.h"; sourceTree = "<group>"; };
 		BD21D4A122DED42100D5888B /* ThemeableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeableView.swift; sourceTree = "<group>"; };
 		BD2219F0253EAEAF000025BE /* PlaybackCatchUpHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCatchUpHelper.swift; sourceTree = "<group>"; };
 		BD22DF0A1BB7911F005FFA28 /* ShortcutManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ShortcutManager.swift; sourceTree = "<group>"; };
@@ -5410,7 +5409,6 @@
 				C72CED35289DB8690017883A /* AppDelegate+Analytics.swift */,
 				404A080924E4C78000308722 /* SceneDelegate.swift */,
 				8B317B9F28906A8900A26A13 /* main.swift */,
-				BD2063301B5351D500DBB592 /* podcasts-Bridging-Header.h */,
 				BD056F0E1F6F8BE300AF8260 /* Main.storyboard */,
 				BD40D7BC19C1A08D00FB8023 /* Launch Screen.xib */,
 				460C375026D83171008B3609 /* Resources */,
@@ -8824,7 +8822,6 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				SWIFT_OBJC_BRIDGING_HEADER = "podcasts/podcasts-Bridging-Header.h";
 				WRAPPER_EXTENSION = app;
 			};
 			name = StagingDebug;
@@ -8909,7 +8906,6 @@
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts Watch App/Supporting Files/watch-bridging-header.h";
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
@@ -9916,7 +9912,6 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				SWIFT_OBJC_BRIDGING_HEADER = "podcasts/podcasts-Bridging-Header.h";
 				WRAPPER_EXTENSION = app;
 			};
 			name = Prototype;
@@ -9999,7 +9994,6 @@
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts Watch App/Supporting Files/watch-bridging-header.h";
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
@@ -10211,7 +10205,6 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				SWIFT_OBJC_BRIDGING_HEADER = "podcasts/podcasts-Bridging-Header.h";
 				WRAPPER_EXTENSION = app;
 			};
 			name = Debug;
@@ -10241,7 +10234,6 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				SWIFT_OBJC_BRIDGING_HEADER = "podcasts/podcasts-Bridging-Header.h";
 				WRAPPER_EXTENSION = app;
 			};
 			name = Release;
@@ -10273,7 +10265,6 @@
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts Watch App/Supporting Files/watch-bridging-header.h";
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
@@ -10307,7 +10298,6 @@
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts Watch App/Supporting Files/watch-bridging-header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
@@ -10414,7 +10404,6 @@
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited) APPCLIP";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts App Clip/app-clip-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -10469,7 +10458,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts App Clip/app-clip-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Osize";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -10524,7 +10512,6 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = APPCLIP;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts App Clip/app-clip-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -10574,7 +10561,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts TV App/Supporting Files/tv-bridging-header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -10626,7 +10612,6 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts TV App/Supporting Files/tv-bridging-header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -10678,7 +10663,6 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Pocket Casts TV App/Supporting Files/tv-bridging-header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};

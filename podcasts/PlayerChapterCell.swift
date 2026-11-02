@@ -46,9 +46,6 @@ class PlayerChapterCell: UITableViewCell {
 
     private var playState = ChapterPlayState.played
 
-    private var circleCenter: CGPoint!
-    var chapterPlayedTime: Int!
-
     private var isChapterToggleEnabled: Bool = false
 
     /// Shown in place of the chapter number while a fingerprint-based seek is being
@@ -184,16 +181,19 @@ class PlayerChapterCell: UITableViewCell {
 
             currentEpisode.deselectedChaptersModified = TimeFormatter.currentUTCTimeInMillis()
 
-            DataManager.sharedManager.save(episode: currentEpisode)
+            DataManager.shared.save(episode: currentEpisode)
         }
+
+        // Time left skips deselected chapters, so views showing it need to refresh even while paused.
+        NotificationCenter.postOnMainThread(notification: Constants.Notifications.chapterSelectionChanged)
     }
 
     @objc func progressUpdated(animated: Bool = true) {
-        guard let chapter, chapter == PlaybackManager.shared.currentChapters().visibleChapter else { return }
+        guard let chapter, chapter == PlaybackManager.shared.currentChapters.visibleChapter else { return }
 
         layoutIfNeeded()
 
-        let lapsedTime = PlaybackManager.shared.currentTime() - chapter.effectiveStartTime
+        let lapsedTime = PlaybackManager.shared.currentTime - chapter.effectiveStartTime
         // Clamp to [0, 1]: the playhead can sit before a generated chapter's
         // resolved start (detection uses the raw start), which would otherwise
         // give a negative width.

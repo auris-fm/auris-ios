@@ -1,7 +1,6 @@
 // swift-tools-version: 6.0
 
 import PackageDescription
-import CompilerPluginSupport
 
 let package = Package(
     name: "Modules",
@@ -9,10 +8,6 @@ let package = Package(
         .iOS(.v17), .watchOS(.v10), .macOS(.v13), .tvOS(.v17)
     ],
     products: XcodeSupport.products + [
-        .library(
-            name: "GRDBMacros",
-            targets: ["GRDBMacros"]
-        ),
         .library(
             name: "PocketCastsUtils",
             targets: ["PocketCastsUtils"]
@@ -26,12 +21,12 @@ let package = Package(
             targets: ["PocketCastsServer"]
         ),
         .library(
-            name: "EndOfYear",
-            targets: ["EndOfYear"]
+            name: "PocketCastsAnalytics",
+            targets: ["PocketCastsAnalytics"]
         ),
         .library(
-            name: "Modules",
-            targets: ["Modules"]
+            name: "EndOfYear",
+            targets: ["EndOfYear"]
         )
     ],
     dependencies: [
@@ -58,31 +53,6 @@ let package = Package(
     ],
     targets: XcodeSupport.targets + [
         .target(
-            name: "GRDBMacros",
-            dependencies: [
-                "GRDBMacrosPlugin",
-                .product(name: "GRDB", package: "GRDB.swift"),
-            ],
-            path: "Sources/GRDBMacros"
-        ),
-        .macro(
-            name: "GRDBMacrosPlugin",
-            dependencies: [
-                .product(name: "SwiftSyntax", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
-                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
-            ],
-            path: "Sources/GRDBMacrosPlugin"
-        ),
-        .testTarget(
-            name: "GRDBMacrosTests",
-            dependencies: [
-                "GRDBMacrosPlugin",
-                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
-            ],
-            path: "Tests/GRDBMacrosTests"
-        ),
-        .target(
             name: "PocketCastsUtils",
             path: "Sources/PocketCastsUtils",
             swiftSettings: [
@@ -99,7 +69,6 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 "PocketCastsUtils",
-                "GRDBMacros",
             ],
             path: "Sources/PocketCastsDataModel",
             swiftSettings: [
@@ -136,6 +105,25 @@ let package = Package(
             resources: [.copy("Fixtures")]
         ),
         .target(
+            name: "PocketCastsAnalytics",
+            dependencies: [
+                "PocketCastsDataModel",
+                "PocketCastsServer",
+                "PocketCastsUtils",
+                "EventHorizonSDK",
+                .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
+            ],
+            path: "Sources/PocketCastsAnalytics",
+            swiftSettings: [
+                .unsafeFlags(["-enable-testing"], .when(configuration: .debug))
+            ]
+        ),
+        .testTarget(
+            name: "PocketCastsAnalyticsTests",
+            dependencies: ["PocketCastsAnalytics"],
+            path: "Tests/PocketCastsAnalyticsTests"
+        ),
+        .target(
             name: "EndOfYear",
             dependencies: [
                 "PocketCastsDataModel",
@@ -145,19 +133,29 @@ let package = Package(
             ],
             path: "Sources/EndOfYear"
         ),
+        .target(
+            name: "AEXML",
+            path: "Sources/AEXML"
+        ),
+        .target(
+            name: "MNAVChapters",
+            path: "Sources/MNAVChapters"
+        ),
+        .target(
+            name: "SJUtils",
+            path: "Sources/SJUtils"
+        ),
+        .target(
+            name: "VoiceBoostN",
+            path: "Sources/VoiceBoostN",
+            linkerSettings: [
+                .linkedFramework("Accelerate")
+            ]
+        ),
         .binaryTarget(
             name: "EventHorizonSDK",
             url: "https://a8c-libs.s3.amazonaws.com/ios/EventHorizon/pocket-casts-2026-04-29-13-55-38/EventHorizon-pocket-casts-2026-04-29-13-55-38.xcframework.zip",
             checksum: "773066f52a81fcc6405efbdeaf825a67d36cfe2b4d3e1855f508b6cf8faa7133"
-        ),
-        .target(
-            name: "Modules",
-            path: "Sources/Modules"
-        ),
-        .testTarget(
-            name: "ModulesTests",
-            dependencies: ["Modules"],
-            path: "Tests/ModulesTests"
         )
     ],
     swiftLanguageModes: [.v5]
@@ -206,6 +204,7 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
+                    "PocketCastsAnalytics",
                     "EventHorizonSDK",
                     .product(name: "Lottie", package: "lottie-ios"),
                     .product(name: "DifferenceKit", package: "DifferenceKit"),
@@ -226,6 +225,10 @@ enum XcodeSupport {
                     .product(name: "Fingerprint", package: "pocket-casts-ios-fingerprint"),
                     .product(name: "whisper", package: "whisper.spm"),
                     "EndOfYear",
+                    "AEXML",
+                    "MNAVChapters",
+                    "SJUtils",
+                    "VoiceBoostN",
                 ]
             ),
             .xcodeTarget(
@@ -234,12 +237,16 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
+                    "PocketCastsAnalytics",
                     "EventHorizonSDK",
                     .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
                     .product(name: "FirebaseAnalyticsWithoutAdIdSupport", package: "firebase-ios-sdk"),
                     .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
                     .product(name: "Kingfisher", package: "Kingfisher"),
                     .product(name: "Lottie", package: "lottie-ios"),
+                    "MNAVChapters",
+                    "SJUtils",
+                    "VoiceBoostN",
                 ]
             ),
             .xcodeTarget(
@@ -248,9 +255,12 @@ enum XcodeSupport {
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "PocketCastsUtils",
+                    "PocketCastsAnalytics",
                     "EventHorizonSDK",
                     .product(name: "AutomatticTracks", package: "Automattic-Tracks-iOS"),
                     .product(name: "Kingfisher", package: "Kingfisher"),
+                    "MNAVChapters",
+                    "SJUtils",
                 ]
             ),
             .xcodeTarget(
@@ -281,6 +291,7 @@ enum XcodeSupport {
                 XcodeTargetNames.pocketCastsTvApp,
                 dependencies: [
                     "PocketCastsUtils",
+                    "PocketCastsAnalytics",
                     "PocketCastsDataModel",
                     "PocketCastsServer",
                     "EventHorizonSDK",
@@ -290,6 +301,9 @@ enum XcodeSupport {
                     .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
                     .product(name: "FirebaseAnalyticsWithoutAdIdSupport", package: "firebase-ios-sdk"),
                     .product(name: "DifferenceKit", package: "DifferenceKit"),
+                    "MNAVChapters",
+                    "SJUtils",
+                    "VoiceBoostN",
                 ]
             ),
         ]
@@ -318,9 +332,5 @@ extension Target {
 extension String {
     var supportingName: String {
         "XcodeTarget_\(self)"
-    }
-
-    var asDependency: Target.Dependency {
-        .target(name: self.supportingName)
     }
 }

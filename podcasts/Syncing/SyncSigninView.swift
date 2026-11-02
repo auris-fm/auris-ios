@@ -241,6 +241,7 @@ final class SyncSigninViewModel: ObservableObject {
         // Button state reacts via @Published + computed isValid
     }
 
+    @MainActor
     func forgotPasswordTapped() {
         let vc = ForgotPasswordViewController()
         vc.delegate = self
@@ -288,7 +289,7 @@ final class SyncSigninViewModel: ObservableObject {
                 self.handleSuccessfulSignIn(username: username, password: password, userId: userId)
 
                 RefreshManager.shared.refreshPodcasts(forceEvenIfRefreshedRecently: true)
-                Settings.setPromotionFinishedAcknowledged(true)
+                Settings.promotionFinishedAcknowledged = true
                 Settings.setLoginDetailsUpdated()
 
                 NotificationCenter.postOnMainThread(notification: .userSignedIn)
@@ -307,7 +308,7 @@ final class SyncSigninViewModel: ObservableObject {
     private func handleSuccessfulSignIn(username: String, password: String, userId: String?) {
 
         if ServerSettings.lastSyncTime == nil {
-            DataManager.sharedManager.markAllPodcastsUnsynced()
+            DataManager.shared.markAllPodcastsUnsynced()
         }
 
         SyncManager.syncReason = .login

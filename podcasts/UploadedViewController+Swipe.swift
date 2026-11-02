@@ -1,6 +1,7 @@
 import Foundation
 import PocketCastsDataModel
 import SwipeCellKit
+import UIKit
 
 extension UploadedViewController: SwipeTableViewCellDelegate, SwipeHandler {
     // MARK: - SwipeTableViewCellDelegate
@@ -8,7 +9,7 @@ extension UploadedViewController: SwipeTableViewCellDelegate, SwipeHandler {
     func tableView(_ tableView: UITableView, editActionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> [SwipeAction]? {
         guard isMultiSelectEnabled == false, let episode = uploadedEpisodes[safe: indexPath.row] else { return nil }
 
-        switch orientation {
+        switch orientation.resolvedForLayoutDirection {
         case .left:
             let actions = SwipeActionsHelper.createLeftActionsForEpisode(episode, tableView: tableView, indexPath: indexPath, swipeHandler: self)
             return actions.swipeKitActions()
@@ -40,7 +41,7 @@ extension UploadedViewController: SwipeTableViewCellDelegate, SwipeHandler {
     }
 
     func deleteRequested(uuid: String) {
-        if let episode = DataManager.sharedManager.findUserEpisode(uuid: uuid) {
+        if let episode = DataManager.shared.findUserEpisode(uuid: uuid) {
             showDeleteConfirmation(userEpisode: episode)
         }
     }

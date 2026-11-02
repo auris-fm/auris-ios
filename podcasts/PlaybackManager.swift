@@ -42,31 +42,31 @@ class PlaybackManager: ServerPlaybackDelegate {
     private var interruptInProgress = false
 
     private var wasPlayingBeforeInterruption = false
-    private let aboutToPlay = AtomicBool()
+    private let aboutToPlay = Mutex(false)
 
-    private let shouldDeactivateSession = AtomicBool()
+    private let shouldDeactivateSession = Mutex(false)
     private var haveCalledPlayerLoad = false
 
     /// Tracks whether `playback_source_resolved` has been reported for the current player, so it's
     /// emitted once when playback actually starts (not on resume/seek) and again after the player
     /// is rebuilt for a new episode. Reset in `cleanupCurrentPlayer`. Atomic because it's mutated
     /// from the `activateAudioSession` completion, which can run off the main queue.
-    private let hasReportedSourceResolved = AtomicBool()
+    private let hasReportedSourceResolved = Mutex(false)
 
     /// Set at runtime when the currently playing stream is found to contain video tracks
     /// (e.g. an HLS stream carrying video). Complements `Episode.videoPodcast()`, which is
     /// based on the progressive file's MIME type and can't see into an HLS alternate enclosure.
     /// Atomic because it's read from now-playing updates that can run off the main queue.
-    private let currentStreamContainsVideo = AtomicBool()
+    private let currentStreamContainsVideo = Mutex(false)
 
     /// Whether the video of the current stream should be rendered. Defaults to on; the user can
     /// switch an HLS video stream to audio-only via the player shelf toggle. Reset per episode.
-    private let videoRenderingEnabled = AtomicBool(true)
+    private let videoRenderingEnabled = Mutex(true)
 
     /// Whether the user has chosen to watch the current downloaded episode's video. The downloaded file
     /// is the progressive (audio-only) enclosure, so watching video means streaming the HLS source
     /// instead. This survives the in-place reload that switches the source and is reset per episode.
-    private let streamingVideoForDownloadedEpisode = AtomicBool()
+    private let streamingVideoForDownloadedEpisode = Mutex(false)
 
     private let updateTimerInterval = 1 as TimeInterval
 
@@ -158,7 +158,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     var isPlaying: Bool {
         if aboutToPlay.value { return true }
 
-        return player?.playing() ?? false
+        return player?.isPlaying ?? false
     }
 
     /// True while the shared audio session is still in use by playback.
@@ -174,11 +174,11 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     var isBuffering: Bool {
-        player?.buffering() ?? false
+        player?.isBuffering ?? false
     }
 
-    func futureBufferAvailable() -> TimeInterval {
-        player?.futureBufferAvailable() ?? 0
+    var futureBufferAvailable: TimeInterval {
+        player?.futureBufferAvailable ?? 0
     }
 
     func recordUpNextUserInteraction() {
@@ -246,18 +246,18 @@ class PlaybackManager: ServerPlaybackDelegate {
         // Played and unplayed episodes should always start from 0
         if episode.played() || episode.unplayed() {
             episode.playedUpTo = 0
-            DataManager.sharedManager.saveEpisode(playedUpTo: 0, episode: episode, updateSyncFlag: false)
+            DataManager.shared.saveEpisode(playedUpTo: 0, episode: episode, updateSyncFlag: false)
             queue.refreshList(checkForAutoDownload: false)
         }
-        DataManager.sharedManager.updateEpisodePlaybackInteractionDate(episode: episode)
-        DataManager.sharedManager.saveEpisode(playbackError: nil, episode: episode)
+        DataManager.shared.updateEpisodePlaybackInteractionDate(episode: episode)
+        DataManager.shared.saveEpisode(playbackError: nil, episode: episode)
         activeError = nil
 
         if autoPlay {
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackStarting)
             play(completion: completion)
 
-            checkIfStreamBufferRequired(episode: episode, effects: effects())
+            checkIfStreamBufferRequired(episode: episode, effects: effects)
         } else if episodeIsChanging {
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.upNextQueueChanged)
         }
@@ -265,7 +265,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     func loadCurrentEpisode() {
         guard let currEpisode = currentEpisode else { return }
-        if playerSwitchRequired() {
+        if playerSwitchRequired {
             load(episode: currEpisode, autoPlay: false, overrideUpNext: false)
         }
         if !haveCalledPlayerLoad {
@@ -306,7 +306,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         aboutToPlay.value = true
 
-        if playerSwitchRequired() {
+        if playerSwitchRequired {
             load(episode: currEpisode, autoPlay: false, overrideUpNext: false)
         }
         if !haveCalledPlayerLoad {
@@ -397,7 +397,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     var isReadyToPlay: Bool {
-        player?.isReadyToPlay() ?? false
+        player?.isReadyToPlay ?? false
     }
 
     func skipBack() {
@@ -407,7 +407,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     private func skipBack(amount: TimeInterval) {
         analyticsPlaybackHelper.skipBack()
 
-        let currPos = currentTime()
+        let currPos = currentTime
         let backTime = max(currPos - amount, 0)
         seekTo(time: backTime, seekHint: .back)
     }
@@ -419,7 +419,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     private func skipForward(amount: TimeInterval) {
         analyticsPlaybackHelper.skipForward()
 
-        let forwardTime = min(currentTime() + amount, duration())
+        let forwardTime = min(currentTime + amount, duration)
         seekTo(time: forwardTime)
 
         StatsManager.shared.addSkippedTime(amount)
@@ -428,7 +428,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     func skipToPreviousChapter(startPlaybackAfterSkip: Bool = false) {
         guard let previousChapter = chapterManager.previousVisibleChapter() else { return }
 
-        if abs(currentChapters().index - previousChapter.index) > 1 {
+        if abs(currentChapters.index - previousChapter.index) > 1 {
             trackChapterSkipped()
         }
 
@@ -445,7 +445,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             return
         }
 
-        if abs(currentChapters().index - nextChapter.index) > 1 {
+        if abs(currentChapters.index - nextChapter.index) > 1 {
             trackChapterSkipped()
         }
 
@@ -459,11 +459,11 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// The chapter the next/previous skip controls would move to. Exposed so
     /// callers can resolve a generated chapter's true playback position via
     /// fingerprinting before seeking (see `GeneratedChapterSeeker`).
-    func nextPlayableChapter() -> ChapterInfo? {
+    var nextPlayableChapter: ChapterInfo? {
         chapterManager.nextVisiblePlayableChapter()
     }
 
-    func previousPlayableChapter() -> ChapterInfo? {
+    var previousPlayableChapter: ChapterInfo? {
         chapterManager.previousVisibleChapter()
     }
 
@@ -472,7 +472,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// generated-chapter seek path preserves parity with
     /// `skipToNextChapter`/`skipToPreviousChapter`, which it routes around.
     func trackChapterSkippedIfNeeded(to chapter: ChapterInfo) {
-        if abs(currentChapters().index - chapter.index) > 1 {
+        if abs(currentChapters.index - chapter.index) > 1 {
             trackChapterSkipped()
         }
     }
@@ -510,7 +510,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         chapterManager.playableChapterAt(index: index)
     }
 
-    func currentChapters() -> Chapters {
+    var currentChapters: Chapters {
         chapterManager.currentChapters
     }
 
@@ -518,9 +518,13 @@ class PlaybackManager: ServerPlaybackDelegate {
         chapterManager.chaptersForTime(time)
     }
 
+    func deselectedChapterDuration(after time: TimeInterval) -> TimeInterval {
+        chapterManager.deselectedDuration(after: time)
+    }
+
     func playableChaptersUpdated() {
         // Check if current chapter still needs to be played
-        if currentChapters().visibleChapter?.isPlayable() == false {
+        if currentChapters.visibleChapter?.isPlayable() == false {
             skipToNextChapter()
         }
     }
@@ -528,8 +532,8 @@ class PlaybackManager: ServerPlaybackDelegate {
     private func checkForChapterChange() {
         guard let episodeUuid = currentEpisode?.uuid else { return }
 
-        if chapterManager.haveTriedToParseChaptersFor(episodeUuid: episodeUuid), chapterManager.updateCurrentChapter(time: currentTime()) {
-            if currentChapters().visibleChapter?.isPlayable() == false {
+        if chapterManager.haveTriedToParseChaptersFor(episodeUuid: episodeUuid), chapterManager.updateCurrentChapter(time: currentTime) {
+            if currentChapters.visibleChapter?.isPlayable() == false {
                 skipToNextChapter()
                 trackChapterSkipped()
             } else {
@@ -566,14 +570,14 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         // if we're seeking an episode, and it's not in progress, it should be
         if !playingEpisode.inProgress() {
-            DataManager.sharedManager.saveEpisode(playingStatus: .inProgress, episode: playingEpisode, updateSyncFlag: SyncManager.isUserLoggedIn())
+            DataManager.shared.saveEpisode(playingStatus: .inProgress, episode: playingEpisode, updateSyncFlag: SyncManager.isUserLoggedIn())
         }
 
         let currentTime = playingEpisode.playedUpTo
         seekingTo = time
         FileLog.shared.addMessage("seek to \(time) startPlaybackAfterSeek \(startPlaybackAfterSeek)")
 
-        if let player, player.isReadyToPlay() {
+        if let player, player.isReadyToPlay {
             player.seekTo(time, completion: { [weak self] () in
                 guard let strongSelf = self else { return }
 
@@ -591,7 +595,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         } else {
             // the player isn't currently initialised, so just set this time directly on the episode, as long as it's not past the duration
             if time >= 0, time <= playingEpisode.duration, time != playingEpisode.playedUpTo {
-                DataManager.sharedManager.saveEpisode(playedUpTo: time, episode: playingEpisode, updateSyncFlag: syncChanges)
+                DataManager.shared.saveEpisode(playedUpTo: time, episode: playingEpisode, updateSyncFlag: syncChanges)
 
                 seekingTo = PlaybackManager.notSeeking
                 NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackPositionSaved, object: playingEpisode.uuid)
@@ -631,27 +635,27 @@ class PlaybackManager: ServerPlaybackDelegate {
         return true
     }
 
-    func currentTime() -> TimeInterval {
+    var currentTime: TimeInterval {
         guard let episode = currentEpisode else { return -1 }
 
-        if seekingTo >= 0, seekingTo <= duration(), !isPlaying { return seekingTo }
+        if seekingTo >= 0, seekingTo <= duration, !isPlaying { return seekingTo }
 
-        let playerTime = !aboutToPlay.value ? player?.currentTime() ?? 0 : 0
+        let playerTime = !aboutToPlay.value ? player?.currentTime ?? 0 : 0
 
         if playerTime <= 0 {
-            let startFromTime = startFromTimeForCurrentEpisode()
+            let startFromTime = startFromTimeForCurrentEpisode
             return episode.playedUpTo < 1 ? startFromTime : episode.playedUpTo
         }
 
         return playerTime
     }
 
-    func duration() -> TimeInterval {
+    var duration: TimeInterval {
         guard let currentEpisode else { return 0 }
 
         if let player, !aboutToPlay.value, !isBuffering {
             let episodeDuration = currentEpisode.duration
-            let playerDuration = player.duration()
+            let playerDuration = player.duration
             return (playerDuration > 0) ? playerDuration : episodeDuration
         }
 
@@ -784,7 +788,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         if nextEpisode.played() || nextEpisode.unplayed() {
             nextEpisode.playedUpTo = 0
         }
-        DataManager.sharedManager.saveEpisode(playbackError: nil, episode: nextEpisode)
+        DataManager.shared.saveEpisode(playbackError: nil, episode: nextEpisode)
         activeError = nil
 
         if autoPlay {
@@ -799,7 +803,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     func play(playlist: EpisodeFilter) {
         let query = PlaylistQueryBuilder.query(clause: .episode, for: playlist, episodeUuidToAdd: playlist.episodeUuidToAddToQueries(), limit: ServerSettings.autoAddToUpNextLimit(), shouldShowArchived: playlist.showArchivedEpisodes)
-        let playlistEpisodes = DataManager.sharedManager.findPlaylistEpisodesWhere(query: query, arguments: nil)
+        let playlistEpisodes = DataManager.shared.findPlaylistEpisodesWhere(query: query, arguments: nil)
         if playlist.manual {
             let archivedEpisodes = playlistEpisodes.filter(\.archived)
             EpisodeManager.bulkUnarchive(episodes: archivedEpisodes, trackEvent: false)
@@ -835,7 +839,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     /// Whether playing `playlistEpisodeIDs` would change the current Up Next queue or the episode being played.
     private func isPlaylistDifferentFromUpNext(playlistEpisodeIDs: [String]) -> Bool {
-        let upNextEpisodeIDs = DataManager.sharedManager
+        let upNextEpisodeIDs = DataManager.shared
             .allUpNextEpisodeUuids()
             .compactMap(\.uuid)
         if playlistEpisodeIDs != upNextEpisodeIDs {
@@ -864,7 +868,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// Whether the current episode should be presented as video, considering the feed metadata
     /// (`videoPodcast()`), any video tracks detected at runtime in the stream, and actual HLS playback
     /// (`willPlayViaHLS`), which we assume is video.
-    func isCurrentEpisodeVideo() -> Bool {
+    var isCurrentEpisodeVideo: Bool {
         guard let episode = currentEpisode else { return false }
         // Assume HLS episodes are video so the player can go full screen immediately, without waiting to
         // detect video tracks at runtime. Use willPlayViaHLS so this only applies when the current source
@@ -879,10 +883,10 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     /// Whether the video surface should currently be shown. Video content can be present
-    /// (`isCurrentEpisodeVideo()`) while the user has chosen to listen audio-only via the shelf toggle
+    /// (`isCurrentEpisodeVideo`) while the user has chosen to listen audio-only via the shelf toggle
     /// or the global "Audio only" setting.
-    func shouldRenderVideo() -> Bool {
-        isCurrentEpisodeVideo() && videoRenderingEnabled.value && !isAudioOnlyForced
+    var shouldRenderVideo: Bool {
+        isCurrentEpisodeVideo && videoRenderingEnabled.value && !isAudioOnlyForced
     }
 
     /// Whether the user is currently listening audio-only: either the global "Audio only" setting is on,
@@ -896,7 +900,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// stream is assumed to carry video, so the toggle is offered whether the HLS is being streamed or the
     /// episode has been downloaded (its downloaded file is audio-only, so the toggle streams the HLS video).
     /// When the global "Audio only" setting forces audio for every episode, the per-episode toggle is hidden.
-    func canToggleVideoRendering() -> Bool {
+    var canToggleVideoRendering: Bool {
         guard FeatureFlag.hls.enabled, !isAudioOnlyForced, let episode = currentEpisode, episode is Episode else { return false }
         return EpisodeManager.hasHLSStream(episode)
     }
@@ -915,16 +919,14 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// its local file is audio-only, so we flip the streaming preference and reload playback in place to
     /// switch between the downloaded audio file and the streamed HLS video.
     func toggleVideoRendering() {
-        guard canToggleVideoRendering(), let episode = currentEpisode else { return }
+        guard canToggleVideoRendering, let episode = currentEpisode else { return }
 
         let switchedToVideo: Bool
         if hasDownloadedFile(episode) {
-            streamingVideoForDownloadedEpisode.toggle()
-            switchedToVideo = streamingVideoForDownloadedEpisode.value
+            switchedToVideo = streamingVideoForDownloadedEpisode.withLock { $0.toggle(); return $0 }
             reloadCurrentEpisodeSource()
         } else {
-            videoRenderingEnabled.toggle()
-            switchedToVideo = videoRenderingEnabled.value
+            switchedToVideo = videoRenderingEnabled.withLock { $0.toggle(); return $0 }
         }
         analyticsPlaybackHelper.videoRenderingToggled(switchedToVideo: switchedToVideo, episode: episode)
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.videoRenderingToggled)
@@ -966,7 +968,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         if let player {
             // in order for things like Picture in Picture to work properly, an audio session needs to be activated. If the UI is asking for the internal AVPlayer, then make sure we do this
             activateAudioSession(completion: nil)
-            return player.internalPlayerForVideoPlayback()
+            return player.internalPlayerForVideoPlayback
         }
         setAudioSessionVideoProperties()
 
@@ -1036,11 +1038,11 @@ class PlaybackManager: ServerPlaybackDelegate {
         #endif
     }
 
-    func playingOverAirplay() -> Bool {
+    var isPlayingOverAirplay: Bool {
         AVAudioSession.sharedInstance().currentRoute.outputs.first?.portType == .airPlay
     }
 
-    func effects() -> PlaybackEffects {
+    var effects: PlaybackEffects {
         if let currentEffects {
             return currentEffects
         }
@@ -1070,7 +1072,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             podcast.playbackSpeed = effects.playbackSpeed
             podcast.boostVolume = effects.volumeBoost
 
-            DataManager.sharedManager.save(podcast: podcast)
+            DataManager.shared.save(podcast: podcast)
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.podcastUpdated, object: podcast.uuid)
         }
 
@@ -1079,7 +1081,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     func decreasePlaybackSpeed() {
-        let playbackEffects = effects()
+        let playbackEffects = effects
         if playbackEffects.playbackSpeed < 0.6 { return }
 
         playbackEffects.playbackSpeed -= 0.1
@@ -1087,14 +1089,14 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     func toggleDefinedPlaybackSpeed() {
-        let playbackEffects = effects()
+        let playbackEffects = effects
         playbackEffects.toggleDefinedSpeedInterval()
 
         changeEffects(playbackEffects)
     }
 
     func increasePlaybackSpeed() {
-        let playbackEffects = effects()
+        let playbackEffects = effects
         if playbackEffects.playbackSpeed > 4.9 { return }
 
         // HLS streams can't sustain playback above 2x, so don't let the speed be raised past it.
@@ -1121,20 +1123,20 @@ class PlaybackManager: ServerPlaybackDelegate {
     private func overrideEffectsToggled(applyLocalSettings: Bool, for podcast: Podcast) {
         podcast.overrideGlobalEffects = applyLocalSettings
 
-        DataManager.sharedManager.save(podcast: podcast)
+        DataManager.shared.save(podcast: podcast)
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.podcastUpdated, object: podcast.uuid)
 
         effectsChangedExternally()
     }
 
     var isCurrentEffectGlobal: Bool {
-        effects().isGlobal
+        effects.isGlobal
     }
 
     private func handlePlaybackEffectsChanged(effects: PlaybackEffects) {
         guard let episode = currentEpisode else { return }
 
-        if playerSwitchRequired() {
+        if playerSwitchRequired {
             load(episode: episode, autoPlay: isPlaying, overrideUpNext: false)
         }
 
@@ -1145,7 +1147,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackEffectsChanged)
     }
 
-    func silenceRemovalAvailable() -> Bool {
+    var isSilenceRemovalAvailable: Bool {
         // Trim silence relies on the EffectsPlayer audio engine; HLS plays through AVPlayer, which can't do it.
         #if APPCLIP
         if let episode = currentEpisode {
@@ -1153,14 +1155,14 @@ class PlaybackManager: ServerPlaybackDelegate {
         }
         #elseif !os(watchOS) && !os(tvOS)
             if let episode = currentEpisode {
-                return !episode.videoPodcast() && !EpisodeManager.willPlayViaHLS(episode) && !GoogleCastManager.sharedManager.connectedOrConnectingToDevice()
+                return !episode.videoPodcast() && !EpisodeManager.willPlayViaHLS(episode) && !GoogleCastManager.shared.connectedOrConnectingToDevice()
             }
         #endif
 
         return false
     }
 
-    func volumeBoostAvailable() -> Bool {
+    var isVolumeBoostAvailable: Bool {
         // Volume boost uses an audio processing tap, which needs a concrete audio track that HLS streams don't
         // expose. The tap logic in DefaultPlayer is compiled on tvOS too, so exclude HLS there as well.
         #if !os(watchOS)
@@ -1174,7 +1176,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         #elseif os(watchOS)
             return false
         #else
-            return !GoogleCastManager.sharedManager.connectedOrConnectingToDevice()
+            return !GoogleCastManager.shared.connectedOrConnectingToDevice()
         #endif
     }
 
@@ -1183,7 +1185,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     @objc func requiredStartingPosition() -> TimeInterval {
         guard let episode = currentEpisode else { return 0 }
 
-        if seekingTo >= 0, seekingTo <= duration() {
+        if seekingTo >= 0, seekingTo <= duration {
             let timeToReturn = seekingTo
             seekingTo = PlaybackManager.notSeeking
 
@@ -1195,9 +1197,9 @@ class PlaybackManager: ServerPlaybackDelegate {
                 return catchUpHelper.adjustStartTimeIfNeeded(for: episode)
             }
         } else {
-            DataManager.sharedManager.saveEpisode(playingStatus: PlayingStatus.inProgress, episode: episode, updateSyncFlag: SyncManager.isUserLoggedIn())
+            DataManager.shared.saveEpisode(playingStatus: PlayingStatus.inProgress, episode: episode, updateSyncFlag: SyncManager.isUserLoggedIn())
 
-            let startTime = startFromTimeForCurrentEpisode()
+            let startTime = startFromTimeForCurrentEpisode
             if startTime > 0 {
                 let seekAheadTime = Double(startTime)
                 StatsManager.shared.addAutoSkipTime(seekAheadTime)
@@ -1214,7 +1216,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         aboutToPlay.value = false
 
         // make sure we load the saved speed for this track
-        player?.setPlaybackRate(effects().playbackSpeed)
+        player?.setPlaybackRate(effects.playbackSpeed)
 
         updateAllNowPlayingData()
     }
@@ -1369,7 +1371,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackPaused)
             activeError = error
             let message = error.userMessage
-            DataManager.sharedManager.saveEpisode(playbackError: message, episode: episode)
+            DataManager.shared.saveEpisode(playbackError: message, episode: episode)
 
             if !episode.downloaded(pathFinder: DownloadManager.shared) {
                 cleanupCurrentPlayer(permanent: false)
@@ -1385,12 +1387,12 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     func playerDidCalculateDuration() {
-        guard let episode = currentEpisode, let playerDuration = player?.duration(), !episode.downloading() else { return }
+        guard let episode = currentEpisode, let playerDuration = player?.duration, !episode.downloading() else { return }
 
         let currentDuration = episode.duration
 
         if currentDuration < 10 || abs(currentDuration - playerDuration) > 10 {
-            DataManager.sharedManager.saveEpisode(duration: playerDuration, episode: episode, updateSyncFlag: SyncManager.isUserLoggedIn())
+            DataManager.shared.saveEpisode(duration: playerDuration, episode: episode, updateSyncFlag: SyncManager.isUserLoggedIn())
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.episodeDurationChanged, object: episode.uuid)
         }
 
@@ -1441,7 +1443,7 @@ class PlaybackManager: ServerPlaybackDelegate {
                 episode.lastPlaybackInteractionDate = Date()
                 episode.lastPlaybackInteractionSyncStatus = SyncStatus.notSynced.rawValue
             }
-            DataManager.sharedManager.save(episode: episode)
+            DataManager.shared.save(episode: episode)
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.episodePlayStatusChanged, object: episode.uuid)
 
             if SyncManager.isUserLoggedIn() {
@@ -1456,7 +1458,7 @@ class PlaybackManager: ServerPlaybackDelegate {
                 } else if let episode = episode as? UserEpisode {
                     // No App Clip episodes should be user episodes
                     #if !APPCLIP
-                    if Settings.userEpisodeRemoveFileAfterPlaying() {
+                    if Settings.userEpisodeRemoveFileAfterPlaying {
                         UserEpisodeManager.deleteFromDevice(userEpisode: episode, removeFromPlaybackQueue: false)
                     }
                     if Settings.userEpisodeRemoveFromCloudAfterPlaying() {
@@ -1486,8 +1488,8 @@ class PlaybackManager: ServerPlaybackDelegate {
     func playerDidRequestTermination() {
         guard let currEpisode = currentEpisode else { return }
 
-        let upTo = currentTime()
-        DataManager.sharedManager.saveEpisode(playedUpTo: upTo, episode: currEpisode, updateSyncFlag: SyncManager.isUserLoggedIn())
+        let upTo = currentTime
+        DataManager.shared.saveEpisode(playedUpTo: upTo, episode: currEpisode, updateSyncFlag: SyncManager.isUserLoggedIn())
 
         cleanupCurrentPlayer(permanent: true)
 
@@ -1526,8 +1528,8 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     // MARK: - Helper Methods
 
-    private func playerSwitchRequired() -> Bool {
-        let possiblePlayers = supportedPlayers()
+    private var playerSwitchRequired: Bool {
+        let possiblePlayers = supportedPlayers
         if let player, let firstSupportedPlayer = possiblePlayers.first {
             return type(of: player) != firstSupportedPlayer
         }
@@ -1540,11 +1542,11 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         // check for rogue settings
         if currEpisode.videoPodcast() {
-            let currEffects = effects()
+            let currEffects = effects
             currEffects.trimSilence = .off
         }
 
-        let playersSupported = supportedPlayers()
+        let playersSupported = supportedPlayers
         #if os(watchOS) || os(tvOS)
             FileLog.shared.addMessage("Using DefaultPlayer")
             player = DefaultPlayer()
@@ -1570,7 +1572,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         #endif
     }
 
-    private func supportedPlayers() -> [PlaybackProtocol.Type] {
+    private var supportedPlayers: [PlaybackProtocol.Type] {
         var possiblePlayers = [PlaybackProtocol.Type]()
 
         guard let currEpisode = currentEpisode else { return possiblePlayers }
@@ -1580,7 +1582,7 @@ class PlaybackManager: ServerPlaybackDelegate {
                 return [fallbackToPlayer]
             }
 
-            if GoogleCastManager.sharedManager.connectedOrConnectingToDevice() {
+            if GoogleCastManager.shared.connectedOrConnectingToDevice() {
                 possiblePlayers.append(GoogleCastPlayer.self)
 
                 return possiblePlayers // for Google Cast, only the Google Cast player is allowed
@@ -1590,8 +1592,8 @@ class PlaybackManager: ServerPlaybackDelegate {
         #if !os(watchOS) && !os(tvOS)
         // HLS must be played by AVPlayer (DefaultPlayer): EffectsPlayer is an audio-only AVAudioEngine
         // pipeline that can't render video, and routing HLS through it desyncs audio from the video surface.
-        let audioReadyForEffectsPlayer = (currEpisode.downloaded(pathFinder: DownloadManager.shared) && effects().trimSilence != .off) || currEpisode.bufferedForStreaming()
-        if !playingOverAirplay(), !currEpisode.videoPodcast(), !EpisodeManager.willPlayViaHLS(currEpisode), audioReadyForEffectsPlayer {
+        let audioReadyForEffectsPlayer = (currEpisode.downloaded(pathFinder: DownloadManager.shared) && effects.trimSilence != .off) || currEpisode.bufferedForStreaming()
+        if !isPlayingOverAirplay, !currEpisode.videoPodcast(), !EpisodeManager.willPlayViaHLS(currEpisode), audioReadyForEffectsPlayer {
             possiblePlayers.append(EffectsPlayer.self)
         }
         #endif
@@ -1642,7 +1644,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         }
 
         #if !os(watchOS) && !APPCLIP && !os(tvOS)
-            if GoogleCastManager.sharedManager.connectedOrConnectingToDevice() {
+            if GoogleCastManager.shared.connectedOrConnectingToDevice() {
                 FileLog.shared.addMessage("PlaybackManager.activateAudioSession: casting, returning true")
                 completeOnMain(true)
                 return
@@ -1722,7 +1724,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         queue.allEpisodes(includeNowPlaying: includeNowPlaying)
     }
 
-    func allEpisodeUuidsInQueue() -> [BaseEpisode] {
+    var allEpisodeUuidsInQueue: [BaseEpisode] {
         queue.allEpisodeUuids()
     }
 
@@ -1730,7 +1732,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.upNextQueueChanged)
     }
 
-    func upNextQueueCount() -> Int {
+    var upNextQueueCount: Int {
         queue.upNextCount()
     }
 
@@ -1745,15 +1747,15 @@ class PlaybackManager: ServerPlaybackDelegate {
     private func recordPlaybackPosition(sendToServerImmediately: Bool, fireNotifications: Bool) {
         guard let currEpisode = currentEpisode else { return }
 
-        let upTo = currentTime()
+        let upTo = currentTime
         if upTo <= 0 { return }
 
         let isUserLoggedIn = SyncManager.isUserLoggedIn()
-        DataManager.sharedManager.saveEpisode(playedUpTo: upTo, episode: currEpisode, updateSyncFlag: isUserLoggedIn)
-        DataManager.sharedManager.updateEpisodePlaybackInteractionDate(episode: currEpisode)
+        DataManager.shared.saveEpisode(playedUpTo: upTo, episode: currEpisode, updateSyncFlag: isUserLoggedIn)
+        DataManager.shared.updateEpisodePlaybackInteractionDate(episode: currEpisode)
         FileLog.shared.addMessage("saving played up to \(upTo) for episode \(currEpisode.displayableTitle())")
         if sendToServerImmediately, isUserLoggedIn {
-            ApiServerHandler.saveUpTo(time: upTo, duration: duration(), episode: currEpisode)
+            ApiServerHandler.saveUpTo(time: upTo, duration: duration, episode: currEpisode)
         }
 
         if fireNotifications {
@@ -1786,15 +1788,15 @@ class PlaybackManager: ServerPlaybackDelegate {
         guard let player, let episode = currentEpisode else { return }
 
         StatsManager.shared.addTotalListeningTime(updateTimerInterval)
-        if player.playbackRate() > 1 {
-            StatsManager.shared.addTimeSavedVariableSpeed((updateTimerInterval * player.playbackRate()) - updateTimerInterval)
+        if player.playbackRate > 1 {
+            StatsManager.shared.addTimeSavedVariableSpeed((updateTimerInterval * player.playbackRate) - updateTimerInterval)
         }
 
         // check for outro skipping
-        let skipLast = skipLastTimeForCurrentEpisode()
+        let skipLast = skipLastTimeForCurrentEpisode
         if skipLast > 0 {
-            let episodeDuration = duration()
-            let timeRemaining = episodeDuration - currentTime()
+            let episodeDuration = duration
+            let timeRemaining = episodeDuration - currentTime
             if episodeDuration > 0, episodeDuration > skipLast, timeRemaining < skipLast {
                 if numberOfEpisodesToSleepAfter == 1 {
                     pause()
@@ -1815,7 +1817,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             recordPlaybackPosition(sendToServerImmediately: isPlaying, fireNotifications: true)
             updateCount = 0
         } else {
-            let upTo = currentTime()
+            let upTo = currentTime
             if upTo > 0 {
                 episode.playedUpTo = upTo
             }
@@ -1835,7 +1837,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             }
         }
 
-        if !player.buffering() {
+        if !player.isBuffering {
             updateChapterInfo()
         }
     }
@@ -1857,7 +1859,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     private func postProgressNotification() {
-        if isBackgrounded() { return }
+        if isBackgrounded { return }
 
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackProgress)
     }
@@ -1866,7 +1868,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.podcastChapterChanged)
     }
 
-    private func isBackgrounded() -> Bool {
+    private var isBackgrounded: Bool {
         #if os(watchOS)
             return false
         #else
@@ -1884,7 +1886,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// is stopped. Reporting `nil` here is interpreted as a rate of `0`, which holds the
     /// timeline in place while paused. See PCIOS-274.
     private var nowPlayingPlaybackRate: Double? {
-        isPlaying ? player?.playbackRate() : nil
+        isPlaying ? player?.playbackRate : nil
     }
 
     @objc private func updateNowPlayingInfo() {
@@ -1901,17 +1903,17 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     private func setAllNowPlayingInfo(for episode: BaseEpisode) {
         #if os(watchOS)
-            WatchNowPlayingHelper.setAllNowPlayingInfo(for: episode, duration: duration(), upTo: currentTime(), playbackRate: nowPlayingPlaybackRate)
+            WatchNowPlayingHelper.setAllNowPlayingInfo(for: episode, duration: duration, upTo: currentTime, playbackRate: nowPlayingPlaybackRate)
         #else
-            NowPlayingHelper.setAllNowPlayingInfo(for: episode, currentChapters: currentChapters(), duration: duration(), upTo: currentTime(), playbackRate: nowPlayingPlaybackRate)
+            NowPlayingHelper.setAllNowPlayingInfo(for: episode, currentChapters: currentChapters, duration: duration, upTo: currentTime, playbackRate: nowPlayingPlaybackRate)
         #endif
     }
 
     private func updateNowPlayingProgress(for episode: BaseEpisode) {
         #if os(watchOS)
-            WatchNowPlayingHelper.updateNowPlayingInfo(for: episode, duration: duration(), upTo: currentTime(), playbackRate: nowPlayingPlaybackRate)
+            WatchNowPlayingHelper.updateNowPlayingInfo(for: episode, duration: duration, upTo: currentTime, playbackRate: nowPlayingPlaybackRate)
         #else
-            NowPlayingHelper.updateNowPlayingInfo(for: episode, currentChapters: currentChapters(), duration: duration(), upTo: currentTime(), playbackRate: nowPlayingPlaybackRate)
+            NowPlayingHelper.updateNowPlayingInfo(for: episode, currentChapters: currentChapters, duration: duration, upTo: currentTime, playbackRate: nowPlayingPlaybackRate)
         #endif
     }
 
@@ -1922,7 +1924,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         #if os(watchOS) || APPCLIP || os(tvOS)
             let connectedToExternalDevice = false
         #else
-            let connectedToExternalDevice = GoogleCastManager.sharedManager.connectedOrConnectingToDevice()
+            let connectedToExternalDevice = GoogleCastManager.shared.connectedOrConnectingToDevice()
         #endif
 
         // When Google Casting in the background, control over the casting device is not available, so remove the controls
@@ -1944,13 +1946,13 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         guard let episode = currentEpisode, episode.mayContainChapters() else { return }
 
-        chapterManager.parseChapters(episode: episode, duration: duration())
+        chapterManager.parseChapters(episode: episode, duration: duration)
     }
 
     private func updateChapterInfo() {
         guard let episode = currentEpisode, episode.mayContainChapters(), !chapterManager.haveTriedToParseChaptersFor(episodeUuid: episode.uuid) else { return }
 
-        chapterManager.parseChapters(episode: episode, duration: duration())
+        chapterManager.parseChapters(episode: episode, duration: duration)
     }
 
     @objc private func updateAllNowPlayingData() {
@@ -1972,7 +1974,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.sleepTimerChanged)
     }
 
-    func sleepTimerActive() -> Bool {
+    var isSleepTimerActive: Bool {
         sleepTimeRemaining >= 0 || numberOfEpisodesToSleepAfter > 0
     }
 
@@ -1994,8 +1996,9 @@ class PlaybackManager: ServerPlaybackDelegate {
         Analytics.track(.playerSleepTimerExtended, source: source, properties: ["amount": Int(duration)])
     }
 
+    @MainActor
     func restartSleepTimer() {
-        guard sleepTimerActive() else {
+        guard isSleepTimerActive else {
             return
         }
 
@@ -2077,7 +2080,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
             strongSelf.analyticsPlaybackHelper.currentSource = strongSelf.commandCenterSource
 
-            if Settings.legacyBluetoothModeEnabled() {
+            if Settings.legacyBluetoothModeEnabled {
                 FileLog.shared.addMessage("Remote control: playCommand, treating as play (Legacy BT Mode is on)")
                 if !strongSelf.isPlaying { strongSelf.play() }
             } else if let lastPlayTime = UserDefaults.standard.object(forKey: Constants.UserDefaults.lastPlayEvent) as? Date, fabs(lastPlayTime.timeIntervalSinceNow) < 10.seconds {
@@ -2085,18 +2088,11 @@ class PlaybackManager: ServerPlaybackDelegate {
                 FileLog.shared.addMessage("Remote control: playCommand, treating as play")
                 if !strongSelf.isPlaying { strongSelf.play() }
             } else {
-                if strongSelf.playingOverAirplay() {
+                if strongSelf.isPlayingOverAirplay {
                     // during handoff iOS will call us to play even if we already are, so honour that here
                     FileLog.shared.addMessage("Remote control: playCommand, treating as play because playing over AirPlay")
                     if !strongSelf.isPlaying { strongSelf.play() }
                 } else {
-                    if FeatureFlag.ignorePlayWithOtherAudio.enabled {
-                        let audioSession = AVAudioSession.sharedInstance()
-                        if audioSession.secondaryAudioShouldBeSilencedHint {
-                            FileLog.shared.addMessage("Remote control: playCommand, ignored because secondary audio should be silenced (isOtherAudioPlaying: \(audioSession.isOtherAudioPlaying))")
-                            return .commandFailed
-                        }
-                    }
                     // we hook play up to play/pause because that's how some headphones/car stereos do it instead of sending distinct play/pause events
                     FileLog.shared.addMessage("Remote control: playCommand, treating as playPause")
                     strongSelf.playPause()
@@ -2152,7 +2148,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
             if let rateEvent = event as? MPChangePlaybackRateCommandEvent {
                 FileLog.shared.addMessage("Remote control: changePlaybackRateCommand")
-                let currentEffects = strongSelf.effects()
+                let currentEffects = strongSelf.effects
                 currentEffects.playbackSpeed = Double(rateEvent.playbackRate)
                 strongSelf.changeEffects(currentEffects)
 
@@ -2182,7 +2178,7 @@ class PlaybackManager: ServerPlaybackDelegate {
                 analyticsPlaybackHelper.currentSource = commandCenterSource
 
                 if let seekEvent = event as? MPChangePlaybackPositionCommandEvent {
-                    if Settings.legacyBluetoothModeEnabled(), seekEvent.positionTime < 1 {
+                    if Settings.legacyBluetoothModeEnabled, seekEvent.positionTime < 1 {
                         FileLog.shared.addMessage("Remote control: ignoring changePlaybackPositionCommand, it's to 0 and legacy bluetooth mode is on")
                     } else {
                         FileLog.shared.addMessage("Remote control: changePlaybackPositionCommand to \(seekEvent.positionTime)")
@@ -2210,7 +2206,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     @objc private func updateExtraActions() {
-        let actionsEnabled = Settings.extraMediaSessionActionsEnabled()
+        let actionsEnabled = Settings.extraMediaSessionActionsEnabled
 
         let markPlayedCommand = MPRemoteCommandCenter.shared().dislikeCommand
         let starCommand = MPRemoteCommandCenter.shared().likeCommand
@@ -2260,20 +2256,13 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         let skipBackAmount = TimeInterval(Settings.skipBackTime)
         if addTarget {
+            // Note: chapter skipping is deliberately not handled here. These commands back the
+            // on-screen skip buttons (lock screen, Control Center, CarPlay), which render the skip
+            // interval on the button itself, and their events always carry that same interval, so
+            // there's no way to tell them apart from a hardware press. The Headphone Controls
+            // setting is applied in the next/previousTrackCommand handlers instead, which is where
+            // hardware next/previous buttons actually arrive.
             setInterval(commandCenter.skipBackwardCommand, interval: skipBackAmount) { event -> MPRemoteCommandHandlerStatus in
-                let skipChapters = Settings.headphonesPreviousAction == .previousChapter
-
-                // if the user has remote chapter skipping on, try to honour that setting if there's no interval that comes through, or the interval matches the default one
-                if skipChapters, let previousChapter = self.chapterManager.previousVisibleChapter() {
-                    let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? TimeInterval(Settings.skipBackTime)
-                    if Int(interval) == Settings.skipBackTime {
-                        FileLog.shared.addMessage("Skipping to previous chapter because Remote Skip Chapters is turned on")
-                        self.seekTo(time: ceil(previousChapter.startTime.seconds))
-
-                        return .success
-                    }
-                }
-
                 self.analyticsPlaybackHelper.currentSource = self.commandCenterSource
 
                 if let skipEvent = event as? MPSkipIntervalCommandEvent, skipEvent.interval > 0 {
@@ -2290,20 +2279,9 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         let skipFwdAmount = TimeInterval(Settings.skipForwardTime)
         if addTarget {
+            // See the note on skipBackwardCommand above: the Headphone Controls setting is applied
+            // in the next/previousTrackCommand handlers, not here.
             setInterval(commandCenter.skipForwardCommand, interval: skipFwdAmount) { event -> MPRemoteCommandHandlerStatus in
-                let skipChapters = Settings.headphonesNextAction == .nextChapter
-
-                // if the user has remote chapter skipping on, try to honour that setting if there's no interval that comes through, or the interval matches the default one
-                if skipChapters, let nextChapter = self.chapterManager.nextVisiblePlayableChapter() {
-                    let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? TimeInterval(Settings.skipForwardTime)
-                    if Int(interval) == Settings.skipForwardTime {
-                        FileLog.shared.addMessage("Skipping to next chapter because Remote Skip Chapters is turned on")
-                        self.seekTo(time: ceil(nextChapter.startTime.seconds))
-
-                        return .success
-                    }
-                }
-
                 self.analyticsPlaybackHelper.currentSource = self.commandCenterSource
 
                 if let skipEvent = event as? MPSkipIntervalCommandEvent, skipEvent.interval > 0 {
@@ -2332,7 +2310,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     @objc private func handleRouteChanged(_ notification: Notification) {
         #if !os(watchOS) && !APPCLIP && !os(tvOS)
-            if GoogleCastManager.sharedManager.connectedOrConnectingToDevice() { return } // while google casting we don't care about interruptions
+            if GoogleCastManager.shared.connectedOrConnectingToDevice() { return } // while google casting we don't care about interruptions
         #endif
 
         guard let userInfo = notification.userInfo, let changeReason = userInfo[AVAudioSessionRouteChangeReasonKey] as? NSNumber else { return }
@@ -2340,8 +2318,8 @@ class PlaybackManager: ServerPlaybackDelegate {
         logRouteChange(userInfo: userInfo)
 
         let reason = changeReason.uintValue
-        if let currEpisode = currentEpisode, playingOverAirplay() && playerSwitchRequired() {
-            let wasPlaying = player?.shouldBePlaying() ?? false
+        if let currEpisode = currentEpisode, isPlayingOverAirplay && playerSwitchRequired {
+            let wasPlaying = player?.shouldBePlaying ?? false
             let autoPlay: Bool
             if FeatureFlag.dontAutoplayOnRouteChange.enabled {
                 // When flag is enabled: only autoplay if we were already playing
@@ -2357,9 +2335,15 @@ class PlaybackManager: ServerPlaybackDelegate {
         } else if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
             player?.routeDidChange(shouldPause: true)
         } else if reason == AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue || reason == AVAudioSession.RouteChangeReason.override.rawValue || reason == AVAudioSession.RouteChangeReason.categoryChange.rawValue {
-            player?.routeDidChange(shouldPause: false)
+            if !FeatureFlag.ignoreRouteChangeWhilePlayRequestPending.enabled || !isPlayRequestPending {
+                player?.routeDidChange(shouldPause: false)
+            }
             updateAllNowPlayingData()
         }
+    }
+
+    private var isPlayRequestPending: Bool {
+        aboutToPlay.value && !(player?.shouldBePlaying ?? false)
     }
 
     private func logRouteChange(userInfo: [AnyHashable: Any]) {
@@ -2378,7 +2362,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
         #if !os(watchOS) && !APPCLIP && !os(tvOS)
-            if GoogleCastManager.sharedManager.connectedOrConnectingToDevice() { return } // while google casting we don't care about interruptions
+            if GoogleCastManager.shared.connectedOrConnectingToDevice() { return } // while google casting we don't care about interruptions
         #endif
 
         guard let userInfo = notification.userInfo else { return }
@@ -2410,7 +2394,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
             FileLog.shared.addMessage("PlaybackManager handleAudioInterrupt began reason: \(interruptionReason?.description ?? "unknown")")
             if let player {
-                wasPlayingBeforeInterruption = player.shouldBePlaying()
+                wasPlayingBeforeInterruption = player.shouldBePlaying
                 player.interruptionDidStart()
             }
 
@@ -2423,7 +2407,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     @objc private func handleSystemAudioReset(_ notification: Notification) {
         #if !os(watchOS) && !APPCLIP && !os(tvOS)
-            if GoogleCastManager.sharedManager.connected() { return } // while google casting we don't care about system audio events
+            if GoogleCastManager.shared.connected() { return } // while google casting we don't care about system audio events
         #endif
 
         if currentEpisode != nil {
@@ -2434,7 +2418,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     func remoteDeviceConnected() {
         AnalyticsHelper.didConnectToChromecast()
 
-        guard let episode = currentEpisode, playerSwitchRequired() else { return }
+        guard let episode = currentEpisode, playerSwitchRequired else { return }
 
         AnalyticsPlaybackHelper.shared.currentSource = .chromecast
         pause()
@@ -2450,7 +2434,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     func remoteDeviceDisconnected() {
         guard let episode = currentEpisode else { return }
 
-        if playerSwitchRequired() {
+        if playerSwitchRequired {
             load(episode: episode, autoPlay: false, overrideUpNext: false)
             NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackPaused)
         }
@@ -2467,8 +2451,8 @@ class PlaybackManager: ServerPlaybackDelegate {
             }
 
             // if we get here then we're either not playing anything, or we're meant to be playing this episode anyway, so connect back up with it
-            if let episodePlaying = DataManager.sharedManager.findBaseEpisode(uuid: episodeUuid) {
-                let shouldPlay = GoogleCastManager.sharedManager.playing()
+            if let episodePlaying = DataManager.shared.findBaseEpisode(uuid: episodeUuid) {
+                let shouldPlay = GoogleCastManager.shared.playing()
                 load(episode: episodePlaying, autoPlay: shouldPlay, overrideUpNext: false)
             }
         #endif
@@ -2513,12 +2497,13 @@ class PlaybackManager: ServerPlaybackDelegate {
         if uuid != playingEpisode.uuid { return } // download isn't the episode we're playing
 
         // the episode we have won't be marked as downloaded, so grab a fresh copy from the database
-        if let refreshedEpisode = DataManager.sharedManager.findBaseEpisode(uuid: uuid) {
+        if let refreshedEpisode = DataManager.shared.findBaseEpisode(uuid: uuid) {
             // the current episode we were playing has downloaded, switch to playing the downloaded version
             let currentlyPlaying = isPlaying
             recordPlaybackPosition(sendToServerImmediately: false, fireNotifications: true)
 
             if !needsToReloadPlayingEpisode(refreshedEpisode) {
+                queue.nowPlayingEpisodeChanged()
                 return
             }
 
@@ -2535,15 +2520,15 @@ class PlaybackManager: ServerPlaybackDelegate {
         if FeatureFlag.doNotSwitchToDownloadedFile.enabled,
            FeatureFlag.streamAndCachePlayingEpisode.enabled,
            !episodeIsChanging,
-           effects().trimSilence == .off,
-           !playerSwitchRequired(),
+           effects.trimSilence == .off,
+           !playerSwitchRequired,
            !refreshedEpisode.videoPodcast(),
            // HLS is streamed directly (no stream-and-cache), so when playback finishes downloading we must reload to switch to the downloaded local file
            !EpisodeManager.hasHLSStream(refreshedEpisode) {
             return false
         } else {
             if !episodeIsChanging {
-                FileLog.shared.addMessage("Playback Manager: Needs to reload current episode [\(refreshedEpisode.title ?? "") - \(refreshedEpisode.uuid)].\n Possible Reasons: Trim silence: \(effects().trimSilence), Player switch required: \(playerSwitchRequired()), Video podcast: \(refreshedEpisode.videoPodcast())")
+                FileLog.shared.addMessage("Playback Manager: Needs to reload current episode [\(refreshedEpisode.title ?? "") - \(refreshedEpisode.uuid)].\n Possible Reasons: Trim silence: \(effects.trimSilence), Player switch required: \(playerSwitchRequired), Video podcast: \(refreshedEpisode.videoPodcast())")
             }
             return true
         }
@@ -2565,7 +2550,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     // MARK: - Interruptions
 
-    func interruptionInProgress() -> Bool {
+    var isInterruptionInProgress: Bool {
         interruptInProgress
     }
 
@@ -2579,13 +2564,13 @@ class PlaybackManager: ServerPlaybackDelegate {
         }
     }
 
-    private func startFromTimeForCurrentEpisode() -> TimeInterval {
+    private var startFromTimeForCurrentEpisode: TimeInterval {
         guard let episode = currentEpisode as? Episode, let parentPodcast = episode.parentPodcast() else { return 0 }
 
         return TimeInterval(parentPodcast.startFrom)
     }
 
-    private func skipLastTimeForCurrentEpisode() -> TimeInterval {
+    private var skipLastTimeForCurrentEpisode: TimeInterval {
         guard let episode = currentEpisode as? Episode, let parentPodcast = episode.parentPodcast() else { return 0 }
 
         return TimeInterval(parentPodcast.skipLast)
@@ -2640,19 +2625,19 @@ class PlaybackManager: ServerPlaybackDelegate {
     func retryUrlLoad(for episodeUuid: String) -> Bool {
 
         guard lastRetryEpisodeUuid != episodeUuid,
-              let episode = DataManager.sharedManager.findEpisode(uuid: episodeUuid),
+              let episode = DataManager.shared.findEpisode(uuid: episodeUuid),
               let podcast = episode.parentPodcast() else {
             lastRetryEpisodeUuid = episodeUuid
             return false
         }
-        Task {
+        Task { [self] in
             haveCalledPlayerLoad = false
             FileLog.shared.addMessage("PlaybackManager: URL failed to load, trying to update episode and playing again")
             lastRetryEpisodeUuid = episodeUuid
 
             ServerPodcastManager.shared.updatePodcastIfRequired(podcast: podcast) { [weak self] wasUpdated in
                 guard let self,
-                      let updatedEpisode = wasUpdated ? DataManager.sharedManager.findEpisode(uuid: episodeUuid) : episode else { return }
+                      let updatedEpisode = wasUpdated ? DataManager.shared.findEpisode(uuid: episodeUuid) : episode else { return }
 
                 FileLog.shared.addMessage("PlaybackManager: Episode\(wasUpdated ? " " : " not") updated, trying to play again.")
 
@@ -2745,7 +2730,7 @@ extension PlaybackManager {
             return
         }
 
-        let currentTime = currentTime()
+        let currentTime = self.currentTime
         bookmarkManager.add(to: episode, at: currentTime, source: source)
 
         playBookmarkCreationSoundIfNeeded(source: source)
@@ -2780,7 +2765,7 @@ extension PlaybackManager {
     func playBookmark(_ bookmark: Bookmark, source: BookmarkAnalyticsSource) async throws {
         guard bookmarksEnabled else { return }
 
-        let dataManager = DataManager.sharedManager
+        let dataManager = DataManager.shared
 
         // Get the bookmark's BaseEpisode so we can load it, fetching it from the server if it's missing
         var foundEpisode = bookmark.episode ?? dataManager.findBaseEpisode(uuid: bookmark.episodeUuid)
@@ -2845,8 +2830,8 @@ extension PlaybackManager {
             pause(userInitiated: false)
             seekTo(time: bookmark.time)
         } else {
-            DataManager.sharedManager.saveEpisode(playedUpTo: bookmark.time, episode: episode, updateSyncFlag: false)
-            DataManager.sharedManager.saveEpisode(playingStatus: .inProgress, episode: episode, updateSyncFlag: false)
+            DataManager.shared.saveEpisode(playedUpTo: bookmark.time, episode: episode, updateSyncFlag: false)
+            DataManager.shared.saveEpisode(playingStatus: .inProgress, episode: episode, updateSyncFlag: false)
             load(episode: episode, autoPlay: false, overrideUpNext: false)
             // Create the player item now (playing would, but we aren't yet) — this is
             // what starts the stream-and-cache download.
@@ -2860,7 +2845,7 @@ extension PlaybackManager {
 
         // The listener took over while we were resolving; leave things where they put them.
         guard isCurrentEpisode(uuid: bookmark.episodeUuid), !isPlaying,
-              abs(currentTime() - bookmark.time) < 1 else {
+              abs(currentTime - bookmark.time) < 1 else {
             FileLog.shared.addMessage(
                 "[Bookmarks] Playback moved while resolving bookmark \(bookmark.uuid) — not starting playback"
             )
@@ -2898,7 +2883,7 @@ extension PlaybackManager {
     @MainActor
     func playEpisodeSearchResult(_ searchEpisode: EpisodeSearchResult) async throws {
         // Get the search result's BaseEpisode so we can load it, fetching it from the server if it's missing
-        var foundEpisode = DataManager.sharedManager.findBaseEpisode(uuid: searchEpisode.uuid)
+        var foundEpisode = DataManager.shared.findBaseEpisode(uuid: searchEpisode.uuid)
 
         if foundEpisode == nil {
             foundEpisode = try await ServerPodcastManager.shared.addMissingPodcastAndEpisode(episodeUuid: searchEpisode.uuid, podcastUuid: searchEpisode.podcastUuid)
