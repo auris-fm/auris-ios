@@ -132,13 +132,13 @@ class EpisodeListSearchController: SimpleNotificationsViewController, UITextFiel
 
     @IBOutlet var dividerHeightConstraint: NSLayoutConstraint! {
         didSet {
-            dividerHeightConstraint.constant = 1 / UIScreen.main.scale
+            applyHairlineWidth(to: dividerHeightConstraint)
         }
     }
 
     @IBOutlet var middleDividerHeightConstraint: NSLayoutConstraint! {
         didSet {
-            middleDividerHeightConstraint.constant = 1 / UIScreen.main.scale
+            applyHairlineWidth(to: middleDividerHeightConstraint)
         }
     }
 
@@ -152,9 +152,7 @@ class EpisodeListSearchController: SimpleNotificationsViewController, UITextFiel
 
         infoLabel.attributedText = info
         overflowButton.isEnabled = isOverflowButtonEnabled
-        if let overflowAccessibilityLabel {
-            overflowButton.accessibilityLabel = overflowAccessibilityLabel
-        }
+        overflowButton.accessibilityLabel = overflowAccessibilityLabel ?? L10n.accessibilityEpisodeActions
         updateActionButton()
         updateClearButton()
         updateLoadingIndicator()

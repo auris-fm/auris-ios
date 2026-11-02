@@ -2,11 +2,10 @@ import AudioUnit
 import AVFoundation
 import PocketCastsDataModel
 import PocketCastsUtils
+import SJUtils
 import UIKit
 
 class EffectsPlayer: PlaybackProtocol, Hashable {
-    private static let targetVolumeDbGain = 15.0 as Float
-
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
 
@@ -38,7 +37,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private var highPassFilter: AVAudioUnitEffect?
     private var dynamicsProcessor: AVAudioUnitEffect?
     private var peakLimiter: AVAudioUnitEffect?
-    private let useVoiceBoostN = AtomicBool()
+    private let useVoiceBoostN = Mutex(false)
     private var audioFileSampleRate: Double = 0
 
     private var playBufferManager: PlayBufferManager?
@@ -48,10 +47,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
     private var effects = PlaybackEffects()
 
-    private let shouldKeepPlaying = AtomicBool()
+    private let shouldKeepPlaying = Mutex(false)
     private var haveFiredDurationNotification = false
 
-    private let aboutToPlay = AtomicBool()
+    private let aboutToPlay = Mutex(false)
     private var episodePath: String?
     private var episode: BaseEpisode?
     private var cachedFrameCount = 0 as Int64
@@ -79,11 +78,11 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         self.episode = episode
     }
 
-    func isReadyToPlay() -> Bool {
+    var isReadyToPlay: Bool {
         audioReadTask != nil && audioPlayTask != nil
     }
 
-    func playing() -> Bool {
+    var isPlaying: Bool {
         if aboutToPlay.value { return true }
 
         if let player {
@@ -106,7 +105,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             strongSelf.player = AVAudioPlayerNode()
             strongSelf.engine?.attach(strongSelf.player!)
 
-            strongSelf.effects = PlaybackManager.shared.effects()
+            strongSelf.effects = PlaybackManager.shared.effects
             strongSelf.playBufferManager = PlayBufferManager()
 
             // Set useVoiceBoostN before setVolumeBoostSettings so bypass is configured correctly
@@ -136,7 +135,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                 strongSelf.audioFile = try AVAudioFile(forReading: fileURL, commonFormat: AVAudioCommonFormat.pcmFormatFloat32, interleaved: false)
 
                 // AVAudioFile.length is an expensive operation (often in the seconds) so here we attempt to load a cached value instead
-                strongSelf.cachedFrameCount = DataManager.sharedManager.findFrameCount(episode: episode)
+                strongSelf.cachedFrameCount = DataManager.shared.findFrameCount(episode: episode)
                 if strongSelf.cachedFrameCount == 0 {
                     // we haven't cached a frame count for this episode, do that now
                     strongSelf.cachedFrameCount = strongSelf.audioFile!.length
@@ -144,7 +143,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                         // If don't have a frameCount we cannot use the effect player
                         throw AVError(_nsError: NSError(domain: AVFoundationErrorDomain, code: AVError.fileFailedToParse.rawValue))
                     }
-                    DataManager.sharedManager.saveFrameCount(episode: episode, frameCount: strongSelf.cachedFrameCount)
+                    DataManager.shared.saveFrameCount(episode: episode, frameCount: strongSelf.cachedFrameCount)
                 }
             } catch {
                 strongSelf.playerLock.unlock()
@@ -177,7 +176,13 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             // Store sample rate for AudioReadTask (useVoiceBoostN already set above)
             strongSelf.audioFileSampleRate = strongSelf.audioFile!.fileFormat.sampleRate
 
-            strongSelf.startReadAndPlayThreads()
+            do {
+                try strongSelf.startReadAndPlayThreads()
+            } catch {
+                strongSelf.playerLock.unlock()
+                PlaybackManager.shared.playbackDidFail(error: .fileCorrupted(logMessage: error.localizedDescription), fallbackToDefaultPlayer: true)
+                return
+            }
             #if !APPCLIP
             // Installed here, with the graph, rather than after a successful `start()`.
             //
@@ -238,7 +243,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         PlaybackManager.shared.playerDidRequestTermination()
     }
 
-    func playbackRate() -> Double {
+    var playbackRate: Double {
         playbackSpeed
     }
 
@@ -271,7 +276,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         }
     }
 
-    func currentTime() -> TimeInterval {
+    var currentTime: TimeInterval {
         if seeking {
             return lastSeekTime
         }
@@ -291,7 +296,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         return nil
     }
 
-    func duration() -> TimeInterval {
+    var duration: TimeInterval {
         if let audioFile {
             return (Double(cachedFrameCount) / audioFile.fileFormat.sampleRate)
         }
@@ -300,7 +305,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     }
 
     func effectsDidChange() {
-        effects = PlaybackManager.shared.effects()
+        effects = PlaybackManager.shared.effects
 
         audioReadTask?.setTrimSilence(effects.trimSilence)
         playbackSpeed = effects.playbackSpeed
@@ -327,7 +332,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         audioPlayTask?.shutdown()
         playBufferManager?.removeAll()
 
-        if playing() {
+        if isPlaying {
             player?.pause()
         }
 
@@ -344,40 +349,24 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         engine?.stop()
     }
 
-    func supportsSilenceRemoval() -> Bool {
-        true
-    }
-
-    func supportsVolumeBoost() -> Bool {
-        true
-    }
-
-    func supportsGoogleCast() -> Bool {
-        false
-    }
-
-    func supportsStreaming() -> Bool {
-        false
-    }
-
-    func supportsAirplay2() -> Bool {
+    var supportsGoogleCast: Bool {
         false
     }
 
     // we only ever play downloaded content, so we're never buffering or worry about future buffer
-    func buffering() -> Bool {
+    var isBuffering: Bool {
         false
     }
 
-    func futureBufferAvailable() -> TimeInterval {
-        duration() - currentTime()
+    var futureBufferAvailable: TimeInterval {
+        duration - currentTime
     }
 
-    func shouldBePlaying() -> Bool {
+    var shouldBePlaying: Bool {
         shouldKeepPlaying.value
     }
 
-    func internalPlayerForVideoPlayback() -> AVPlayer? {
+    var internalPlayerForVideoPlayback: AVPlayer? {
         nil
     }
 
@@ -389,11 +378,11 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     }
 
     func routeDidChange(shouldPause: Bool) {
-        shouldKeepPlaying.value = shouldKeepPlaying.value && !shouldPause
+        shouldKeepPlaying.withLock { $0 = $0 && !shouldPause }
 
         // when this is called, the engine has detected an interruption like a route change. Because this happens on things like bluetooth connect, and not just disconnect, we deal with it here.
         // The audio engine has shut down at this point, so we call pause to destroy all our current state and play to restore it all if we should still be playing
-        if shouldKeepPlaying.value, !PlaybackManager.shared.interruptionInProgress() {
+        if shouldKeepPlaying.value, !PlaybackManager.shared.isInterruptionInProgress {
             PlaybackManager.shared.pause(userInitiated: false)
             PlaybackManager.shared.play(userInitiated: false)
         } else if !shouldKeepPlaying.value {
@@ -403,14 +392,14 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
     // MARK: - Helper methods
 
-    private func startReadAndPlayThreads() {
+    private func startReadAndPlayThreads() throws {
         // just in case there are any running
         audioReadTask?.shutdown()
         audioPlayTask?.shutdown()
 
         guard let audioFile, let player, let playBufferManager else { return }
         let requiredStartTime = PlaybackManager.shared.requiredStartingPosition()
-        audioReadTask = AudioReadTask(trimSilence: effects.trimSilence, audioFile: audioFile, outputFormat: audioFile.processingFormat, bufferManager: playBufferManager, playPositionHint: requiredStartTime, frameCount: cachedFrameCount, useVoiceBoostN: useVoiceBoostN, sampleRate: audioFileSampleRate)
+        audioReadTask = try AudioReadTask(trimSilence: effects.trimSilence, audioFile: audioFile, outputFormat: audioFile.processingFormat, bufferManager: playBufferManager, playPositionHint: requiredStartTime, frameCount: cachedFrameCount, useVoiceBoostN: { [weak self] in self?.useVoiceBoostN.value ?? false }, sampleRate: audioFileSampleRate)
         audioPlayTask = AudioPlayTask(player: player, bufferManager: playBufferManager)
 
         audioReadTask?.startup()

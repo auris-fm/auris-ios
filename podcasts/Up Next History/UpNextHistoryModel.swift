@@ -1,3 +1,4 @@
+import Foundation
 import PocketCastsDataModel
 import PocketCastsServer
 import PocketCastsUtils
@@ -8,7 +9,7 @@ class UpNextHistoryModel: ObservableObject {
 
     private let dataManager: DataManager
 
-    init(dataManager: DataManager = DataManager.sharedManager) {
+    init(dataManager: DataManager = DataManager.shared) {
         self.dataManager = dataManager
     }
 
@@ -39,7 +40,7 @@ class UpNextHistoryModel: ObservableObject {
             PlaybackManager.shared.queue.bulkOperationDidComplete()
             PlaybackManager.shared.queue.refreshList(checkForAutoDownload: false)
 
-            let upNextQueueCount = PlaybackManager.shared.upNextQueueCount()
+            let upNextQueueCount = PlaybackManager.shared.upNextQueueCount
             FileLog.shared.addMessage("UpNextHistory: Restored Up Next Queue to \(upNextQueueCount) episodes")
         }
     }

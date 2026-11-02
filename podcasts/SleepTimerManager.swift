@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsUtils
+import AVFoundation
 import AVKit
 
 class SleepTimerManager {
@@ -53,7 +54,7 @@ class SleepTimerManager {
     }
 
     func restartSleepTimerIfNeeded() {
-        guard !PlaybackManager.shared.sleepTimerActive(), Settings.autoRestartSleepTimer else {
+        guard !PlaybackManager.shared.isSleepTimerActive, Settings.autoRestartSleepTimer else {
             return
         }
 
@@ -99,7 +100,7 @@ class SleepTimerManager {
     }
 
     private func restartSleepTimerAndPlayTone() {
-        guard PlaybackManager.shared.sleepTimerActive() && Settings.shakeToRestartSleepTimer else {
+        guard PlaybackManager.shared.isSleepTimerActive && Settings.shakeToRestartSleepTimer else {
             backgroundShakeObserver.stopObserving()
             return
         }

@@ -260,7 +260,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     }
 
     private func updateDisplay() {
-        if PlaybackManager.shared.sleepTimerActive() {
+        if PlaybackManager.shared.isSleepTimerActive {
             sleepTimerOffView.isHidden = true
             sleepTimerActiveView.isHidden = false
             activeSleepAnimation.sleepTimerOn = true
@@ -275,7 +275,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
             sleepTimerActiveView.isHidden = true
             activeSleepAnimation.sleepTimerOn = false
 
-            customTimeStepper.currentValue = Settings.customSleepTime()
+            customTimeStepper.currentValue = Settings.customSleepTime
             updateCustomSleepTime()
             sleepTimerOffView.sizeToFit()
         }
@@ -287,7 +287,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     }
 
     private func updateCustomSleepTime() {
-        let title = TimeFormatter.shared.minutesHoursFormatted(time: Settings.customSleepTime())
+        let title = TimeFormatter.shared.minutesHoursFormatted(time: Settings.customSleepTime)
         customTimeBtn.setTitle(title, for: .normal)
     }
 
@@ -300,7 +300,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     // When the user unlocks the phone and the timer count is active, we check
     // if it's still going on. If not, the view is dismissed.
     @objc private func dismissIfNeeded() {
-        if !PlaybackManager.shared.sleepTimerActive(), !sleepTimerActiveView.isHidden {
+        if !PlaybackManager.shared.isSleepTimerActive, !sleepTimerActiveView.isHidden {
             dismiss(animated: true)
         }
     }
@@ -310,7 +310,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     @IBAction func settingsTapped(_ sender: Any) {
         Analytics.track(.playerSleepTimerSettingsTapped)
 #if !APPCLIP
-        NavigationManager.sharedManager.navigateTo(NavigationManager.settingsGeneralKey, data: [NavigationManager.settingsGeneralRowKey: GeneralSettingsViewController.TableRow.autoRestartSleepTimer])
+        NavigationManager.shared.navigateTo(NavigationManager.settingsGeneralKey, data: [NavigationManager.settingsGeneralRowKey: GeneralSettingsViewController.TableRow.autoRestartSleepTimer])
 #endif
     }
 
@@ -342,7 +342,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     }
 
     @IBAction func customTapped(_ sender: Any) {
-        PlaybackManager.shared.setSleepTimerInterval(Settings.customSleepTime())
+        PlaybackManager.shared.setSleepTimerInterval(Settings.customSleepTime)
         dismiss(animated: true, completion: nil)
     }
 
@@ -369,7 +369,7 @@ class SleepTimerViewController: SimpleNotificationsViewController {
     }
 
     @objc private func customTimeDidChange() {
-        Settings.setCustomSleepTime(customTimeStepper.currentValue)
+        Settings.customSleepTime = customTimeStepper.currentValue
         updateCustomSleepTime()
     }
 
