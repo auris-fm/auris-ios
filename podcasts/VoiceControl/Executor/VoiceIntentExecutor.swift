@@ -112,7 +112,52 @@ extension PlaybackManager: PlaybackStateProviding {
 
 extension FingerprintTimingManager: FingerprintMappingProviding {}
 
-class VoiceIntentExecutor {
+/// The single entry point `VoiceControlService` needs from the executor. Extracted (spec 85cec5b7) so the
+/// service's routing branches can be driven with a chosen RESULT — including a failure — without
+/// constructing every sink.
+/// The executor's own structured verdict for a turn (spec: `execution.outcome` must be a
+/// structured executor verdict, not a response-derived unknown). The states/reasons are the
+/// record's enumerated vocabulary; `outcome` is the executor's settled disposition.
+typealias ExecutionVerdict = VoiceSharingContributionEncoder.StageOutcome
+
+protocol VoiceIntentExecuting: AnyObject {
+    func execute(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> VoiceResponse
+    func executeWithVerdict(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> (response: VoiceResponse, verdict: ExecutionVerdict)
+    @MainActor func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp?
+    @MainActor func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int)
+    @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?)
+    func execute(_ intent: any VoiceIntent) async -> VoiceResponse
+    /// The executor's decision site: returns the presentation AND the executor's own verdict
+    /// for the same turn. A returned response alone is a presentation choice; this is the fact.
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict)
+}
+
+extension VoiceIntentExecuting {
+    func execute(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> VoiceResponse { await execute(intent) }
+    func executeWithVerdict(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> (response: VoiceResponse, verdict: ExecutionVerdict) { await executeWithVerdict(intent) }
+    @MainActor func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp? { nil }
+    @MainActor func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {}
+    @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
+    /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
+    /// 6a033773): only the executor's OWN decisions are stated here — the error earcon is the
+    /// failure the executor itself logs and acts on, and confirm-required is the executor's own
+    /// decision not to act without confirmation. Every OTHER response is a presentation choice:
+    /// a success-shaped presentation alone cannot prove action completion, so the verdict stays
+    /// unknown until sinks report structured facts from their action results.
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        let response = await execute(intent)
+        switch response {
+        case .earcon(.error):
+            return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+        case .earcon(.confirmRequired):
+            return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+        default:
+            return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+        }
+    }
+}
+
+class VoiceIntentExecutor: VoiceIntentExecuting {
     private let playbackSink: VoicePlaybackSink
     private let effectsSink: VoiceEffectsSink
     private let volumeSink: VoiceVolumeSink
@@ -197,28 +242,30 @@ class VoiceIntentExecutor {
         self.analytics = analytics
     }
 
-    func execute(
-        _ intent: any VoiceIntent,
-        /// REQUEST-SCOPED, carried on THIS dispatch alongside its request. Storing it on the shared
-        /// executor would let an overlapping dispatch replace another's expected value, so the
-        /// prepared identity could be compared against the wrong turn's.
-        preparedObserver: CloudRouteSink.PreparedObserver? = nil
-    ) async -> VoiceResponse {
-        let response: VoiceResponse
-        // Set only by the cloud branch. Every other intent leaves it nil, so the generic
-        // response-shape rule below is untouched for them.
-        var cloudOutcome: CloudRouteOutcome?
+    func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
+        await executeCollectingFact(intent).response
+    }
 
+    func execute(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> VoiceResponse {
+        await executeCollectingFact(intent, preparedObserver: preparedObserver).response
+    }
+
+    private func executeCollectingFact(
+        _ intent: any VoiceIntent,
+        preparedObserver: CloudRouteSink.PreparedObserver? = nil
+    ) async -> (response: VoiceResponse, fact: SinkActionFact?) {
+        var response: (response: VoiceResponse, fact: SinkActionFact?)
+        var cloudOutcome: CloudRouteOutcome?
         switch intent {
         case let p as PlaybackIntent: response = executePlayback(p)
-        case let e as EffectsIntent: response = executeEffects(e)
-        case let v as VolumeIntent: response = executeVolume(v)
-        case let s as SleepIntent: response = executeSleep(s)
-        case let c as ChapterIntent: response = executeChapter(c)
-        case let b as BookmarkIntent: response = executeBookmark(b)
-        case let q as QueueIntent: response = executeQueue(q)
-        case let pq as PlaybackQueryIntent: response = executePlaybackQuery(pq)
-        case let sq as StatsQueryIntent: response = executeStatsQuery(sq)
+        case let e as EffectsIntent: response = (executeEffects(e), nil)
+        case let v as VolumeIntent: response = (executeVolume(v), nil)
+        case let s as SleepIntent: response = (executeSleep(s), nil)
+        case let c as ChapterIntent: response = (executeChapter(c), nil)
+        case let b as BookmarkIntent: response = (executeBookmark(b), nil)
+        case let q as QueueIntent: response = (executeQueue(q), nil)
+        case let pq as PlaybackQueryIntent: response = (executePlaybackQuery(pq), nil)
+        case let sq as StatsQueryIntent: response = (executeStatsQuery(sq), nil)
         case let cr as CloudRouteIntent:
             // An absent context is a representable turn, not a refusal: the app's normal first
             // interaction has nothing playing, and the contract describes that as absent
@@ -260,19 +307,20 @@ class VoiceIntentExecutor {
             // rendered feedback (reviewer 0c546ce5 item 4).
             if !ownsEffects {
                 FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(cr.utteranceId ?? "?")")
-                return .silent
+                return (.silent, nil)
             }
-            response = result.response
+            response = (result.response, result.fact)
             // Carried out of the switch rather than inferred from `response` below: the
             // rendered feedback cannot say what happened (a spoken error and a silent
             // success are both "no earcon"), and reading it as the outcome is how a
             // failed turn was recorded as a completed cloud route.
             cloudOutcome = result.outcome
-        default: response = .earcon(.error)
+        default: response = (.earcon(.error), nil)
         }
 
+        let voiceResponse = response.response
         // Record analytics after every command
-        analytics?.recordCommand(intent, response: response)
+        analytics?.recordCommand(intent, response: voiceResponse)
 
         // Start grace period after any successful (non-error) command
         if let outcome = cloudOutcome {
@@ -282,15 +330,15 @@ class VoiceIntentExecutor {
                 break   // falls through to the window decision below
             case .failed, .earlyClose, .refused:
                 FileLog.shared.addMessage("[VoicePipeline] Cloud turn did not complete — no grace period")
-                return response
+                return (voiceResponse, response.fact)
             }
-            guard let route = intent as? CloudRouteIntent else { return response }
+            guard let route = intent as? CloudRouteIntent else { return (voiceResponse, response.fact) }
             // Only a turn the server completed reaches the window decision. A window
             // without a generation cannot be attributed to any session, so it changes
             // no grace state rather than falling through to the generic reset.
             guard let generation = route.generation else {
                 FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
-                return response
+                return (voiceResponse, response.fact)
             }
             switch route.origin {
             case .modelCall:
@@ -309,52 +357,75 @@ class VoiceIntentExecutor {
                 FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
                 gracePeriodSignal.extendWindowKeepingEscalationSpent(underGeneration: generation)
             }
-            return response
-        } else if case .earcon(.error) = response {
+            return (voiceResponse, response.fact)
+        } else if case .earcon(.error) = voiceResponse {
             FileLog.shared.addMessage("[VoicePipeline] Command failed — no grace period")
-        } else if let route = intent as? CloudRouteIntent {
-            // A cloud completion may only touch the window it was issued under, so
-            // it must carry that window's identity. One without a generation cannot
-            // be attributed to any window — falling through to the generic reset
-            // would let it reopen a session it never belonged to — so it changes no
-            // grace state at all.
-            guard let generation = route.generation else {
-                FileLog.shared.addMessage("[VoicePipeline] Cloud completion without a window identity — grace state untouched")
-                return response   // analytics already recorded above
-            }
-            switch route.origin {
-            case .modelCall:
-                // Restores the allowance, but only inside its own window. One
-                // atomic operation: checking then resetting separately leaves a gap
-                // in which a privacy close could be undone.
-                if gracePeriodSignal.recognizeCommandIfCurrentWindow(generation) {
-                    FileLog.shared.addMessage("[VoicePipeline] Cloud route completed — grace period")
-                } else {
-                    FileLog.shared.addMessage("[VoicePipeline] Cloud route completed for an ended window — ignored")
-                }
-            case .routingFailure:
-                // The conversation continues, but only for the window that issued
-                // this dispatch, and without restoring the allowance that permitted
-                // it (shared contract with Android).
-                FileLog.shared.addMessage("[VoicePipeline] Fallback dispatch — grace period extended, budget kept spent")
-                gracePeriodSignal.extendWindowKeepingEscalationSpent(underGeneration: generation)
-            }
         } else {
             FileLog.shared.addMessage("[VoicePipeline] Command succeeded — grace period")
             gracePeriodSignal.onCommandRecognized()
         }
 
-        return response
+        return (voiceResponse, response.fact)
     }
 
-    private func executePlayback(_ intent: PlaybackIntent) -> VoiceResponse {
+    /// The verdict rides the ONE shared execution path: `executeCollectingFact` performs the
+    /// turn exactly once (analytics + grace effects, reviewer 8bc80b2b) and threads the sink's
+    /// own fact invocation-locally; where the channel is silent the verdict is the TEMPORARY
+    /// presentation bridge (labeled at its definition).
+    func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        await executeWithVerdict(intent, preparedObserver: nil)
+    }
+
+    func executeWithVerdict(_ intent: any VoiceIntent, preparedObserver: CloudRouteSink.PreparedObserver?) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        let (response, fact) = await executeCollectingFact(intent, preparedObserver: preparedObserver)
+        guard let fact else {
+            // Cloud turns with no stated fact are EXPLICITLY unknown: the
+            // presentation bridge would recreate the action-failure claim the
+            // sink just declined to make (error earcon on a server
+            // admission/transport error — reviewer b9b9fe0f/516acc58).
+            if intent is CloudRouteIntent {
+                return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+            }
+            return (response, Self.presentationBridgeVerdict(response))
+        }
+        return (response, ExecutionVerdict(
+            state: fact.state, reason: fact.reason,
+            outcome: fact.state == "completed" ? "executed"
+                : fact.state == "failed" ? "failed" : "refused"))
+    }
+
+    private func executeWithVerdictViaBridge(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+        let response = await execute(intent)
+        return (response, Self.presentationBridgeVerdict(response))
+    }
+
+    /// TEMPORARY BRIDGE (reviewer 03593972/7b09ce42, spec cac5e28b): the error earcon and
+    /// confirm-required earcon are PRESENTATION classifications, kept only because they are the
+    /// conclusions the executor itself currently acts on (it logs "Command failed" and withholds
+    /// grace on exactly this value). They are NOT decision-site facts; the sink-side fact channel
+    /// (SinkActionFact) replaces them as it reaches each sink. Everything else stays unknown.
+    static func presentationBridgeVerdict(_ response: VoiceResponse) -> ExecutionVerdict {
+        switch response {
+        case .earcon(.error):
+            return ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed")
+        case .earcon(.confirmRequired):
+            return ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused")
+        default:
+            return ExecutionVerdict(state: "unknown", reason: "observation_unavailable")
+        }
+    }
+
+    private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {
         switch intent {
-        case .pause: return playbackSink.pause()
-        case .resume: return playbackSink.resume()
+        case .pause:
+            return playbackSink.pauseWithFact()
+        case .nextEpisode:
+            return playbackSink.nextEpisodeWithFact()
+        case .resume:
+            return (playbackSink.resume(), nil)
         case .seekRelative(let delta, let direction):
-            return playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
-        case .seekTo(let pos): return playbackSink.seekTo(positionSeconds: pos)
-        case .nextEpisode: return playbackSink.nextEpisode()
+            return (playbackSink.seekRelative(deltaSeconds: delta, direction: direction), nil)
+        case .seekTo(let pos): return (playbackSink.seekTo(positionSeconds: pos), nil)
         }
     }
 

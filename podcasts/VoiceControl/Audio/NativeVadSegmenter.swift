@@ -156,6 +156,40 @@ class NativeVadSegmenter {
         reset()
     }
 
+    // MARK: - Contribution observation hooks (observe-only)
+    //
+    // The Voice Sharing collector needs three signals that `onUtterance` cannot provide, because completion
+    // arrives AFTER wake/bleed rejection and only for segments that reach an endpoint:
+    //
+    //   * `capture_id` must be minted at confirmed speech start, before any rejection decision exists — a
+    //     bleed- or wake-rejected segment is still collectable audio (spec), and rejections are silent
+    //     `return`s downstream, so a completion-only view never sees them at all.
+    //   * Long in-progress speech must be admitted against clip ceilings BEFORE completion, otherwise a
+    //     segment whose completion never arrives (permission closes mid-speech) has already exceeded its
+    //     memory/disk bound.
+    //   * A reset while speech is active is a CANCELLATION, not a completion: the partial contribution is
+    //     discarded rather than finalized.
+    //
+    // These fire alongside the existing logic and read state only. Nothing here appends to, trims, or
+    // reorders `buffer`, and no hook return value influences recognition. Retention behaviour stays pinned by
+    // NativeAudioCaptureTests.
+
+    /// Fires once when speech is CONFIRMED (the frame that reaches `minSpeechFrames`), not on pending energy:
+    /// an unconfirmed burst is discarded by design and must not open a contribution.
+    var onSpeechStarted: ((_ confirmationFrameSamples: Int) -> Void)?
+
+    /// Fires per retained frame while a segment is active, reporting the total samples retained so far. Lets a
+    /// consumer enforce a ceiling during the utterance instead of discovering overshoot after it ends.
+    /// Carries the REAL new PCM since the previous call (not a copy of the whole buffer, not a count).
+    /// The contribution consumer appends exactly these bytes to its own bounded copy, so what it claims to
+    /// hold is what actually arrived. Kept separate from `onUtterance` so in-progress bounds hold even if
+    /// the utterance is never emitted.
+    var onSpeechAccumulated: ((_ newSamples: ArraySlice<Float>, _ bufferCount: Int) -> Void)?
+
+    /// Fires when `reset()` interrupts ACTIVE speech. Not fired on a natural end or on a reset with nothing
+    /// open, so a cancelled partial is never confused with a completed utterance.
+    var onSpeechCancelled: (() -> Void)?
+
     /// - Parameters:
     ///   - threshold: RMS energy threshold above which audio is considered speech (energy
     ///     classifier only; the injected classifier decides when one is supplied)
@@ -218,6 +252,7 @@ class NativeVadSegmenter {
             if !speechActive { activeSamples = 0 }
             buffer.append(contentsOf: samples)
             speechFrameCount += 1
+            let wasActive = speechActive
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
                 if !preRoll.isEmpty {
@@ -237,6 +272,14 @@ class NativeVadSegmenter {
                 appendPreRoll(samples, capturedAt: capturedAt)
                 return
             }
+            if speechActive {
+                if !wasActive {
+                    onSpeechStarted?(samples.count)
+                    onSpeechAccumulated?(buffer[...], buffer.count)
+                } else {
+                    onSpeechAccumulated?(buffer.suffix(samples.count), buffer.count)
+                }
+            }
             silenceStart = nil
             if checkRetainedCeiling() { return }
         } else if speechActive || isStuckActive {
@@ -250,6 +293,7 @@ class NativeVadSegmenter {
                 // on positive classification would let a long hangover cross the bound and then
                 // be emitted by the endpoint without any interruption.
                 if checkRetainedCeiling() { return }
+                onSpeechAccumulated?(buffer.suffix(samples.count), buffer.count)
             }
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
@@ -339,7 +383,7 @@ class NativeVadSegmenter {
     }
 
     private func emitUtterance() {
-        let utterance = buffer
+        let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
         FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
         // A windowed classifier carries state across frames; clearing it here keeps the next
@@ -356,6 +400,7 @@ class NativeVadSegmenter {
     }
 
     func reset() {
+        let wasActive = speechActive
         speechClassifier.reset()
         activeSamples = 0
         isStuckActive = false
@@ -367,6 +412,7 @@ class NativeVadSegmenter {
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0
+        if wasActive { onSpeechCancelled?() }
     }
 
     /// Root-mean-square energy of the signal.

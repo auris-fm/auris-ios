@@ -27,6 +27,7 @@ enum CloudRouteOutcome: Equatable {
 struct CloudRouteResult: Equatable {
     let response: VoiceResponse
     let outcome: CloudRouteOutcome
+    var fact: SinkActionFact? = nil
 }
 
 /// Lock-guarded one-way flag: set synchronously from a cancellation handler, read from any task.
@@ -1116,6 +1117,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // in a turn that issued no `play_quote` would seek to a previous turn's
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
+        // Action outcomes are INVOCATION-LOCAL to this turn: the aggregate fact
+        // is built ONLY from the actions this turn actually ran, and two
+        // overlapping turns on one sink can never see each other's entries.
+        var turnActionFacts: [SinkActionFact] = []
 
         // Hold the place for the turn: the server decides when the assistant
         // speaks, so the client does not pause on its own for a turn that may
@@ -1243,10 +1248,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // handler's mark (or Task.isCancelled) stops consumption here; the turn is
                     // classified earlyClose below, never `completed`.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
-                    await executeAction(
+                    turnActionFacts.append(await executeAction(
                         tool: tool, action: action, params: params,
                         operationId: operationId, capabilityVersion: capabilityVersion
-                    )
+                    ))
                 // .token is no longer accumulated — cloud answers are played as
                 // audio, not text (spec: "cloud answers are played, not spoken").
                 case .token:
@@ -1420,7 +1425,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             turnSocket.finishTurn()
         }
         if let turnResult {
-            return CloudRouteResult(response: turnResponse, outcome: turnResult)
+            return CloudRouteResult(response: turnResponse, outcome: turnResult, fact: Self.aggregateActionFact(turnActionFacts))
         }
         if turnToken.isCancelled || ownerCancelledFlag.isSet {
             // OWNER CANCELLATION (review dee03708/fa03b7f9): the cancelled turn's OWNED output
@@ -1442,7 +1447,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let stopEpoch = audioPlayer.cancel()
                 if await audioPlayer.awaitActualStop(after: stopEpoch) {
                     guard activeTurn == nil || activeTurn === turnToken else {
-                        return CloudRouteResult(response: .silent, outcome: .earlyClose)
+                        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
                     }
                     restoreTransientAudioState()
                 } else {
@@ -1475,7 +1480,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // No captured entry: nothing was retired for this turn (it owned no pending
                 // playback at supersession) — nothing to await.
             }
-            return CloudRouteResult(response: .silent, outcome: .earlyClose)
+            return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
         }
         // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
         // AWAIT the identity-bound stop completion BEFORE releasing the host playback and the
@@ -1499,7 +1504,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
-        return CloudRouteResult(response: .silent, outcome: .earlyClose)
+        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
     }
 
     private func restoreTransientAudioState() {
@@ -1522,18 +1527,37 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Seek positions are intentionally not rolled back.
     }
 
+    static func aggregateActionFact(_ facts: [SinkActionFact]) -> SinkActionFact? {
+        guard !facts.isEmpty else { return nil }
+        if facts.contains(where: { $0.state == "failed" }) {
+            return SinkActionFact(state: "failed", reason: "action_failed")
+        }
+        let states = Set(facts.map(\.state))
+        if states == ["not_run"] {
+            return SinkActionFact(state: "not_run", reason: "precondition_failed")
+        }
+        if states == ["completed"] {
+            return SinkActionFact(state: "completed", reason: nil)
+        }
+        return SinkActionFact(state: "unknown", reason: "observation_unavailable")
+    }
+
     private func executeAction(
         tool: String,
         action: String,
         params: [String: CloudRouteJSONValue],
         operationId: String?,
         capabilityVersion: String?
-    ) async {
-        guard tool == "playback" else { return }
+    ) async -> SinkActionFact {
+        let unknown = SinkActionFact(state: "unknown", reason: "observation_unavailable")
+        guard tool == "playback" else { return unknown }
+        var fact: SinkActionFact?
         await executeCloudMutation(
             action: action, params: params,
-            operationId: operationId, capabilityVersion: capabilityVersion
+            operationId: operationId, capabilityVersion: capabilityVersion,
+            onFact: { fact = $0 }
         )
+        return fact ?? unknown
     }
 
     /// The wire contract's runtime gate (rev da327e624 §1): every cloud app operation carries
@@ -1543,7 +1567,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         action: String,
         params: [String: CloudRouteJSONValue],
         operationId: String?,
-        capabilityVersion: String?
+        capabilityVersion: String?,
+        onFact: (SinkActionFact) -> Void = { _ in }
     ) async {
         guard let operationId, !operationId.isEmpty, capabilityVersion != nil else {
             let refused = OperationResult.nonSuccess(.refused, reason: OperationReason.unsupportedOperation)
@@ -1617,7 +1642,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion)
             return
         }
-        let refusal = performMutation(action: action, params: params)
+        let refusal = performMutation(action: action, params: params, onFact: onFact)
         if let refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
             // record in progress, so the honest report is unknown, never a replayable refusal.
@@ -1655,7 +1680,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// Runs the mutation. Returns the refusal to record (nil = executed).
-    private func performMutation(action: String, params: [String: CloudRouteJSONValue]) -> OperationResult? {
+    private func performMutation(action: String, params: [String: CloudRouteJSONValue], onFact: (SinkActionFact) -> Void) -> OperationResult? {
         switch action {
         case "seek_to":
             // Two forms, per the wire contract's schema (app_operation_schema_map 11993ca):
@@ -1720,7 +1745,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
             return nil
         case "pause":
-            _ = playbackSink.pause()
+            let (response, fact) = playbackSink.pauseWithFact()
+            _ = response
+            if let fact { onFact(fact) }
+            // The turn that PAUSED owns the restore: without this, the end-of-
+            // turn restore would resume over the cloud's own pause (the
+            // hold/release protocol — reviewer af68a7bb regression).
             didAutoPause = false
             return nil
         case "resume":

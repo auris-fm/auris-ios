@@ -9,6 +9,8 @@ final class SenseVoiceBackend: AsrBackend {
 
     private let modelDir: String
     private var recognizer: SherpaOnnxOfflineRecognizer?
+    private var loadedIdentity: VoiceSharingContributionEncoder.ModelRef?
+    private let loadedLock = NSLock()
     private let transcribeQueue = DispatchQueue(label: "com.auris.sensevoice", qos: .userInitiated)
 
     let capabilities = AsrCapabilities(
@@ -42,7 +44,7 @@ final class SenseVoiceBackend: AsrBackend {
 
     func ensureReady() async -> Result<Void, Error> {
         // Rebuild the recognizer if not present (e.g. first call, or after model dir change).
-        if recognizer != nil { return .success(()) }
+        if loadedLock.withLock({ recognizer != nil }) { return .success(()) }
 
         do {
             try await downloadModels()
@@ -50,6 +52,15 @@ final class SenseVoiceBackend: AsrBackend {
             return .failure(error)
         }
 
+        return await withCheckedContinuation { continuation in
+            transcribeQueue.async { [self] in
+                continuation.resume(returning: loadRecognizer())
+            }
+        }
+    }
+
+    private func loadRecognizer() -> Result<Void, Error> {
+        if loadedLock.withLock({ recognizer != nil }) { return .success(()) }
         let encoderPath = (modelDir as NSString).appendingPathComponent(Self.modelFilename)
         let tokensPath = (modelDir as NSString).appendingPathComponent(Self.tokensFilename)
         guard FileManager.default.fileExists(atPath: encoderPath),
@@ -69,20 +80,40 @@ final class SenseVoiceBackend: AsrBackend {
 
         // Just-created local structs must be kept alive until init completes.
         var cfg = config
-        let recognizer = SherpaOnnxOfflineRecognizer(config: &cfg)
-        self.recognizer = recognizer
+        let loaded = LoadedModelAssets.load(
+            id: requiredModel.id,
+            assets: requiredModel.files.map { ($0.filename, URL(fileURLWithPath: modelDir).appendingPathComponent($0.filename)) }) {
+                SherpaOnnxOfflineRecognizer(config: &cfg)
+            }
+        loadedLock.withLock {
+            self.recognizer = loaded.component
+            self.loadedIdentity = loaded.identity
+        }
         FileLog.shared.addMessage("[SenseVoice] backend ready")
         return .success(())
     }
 
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        await transcribe(samples: samples, sampleRateHz: sampleRateHz, modelUsed: { _, _ in })
+    }
+
+    func transcribe(samples: [Float], sampleRateHz: Int,
+                    modelUsed: @escaping (VoiceSharingContributionEncoder.ModelRef?, Bool) -> Void) async -> AsrResult {
         // Serialize sherpa-onnx offline decode — not thread-safe across concurrent Tasks.
         return await withCheckedContinuation { continuation in
             transcribeQueue.async { [weak self] in
-                guard let self, let rec = self.recognizer else {
+                guard let self else {
+                    modelUsed(nil, false)
                     continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
                     return
                 }
+                let loaded = self.loadedLock.withLock { (self.recognizer, self.loadedIdentity) }
+                guard let rec = loaded.0 else {
+                    modelUsed(nil, false)
+                    continuation.resume(returning: AsrResult(text: "", detectedLanguage: nil))
+                    return
+                }
+                modelUsed(loaded.1, false)
                 do {
                     let result = rec.decode(samples: samples, sampleRate: sampleRateHz)
                     let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -107,7 +138,10 @@ final class SenseVoiceBackend: AsrBackend {
     }
 
     func release() {
-        recognizer = nil
+        loadedLock.withLock {
+            recognizer = nil
+            loadedIdentity = nil
+        }
         FileLog.shared.addMessage("[SenseVoice] released")
     }
 
