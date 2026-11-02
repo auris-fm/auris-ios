@@ -15,6 +15,10 @@ protocol PlaybackManagerProtocol {
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
+    /// The skip WITH its actual decision: `outcome` is returned at the manager's own
+    /// guard/action branches (played episode — shuffle-attributed — vs decline). The
+    /// `presentationTitle` carries only the historical spoken candidate and proves nothing.
+    func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: PlaybackManager.NextEpisodeSkipOutcome)
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -36,6 +40,33 @@ class PlaybackManagerSink: VoicePlaybackSink {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.pause()
         return .earcon(.success)
+    }
+
+    /// THE FACT CHANNEL (spec 32305c22 ruling): pause is an IDEMPOTENT success by the existing
+    /// action contract — a prior paused state alone does not turn it into a refusal — so the
+    /// fact is completed in both worlds, stated at the sink rather than inferred from the earcon.
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        let response = pause()
+        return (response, SinkActionFact(state: "completed", reason: nil))
+    }
+
+    /// THE DISCRIMINATING SITE: the skip happens ONLY when the up-next queue is non-empty; with
+    /// none, the sink speaks the same success-shaped template but NOTHING moved. The fact is
+    /// emitted at that real decision: skip performed → completed; no object to act on →
+    /// not_run/precondition_failed. The user-facing presentation is preserved unchanged.
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        let result = playbackManager.skipToNextUpNextEpisodeWithFact()
+        // The fact is the action's OWN decision from the manager's guard/action
+        // branches — never the pre-read candidate title, which exists even when
+        // the action declines (reviewer 50103ef9).
+        let fact: SinkActionFact
+        switch result.outcome {
+        case .played: fact = SinkActionFact(state: "completed", reason: nil)
+        case .declined: fact = SinkActionFact(state: "not_run", reason: "precondition_failed")
+        }
+        let response = VoiceResponse.spoken(templates.resolve("playback.next_episode", result.presentationTitle ?? "next episode"))
+        return (response, fact)
     }
 
     func resume() -> VoiceResponse {

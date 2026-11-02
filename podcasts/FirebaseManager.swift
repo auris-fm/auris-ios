@@ -14,18 +14,72 @@ struct FirebaseManager {
             Constants.RemoteParams.patronCloudStorageGB: NSNumber(value: Constants.RemoteParams.patronCloudStorageGBDefault),
             Constants.RemoteParams.addMissingEpisodes: NSNumber(value: Constants.RemoteParams.addMissingEpisodesDefault),
             Constants.RemoteParams.errorLogoutHandling: NSNumber(value: Constants.RemoteParams.errorLogoutHandlingDefault),
-            Constants.RemoteParams.slumberStudiosPromoCode: NSString(string: Constants.RemoteParams.slumberStudiosPromoCodeDefault)
+            Constants.RemoteParams.slumberStudiosPromoCode: NSString(string: Constants.RemoteParams.slumberStudiosPromoCodeDefault),
+            // Voice Sharing: default false. Registration here is NOT an enable path —
+            // the policy snapshot ignores defaults entirely and requires a valid value
+            // read after activate completes (see VoiceSharingPolicy).
+            Constants.RemoteParams.voiceSharingEnabled: NSNumber(value: Constants.RemoteParams.voiceSharingEnabledDefault)
         ]
         FeatureFlag.allCases.filter { $0.remoteKey != nil }.forEach { flag in
             remoteConfigDefaults[flag.remoteKey!] = NSNumber(value: flag.default)
         }
         remoteConfig.setDefaults(remoteConfigDefaults)
 
-        remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, _ in
-            if status == .success {
-                remoteConfig.activate(completion: nil)
+        // Freshness must be PROVEN, not assumed from `.success`: the SDK returns
+        // FIRRemoteConfigFetchStatusSuccess on its cached path too (RCNConfigFetch short-circuits
+        // with Success + nil error when the minimum fetch interval has not elapsed), and it only
+        // advances `lastFetchTime` inside updateMetadataWithFetchSuccessStatus, i.e. after a real
+        // network exchange. So capture the time before the call and require it to have moved.
+        #if os(iOS) && !APPCLIP
+        // Two independent reference points, both required. `fetchStartedAt` is our wall-clock start;
+        // `sdkTimeBeforeFetch` is the SDK's own prior timestamp. A backward clock jump can leave an OLD
+        // cached lastFetchTime still greater than our start, so comparing against only one of them can
+        // be fooled — the exchange must move the SDK timestamp from its previous value AND land past
+        // our start.
+        let sharingCoordinator = VoiceSharingCoordinator.shared
+        sharingCoordinator.refreshCohortAttributes()
+        sharingCoordinator.initiateIdentityRecoveryRefresh = {
+            FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
+        }
+        let fetchStartedAt = sharingCoordinator.nowForFreshnessCheck()
+        let sdkTimeBeforeFetch = sharingCoordinator.lastFetchTime()
+        let enrollmentLookup = sharingCoordinator.beginEnrollmentLookup()
+        #endif
+        remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
+            guard status == .success, error == nil else {
+                // A failed fetch — including cached/no-network outcomes — must NOT renew the
+                // lease. Nothing was activated, so whatever snapshot is installed keeps its
+                // existing expiry and simply stops permitting once it lapses.
+                completion?(status)
+                return
             }
-            completion?(status)
+            remoteConfig.activate { _, activationError in
+                // The only path that may install/renew a snapshot: a fresh fetch that succeeded
+                // AND an activate that returned without error. Installation happens after
+                // activate returns, never after fetch alone, so values cannot come from mixed
+                // template generations.
+                //
+                // Condition is `os(iOS) && !APPCLIP`, NOT `!APPCLIP` alone: this file is compiled
+                // into podcasts, Pocket Casts App Clip and Pocket Casts TV App, and the TV target's
+                // configurations define no APPCLIP flag at all (only Debug sets
+                // SWIFT_ACTIVE_COMPILATION_CONDITIONS there), so `!APPCLIP` would reference the
+                // app-only Coordinator from the tvOS build, whose sources do not include
+                // VoiceControl. Those targets stay on the fail-closed default (disabled), which is
+                // correct for surfaces that cannot capture voice.
+                #if os(iOS) && !APPCLIP
+                let didActivate = activationError == nil
+                let provedFreshExchange = sharingCoordinator.lastFetchAdvancedPast(
+                    fetchStartedAt,
+                    previousSDKTime: sdkTimeBeforeFetch
+                )
+                Task {
+                    await sharingCoordinator.completeActivationWithEnrollment(
+                        freshActivationSucceeded: didActivate && provedFreshExchange,
+                        lookup: enrollmentLookup)
+                }
+                #endif
+                completion?(status)
+            }
         }
     }
 }

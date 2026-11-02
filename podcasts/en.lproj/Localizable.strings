@@ -6690,3 +6690,87 @@
 
 /* Message shown when a network the user tapped fails to load */
 "network_fail_to_load" = "This network couldn't be loaded";
+
+/* Voice Sharing recovery: shown when a revocation could not be proven complete; the verified remedy is deleting stored recordings on this device. */
+"voice_sharing_recovery_held" = "Some stored recordings could not be removed. Deleting recordings on this device will try to finish it, and will tell you if it cannot.";
+
+/* Voice Sharing recovery: shown when the app cannot determine whether collection is permitted. */
+"voice_sharing_recovery_paused" = "Voice Sharing is paused until the app can check its settings. Open the app with a connection to resume.";
+
+/* Voice Sharing recovery: shown when the account is not enrolled in Voice Sharing on the server. */
+"voice_sharing_recovery_not_enrolled" = "Voice Sharing is not enabled for this account.";
+
+/* Voice Sharing recovery: shown when the user has turned Voice Sharing off on this device. */
+"voice_sharing_recovery_turned_off" = "Turn on Voice Sharing to resume.";
+
+/* Voice Sharing status title: sharing is running. */
+"voice_sharing_status_on" = "Voice Sharing is on";
+
+/* Voice Sharing status title: sharing is paused (the app cannot confirm its settings). */
+"voice_sharing_status_paused" = "Voice Sharing is paused";
+
+/* Voice Sharing status title: sharing is off (user gesture or account state). */
+"voice_sharing_status_off" = "Voice Sharing is off";
+
+/* Voice Sharing status title: sharing stopped because stored recordings could not be confirmed removed. */
+"voice_sharing_status_stopped" = "Voice Sharing stopped";
+
+/* Voice Sharing settings row label for pending contribution uploads. */
+"voice_sharing_row_uploads" = "Contribution uploads";
+
+/* Voice Sharing settings row label for stored recordings. */
+"voice_sharing_row_waiting" = "Recordings waiting to upload";
+
+/* Voice Sharing settings value: collection is permitted. */
+"voice_sharing_value_active" = "Active";
+
+/* Voice Sharing settings value: collection is not permitted. */
+"voice_sharing_value_not_active" = "Not active";
+
+/* Voice Sharing settings value: the count could not be determined. */
+"voice_sharing_value_unknown" = "Unknown";
+
+/* Voice Sharing settings value: the stored set could not be confirmed. */
+"voice_sharing_value_not_confirmed" = "Not confirmed";
+
+/* Voice Sharing settings: unknown storage explanation. */
+"voice_sharing_unknown_storage_explainer" = "Some stored recordings cannot be checked right now. Deleting will attempt them all and tell you exactly what could not be resolved.";
+
+/* Voice Sharing settings: section title. */
+"voice_sharing_section_title" = "Voice Sharing";
+
+/* Voice Sharing settings: local deletion button. */
+"voice_sharing_delete_local" = "Delete recordings on this device";
+
+/* Voice Sharing settings: local deletion confirmation. */
+"voice_sharing_delete_local_confirm" = "Delete recordings still waiting to upload on this device?";
+
+/* Voice Sharing account enrollment, withdrawal and accepted-data deletion. */
+"voice_sharing_account_title" = "Help improve voice control";
+"voice_sharing_account_unavailable" = "Voice Sharing is unavailable for this account.";
+"voice_sharing_account_plan" = "Plan";
+"voice_sharing_account_membership" = "Voice Sharing";
+"voice_sharing_account_purpose" = "Send your voice recordings, recognized text and command results to help improve Auris.";
+"voice_sharing_account_background_speech" = "Recordings may include background speech and speech that did not activate Auris. Sharing is separate from your Free or Pro plan.";
+"voice_sharing_account_disclosure_unavailable" = "Enrollment is not available right now. You can still withdraw or request deletion.";
+"voice_sharing_account_enroll" = "Share voice recordings";
+"voice_sharing_account_confirm_disclosure" = "I agree to share these recordings, text and command results";
+"voice_sharing_account_withdraw" = "Stop sharing and withdraw";
+"voice_sharing_account_refresh_failed" = "Could not refresh account state. Last known information is shown.";
+"voice_sharing_account_refresh" = "Refresh account state";
+"voice_sharing_account_retry" = "Retry account operation";
+"voice_sharing_account_cleanup_unavailable" = "Local cleanup could not be verified. Sharing has stopped locally; try cleanup again.";
+"voice_sharing_account_retry_cleanup" = "Retry local cleanup";
+"voice_sharing_account_delete_accepted" = "Request deletion of accepted recordings";
+"voice_sharing_account_delete_scope" = "This requests deletion of previously accepted recordings and linked data. It does not withdraw membership or stop future sharing. Withdrawal is a separate action.";
+"voice_sharing_account_local_recordings" = "Recordings on this device";
+"voice_sharing_account_checking" = "Checking account state…";
+"voice_sharing_account_operation_failed" = "The server operation could not be confirmed. You can retry.";
+"voice_sharing_account_conflict" = "Account state changed. Refresh and confirm a new action; enrollment was not replayed.";
+"voice_sharing_account_sign_in_again" = "Sign in again to confirm this operation.";
+"voice_sharing_account_refused" = "The server refused this account operation.";
+"voice_sharing_account_enrolled" = "Voice Sharing enrollment is confirmed. Recording and upload also require current permission and policy.";
+"voice_sharing_account_withdrawn" = "Withdrawal is confirmed. New sharing is stopped.";
+"voice_sharing_account_withdrawal_pending" = "Sharing is stopped locally. Server withdrawal is not yet confirmed.";
+"voice_sharing_account_deletion_pending" = "Deletion request acknowledged and pending. This does not confirm removal.";
+"voice_sharing_account_cleanup_unresolved" = "Some pending recordings could not be confirmed removed. Sharing has stopped locally; try cleanup again.";

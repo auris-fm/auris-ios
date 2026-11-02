@@ -22,14 +22,21 @@ class VoiceControlService: ObservableObject {
     private let interruptionHandler: AudioSessionInterruptionHandler
     private let asrEngine: VoiceAsrEngine
     private let wakeWordDetector: WakeWordDetectorProtocol
-    private let intentRouter: LfmIntentRouter
-    private let executor: VoiceIntentExecutor
+    private let intentRouter: any IntentClassifying
+    private let executor: any VoiceIntentExecuting
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
 
     /// The manager whose live origin follows the grace window. An EXPLICIT dependency rather than a
     /// reach-through to a test accessor: production must not depend on `…ForTesting` or a force-cast.
+    /// The collector that records this capture's observations. Optional so tests and any caller that
+    /// does not run voice-sharing work unchanged; routing/execution are reported through it when present.
+    private let contributionCollector: VoiceSharingCollector?
+    var voiceSharingLifetime: VoiceSharingLifetime?
+    /// Injected for the routing/execution provenance controls; production uses `contributionCollector`.
+    var contributionCollectorForTesting: VoiceSharingCollector? { contributionCollector }
+
     private let liveOriginManager: CloudConversationManager
 
     /// The grace signal this service drives, so a test can observe a route change's effect
@@ -118,7 +125,7 @@ class VoiceControlService: ObservableObject {
     }
 
     /// The executor this service routes validated intents through.
-    var executorForTesting: VoiceIntentExecutor { executor }
+    var executorForTesting: VoiceIntentExecutor { executor as! VoiceIntentExecutor }
 
     /// The dialog manager, so a control can BEGIN a dialog through the production `handle` path
     /// and prove a dialog-pending turn keeps its OWN admitted identity on the wire (spec 0443b70).
@@ -299,13 +306,14 @@ class VoiceControlService: ObservableObject {
         interruptionHandler: AudioSessionInterruptionHandler,
         asrEngine: VoiceAsrEngine,
         wakeWordDetector: WakeWordDetectorProtocol,
-        intentRouter: LfmIntentRouter,
-        executor: VoiceIntentExecutor,
+        intentRouter: any IntentClassifying,
+        executor: any VoiceIntentExecuting,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
         liveOriginManager: CloudConversationManager,
         analytics: VoiceAnalytics,
+        contributionCollector: VoiceSharingCollector? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse },
         /// Invoked when a queued input's routing attempt FINISHES — after it returns or is refused,
         /// and after its `defer` runs. An acknowledgement of COMPLETION, not of preparation: a
@@ -334,6 +342,7 @@ class VoiceControlService: ObservableObject {
         self.gracePeriodSignal = gracePeriodSignal
         self.liveOriginManager = liveOriginManager
         self.analytics = analytics
+        self.contributionCollector = contributionCollector
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
         self.onInputBarrierSettled = onInputBarrierSettled
@@ -502,6 +511,7 @@ class VoiceControlService: ObservableObject {
 
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
+        captureContext: VoiceSharingCollector.CaptureContext? = nil,
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) -> Bool {
@@ -564,7 +574,9 @@ class VoiceControlService: ObservableObject {
             // fired during grace from a follow-up inside the same grace — both arrive with grace
             // active — so the answer has to come from the gate decision that produced this input.
             let capturedSelection = selection ?? input.selection
+            let collectorForAbandonment = self.contributionCollector
             let task = Task { [weak self] in
+                defer { collectorForAbandonment?.finalizeDeferredCompletion(context: captureContext) }
                 // THE TERMINAL ACKNOWLEDGEMENT IS UNCONDITIONAL: on EVERY exit the input's task
                 // reports HOW it ended, because "the queued input returned" is not the same claim as
                 // "an action ran". A test can therefore await settlement instead of polling for an
@@ -647,8 +659,27 @@ class VoiceControlService: ObservableObject {
                 }
 
                 await previous?.value
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
+                // This capture was handed to THIS task. If the task is abandoned while queued behind
+                // its predecessor, it still owns the record and must release it, or the capture never
+                // publishes (review a7dfe013 #3). Reported as cancelled, because that is what happened.
+                func abandonCapture(_ collector: VoiceSharingCollector?) {
+                    guard let captureContext, let collector else { return }
+                    collector.engineReported(
+                        stage: "execution",
+                        outcome: .init(state: "cancelled", reason: "cancelled_by_user"),
+                        context: captureContext)
+                    collector.finalizeDeferredCompletion(context: captureContext)
+                }
+                guard !Task.isCancelled else {
+                    abandonCapture(self?.contributionCollector ?? collectorForAbandonment)
+                    return
+                }
+                guard let self else {
+                    // The service itself was released. The collector captured above can still report and
+                    // release the record on its behalf.
+                    abandonCapture(collectorForAbandonment)
+                    return
+                }
                 self.transcriptLock.lock()
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
@@ -679,6 +710,7 @@ class VoiceControlService: ObservableObject {
                 let preparedObserver = self.preparedObserverFactory?(input)
                 terminal = await self.handleRoutingInput(
                     input,
+                    captureContext: captureContext,
                     origin: capturedOrigin,
                     selection: capturedSelection,
                     preparedObserver: preparedObserver,
@@ -748,8 +780,8 @@ class VoiceControlService: ObservableObject {
         // ONE operation: the enqueue itself reports whether it ACCEPTED the input. A separate
         // precheck would be a different operation from the one that takes ownership, so a stop
         // landing between them would reject the enqueue with nobody left to release the turn.
-        asrEngine.onRoutingInput = { [weak self] input in
-            self?.enqueueRoutingInput(input, origin: nil) ?? false
+        asrEngine.onRoutingInputWithContext = { [weak self] input, captureContext in
+            self?.enqueueRoutingInput(input, captureContext: captureContext, origin: nil) ?? false
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in
@@ -941,13 +973,90 @@ class VoiceControlService: ObservableObject {
 
     /// Returns the actual routing disposition, distinguishing capture loss from interruption suppression.
     @discardableResult
+    private static func settledDisposition(
+        for outcome: VoiceSharingContributionEncoder.StageOutcome
+    ) -> String {
+        switch outcome.state {
+        case "failed": return "failed"
+        // `completed` is stated only by a sink-side structured fact (none exists yet — the
+        // presentation-inference that briefly produced it was withdrawn, spec 6a033773). The
+        // mapping stays correct for when real sink facts arrive.
+        case "completed": return "executed"
+        // `unknown` cannot claim a disposition either: the turn finished, but what became of it was not
+        // observed, so the routing verdict stays honest about that rather than guessing.
+        case "unknown": return "pending"
+        default: return "refused"
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: put the service in the listening state the routing branches require, without starting
+    /// audio. Only the flag moves — no route, no capture, no wake detector.
+    func enterListeningStateForTesting() {
+        isListening = true
+    }
+    #endif
+
+    #if DEBUG
+
+    static func settledDispositionForTesting(
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome) -> String {
+        settledDisposition(for: outcome)
+    }
+    #endif
+
+    /// Reports BOTH stages for a turn that reached the executor. Routing's disposition is corrected
+    /// from `pending` to its terminal value, which is why it is reported a second time. The
+    /// execution stage carries the EXECUTOR'S OWN structured verdict — not a response-derived
+    /// classification (spec: the record must state what execution concluded, and the executor is
+    /// the decision site).
+    private func reportExecution(
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome,
+        captureContext: VoiceSharingCollector.CaptureContext?
+    ) {
+        let verdict = Self.settledDisposition(for: outcome)
+        contributionCollector?.engineReported(
+            stage: "routing",
+            outcome: .init(state: "completed", reason: nil,
+                           routingDisposition: verdict),
+            context: captureContext)
+        // The executor's own verdict, from the same decision the disposition derives from — the
+        // `outcome` member states what execution concluded, not what was presented.
+        contributionCollector?.engineReported(
+            stage: "execution",
+            outcome: .init(state: outcome.state, reason: outcome.reason,
+                           text: outcome.text, decision: outcome.decision,
+                           translatedText: outcome.translatedText,
+                           targetLanguage: outcome.targetLanguage,
+                           routingDisposition: outcome.routingDisposition,
+                           outcome: verdict),
+            context: captureContext)
+    }
+
+    /// FINDING a7dfe013 #3: this method took ownership of the deferred record and could return
+    /// without reporting. A capture left owned-but-unreported never publishes, so every early exit
+    /// must SETTLE it — cancelled if the turn was abandoned, else with whatever is true of that exit.
+    private func settleOwnedCapture(
+        _ context: VoiceSharingCollector.CaptureContext?,
+        cancelled: Bool,
+        reason: String?
+    ) {
+        guard let context else { return }
+        contributionCollector?.engineReported(
+            stage: "execution",
+            outcome: .init(state: cancelled ? "cancelled" : "not_run", reason: reason),
+            context: context)
+    }
+
     func handleRoutingInput(
         _ input: IntentRoutingInput,
+        captureContext: VoiceSharingCollector.CaptureContext? = nil,
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil,
         preparedObserver: CloudRouteSink.PreparedObserver? = nil,
         parsedIntentObserver: ParsedIntentObserver? = nil
     ) async -> InputTerminalOutcome {
+        defer { contributionCollector?.finalizeDeferredCompletion(context: captureContext) }
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return .dropped }
@@ -996,7 +1105,9 @@ class VoiceControlService: ObservableObject {
         case .route:
             break
         }
-        let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
+        let result = intentRouter.classify(input: input, pendingDialog: dialogContext) { [weak contributionCollector] identity in
+            contributionCollector?.engineUsedModel(slot: "router", reference: identity, context: captureContext)
+        }
         // Snapshot before recording: `recordPipelineLatency` consumes and clears
         // `latestRouterMetrics`, and the escalation policy must read *this* turn's
         // reason rather than nil — a cleared reason escalates even the reasons that
@@ -1065,7 +1176,8 @@ class VoiceControlService: ObservableObject {
                 )
                 return .suppressedByInterruption
             }
-            let response = await executor.execute(intent, preparedObserver: preparedObserver)
+            let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
+            reportExecution(executionVerdict, captureContext: captureContext)
             // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
@@ -1091,6 +1203,12 @@ class VoiceControlService: ObservableObject {
 
         case .dialogControl(let action):
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
+            // The dialog manager decided: routing ran and produced a control action.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "pending"),
+                context: captureContext)
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
@@ -1098,7 +1216,8 @@ class VoiceControlService: ObservableObject {
                     FileLog.shared.addMessage("[VoicePipeline] dialog intent refused (admission retired)")
                     return .routed
                 }
-                let response = await executor.execute(intent, preparedObserver: preparedObserver)
+                let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
+            reportExecution(executionVerdict, captureContext: captureContext)
                 // Same bridge on every executor path: an interruption resolved by THIS turn must
                 // reach its follow-up whichever intent produced it.
                 await submitRetainedFollowUpIfAny()
@@ -1133,13 +1252,34 @@ class VoiceControlService: ObservableObject {
                     self.markContinuationEnqueued(input.utteranceId)
                 }
             } else if let question = dialogResult.question {
+                // A question means NOTHING was executed: execution did not run for this turn.
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "not_run", reason: "client_refused"),
+                    context: captureContext)
                 audioRenderer.render(.spoken(question))
             }
-            // If dialogResult has no intent and no question (e.g., cancel), do nothing
+            // If dialogResult has no intent and no question (e.g., cancel), nothing was executed —
+            // but the record still needs releasing.
+            if dialogResult.intent == nil && dialogResult.question == nil {
+                settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
+            }
 
         case .none:
             let stage = turnMetrics?.failedStage ?? "?"
             let reason = turnMetrics?.reason
+            // The router RAN and returned no intent. Classifying that as "no candidates" would be a
+            // guess about WHY, so the observed fact — routing completed with a negative verdict —
+            // goes in the decision field, exactly as the wake stage does.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "not_run"),
+                context: captureContext)
+            contributionCollector?.engineReported(
+                stage: "execution",
+                outcome: .init(state: "not_run", reason: "client_refused"),
+                context: captureContext)
 
             // A routing failure or a deliberate `no_match` escalates through the
             // same path a chosen `cloud_route` uses — same intent, same executor —
@@ -1196,7 +1336,7 @@ class VoiceControlService: ObservableObject {
                 // that itself fails carries its own earcon from the sink.
                 // Marked as a fallback so the executor extends the window without
                 // restoring the allowance that permitted it.
-                let response = await executor.execute(
+                let (response, executionVerdict) = await executor.executeWithVerdict(
                     CloudRouteIntent(
                         request: transcript,
                         tier: .unknown,
@@ -1234,6 +1374,8 @@ class VoiceControlService: ObservableObject {
             // the router could not do its job — and each speaks: the user asked
             // a real question and got nothing.
             audioRenderer.playEarcon(.error)
+            // Nothing was executed and no dispatch happened; release the record.
+            settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
         }
         return .routed
     }
