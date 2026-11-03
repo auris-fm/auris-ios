@@ -520,20 +520,36 @@ final class VoiceSharingCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.restoredSessionPollGeneration == generation else { return }
             // The tick DELEGATES; it does not decide. It previously guarded with
-            // `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn(), a syncing-email read)
-            // before asking `settleFromOwnerReadiness()`, and those are different conditions: the
-            // readable credential can name an account through `storedAccountIdentity()` while that
-            // defaults key is empty, which is the whole cold-restore case. Measured: with a stored
-            // credential present and the old gate false, the poll settled nothing while the same
-            // entry point called directly settled once — the gate decided, and it decided wrong.
+            // `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn(), which is a non-empty
+            // `syncingEmail()`) before asking `settleFromOwnerReadiness()`, and those are DIFFERENT
+            // Keychain keys: the gate reads `syncingEmailKey`, the decision can settle on
+            // `storedAccountIdentity()`, which reads the refresh token and accepts a userId with no
+            // email. So one can be empty while the other names an account.
             //
-            // Nothing is lost by asking the owner directly. `settleFromOwnerReadiness()` is
-            // idempotent (it dedupes on `settledAccountIdentity`), keeps its own debt when the owner
-            // is silent (reviewer on 4035a1ebf: a tick must never clear its own debt), and cannot
-            // mint a lifecycle from stale process-global state: `storedAccountIdentity()` reports
-            // nothing unless a refresh token is actually in the Keychain, so a signed-out device
-            // still settles nothing. The old gate was a second, narrower predicate guarding a
-            // decision that already guards itself — reviewer's cfcfab6f shape.
+            // WHAT WAS MEASURED, and it is narrower than it first looked (reviewer d9bd9e03): the
+            // disagreement was measured with INJECTED providers, not with production defaults. With
+            // a stored credential supplied and the old gate false, the poll settled nothing while
+            // the same entry point called directly settled once. Whether a real cold process reaches
+            // that state is an OPEN question, not something these controls establish - the default
+            // presence predicate refuses before the stored identity is read. So this is a latent
+            // structural defect being removed, not a reproduced production bug.
+            //
+            // Nothing is lost by asking the owner directly, but the REASON has to be stated
+            // correctly (reviewer bd0766db corrected an earlier, wrong version of this comment):
+            // `storedAccountIdentity()` does NOT require an email. It refuses only an incomplete
+            // credential write, a missing/empty refresh token, or a combined `uuid|email` key that
+            // is empty on BOTH sides - so a refresh token with a stored userId and no email still
+            // names an account. What actually keeps a signed-out device from settling is that the
+            // presence predicate these callers reach runs BEFORE the stored identity is read, and
+            // that predicate requires a committed identity or a readable syncing email.
+            //
+            // What removal of the gate relies on is narrower and textual: `settleFromOwnerReadiness`
+            // is idempotent (dedupes on `settledAccountIdentity`), keeps its own debt when the owner
+            // is silent (reviewer on 4035a1ebf: a tick must never clear its own debt), and settles
+            // only on an identity it can read. The old gate was a second, narrower predicate
+            // guarding a decision that already guards itself - reviewer's cfcfab6f shape - and
+            // `storedAccountIdentity()` and `syncingEmail()` read DIFFERENT Keychain keys, which is
+            // exactly why those two predicates could disagree.
             self.settleFromOwnerReadiness()
             // Back off 5x after the fast restore window (~ the old bound's coverage).
             let base = self.restoredSessionRetryDelay()
