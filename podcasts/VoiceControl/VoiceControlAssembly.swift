@@ -208,6 +208,9 @@ class VoiceControlAssembly {
         // sharing is enabled, ignoring the assistant's routing flag and the gateway-cutover gate. With no
         // configured origin there is no credential to present, so sharing is unavailable rather than
         // falling back to a static identity the account route must refuse.
+        // Sharing endpoints use the CONFIGURED origin (not the cutover-gated one) so authentication and
+        // the requests it authorizes agree, per reviewer on b658801c6.
+        let sharingOrigin = CloudConfig.shared.configuredOrigin
         let voiceSharingTokenProvider = CloudTokenProviderRouter.voiceSharingProvider()
         if voiceSharingTokenProvider == nil {
             FileLog.shared.addMessage("[VoiceSharing] sharing unavailable: no Auris origin configured")
@@ -215,6 +218,7 @@ class VoiceControlAssembly {
         let uploadTrigger = voiceSharingTokenProvider.map { provider in
             makeVoiceSharingUploadTrigger(
                 queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity,
+                baseURLProvider: { sharingOrigin },
                 tokenProvider: provider)
         }
         // The settings MODEL is wired here, in production, with the real live reads (reviewer
@@ -499,13 +503,18 @@ class VoiceControlAssembly {
             parsedIntentObserverFactory: parsedIntentObserverFactory,
             preparedObserverFactory: preparedObserverFactory
         )
+        // An absent sharing origin disables SHARING ONLY. Returning nil here took out the whole Voice
+        // Control service — a working feature broken because an unrelated one is unconfigured, which is
+        // failing wide rather than closed. The service is always constructed; with no upload trigger it
+        // simply has no voice-sharing lifetime attached.
         if let uploadTrigger {
             return installVoiceSharingLifetime(
                 on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
                 enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
                 queue: contributionQueue)
         }
-        return nil
+        service.voiceSharingLifetime = nil
+        return service
     }
 
     /// The production upload chain. Injection changes sources, not the wiring under test.

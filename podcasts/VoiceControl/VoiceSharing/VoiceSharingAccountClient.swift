@@ -49,7 +49,9 @@ final class VoiceSharingAccountClient {
     private let membershipStore: VoiceSharingEnrollmentStore
 
     init(
-        baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
+        // The CONFIGURED sharing origin, not the cutover-gated one: authentication and the requests it
+        // authorizes must agree (reviewer on b658801c6).
+        baseURLProvider: @escaping () -> String = { CloudConfig.shared.configuredOrigin },
         tokenProvider: CloudTokenProviding,
         session: URLSession = URLSession(configuration: .default),
         requestIDFactory: @escaping () -> String = { UUID().uuidString.lowercased() },
