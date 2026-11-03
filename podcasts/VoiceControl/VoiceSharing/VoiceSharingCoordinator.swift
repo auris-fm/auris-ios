@@ -547,6 +547,10 @@ final class VoiceSharingCoordinator {
     /// idempotence key for settlement (see handleLoginStateDidChange).
     private var settledAccountIdentity: String?
 
+    /// Read-only view of the settlement key, so a control can assert that an UNRESOLVED tick
+    /// invented no identity. Reading is not an observation the predicate depends on.
+    var settledAccountIdentityForTesting: String? { settledAccountIdentity }
+
     /// Bumped by every credential commit so a burst (a login commits, then the first renewal)
     /// re-derives once instead of twice.
     internal var credentialCommitRevision = 0
