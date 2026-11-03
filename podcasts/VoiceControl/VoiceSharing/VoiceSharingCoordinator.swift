@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Firebase
 import PocketCastsServer
 import FirebaseRemoteConfig
@@ -512,8 +513,18 @@ final class VoiceSharingCoordinator {
     /// idempotence key for settlement (see handleLoginStateDidChange).
     private var settledAccountIdentity: String?
 
-    /// Injectable so controls control what "same account" means. Production: the server account id.
-    var settledAccountIdentityProvider: () -> String? = { ServerSettings.userId }
+    /// Injectable so controls control what "same account AND session" means. Production: the
+    /// account id plus a digest of the upstream refresh token — a session rotation (new refresh
+    /// token) for the SAME account is a genuinely new session and must settle again, while a
+    /// repeat notification for the same session dedupes. Nil = identity unreadable; settlement
+    /// defers (never a placeholder key). The raw token is never stored or logged — only its digest.
+    var settledAccountIdentityProvider: () -> String? = {
+        guard let userId = ServerSettings.userId, !userId.isEmpty,
+              let refresh = try? ServerSettings.refreshToken(), !refresh.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(refresh.utf8)).prefix(8)
+            .map { String(format: "%02x", $0) }.joined()
+        return "\(userId)|\(digest)"
+    }
 
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
     /// prompted it. Split out so a composition test can drive the real producer sequence and still assert
@@ -522,31 +533,38 @@ final class VoiceSharingCoordinator {
         // DIAGNOSTIC (temporary): silent transitions are what made "the session exists for sync but
         // voice sharing reads anonymous" unreadable for an hour.
         FileLog.shared.addMessage("[VoiceSharing] identity changed: signedIn=\(signedIn)")
-        enrollmentStore.transitionToAccount(signedIn: signedIn)
         if signedIn {
-            // IDEMPOTENT SETTLEMENT (reviewer ac82eab04): settlement is keyed on the account
-            // identity. A second settlement for the SAME account — a repeat login notification,
-            // or a notification landing after the poll already settled the restored session —
-            // must be a no-op: `beginNewLifecycle()` unconditionally replaced the lifecycle and
-            // superseded the settled account's in-flight work. A genuinely different account
-            // settles again (sign-out clears the key first; a direct A→B switch has a distinct
-            // identity).
-            let account = settledAccountIdentityProvider() ?? "unknown-account"
-            if account == settledAccountIdentity {
-                FileLog.shared.addMessage("[VoiceSharing] identity settlement: same account, no-op")
+            // IDEMPOTENT SETTLEMENT, keyed on account+session, BEFORE any side effect
+            // (reviewer on 59371aaf7): the identity is (account, session incarnation) — a new
+            // refresh token for the same account is a new session and settles again; a repeat
+            // notification for the SAME session must not even reach
+            // `enrollmentStore.transitionToAccount`, which bumps the operation generation and
+            // resets state unconditionally — deduping after it cleared the enrollment authority
+            // and then skipped the refresh that would restore it.
+            // An UNREADABLE identity defers settlement entirely: substituting a placeholder
+            // key would both mis-dedupe and settle under an identity we cannot vouch for.
+            // Deferral leaves the poll running; a later tick settles once the identity reads.
+            guard let identity = settledAccountIdentityProvider() else {
+                FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: identity unreadable")
                 return
             }
-            settledAccountIdentity = account
+            if identity == settledAccountIdentity {
+                FileLog.shared.addMessage("[VoiceSharing] identity settlement: same account+session, no-op")
+                return
+            }
+            settledAccountIdentity = identity
             // A login settlement cancels the poll. A pending poll tick after a normal login
             // notification settled the identity must not re-derive and supersede the settled
             // lifecycle. The SIGNED-OUT branch deliberately leaves a running poll alone: its
             // ticks only settle when auth state says signed in, so it remains the coverage for
             // a session that restores late without any notification.
             cancelRestoredSessionRetry()
+            enrollmentStore.transitionToAccount(signedIn: true)
             VoiceSharingSessionGeneration.shared.beginNewLifecycle()
             identityBecameReadable()
         } else {
             settledAccountIdentity = nil
+            enrollmentStore.transitionToAccount(signedIn: false)
             VoiceSharingSessionGeneration.shared.clear()
             policy.invalidateForIdentityChange()
             consentGateLost()
