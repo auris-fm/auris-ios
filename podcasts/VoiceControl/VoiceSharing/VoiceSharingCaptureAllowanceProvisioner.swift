@@ -390,6 +390,14 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             if refusal.mintsNewAllocation {
                 discardRequestID(ifCurrent: requestID, account: account, epoch: epoch)
             }
+            // A 503 says the SERVER failed, not that this device's identity or installation is wrong.
+            // Keeping the existing installation matters as much as keeping the identity: a transient
+            // outage during a refresh must not revoke the batch the device already holds, or a working
+            // capture would be shut off by someone else's incident.
+            if refusal == .serverUnavailable {
+                log("capture allowance: server unavailable; keeping the current identity and installation")
+                return
+            }
             clearSupersededInstallation(epoch: answeredEpoch)
             log("capture allowance REFUSED: \(refusal)")
         case .unavailable:

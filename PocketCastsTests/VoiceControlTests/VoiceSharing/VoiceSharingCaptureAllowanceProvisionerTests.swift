@@ -322,6 +322,29 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
                           "a spent batch must advance in-process, not only after a restart")
     }
 
+    /// A 5xx says the server failed, not that this device's batch is wrong. A transient outage during a
+    /// refresh must not revoke an installed batch, or a working capture is shut off by someone else's
+    /// incident.
+    func test_serverUnavailable_keepsTheInstalledBatchAndIdentity() async {
+        var outage = false
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            if outage { return (503, Data()) }
+            return (200, self.makeBody(requestID: id))
+        })
+        let p = provisioner(client: echo)
+        await p.provision()
+        XCTAssertNotNil(p.currentAuthorization(), "the batch installs first")
+        let installed = Self.lastSentRequestID
+        outage = true
+        await p.provision()
+        XCTAssertNotNil(p.currentAuthorization(), "a 503 must not revoke an installed batch")
+        outage = false
+        await p.provision()
+        XCTAssertEqual(Self.lastSentRequestID, installed,
+                       "and the SAME identity is replayed afterwards, not a new one")
+    }
+
     /// A granted batch capped BELOW the compiled ceiling is proved exhausted at its own caps.
     func test_lowerCappedBatch_provesExhaustionAtItsOwnCaps() async {
         let echo = client(replies: { request in
