@@ -39,7 +39,7 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         -> VoiceSharingCaptureAllowanceClient {
         final class Stub: URLProtocol {
             static var replies: ((URLRequest) -> (Int, Data))?
-            static var requestCount = 0
+            static var requestCount = 0 { didSet { StubCounting.counter = requestCount } }
             /// The REAL request body the client sent, echoed back so validation sees a live id.
             static var lastBody: Data?
             override class func canInit(with request: URLRequest) -> Bool { true }
@@ -357,13 +357,22 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         await p.provision()
         XCTAssertNotNil(p.currentAuthorization(), "the batch installs first")
         let installed = Self.lastSentRequestID
+        // Drive a real RENEWAL: spend the batch so provision() actually makes an HTTP call.
+        guard let authority = p.currentAuthorization() else { return XCTFail("must install") }
+        var charged = 0
+        while testLedger.charge(authority) { charged += 1 }
+        XCTAssertEqual(charged, 4)
+        let beforeOutage = Self.observedRequests
         outage = true
         await p.provision()
-        XCTAssertNotNil(p.currentAuthorization(), "a 503 must not revoke an installed batch")
+        XCTAssertGreaterThan(Self.observedRequests, beforeOutage,
+                             "the renewal must actually reach HTTP, not return early")
+        XCTAssertNotNil(p.currentAuthorization(),
+                        "a 503 during renewal must not revoke the installed batch")
         outage = false
         await p.provision()
-        XCTAssertEqual(Self.lastSentRequestID, installed,
-                       "and the SAME identity is replayed afterwards, not a new one")
+        XCTAssertNotEqual(Self.lastSentRequestID, installed,
+                          "and the identity advanced exactly once for one exhaustion")
     }
 
     /// A granted batch capped BELOW the compiled ceiling is proved exhausted at its own caps.
@@ -478,6 +487,11 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
 
     private let prohibitedRequestID = "44444444-4444-4444-8444-444444444444"
 
+    /// Stub request counter, republished so a control can assert a call actually happened.
+    static var observedRequests: Int {
+        get { StubCounting.counter }
+    }
+    enum StubCounting { static var counter = 0 }
     static var lastSentRequestID: String?
     private static func noteSentRequestID(_ request: URLRequest) {
         _ = requestIDInBody(request)

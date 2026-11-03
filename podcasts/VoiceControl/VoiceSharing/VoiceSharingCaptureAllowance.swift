@@ -156,6 +156,12 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
         worker.async { [weak self] in
             guard let self else { return }
             let authority = self.currentAuthorization()
+            if authority == nil {
+                // No installed authority: capture is refused, and the producer is the only thing that
+                // can change that. Without this, an expired allowance waits for the next policy
+                // exchange — potentially hours — before it can be refreshed.
+                self.capacityExhausted()
+            }
             // Validation precedes ledger creation, lock acquisition, and every durable charge.
             let charged = authority.map { self.ledger.charge($0) } ?? false
             self.lock.lock()
@@ -163,9 +169,12 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
             self.preparing = false
             guard charged, let authority, self.generation == startedGeneration,
                   self.currentAuthorization() == authority else {
-                // A refusal WITH an authority in hand is a capacity refusal: the batch has no
-                // reservations left. Nothing else here is a request for another allocation.
-                if !charged, authority != nil { self.lock.unlock(); self.capacityExhausted(); self.lock.lock() }
+                // Any refusal while an authority is EXPECTED is a request for another allocation: the
+                // batch is spent, or there is no installed authority at all (expired, never installed,
+                // or not yet fetched). Capture stays refused either way — only the producer is woken.
+                self.lock.unlock()
+                self.capacityExhausted()
+                self.lock.lock()
                 return
             }
             self.token = authority
