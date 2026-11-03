@@ -340,6 +340,8 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
     final class TaggedStub: URLProtocol {
         static var entered = Set<String>()
         static var stopped = Set<String>()
+        static var finished = Set<String>()
+        static var releases: [String: DispatchSemaphore] = [:]
         private var finishedLoading = false
         class func tag(_ request: URLRequest) -> String {
             request.url?.host ?? "?"
@@ -352,20 +354,20 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
             let http = HTTPURLResponse(url: request.url!, statusCode: 200,
                                        httpVersion: nil, headerFields: nil)!
             client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-            if tag == "b.test" {
-                // B delivers a full VALID response immediately — B must be unaffected
-                // by A's cancellation entirely.
-                client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.validReply)
-                finishedLoading = true
-                client?.urlProtocolDidFinishLoading(self)
-                return
-            }
-            // A delivers a partial body and would only finish much later — cancelling
-            // A must stop it before that; if NOT cancelled it would "time out" a
-            // real transfer, which the assertion distinguishes via `stopped`.
-            client?.urlProtocol(self, didLoad: Data(repeating: 0x64, count: 64))
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
-                guard let self, !Self.stopped.contains(tag) else { return }
+            // BOTH transfers are left open on return: startLoading must not block
+            // (blocking this thread serializes other loads). Completion for each is
+            // delivered later from a detached thread on its own release.
+            // JSON-whitespace filler: the pending partial bytes must remain a valid
+            // prefix of the envelope B eventually completes with.
+            client?.urlProtocol(self, didLoad: Data(repeating: 0x20, count: 64))
+            DispatchQueue.global().async { [weak self] in
+                guard let self else { return }
+                while !Self.stopped.contains(tag) {
+                    if Self.releases[tag]?.wait(timeout: .now() + 0.05) == .success { break }
+                }
+                self.client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.validReply)
+                self.finishedLoading = true
+                Self.finished.insert(tag)
                 self.client?.urlProtocolDidFinishLoading(self)
             }
         }
@@ -380,6 +382,9 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
     func test_transport_overlappingRequests_cancellationIsPerInvocation() async {
         TaggedStub.entered = []
         TaggedStub.stopped = []
+        TaggedStub.finished = []
+        TaggedStub.releases = ["a.test": DispatchSemaphore(value: 0),
+                               "b.test": DispatchSemaphore(value: 0)]
         Self.validReply = makeBody(requestID: requestID) // valid allowance body
 
         func clientFor(_ host: String) -> VoiceSharingCaptureAllowanceClient {
@@ -406,6 +411,11 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                       "A's transfer must be stopped")
         XCTAssertFalse(TaggedStub.stopped.contains("b.test"),
                        "cancelling A must NOT stop B's transfer")
+        XCTAssertFalse(TaggedStub.finished.contains("b.test"),
+                       "B must still be PENDING (unfinished) when A is cancelled — a shared handle defect would have stopped or already-cleared B here")
+
+        // Release B's pending transfer: only then does it complete with acceptance.
+        TaggedStub.releases["b.test"]?.signal()
         // B completes normally with a valid acceptance — shared cancellation state
         // (the defect under test) would have cancelled B with A.
         let bOutcome = await b.value
