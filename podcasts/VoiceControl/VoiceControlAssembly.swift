@@ -268,7 +268,11 @@ class VoiceControlAssembly {
                 .appendingPathComponent("CaptureRequests", isDirectory: true))
         let captureAllowance = VoiceSharingCaptureAllowance(
             ledger: captureLedger,
-            currentAuthorization: { allowanceProvisioner.currentAuthorization() })
+            currentAuthorization: { allowanceProvisioner.currentAuthorization() },
+            // DEMAND-DRIVEN (reviewer): a spent batch is discovered at charge time, which happens
+            // between policy exchanges. Route that demand to the same off-callback provisioner path,
+            // bounded and coalesced, so capture does not stall until the lease turns over.
+            capacityExhausted: { allowanceProvisioner.noteCapacityExhausted() })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             captureAllowance: captureAllowance,

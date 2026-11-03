@@ -322,6 +322,27 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
                           "a spent batch must advance in-process, not only after a restart")
     }
 
+    /// A stale refusal for a SUPERSEDED identity must not clear the newer installation. Both normally
+    /// share the same enrollment epoch, so an epoch comparison protects the very installation it was
+    /// meant to protect.
+    func test_staleRefusal_doesNotClearANewerInstallation() async {
+        var reply: (Int, Data) = (200, Data())
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            if reply.0 == 200 { return (200, self.makeBody(requestID: id)) }
+            return reply
+        })
+        let p = provisioner(client: echo)
+        await p.provision()
+        XCTAssertNotNil(p.currentAuthorization())
+        // A 403 names a superseded identity: same enrollment epoch, different request id.
+        reply = (403, Data("{\"code\":\"retired_enrollment\"}".utf8))
+        await p.provision()
+        // Whatever the outcome, an installed batch belonging to a DIFFERENT identity must survive.
+        let auth = p.currentAuthorization()
+        XCTAssertNotNil(auth, "a refusal answering another identity must not clear this installation")
+    }
+
     /// A 5xx says the server failed, not that this device's batch is wrong. A transient outage during a
     /// refresh must not revoke an installed batch, or a working capture is shut off by someone else's
     /// incident.
