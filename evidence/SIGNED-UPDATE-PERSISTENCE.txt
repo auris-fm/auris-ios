@@ -1,0 +1,37 @@
+SIGNED IN-PLACE UPDATE / SESSION PERSISTENCE — iOS
+Date: 2026-11-03 18:46:33Z
+Destination: disposable simulator F73682F2-3E79-43AA-B13C-62D80E216CC8 (created for this check; owner's 13EB57ED untouched)
+Build SHA: 87a02051178c171f93f611c3ce0c97bc1d78224b   tree: 1 tracked changes at build time
+Signing identity: Identifier=fm.auris  Signature=adhoc  TeamIdentifier=not set  (both builds identical)
+CFBundleVersion: 8.21.0.0
+
+PROCEDURE
+1. Fresh create + boot of F73682F2-3E79-43AA-B13C-62D80E216CC8; install build A; launch.
+2. Seed a session through the real Keychain API (ServerSettings.setSyncingEmail,
+   KeychainHelper.save refresh + access token) via a temporary XCTest harness.
+3. Read the state with the production readers:
+     before: email=signed-update-test@example.com
+             storedAccountIdentity=02EA5767-DBA2-5A52-B8E3-745D62485B60
+             loggedIn=true
+4. xcodebuild build (build B) and `xcrun simctl install` OVER the existing install (no uninstall).
+5. Relaunch, re-read with the same production readers:
+     after:  email=signed-update-test@example.com
+             storedAccountIdentity=02EA5767-DBA2-5A52-B8E3-745D62485B60
+             loggedIn=true
+
+OBSERVED
+- Data container DID rotate on the in-place update
+  (318EA403-... -> B8EFD1D3-...). DATA MOVED WITH IT.
+- The session survived: same email, same stored account digest, still logged in.
+- Therefore: container rotation is NOT keychain invalidation, and it is not session loss.
+  This is a measurement, not an inference, and it corrects an earlier claim of mine that
+  an install costs a fresh sign-in.
+
+CAVEAT
+- Ad-hoc ("sign to run locally") signing, not a Developer ID / development-team signature.
+  What this proves is in-place update persistence for this signing mode on the simulator.
+  It does not prove it for a differently-signed build, and it does not prove anything about
+  a device.
+- The seeded session is a synthetic credential (not a real server session), which is what
+  makes it safe to run without touching the owner's account. The readers under test are the
+  production ones; only the credential is synthetic.
