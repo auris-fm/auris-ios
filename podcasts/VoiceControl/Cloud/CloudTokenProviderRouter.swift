@@ -36,4 +36,19 @@ enum CloudTokenProviderRouter {
         guard edgeTokensEnabled, !aurisBaseURL.isEmpty else { return sharedStaticProvider }
         return sharedAurisProvider
     }
+
+    /// The credential for Voice Sharing, on EVERY build where sharing is enabled (spec ruling
+    /// 2026-11-03). Deliberately not `provider()`: the assistant's routing flag and the gateway-cutover
+    /// gate both exist for their own migrations, and inheriting either would let a shipped build quietly
+    /// fall back to `CloudStaticIdentityTokenProvider` — whose `token()` is a bare `user_<uuid>`, not a
+    /// JWS, which the account route cannot verify under any configuration.
+    ///
+    /// Fail-closed on a missing origin: with no sharing origin there is no credential to present, and
+    /// returning the static provider would send an identity the route must refuse. The caller treats a
+    /// nil token as "sharing unavailable", which is the honest state.
+    static func voiceSharingProvider(aurisBaseURL: String = CloudConfig.shared.baseUrl)
+        -> (any CloudTokenProviding)? {
+        guard !aurisBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return sharedAurisProvider
+    }
 }

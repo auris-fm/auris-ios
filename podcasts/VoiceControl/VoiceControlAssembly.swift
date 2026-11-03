@@ -204,8 +204,19 @@ class VoiceControlAssembly {
                 accountScope: ServerSettings.userId,
                 enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
         }
-        let uploadTrigger = makeVoiceSharingUploadTrigger(
-            queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity)
+        // SPEC RULING 2026-11-03: Voice Sharing selects the Auris provider on EVERY build where
+        // sharing is enabled, ignoring the assistant's routing flag and the gateway-cutover gate. With no
+        // configured origin there is no credential to present, so sharing is unavailable rather than
+        // falling back to a static identity the account route must refuse.
+        let voiceSharingTokenProvider = CloudTokenProviderRouter.voiceSharingProvider()
+        if voiceSharingTokenProvider == nil {
+            FileLog.shared.addMessage("[VoiceSharing] sharing unavailable: no Auris origin configured")
+        }
+        let uploadTrigger = voiceSharingTokenProvider.map { provider in
+            makeVoiceSharingUploadTrigger(
+                queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity,
+                tokenProvider: provider)
+        }
         // The settings MODEL is wired here, in production, with the real live reads (reviewer
         // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
         // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
@@ -251,28 +262,30 @@ class VoiceControlAssembly {
         // authority comes from ONE real allowance request provisioned after the policy gate
         // installs. Memory-only; absent a valid installed response admission fails closed.
         let captureLedger = VoiceSharingCaptureLedger(root: allowanceRoot)
-        let allowanceProvisioner = VoiceSharingCaptureAllowanceProvisioner(
-            client: VoiceSharingCaptureAllowanceClient(tokenProvider: CloudTokenProviderRouter.provider()),
-            accountProvider: { ServerSettings.userId },
-            enrollmentEpochProvider: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
-            stampProvider: {
-                guard let session = VoiceSharingSessionGeneration.shared.currentGeneration(),
-                      let epoch = VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch else { return nil }
-                return VoiceSharingCaptureStamp(
-                    session: session,
-                    epoch: epoch,
-                    policyGeneration: VoiceSharingCoordinator.shared.policy.currentLeaseGeneration)
-            },
-            ledger: captureLedger,
-            requestIdentityRoot: allowanceRoot.deletingLastPathComponent()
-                .appendingPathComponent("CaptureRequests", isDirectory: true))
+        let allowanceProvisioner = voiceSharingTokenProvider.map { provider in
+            VoiceSharingCaptureAllowanceProvisioner(
+                client: VoiceSharingCaptureAllowanceClient(tokenProvider: provider),
+                accountProvider: { ServerSettings.userId },
+                enrollmentEpochProvider: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
+                stampProvider: {
+                    guard let session = VoiceSharingSessionGeneration.shared.currentGeneration(),
+                          let epoch = VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch else { return nil }
+                    return VoiceSharingCaptureStamp(
+                        session: session,
+                        epoch: epoch,
+                        policyGeneration: VoiceSharingCoordinator.shared.policy.currentLeaseGeneration)
+                },
+                ledger: captureLedger,
+                requestIdentityRoot: allowanceRoot.deletingLastPathComponent()
+                    .appendingPathComponent("CaptureRequests", isDirectory: true))
+        }
         let captureAllowance = VoiceSharingCaptureAllowance(
             ledger: captureLedger,
-            currentAuthorization: { allowanceProvisioner.currentAuthorization() },
+            currentAuthorization: { allowanceProvisioner?.currentAuthorization() },
             // DEMAND-DRIVEN (reviewer): a spent batch is discovered at charge time, which happens
             // between policy exchanges. Route that demand to the same off-callback provisioner path,
             // bounded and coalesced, so capture does not stall until the lease turns over.
-            capacityExhausted: { allowanceProvisioner.noteCapacityExhausted() })
+            capacityExhausted: { allowanceProvisioner?.noteCapacityExhausted() })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             captureAllowance: captureAllowance,
@@ -315,18 +328,21 @@ class VoiceControlAssembly {
         // expiry. Driving it only at launch meant a spent batch could not advance until the app was
         // relaunched, even though the client had proven the exhaustion.
         VoiceSharingFirebaseApp.connectAllowanceRefresh {
+            guard let allowanceProvisioner else { return }
             Task { await allowanceProvisioner.provision() }
         }
         VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { installed in
             // The gate installed: fetch the REAL capture allowance now so a consented
             // capture admits against a server-issued batch. Failure is surfaced by the
             // provisioner itself; capture stays closed either way.
-            guard installed else { return }
+            guard installed, let allowanceProvisioner else { return }
             Task { await allowanceProvisioner.provision() }
         }
-        installVoiceSharingGateLoss(
-            collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
-            queue: contributionQueue, coordinator: .shared)
+        if let uploadTrigger {
+            installVoiceSharingGateLoss(
+                collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
+                queue: contributionQueue, coordinator: .shared)
+        }
 
 
         // One emitted-PCM reference for the whole session: the cloud-answer renderer
@@ -483,10 +499,13 @@ class VoiceControlAssembly {
             parsedIntentObserverFactory: parsedIntentObserverFactory,
             preparedObserverFactory: preparedObserverFactory
         )
-        return installVoiceSharingLifetime(
-            on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
-            enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
-            queue: contributionQueue)
+        if let uploadTrigger {
+            return installVoiceSharingLifetime(
+                on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
+                enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
+                queue: contributionQueue)
+        }
+        return nil
     }
 
     /// The production upload chain. Injection changes sources, not the wiring under test.
@@ -495,7 +514,7 @@ class VoiceControlAssembly {
         isAuthorized: @escaping () -> Bool,
         currentIdentity: @escaping () -> VoiceSharingUploadIdentity?,
         baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
-        tokenProvider: CloudTokenProviding = CloudTokenProviderRouter.provider(),
+        tokenProvider: CloudTokenProviding, // caller supplies the voice-sharing provider (spec 2026-11-03)
         session: URLSession = .shared,
         clock: @escaping () -> Date = Date.init,
         retryPolicy: VoiceSharingRetryPolicy = VoiceSharingRetryPolicy(
