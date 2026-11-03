@@ -41,25 +41,33 @@ protocol VoiceSharingCaptureAccountScope {
     var accountDigest: String { get }
     var accountBinding: String { get }
     var window: String { get }
+    /// Per-batch durable accounting identity (spec: persist consumption per account AND batch).
+    var batchId: String { get }
 }
 
 struct VoiceSharingCaptureAuthorization: Equatable, VoiceSharingCaptureAccountScope {
     let accountDigest: String
     let accountBinding: String
     let window: String
+    let batchId: String
     let limits: VoiceSharingCaptureLimits
     let consent: VoiceSharingCaptureStamp
 
-    init?(account: String, establishedWindow: String?, limits: VoiceSharingCaptureLimits?, consent: VoiceSharingCaptureStamp) {
+    init?(account: String, establishedWindow: String?, batchId: String?, limits: VoiceSharingCaptureLimits?, consent: VoiceSharingCaptureStamp) {
         guard !account.isEmpty, account.utf8.count <= 512,
               let establishedWindow, !establishedWindow.isEmpty, establishedWindow.utf8.count <= 512,
+              let batchId, Self.isValidBatchId(batchId),
               let limits else { return nil }
         accountDigest = Self.digest(account)
         accountBinding = Self.digest("auris-capture-allowance-account-v1:" + account)
         window = establishedWindow
+        self.batchId = batchId
         self.limits = limits
         self.consent = consent
     }
+
+    /// Opaque server-issued UUIDs only — never a caller-chosen label.
+    static func isValidBatchId(_ value: String) -> Bool { UUID(uuidString: value) != nil }
 
     fileprivate static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -72,14 +80,17 @@ struct VoiceSharingCaptureProvisioningAuthority: VoiceSharingCaptureAccountScope
     let accountDigest: String
     let accountBinding: String
     let window: String
+    let batchId: String
 
     /// Caller must have independent first-provisioning proof; a normal admission snapshot is insufficient.
-    init?(verifiedFirstProvisioningAccount account: String, establishedWindow: String) {
+    init?(verifiedFirstProvisioningAccount account: String, establishedWindow: String, batchId: String) {
         guard !account.isEmpty, account.utf8.count <= 512,
-              !establishedWindow.isEmpty, establishedWindow.utf8.count <= 512 else { return nil }
+              !establishedWindow.isEmpty, establishedWindow.utf8.count <= 512,
+              VoiceSharingCaptureAuthorization.isValidBatchId(batchId) else { return nil }
         accountDigest = VoiceSharingCaptureAuthorization.digest(account)
         accountBinding = VoiceSharingCaptureAuthorization.digest("auris-capture-allowance-account-v1:" + account)
         window = establishedWindow
+        self.batchId = batchId
     }
 }
 
@@ -169,6 +180,7 @@ final class VoiceSharingCaptureLedger {
         let account: String
         let binding: String
         let window: String
+        let batch: String
         let incarnation: String
     }
 
@@ -222,7 +234,10 @@ final class VoiceSharingCaptureLedger {
 
     private func chargeLocked<Scope: VoiceSharingCaptureAccountScope>(_ authority: Scope, limits: VoiceSharingCaptureLimits?) throws -> Bool {
         let firstProvisioning = limits == nil
+        // Consumption is persisted PER ACCOUNT AND BATCH (spec): distinct directory per batch so a
+        // refreshed batch reopens its own ledger and a different batch can never reuse its usage.
         let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
+            .appendingPathComponent(authority.batchId, isDirectory: true)
         // Ordinary admission/recovery must not mistake lost accounting for first use.
         if firstProvisioning { try createDirectoriesDurably(directory) }
         let lockURL = directory.appendingPathComponent("claim.lock")
@@ -255,7 +270,7 @@ final class VoiceSharingCaptureLedger {
             try synchronize(root, true)
             try barrier(.claimDurable)
             let identity = Identity(schema: 1, account: authority.accountDigest, binding: authority.accountBinding,
-                                    window: authority.window, incarnation: UUID().uuidString)
+                                    window: authority.window, batch: authority.batchId, incarnation: UUID().uuidString)
             try write(Genesis(identity: identity, established: false), to: genesisURL)
             try barrier(.genesisInitializing)
             try write(Usage(identity: identity, records: 0, bytes: 0, transaction: nil), to: usageURL)
@@ -303,7 +318,8 @@ final class VoiceSharingCaptureLedger {
 
     private func matches<Scope: VoiceSharingCaptureAccountScope>(_ identity: Identity, _ authority: Scope) -> Bool {
         identity.schema == 1 && identity.account == authority.accountDigest && identity.binding == authority.accountBinding
-            && identity.window == authority.window && UUID(uuidString: identity.incarnation) != nil
+            && identity.window == authority.window && identity.batch == authority.batchId
+            && UUID(uuidString: identity.incarnation) != nil
     }
 
     private func createDirectoriesDurably(_ directory: URL) throws {
