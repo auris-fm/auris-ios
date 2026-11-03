@@ -156,6 +156,37 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         return ledger.isExhausted(authority, caps: caps) ? batch : nil
     }
 
+    /// True when an installed batch still has capacity its ledger recognises.
+    ///
+    /// Deliberately NOT "an authorization exists": an exhausted installation is retained across a
+    /// failed replacement request (so a 503 cannot destroy it), and a pending replacement must still be
+    /// retried. Judging this on the authorization alone let the retained exhausted installation suppress
+    /// the retry of its own replacement, which left the device stuck on a spent batch until relaunch.
+    ///
+    /// When the binding for the installed request is missing or belongs to a different request, the
+    /// pending replacement is unproven, so no usable capacity is claimed and the retry proceeds.
+    private func hasUsableInstallation() -> Bool {
+        guard currentAuthorization() != nil else { return false }
+        guard let account = accountProvider(), let epoch = enrollmentEpochProvider(),
+              let binding = existingBinding(account: account, epoch: epoch),
+              let installedID = installedRequestIdentity(), binding.requestID == installedID,
+              binding.batchID == currentAuthorization()?.batchId,
+              binding.maxRecords > 0, binding.maxBytes > 0 else { return false }
+        let authority = VoiceSharingCaptureProvisioningAuthority(
+            verifiedFirstProvisioningAccount: account, establishedWindow: binding.windowID,
+            batchId: binding.batchID)
+        guard let authority else { return false }
+        let caps = VoiceSharingCaptureLedger.BatchCaps(records: binding.maxRecords, bytes: binding.maxBytes)
+        // Exhausted accounting means the batch is spent: the pending replacement must be retried.
+        return !ledger.isExhausted(authority, caps: caps)
+    }
+
+    private func installedRequestIdentity() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return installedRequestID
+    }
+
     /// True when the batch behind the installed authority has no capacity left in the durable ledger.
     private func installedBatchIsExhausted() -> Bool {
         guard let authorization = currentAuthorization(),
@@ -342,7 +373,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         // An installed authority with capacity left means there is nothing to do. An installed verdict
         // whose batch is EXHAUSTED does not: the client must be able to advance to the next batch within
         // the same process, not only after a restart.
-        if currentAuthorization() != nil, !installedBatchIsExhausted() { return }
+        if hasUsableInstallation() { return }
         guard let account = accountProvider(), !account.isEmpty else {
             log("capture allowance provision skipped: no account identity")
             return

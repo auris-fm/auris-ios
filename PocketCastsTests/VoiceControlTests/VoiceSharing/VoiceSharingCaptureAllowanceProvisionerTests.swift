@@ -370,9 +370,13 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         XCTAssertNotNil(p.currentAuthorization(),
                         "a 503 during renewal must not revoke the installed batch")
         outage = false
+        let beforeRecovery = Self.observedRequests
         await p.provision()
-        XCTAssertNotEqual(Self.lastSentRequestID, installed,
-                          "and the identity advanced exactly once for one exhaustion")
+        XCTAssertGreaterThan(Self.observedRequests, beforeRecovery,
+                             "the pending replacement must be retried, not suppressed by the retained "
+                             + "exhausted installation")
+        XCTAssertNotNil(p.currentAuthorization(),
+                        "and the replacement actually installs once the server answers again")
     }
 
     /// A granted batch capped BELOW the compiled ceiling is proved exhausted at its own caps.
