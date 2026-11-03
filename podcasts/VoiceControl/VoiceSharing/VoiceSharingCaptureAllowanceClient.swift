@@ -50,6 +50,8 @@ struct VoiceSharingCaptureAllowanceResponse: Equatable {
     /// the server interval because admission re-checks against the ORIGINAL deadline.
     let validForMSRemaining: Int
     let deadlineMonotonicMS: Int
+    /// The ORIGINAL monotonic request start; a backward clock cannot restore validity.
+    let startMonotonicMS: Int
     let batchMaxRecords: Int
     let batchMaxBytes: Int
     let maxClipMS: Int
@@ -102,7 +104,10 @@ struct VoiceSharingCaptureAllowanceResponse: Equatable {
         self.enrollmentEpoch = epoch
         self.disposition = disposition
         validForMSRemaining = remainingMS
-        deadlineMonotonicMS = requestStartMonotonicMS + validFor
+        let (deadline, deadlineOverflow) = requestStartMonotonicMS.addingReportingOverflow(validFor)
+        guard !deadlineOverflow else { return nil }
+        deadlineMonotonicMS = deadline
+        startMonotonicMS = requestStartMonotonicMS
         self.batchMaxRecords = batchMaxRecords
         self.batchMaxBytes = batchMaxBytes
         self.maxClipMS = maxClipMS
@@ -122,9 +127,14 @@ struct VoiceSharingCaptureAllowanceResponse: Equatable {
         return true
     }
 
-    /// Admission validity AGAINST THE ORIGINAL DEADLINE, e.g. after a delayed installation.
+    /// Admission validity AGAINST THE ORIGINAL WINDOW: start <= now < deadline. A clock
+    /// reading before the original start (backward jump) cannot restore validity.
     func stillValid(monotonicNowMS: Int) -> Bool {
-        monotonicNowMS < deadlineMonotonicMS
+        guard monotonicNowMS >= 0, monotonicNowMS >= startMonotonicMS else { return false }
+        let (elapsed, overflow) = monotonicNowMS.subtractingReportingOverflow(startMonotonicMS)
+        guard !overflow else { return false }
+        // deadline = start + full server interval, so this is overflow-free by construction.
+        return elapsed < deadlineMonotonicMS - startMonotonicMS
     }
 }
 
@@ -189,19 +199,9 @@ struct VoiceSharingCaptureAllowanceClient {
         urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         guard sessionIdentity() == identity else { return .unavailable }
         do {
-            let (bytes, response) = try await session.bytes(for: urlRequest)
-            guard let http = response as? HTTPURLResponse else { return .unavailable }
+            let (data, http) = try await Self.boundedRead(
+                urlRequest, session: session, limit: VoiceSharingCaptureAllowanceResponse.maximumEnvelopeBytes)
             guard sessionIdentity() == identity else { return .unavailable }
-            // BOUNDED READ: at most limit+1 bytes for success AND error statuses alike.
-            var data = Data()
-            var capacity = 0
-            for try await byte in bytes {
-                data.append(byte)
-                capacity += 1
-                if capacity > VoiceSharingCaptureAllowanceResponse.maximumEnvelopeBytes {
-                    return .unavailable // oversized envelope — stop, never parse
-                }
-            }
             let elapsed = monotonicNowMS() - start
             guard elapsed >= 0 else { return .unavailable } // backward clock cannot extend validity
             switch http.statusCode {
@@ -220,6 +220,67 @@ struct VoiceSharingCaptureAllowanceClient {
             }
         } catch {
             return .unavailable
+        }
+    }
+
+    enum TransportBound: Error { case oversizedOrIncomplete }
+
+    /// A delegate-driven bounded read for EVERY status: the delegate appends at most
+    /// limit+1 bytes and EXPLICITLY cancels the session task when the bound is exceeded
+    /// (early exits terminate the transfer — the stream is never fully consumed).
+    private static func boundedRead(_ request: URLRequest, session: URLSession,
+                                    limit: Int) async throws -> (Data, HTTPURLResponse) {
+        final class Delegate: NSObject, URLSessionDataDelegate {
+            let limit: Int
+            var response: HTTPURLResponse?
+            var data = Data()
+            var boundExceeded = false
+            var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+            var onBoundExceeded: (() -> Void)?
+            init(limit: Int) { self.limit = limit }
+            func finish() {
+                continuation?.resume(returning: (data, response ?? HTTPURLResponse(url: URL(string: "https://invalid.invalid")!, statusCode: 0, httpVersion: nil, headerFields: nil)!))
+                continuation = nil
+            }
+            func urlSession(_: URLSession, dataTask _: URLSessionDataTask,
+                            didReceive response: URLResponse,
+                            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+                self.response = response as? HTTPURLResponse
+                completionHandler(.allow)
+            }
+            func urlSession(_: URLSession, dataTask _: URLSessionDataTask, didReceive received: Data) {
+                guard !boundExceeded else { return }
+                data.append(received)
+                if data.count > limit {
+                    boundExceeded = true
+                    onBoundExceeded?() // explicitly terminate the transfer
+                    finish() // bound exceeded: stop consuming, refuse — never buffer the rest
+                }
+            }
+            func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
+                guard !boundExceeded, let continuation = continuation else {
+                    self.continuation = nil
+                    return
+                }
+                self.continuation = nil
+                if let error { continuation.resume(throwing: error) } else { finish2(continuation) }
+            }
+            private func finish2(_ continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>) {
+                guard let response else {
+                    continuation.resume(throwing: TransportBound.oversizedOrIncomplete)
+                    return
+                }
+                continuation.resume(returning: (data, response))
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let delegate = Delegate(limit: limit)
+            delegate.continuation = continuation
+            let queue = OperationQueue()
+            let delegateSession = URLSession(configuration: session.configuration, delegate: delegate, delegateQueue: queue)
+            let task = delegateSession.dataTask(with: request)
+            delegate.onBoundExceeded = { task.cancel() }
+            task.resume()
         }
     }
 }
@@ -241,13 +302,19 @@ enum VoiceSharingCaptureAllowanceInstallation {
     static func admissionAuthority(account: String, response: VoiceSharingCaptureAllowanceResponse,
                                    consent: VoiceSharingCaptureStamp) -> VoiceSharingCaptureAuthorization? {
         guard response.disposition == .issued || response.disposition == .replayed else { return nil }
-        guard response.maxClipMS * 16 > 0 else { return nil } // multiplication sanity (16 kHz mono)
+        // BOTH clip limits bind independently: samples come from max_clip_ms AND the
+        // byte ceiling (16 kHz mono PCM16: 2 bytes/sample + 44-byte WAV header), so a
+        // lowered max_clip_bytes cannot admit a WAV the server does not permit.
+        let samplesFromMS = response.maxClipMS.multipliedReportingOverflow(by: 16)
+        guard !samplesFromMS.overflow, samplesFromMS.partialValue > 0 else { return nil }
+        let samplesFromBytes = (response.maxClipBytes - 44).quotientAndRemainder(dividingBy: 2)
+        guard samplesFromBytes.quotient > 0 else { return nil }
         let limits = VoiceSharingCaptureLimits(
             dailyRecords: UInt64(response.batchMaxRecords),
             dailyBytes: UInt64(response.batchMaxBytes),
             compiledRecordsCeiling: 4,
             compiledBytesCeiling: UInt64(4 * 1_985_580),
-            clipSamples: response.maxClipMS * 16,
+            clipSamples: min(samplesFromMS.partialValue, samplesFromBytes.quotient),
             metadataBytes: response.maxMetadataBytes,
             compiledClipSamples: VoiceSharingCaptureAllowanceResponse.compiledMaxClipMS * 16,
             compiledMetadataBytes: VoiceSharingCaptureAllowanceResponse.compiledMaxMetadataBytes)
