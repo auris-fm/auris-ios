@@ -277,6 +277,66 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                           "cancellation must stop further delivery before all chunks load")
     }
 
+    /// A SINGLE huge chunk (12 KiB in one didLoad) must be capped at limit+1, never
+    /// buffered whole.
+    func test_transport_singleLargeChunk_isCappedAtLimit() async {
+        final class Stub4: URLProtocol {
+            static var cancelled = false
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                let http = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                           httpVersion: nil, headerFields: nil)!
+                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                // One 12 KiB didLoad — larger than the whole allowance.
+                client?.urlProtocol(self, didLoad: Data(repeating: 0x62, count: 12 * 1024))
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            override func stopLoading() { Self.cancelled = true }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub4.self]
+        Stub4.cancelled = false
+        let client = VoiceSharingCaptureAllowanceClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" })
+        let outcome = await client.perform(makeRequest())
+        XCTAssertEqual(outcome, .unavailable, "single oversized chunk must refuse")
+    }
+
+    /// Caller-cancellation while delivery is pending propagates to the session task.
+    func test_transport_callerCancellation_terminatesThePendingTransfer() async throws {
+        final class Stub5: URLProtocol {
+            static var cancelled = false
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                let http = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                           httpVersion: nil, headerFields: nil)!
+                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(repeating: 0x63, count: 64))
+                // The rest is never delivered — the caller cancels while pending.
+            }
+            override func stopLoading() { Self.cancelled = true }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub5.self]
+        Stub5.cancelled = false
+        let client = VoiceSharingCaptureAllowanceClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" })
+        let task = Task { await client.perform(makeRequest()) }
+        try await Task.sleep(nanoseconds: 100_000_000) // delivery pending
+        task.cancel()
+        _ = await task.value
+        XCTAssertTrue(waitForFlag { Stub5.cancelled },
+                      "caller cancellation must terminate the pending session task")
+    }
+
     func test_transport_errorStatus_oversizedBody_isBounded() async {
         final class Stub3: URLProtocol {
             static var cancelled = false
