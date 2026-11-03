@@ -401,6 +401,7 @@ enum VoiceSharingCaptureAllowanceInstallation {
             compiledClipSamples: VoiceSharingCaptureAllowanceResponse.compiledMaxClipMS * 16,
             compiledMetadataBytes: VoiceSharingCaptureAllowanceResponse.compiledMaxMetadataBytes)
         return VoiceSharingCaptureAuthorization(account: account, establishedWindow: response.windowID,
-                                                batchId: response.batchID, limits: limits, consent: consent)
+                                                batchId: response.batchID, limits: limits, consent: consent,
+                                                deadlineMonotonicMS: response.deadlineMonotonicMS)
     }
 }

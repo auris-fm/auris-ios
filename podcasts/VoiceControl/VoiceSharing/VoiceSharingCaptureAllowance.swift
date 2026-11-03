@@ -53,8 +53,15 @@ struct VoiceSharingCaptureAuthorization: Equatable, VoiceSharingCaptureAccountSc
     let batchId: String
     let limits: VoiceSharingCaptureLimits
     let consent: VoiceSharingCaptureStamp
+    /// Monotonic instant this batch stops admitting: the ORIGINAL request start plus the server's
+    /// `valid_for_ms`. Carried into admission because the policy lease is an INDEPENDENT lifetime —
+    /// a short allowance under a live lease stayed usable past its own deadline when nothing but a
+    /// timer watched expiry (reviewer on the dependency set), and capture must refuse at that
+    /// boundary without relying on a timer having fired.
+    let deadlineMonotonicMS: Int
 
-    init?(account: String, establishedWindow: String?, batchId: String?, limits: VoiceSharingCaptureLimits?, consent: VoiceSharingCaptureStamp) {
+    init?(account: String, establishedWindow: String?, batchId: String?, limits: VoiceSharingCaptureLimits?, consent: VoiceSharingCaptureStamp,
+          deadlineMonotonicMS: Int = Int.max) {
         guard !account.isEmpty, account.utf8.count <= 512,
               let establishedWindow, !establishedWindow.isEmpty, establishedWindow.utf8.count <= 512,
               let batchId, Self.isValidBatchId(batchId),
@@ -65,7 +72,12 @@ struct VoiceSharingCaptureAuthorization: Equatable, VoiceSharingCaptureAccountSc
         self.batchId = batchId
         self.limits = limits
         self.consent = consent
+        self.deadlineMonotonicMS = deadlineMonotonicMS
     }
+
+    /// Admission lifetime check. `now` is monotonic; a monotonic clock that moved BACKWARD reads as
+    /// elapsed (fail closed) rather than granting a fresh interval.
+    func isLive(atMonotonicMS now: Int) -> Bool { now < deadlineMonotonicMS }
 
     /// Opaque server-issued UUIDs only — never a caller-chosen label.
     static func isValidBatchId(_ value: String) -> Bool { UUID(uuidString: value) != nil }
@@ -129,12 +141,17 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
     private var preparing = false
     private var token: VoiceSharingCaptureAuthorization?
 
+    /// Monotonic milliseconds, injectable so a control can step past a deadline without waiting.
+    private let monotonicNowMS: () -> Int
+
     init(ledger: VoiceSharingCaptureLedger,
          currentAuthorization: @escaping () -> VoiceSharingCaptureAuthorization?,
-         capacityExhausted: @escaping () -> Void = {}) {
+         capacityExhausted: @escaping () -> Void = {},
+         monotonicNowMS: @escaping () -> Int = { Int(ProcessInfo.processInfo.systemUptime * 1000) }) {
         self.ledger = ledger
         self.currentAuthorization = currentAuthorization
         self.capacityExhausted = capacityExhausted
+        self.monotonicNowMS = monotonicNowMS
     }
 
     func take(for stamp: VoiceSharingCaptureStamp) -> VoiceSharingCaptureReservation? {
@@ -143,7 +160,10 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
         // Authority comparison and single-use consumption are one short memory decision.
         guard let prepared = token else { return nil }
         token = nil
-        guard prepared.consent == stamp, currentAuthorization() == prepared else { return nil }
+        // A batch past its own allowance deadline never admits, even while policy is still live and
+        // even though the installed authority compares equal (it is the SAME batch).
+        guard prepared.isLive(atMonotonicMS: monotonicNowMS()),
+              prepared.consent == stamp, currentAuthorization() == prepared else { return nil }
         return .init(clipSamples: prepared.limits.clipSamples, metadataBytes: prepared.limits.metadataBytes)
     }
 
