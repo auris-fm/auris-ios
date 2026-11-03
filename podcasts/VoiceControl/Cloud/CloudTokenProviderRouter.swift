@@ -21,6 +21,14 @@ enum CloudTokenProviderRouter {
         authBaseURLProvider: { CloudConfig.shared.baseUrl },
         credentialProvider: { CloudAccountSessionCredentialProvider().credential() }
     )
+
+    /// The Auris provider as Voice Sharing sees it: the SAME instance and refresh chain, but dialled at
+    /// the configured origin rather than the cutover-gated one. Sharing the instance matters — a second
+    /// instance would rotate the same refresh token and revoke the other's chain (`refresh_reused`).
+    private static let sharedVoiceSharingProvider = CloudAuthTokenProvider(
+        authBaseURLProvider: { CloudConfig.shared.configuredOrigin },
+        credentialProvider: { CloudAccountSessionCredentialProvider().credential() }
+    )
     private static let sharedStaticProvider = CloudStaticIdentityTokenProvider()
 
     /// - Parameters:
@@ -46,9 +54,14 @@ enum CloudTokenProviderRouter {
     /// Fail-closed on a missing origin: with no sharing origin there is no credential to present, and
     /// returning the static provider would send an identity the route must refuse. The caller treats a
     /// nil token as "sharing unavailable", which is the honest state.
-    static func voiceSharingProvider(aurisBaseURL: String = CloudConfig.shared.baseUrl)
-        -> (any CloudTokenProviding)? {
-        guard !aurisBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return sharedAurisProvider
+    static func voiceSharingProvider(aurisBaseURL: String? = nil) -> (any CloudTokenProviding)? {
+        let resolved = aurisBaseURL ?? CloudConfig.shared.configuredOrigin
+        guard nonEmpty(resolved) != nil else { return nil }
+        return sharedVoiceSharingProvider
+    }
+
+    private static func nonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

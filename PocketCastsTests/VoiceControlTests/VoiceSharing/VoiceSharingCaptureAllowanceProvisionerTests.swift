@@ -6,6 +6,9 @@ import XCTest
 final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
     private let requestID = "11111111-1111-4111-8111-111111111111"
     private let batchA = "22222222-2222-4222-8222-222222222222"
+    /// A server answers a DIFFERENT batch for a new allocation. Opt-in so existing controls that name
+    /// `batchA` keep their meaning, while a control about a replacement can tell the two apart.
+    private let batchB = "44444444-4444-4444-8444-444444444444"
     private let window = "33333333-3333-4333-8333-333333333333"
 
     private final class StubTokens: CloudTokenProviding {
@@ -348,10 +351,13 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
     /// incident.
     func test_serverUnavailable_keepsTheInstalledBatchAndIdentity() async {
         var outage = false
+        var issued = 0
         let echo = client(replies: { request in
             let id = Self.requestIDInBody(request) ?? ""
             if outage { return (503, Data()) }
-            return (200, self.makeBody(requestID: id))
+            issued += 1
+            // The replacement is a DIFFERENT batch, as a real server would answer.
+            return (200, self.makeBody(requestID: id, batch: issued == 1 ? nil : self.batchB))
         })
         let p = provisioner(client: echo)
         await p.provision()
@@ -369,14 +375,20 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
                              "the renewal must actually reach HTTP, not return early")
         XCTAssertNotNil(p.currentAuthorization(),
                         "a 503 during renewal must not revoke the installed batch")
+        let replacedBatch = p.currentAuthorization()?.batchId
         outage = false
         let beforeRecovery = Self.observedRequests
         await p.provision()
         XCTAssertGreaterThan(Self.observedRequests, beforeRecovery,
                              "the pending replacement must be retried, not suppressed by the retained "
                              + "exhausted installation")
-        XCTAssertNotNil(p.currentAuthorization(),
-                        "and the replacement actually installs once the server answers again")
+        // The reviewer's point: "an authorization exists" cannot distinguish the RETAINED exhausted batch
+        // from its replacement, so this asserts the replacement's own identity.
+        guard let recovered = p.currentAuthorization() else {
+            return XCTFail("the replacement must install once the server answers again")
+        }
+        XCTAssertNotEqual(recovered.batchId, replacedBatch,
+                          "the recovered authority must be the REPLACEMENT batch, not the retained one")
     }
 
     /// A granted batch capped BELOW the compiled ceiling is proved exhausted at its own caps.
