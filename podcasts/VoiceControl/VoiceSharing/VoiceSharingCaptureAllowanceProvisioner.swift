@@ -108,7 +108,10 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             else { return existing } // no proof of exhaustion: replay this identity
             log("capture allowance batch \(consumed) is exhausted in the durable ledger; advancing")
             discardRequestIDLocked(account: account, epoch: epoch)
-            clearInstallation()
+            // Deliberately does NOT clear the installation. The old batch is exhausted, so it can admit
+            // nothing more either way, but clearing it here destroyed it before the replacement request
+            // had even been sent: a 503 on the very next line then left the device with neither the old
+            // batch nor a new one. The installation is replaced when a replacement actually installs.
         }
         let url = fileURL(account: account, epoch: epoch)
         let value = UUID().uuidString
@@ -179,15 +182,6 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         installedAccount = nil
         installedRequestID = nil
         lock.unlock()
-    }
-
-    /// Drop an installed response that no longer produces an authority (account/epoch/policy moved).
-    private func clearStaleInstallation() {
-        lock.lock()
-        let installed = installedResponse
-        lock.unlock()
-        guard installed != nil else { return }
-        clearInstallation()
     }
 
     /// The durable record of what the current identity was issued for.
@@ -349,7 +343,6 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         // whose batch is EXHAUSTED does not: the client must be able to advance to the next batch within
         // the same process, not only after a restart.
         if currentAuthorization() != nil, !installedBatchIsExhausted() { return }
-        if currentAuthorization() == nil { clearStaleInstallation() }
         guard let account = accountProvider(), !account.isEmpty else {
             log("capture allowance provision skipped: no account identity")
             return
