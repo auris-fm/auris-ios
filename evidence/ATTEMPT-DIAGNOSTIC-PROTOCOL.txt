@@ -26,3 +26,19 @@ KNOWN LIMIT, stated in advance
   If the failure is BEFORE the route (wrong host, TLS, no token), nothing arrives, no id
   exists on either side, and client evidence is the whole of it. An id would not have helped.
   This is the bucket where the 6-line fix buys least, which is why it is deferred.
+
+CORRECTION (spec a91a907e) — A TIMESTAMP/OUTCOME MATCH IS A CANDIDATE, NOT AN EXACT MATCH
+  I wrote above that two clocks matching "is the correlation, and it survives having no id."
+  That overstates it, and spec is right to bound it. Without a shared identifier, a
+  (server time, server outcome) pair agreeing with a (client time, client outcome) pair
+  establishes a CANDIDATE pairing, not identity of request. It is weakest exactly where it
+  is needed:
+    - clock skew between the device and the edge is unmeasured;
+    - two attempts within the same second are indistinguishable;
+    - a server outcome that maps many-to-one onto a client outcome (any refusal that
+      surfaces as the same client line) cannot separate which refusal it was.
+  So the honest phrasing of a match is "candidate correlation, consistent with a single
+  request crossing the wire and matching outcomes" - and the only way to convert a
+  candidate into an identification is to inspect origin logs against the client's
+  attempt, which spec has offered and which needs no build change from me.
+  Everything else in this protocol stands; this bounds what the evidence will support.
