@@ -1,5 +1,6 @@
 import XCTest
 @testable import podcasts
+@testable import PocketCastsServer
 
 /// Restored-session settlement controls (reviewer 30630d31 finding 2; reworked for the owner's
 /// commit hook after spec 2026-11-03 / reviewer on `466576407`):
@@ -126,7 +127,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
 
         let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { false })
         defer { invalidate() }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05)) // restoration debt pending
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 
         coordinator.handleLoginStateDidChange(signedIn: false) // sign-out while pending
         account = "account-B"                                  // a different account signs in
@@ -439,6 +440,95 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         XCTAssertEqual(settlements.value, 1, "duplicate is a no-op")
         XCTAssertTrue(store.currentEffectiveEnrolled,
                       "the duplicate must not have reset the settled enrollment authority")
+    }
+
+    /// REVIEWER (`86360d9e1`): the existing cold-path control injected the digests and called the
+    /// callback directly, so it asserted the seam rather than the production transition. The item
+    /// left open is the one that actually breaks a session: after an account is settled and a real
+    /// projection has been applied under it, a RENEWAL commit — a different `commitAuthentication`,
+    /// which is what the owner reports on every token exchange — must not reset that projection.
+    ///
+    /// This drives the real `ServerSettings.credentialCommitObserver` hook end to end. If a renewal
+    /// re-settles, the enrollment store transitions and clears the settled authority, and the user's
+    /// next capture is refused for want of an enrollment they did grant.
+    func test_renewalThroughTheRealCommitHook_preservesSettledProjection() async throws {
+        let store = VoiceSharingEnrollmentStore(sessionIdentityProvider: { "gen-A" })
+        store.setLocalOptIn(true)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: [
+                "schema_version": 1,
+                "membership_revision": "r1",
+                "plan": "pro",
+                "voice_sharing_enrolled": true,
+                "withdrawal_state": "active",
+                "enrollment_epoch": "e1" as Any,
+                "accepted_disclosure_version": "voice-sharing-v1" as Any,
+            ])
+        defer { VoiceSharingStubProtocol.replies.removeAll() }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        let client = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" },
+            membershipStore: store)
+
+        let coordinator = makeCoordinator(enrollmentStore: store)
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.restoredSessionAuthReadable = { true }
+        let digests = Cell(UUID(uuidString: "11111111-2222-3333-4444-555555555555")!)
+        coordinator.ownerCredentialIsPresent = { true }
+        coordinator.storedCredentialIdentityProvider = {
+            VoiceSharingCoordinator.storedIdentity(from: digests.value)
+        }
+        coordinator.ownerAccountIdentityProvider = {
+            VoiceSharingCoordinator.committedIdentity(from: digests.value)
+        }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { true })
+        defer { invalidate(); VoiceSharingSessionGeneration.shared.clear() }
+
+        XCTAssertEqual(settlements.value, 1, "premise: the cold start settled")
+        let generation = VoiceSharingSessionGeneration.shared.currentGeneration()
+
+        let fetched = await client.fetchProjection()
+        let membership = try XCTUnwrap(fetched?.membership, "premise: projection fetched")
+        XCTAssertTrue(store.apply(authoritative: membership, readUnder: fetched!.issuedUnder),
+                      "premise: projection applies under the settled lifecycle")
+        XCTAssertTrue(store.currentEffectiveEnrolled, "premise: enrolled")
+
+        // A RENEWAL: the owner commits again for the SAME account and reports completion through
+        // the real observer the production wiring installs. That is exactly what a token exchange
+        // at expiry produces.
+        // The observer runs on the main queue, so this expectation is the control's SYNC POINT: it
+        // is fulfilled after the observer fires and its hop has run. Without it the assertions below
+        // execute before settlement is even attempted - measured: they all passed while the renewal
+        // path had been deliberately broken, because the hop had not run yet.
+        let renewalObserved = expectation(description: "renewal reported through the owner's hook")
+        let previousObserver = ServerSettings.credentialCommitObserver
+        ServerSettings.credentialCommitObserver = {
+            previousObserver?()
+            DispatchQueue.main.async { renewalObserved.fulfill() }
+        }
+        defer { ServerSettings.credentialCommitObserver = previousObserver }
+        let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(explicit: false))
+        XCTAssertTrue(ServerSettings.commitAuthentication(
+            AuthenticationResponse(token: "renewed", uuid: "renewal-account", email: "b@example.com",
+                                   refreshToken: "renewed-refresh"),
+            for: attempt, password: "p"))
+        // The observer hops to the main queue; let it run, since settlement must also happen there.
+        wait(for: [renewalObserved], timeout: 5)
+
+        XCTAssertEqual(settlements.value, 1,
+                       "a renewal must not settle again - it is the same account")
+        XCTAssertTrue(store.currentEffectiveEnrolled,
+                      "and it must not reset the settled enrollment authority")
+        XCTAssertEqual(VoiceSharingSessionGeneration.shared.currentGeneration(), generation,
+                       "nor replace the lifecycle the projection was applied under")
     }
 
     /// (b) The poll must survive past the old 20-attempt bound: a session that restores late is
