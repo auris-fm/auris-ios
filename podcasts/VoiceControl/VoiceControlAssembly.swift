@@ -306,12 +306,19 @@ class VoiceControlAssembly {
         // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
         // recovery event nor an expiring lease — run one named exchange now so the policy
         // lease installs at launch. Failure reports through the exchange's own path.
-        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { [weak allowanceProvisioner] installed in
+        // The allowance provisioner is driven from EVERY policy exchange, not just launch: the exchange
+        // is the one live signal that fires at launch, on identity recovery, and on lease renewal after
+        // expiry. Driving it only at launch meant a spent batch could not advance until the app was
+        // relaunched, even though the client had proven the exhaustion.
+        VoiceSharingFirebaseApp.connectAllowanceRefresh {
+            Task { await allowanceProvisioner.provision() }
+        }
+        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { installed in
             // The gate installed: fetch the REAL capture allowance now so a consented
             // capture admits against a server-issued batch. Failure is surfaced by the
             // provisioner itself; capture stays closed either way.
             guard installed else { return }
-            Task { await allowanceProvisioner?.provision() }
+            Task { await allowanceProvisioner.provision() }
         }
         installVoiceSharingGateLoss(
             collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,

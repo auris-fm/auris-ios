@@ -99,7 +99,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             guard let consumed = consumedBatch(forRequestID: existing, account: account, epoch: epoch)
             else { return existing } // no proof of exhaustion: replay this identity
             log("capture allowance batch \(consumed) is exhausted in the durable ledger; advancing")
-            discardRequestID(account: account, epoch: epoch)
+            discardRequestIDLocked(account: account, epoch: epoch)
             clearInstallation()
         }
         let url = fileURL(account: account, epoch: epoch)
@@ -245,6 +245,36 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     }
 
     private func discardRequestID(account: String, epoch: String) {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        try? FileManager.default.removeItem(at: fileURL(account: account, epoch: epoch))
+        try? FileManager.default.removeItem(at: bindingURL(account: account, epoch: epoch))
+    }
+
+    /// Discards only when the persisted identity is still the one the response answered. A stale
+    /// response for a superseded identity is ignored: something newer already decided this account's
+    /// identity, and the server's verdict on the old request no longer describes what is on disk.
+    private func discardRequestID(ifCurrent requestID: String, account: String, epoch: String) {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        guard existingRequestID(account: account, epoch: epoch) == requestID else {
+            log("capture allowance: ignoring a verdict for a superseded request identity")
+            return
+        }
+        discardRequestIDLocked(account: account, epoch: epoch)
+    }
+
+    /// A verdict for a SUPERSEDED accounting window answers a question nobody is waiting on any more.
+    /// Whatever is installed now belongs to a newer window, so the old verdict must not clear it.
+    private func clearSupersededInstallation(epoch: String) {
+        lock.lock()
+        let installedEpoch = installedResponse?.enrollmentEpoch
+        lock.unlock()
+        guard installedEpoch == nil || installedEpoch == epoch else { return }
+        clearInstallation()
+    }
+
+    private func discardRequestIDLocked(account: String, epoch: String) {
         try? FileManager.default.removeItem(at: fileURL(account: account, epoch: epoch))
         try? FileManager.default.removeItem(at: bindingURL(account: account, epoch: epoch))
     }
@@ -298,6 +328,8 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             return
         }
         let outcome = await client.perform(request)
+        // The window this response ANSWERS, which for a refusal is the one the request was sent under.
+        let answeredEpoch = epoch
         switch outcome {
         case .accepted(let response):
             guard let verifiedFirstProvisioning = VoiceSharingCaptureProvisioningAuthority(
@@ -351,9 +383,14 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         case .refused(let refusal):
             // Only these two outcomes justify asking for a DIFFERENT batch: the batch has no capacity
             // left, or the server says its accounting window is over. Local expiry is not one of them.
+            // The discard is checked against the identity THIS response answered, under the identity
+            // lock. A delayed `410` for a request sent before a replacement was minted must not delete
+            // that replacement: two outstanding requests can both answer 410 around one advance, and an
+            // unconditional discard would delete the ID the advance just created and mint a third.
             if refusal.mintsNewAllocation {
-                discardRequestID(account: account, epoch: epoch)
+                discardRequestID(ifCurrent: requestID, account: account, epoch: epoch)
             }
+            clearSupersededInstallation(epoch: answeredEpoch)
             log("capture allowance REFUSED: \(refusal)")
         case .unavailable:
             // Unreachable server proves nothing about the batch; the identity is kept.
