@@ -1,0 +1,28 @@
+FIRST ATTEMPT — DIAGNOSTIC PROTOCOL (agreed before the attempt, not after)
+Decision: option 1 — build stays frozen at bb72d3c4c; the 6-line allowance-logging fix is
+deferred until after the first attempt. Basis (cloud, bcd03ab7): the request id only has to
+exist on ONE half. Server instrumentation timestamps+ids every account-route line, so
+correlation = server (timestamp, outcome) x client (provisioner outcome, time-to-the-second).
+An id in the client log would help on attempts 2..N, not on the first.
+
+WHAT WILL BE RECORDED, in this format, verbatim
+  1. Every [VoiceSharing] line with wall-clock time TO THE SECOND, unsummarised.
+  2. For each line: the emitter, and whether it can ONLY come from the app process.
+     The debug_log is shared with the test host, so an unqualified line is not evidence.
+  3. Screen state at the attempt and at any failure, word for word.
+  4. Whether a provision was attempted at all.
+
+THE ONE DISTINCTION I CAN MAKE WITHOUT THE SERVER
+  `provision skipped: <reason>`  -> no request was sent (client-side fact)
+  an outcome line (`installed:`, `REFUSED:`, `unavailable`) -> a request WAS sent
+  This separates "never left the device" from "left and was refused" without any id.
+
+EXPECTED ORDERING, to be named not assumed
+  cloud projects: token acquisition (/api/v1/auth/token) -> allowance -> capture.
+  If the first account-route request is an ALLOWANCE request rather than a TOKEN request,
+  that is either an already-usable token or a skipped step. Different findings; report which.
+
+KNOWN LIMIT, stated in advance
+  If the failure is BEFORE the route (wrong host, TLS, no token), nothing arrives, no id
+  exists on either side, and client evidence is the whole of it. An id would not have helped.
+  This is the bucket where the 6-line fix buys least, which is why it is deferred.
