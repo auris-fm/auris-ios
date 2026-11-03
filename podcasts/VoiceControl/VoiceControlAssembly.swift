@@ -247,10 +247,24 @@ class VoiceControlAssembly {
                     conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
             })
         let allowanceRoot = queueRoot.deletingLastPathComponent().appendingPathComponent("CaptureUsage", isDirectory: true)
+        // CONNECTED CAPTURE ENTRY (scope correction 2026-11-03): the collector's admission
+        // authority comes from ONE real allowance request provisioned after the policy gate
+        // installs. Memory-only; absent a valid installed response admission fails closed.
+        let allowanceProvisioner = VoiceSharingCaptureAllowanceProvisioner(
+            client: VoiceSharingCaptureAllowanceClient(tokenProvider: CloudTokenProviderRouter.provider()),
+            accountProvider: { ServerSettings.userId },
+            enrollmentEpochProvider: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
+            stampProvider: {
+                guard let session = VoiceSharingSessionGeneration.shared.currentGeneration(),
+                      let epoch = VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch else { return nil }
+                return VoiceSharingCaptureStamp(
+                    session: session,
+                    epoch: epoch,
+                    policyGeneration: VoiceSharingCoordinator.shared.policy.currentLeaseGeneration)
+            })
         let captureAllowance = VoiceSharingCaptureAllowance(
             ledger: VoiceSharingCaptureLedger(root: allowanceRoot),
-            // Activation has no approved daily limits/ceilings or trustworthy window authority yet.
-            currentAuthorization: { nil })
+            currentAuthorization: { allowanceProvisioner.currentAuthorization() })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             captureAllowance: captureAllowance,
@@ -282,7 +296,13 @@ class VoiceControlAssembly {
         // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
         // recovery event nor an expiring lease — run one named exchange now so the policy
         // lease installs at launch. Failure reports through the exchange's own path.
-        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared)
+        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { [weak allowanceProvisioner] installed in
+            // The gate installed: fetch the REAL capture allowance now so a consented
+            // capture admits against a server-issued batch. Failure is surfaced by the
+            // provisioner itself; capture stays closed either way.
+            guard installed else { return }
+            Task { await allowanceProvisioner?.provision() }
+        }
         installVoiceSharingGateLoss(
             collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
             queue: contributionQueue, coordinator: .shared)
