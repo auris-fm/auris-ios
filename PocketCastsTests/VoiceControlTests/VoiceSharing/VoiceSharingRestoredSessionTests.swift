@@ -615,6 +615,59 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         XCTAssertEqual(coordinator.settledAccountIdentityForTesting, "account-A")
     }
 
+    /// (d) reviewer on the Android lane (70d0801b) / @cloud: **a predicate used to decide whether
+    /// there is anything to do must not perform the work it is supposed to gate.** Their form was a
+    /// readiness check that called the full credential supplier, which can refresh over HTTP behind
+    /// a shut gate - so a "closed" gate still acquired credentials, and the control saw only the
+    /// returned Boolean.
+    ///
+    /// A predicate has TWO properties, value and cost. Controls are almost always written against
+    /// the value, so this one counts the COST: how many times settlement consults the owner, and
+    /// how many times consulting it would have meant acquiring something.
+    ///
+    /// On this lane the providers read Keychain and in-memory state only, so the expected counts
+    /// are "as many reads as calls, zero acquisitions". The count is the assertion - if a future
+    /// change moves credential acquisition inside the predicate, the acquisition count rises and
+    /// this fails even though the returned value is unchanged.
+    func test_readinessPredicate_costsReadsNotAcquisitions() {
+        let coordinator = makeCoordinator()
+        let ownerReads = Cell(0)
+        let storedReads = Cell(0)
+        let acquisitions = Cell(0)
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+
+        // Unresolved: every call consults the owner twice (committed, then present) and must
+        // acquire nothing. A credential acquisition here is the defect, not a slow path.
+        coordinator.ownerAccountIdentityProvider = { ownerReads.mutate { $0 += 1 }; return nil }
+        coordinator.ownerCredentialIsPresent = { true }
+        // The acquisition seam stands in for the credential supplier. If the predicate ever
+        // consults it, that is the defect, and this counter sees it.
+        coordinator.credentialAcquisitionForTesting = { acquisitions.mutate { $0 += 1 } }
+        coordinator.storedCredentialIdentityProvider = { storedReads.mutate { $0 += 1 }; return nil }
+
+        for _ in 0..<20 { coordinator.settleFromOwnerReadiness() }
+
+        XCTAssertEqual(ownerReads.value, 20,
+                       "20 unresolved settles consult the owner exactly once each")
+        XCTAssertEqual(storedReads.value, 20,
+                       "and consult the stored credential exactly once each while unnameable")
+        XCTAssertEqual(acquisitions.value, 0,
+                       "CONSULTING READINESS MUST ACQUIRE NOTHING - this count is the control")
+        XCTAssertEqual(settlements.value, 0,
+                       "still no settlement while unresolved")
+
+        // Readiness changes: one settlement, and the cost profile is unchanged - resolving does not
+        // become an excuse for extra consultations.
+        coordinator.storedCredentialIdentityProvider = { storedReads.mutate { $0 += 1 }; return "account-A" }
+        for _ in 0..<20 { coordinator.settleFromOwnerReadiness() }
+        XCTAssertEqual(settlements.value, 1, "exactly one settlement across the transition")
+        XCTAssertEqual(acquisitions.value, 0,
+                       "resolving must not acquire either; acquisition belongs to the permitted attempt")
+        XCTAssertLessThanOrEqual(storedReads.value, 41,
+                                 "call cost stays proportional to calls, not to attempts")
+    }
+
     /// (b) The poll must survive past the old 20-attempt bound: a session that restores late is
     /// otherwise permanently unsettled. Bound the run by cancelling through the invalidate
     /// closure, which is also what production teardown does.
