@@ -180,6 +180,14 @@ struct VoiceSharingCaptureAllowanceClient {
         case retiredEnrollment     // 403
         case serverUnavailable     // 503
         case other(Int)
+
+        /// Only a genuinely EXHAUSTED batch or a SERVER-CONFIRMED expired accounting window justifies
+        /// asking for a new allocation. A restart, a local freshness expiry or a transport failure
+        /// never does: the identity is replayed and the server resolves the same persisted batch.
+        /// Only the SERVER's own confirmation that the accounting window is over justifies asking for a
+        /// different batch. Exhaustion is deliberately absent: an exhausted batch is still this device's
+        /// batch, and minting a new request for it would buy capacity the day's budget does not have.
+        var mintsNewAllocation: Bool { self == .windowExpired }
     }
 
     /// Sends one request, capturing the monotonic request-start BEFORE any work. The response

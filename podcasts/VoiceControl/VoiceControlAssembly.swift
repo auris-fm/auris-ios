@@ -250,6 +250,7 @@ class VoiceControlAssembly {
         // CONNECTED CAPTURE ENTRY (scope correction 2026-11-03): the collector's admission
         // authority comes from ONE real allowance request provisioned after the policy gate
         // installs. Memory-only; absent a valid installed response admission fails closed.
+        let captureLedger = VoiceSharingCaptureLedger(root: allowanceRoot)
         let allowanceProvisioner = VoiceSharingCaptureAllowanceProvisioner(
             client: VoiceSharingCaptureAllowanceClient(tokenProvider: CloudTokenProviderRouter.provider()),
             accountProvider: { ServerSettings.userId },
@@ -261,9 +262,12 @@ class VoiceControlAssembly {
                     session: session,
                     epoch: epoch,
                     policyGeneration: VoiceSharingCoordinator.shared.policy.currentLeaseGeneration)
-            })
+            },
+            ledger: captureLedger,
+            requestIdentityRoot: allowanceRoot.deletingLastPathComponent()
+                .appendingPathComponent("CaptureRequests", isDirectory: true))
         let captureAllowance = VoiceSharingCaptureAllowance(
-            ledger: VoiceSharingCaptureLedger(root: allowanceRoot),
+            ledger: captureLedger,
             currentAuthorization: { allowanceProvisioner.currentAuthorization() })
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
