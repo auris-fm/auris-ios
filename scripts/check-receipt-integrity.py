@@ -28,7 +28,13 @@ for path in sorted(glob.glob("evidence/*.txt")):
         problems.append(f"{path}: missing trailing newline")
 
     for n, line in enumerate(text.splitlines(), 1):
-        if re.search(r"\(\s*\)", line) and "(" in line:
+        # Distinguish TWO different things that both contain '()':
+        #   an identifier call, e.g. `ServerSettings.committedAccountIdentity()` - legitimate;
+        #   a DROPPED phrase, which leaves '()' standing alone at a sentence boundary, i.e.
+        #   preceded by whitespace/line-start rather than by an identifier character.
+        # An earlier version excluded any line containing an identifier call, which silenced
+        # real drops on those same lines - detection got weaker to remove a false positive.
+        for dropped in re.finditer(r"(?<![A-Za-z0-9_.:`])\(\s*\)", line):
             problems.append(f"{path}:{n}: empty parentheses - a phrase was dropped")
         if re.search(r"(^|\s),\s*,", line):
             problems.append(f"{path}:{n}: doubled comma - a phrase was dropped")
