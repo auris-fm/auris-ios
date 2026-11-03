@@ -109,6 +109,34 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         VoiceSharingFirebaseApp.refreshPolicy { _ in expectation.fulfill() }
         waitForExpectations(timeout: 10)
     }
+
+    /// PRODUCTION ENTRY control (reviewer 45479ac1): the connected identity-recovery
+    /// path runs the named fetch→activate and the outcome is observable. Deleting the
+    /// `connectIdentityRecoveryRefresh()` call in the assembly removes the production
+    /// connection; this control exercises that exact connected closure.
+    func test_identityRecoveryRefreshRunsTheNamedFetchActivatePath() {
+        VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+        let coordinator = VoiceSharingCoordinator.shared
+        VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh(coordinator: coordinator)
+        XCTAssertNotNil(coordinator.initiateIdentityRecoveryRefresh,
+                        "the production connection must install the refresh closure")
+        let expectation = expectation(description: "identity-recovery refresh completes")
+        // The connected closure uses expiration 0 and records its outcome. Poll: a
+        // real fetch can take several seconds on a live project.
+        coordinator.initiateIdentityRecoveryRefresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { expectation.fulfill() }
+        let outcome = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            VoiceSharingFirebaseApp.lastPolicyRefreshOutcome != nil
+        }, object: self)
+        wait(for: [expectation, outcome], timeout: 30)
+        if VoiceSharingFirebaseApp.existing() == nil {
+            XCTAssertEqual(VoiceSharingFirebaseApp.lastPolicyRefreshOutcome, false,
+                           "absent authority must report a failed refresh, not silence")
+        } else {
+            XCTAssertNotNil(VoiceSharingFirebaseApp.lastPolicyRefreshOutcome,
+                            "the named fetch→activate path must report its outcome")
+        }
+    }
 }
 
 private enum TestSupport {

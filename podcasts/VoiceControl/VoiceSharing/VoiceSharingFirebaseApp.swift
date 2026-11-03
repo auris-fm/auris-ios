@@ -47,6 +47,7 @@ enum VoiceSharingFirebaseApp {
                               completion: ((Bool) -> Void)? = nil) {
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy refresh skipped: secondary app absent")
+            lastPolicyRefreshOutcome = false
             completion?(false)
             return
         }
@@ -54,6 +55,7 @@ enum VoiceSharingFirebaseApp {
         config.fetch(withExpirationDuration: expiration) { status, error in
             if let error {
                 FileLog.shared.addMessage("[VoiceSharing] policy fetch failed: \(error.localizedDescription)")
+                lastPolicyRefreshOutcome = false
                 completion?(false)
                 return
             }
@@ -61,7 +63,26 @@ enum VoiceSharingFirebaseApp {
                 if let error {
                     FileLog.shared.addMessage("[VoiceSharing] policy activate failed: \(error.localizedDescription)")
                 }
+                lastPolicyRefreshOutcome = activated
                 completion?(activated)
+            }
+        }
+    }
+
+    /// Observable outcome of the last completed named fetch→activate (test seam).
+    static var lastPolicyRefreshOutcome: Bool?
+
+    /// PRODUCTION ENTRY (reviewer 45479ac1): connects the coordinator's identity-
+    /// recovery refresh to the NAMED fetch→activate→value path. The default-app
+    /// refresh remains the caller's separate concern. Called from the assembly
+    /// where Firebase is configured; the recorded outcome makes the connection
+    /// observable end to end.
+    static func connectIdentityRecoveryRefresh(coordinator: VoiceSharingCoordinator = .shared) {
+        coordinator.initiateIdentityRecoveryRefresh = {
+            refreshPolicy(expiration: 0) { activated in
+                if !activated {
+                    FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
+                }
             }
         }
     }

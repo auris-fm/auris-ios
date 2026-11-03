@@ -275,6 +275,10 @@ class VoiceControlAssembly {
         VoiceSharingCoordinator.shared.initiateIdentityRecoveryRefresh = {
             FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
         }
+        // ACTIVATION SLICE (reviewer 45479ac1): the named secondary policy refresh is a
+        // PRODUCTION-connected entry — identity recovery runs the named fetch→activate→value
+        // path (with failure reporting); the default-app refresh above stays for its own consumers.
+        VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh()
         installVoiceSharingGateLoss(
             collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
             queue: contributionQueue, coordinator: .shared)
