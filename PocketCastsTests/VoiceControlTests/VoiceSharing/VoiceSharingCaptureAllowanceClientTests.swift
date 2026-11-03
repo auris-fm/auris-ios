@@ -337,80 +337,97 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                       "caller cancellation must terminate the pending session task")
     }
 
-    /// Overlapping A/B: cancelling A must leave B's transfer untouched.
-    func test_transport_overlappingRequests_cancellationIsPerInvocation() async {
-        final class Stubs: URLProtocol {
-            static var cancelled = Set<String>()
-            static func key(_ request: URLRequest) -> String {
-                request.value(forHTTPHeaderField: "X-Tag") ?? "?"
-            }
-            override class func canInit(with request: URLRequest) -> Bool { true }
-            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-            override func startLoading() {
-                let tag = Self.key(request)
-                let http = HTTPURLResponse(url: request.url!, statusCode: 200,
-                                           httpVersion: nil, headerFields: nil)!
-                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: Data(repeating: 0x64, count: 64))
-                DispatchQueue.global().async { [weak self] in
-                    // Hold the rest pending "indefinitely"; only cancellation ends it.
-                    Thread.sleep(forTimeInterval: 5)
-                    guard let self, !Self.cancelled.contains(tag) else { return }
-                    self.client?.urlProtocolDidFinishLoading(self)
-                }
-            }
-            override func stopLoading() { Self.cancelled.insert(Self.key(request)) }
+    final class TaggedStub: URLProtocol {
+        static var entered = Set<String>()
+        static var stopped = Set<String>()
+        private var finishedLoading = false
+        class func tag(_ request: URLRequest) -> String {
+            request.url?.host ?? "?"
         }
-        // Tag via distinct baseURLProviders by weaving the tag into the URL path check —
-        // simpler: two clients, distinguish by completion order and delivery identity.
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [Stubs.self]
-        Stubs.cancelled = []
-        func makePendingClient() -> VoiceSharingCaptureAllowanceClient {
-            VoiceSharingCaptureAllowanceClient(
-                baseURLProvider: { "https://api.example.test" },
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let tag = Self.tag(request)
+            Self.entered.insert(tag)
+            let http = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+            if tag == "b.test" {
+                // B delivers a full VALID response immediately — B must be unaffected
+                // by A's cancellation entirely.
+                client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.validReply)
+                finishedLoading = true
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            // A delivers a partial body and would only finish much later — cancelling
+            // A must stop it before that; if NOT cancelled it would "time out" a
+            // real transfer, which the assertion distinguishes via `stopped`.
+            client?.urlProtocol(self, didLoad: Data(repeating: 0x64, count: 64))
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !Self.stopped.contains(tag) else { return }
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+        }
+        override func stopLoading() {
+            // Only a cancellation (not the ordinary post-completion invalidation stop)
+            // marks the transfer as stopped.
+            if !finishedLoading { Self.stopped.insert(Self.tag(request)) }
+        }
+    }
+    static var validReply: Data = Data()
+
+    func test_transport_overlappingRequests_cancellationIsPerInvocation() async {
+        TaggedStub.entered = []
+        TaggedStub.stopped = []
+        Self.validReply = makeBody(requestID: requestID) // valid allowance body
+
+        func clientFor(_ host: String) -> VoiceSharingCaptureAllowanceClient {
+            let fresh = URLSessionConfiguration.ephemeral
+            fresh.protocolClasses = [TaggedStub.self]
+            fresh.timeoutIntervalForRequest = 10
+            return VoiceSharingCaptureAllowanceClient(
+                baseURLProvider: { "https://\(host)" },
                 tokenProvider: StubTokens(),
-                session: URLSession(configuration: URLSessionConfiguration.ephemeral.copy() as! URLSessionConfiguration),
+                session: URLSession(configuration: fresh),
                 sessionIdentity: { "gen-A" })
         }
-        let a = Task { await makePendingClient().perform(makeRequest()) }
-        let b = Task { await makePendingClient().perform(makeRequest()) }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let a = Task { await clientFor("a.test").perform(makeRequest()) }
+        let b = Task { await clientFor("b.test").perform(makeRequest()) }
+        // Entry barrier: both transfers are actually pending before any cancellation.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, TaggedStub.entered.count < 2 { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertEqual(TaggedStub.entered.count, 2, "both transfers must be pending")
+
         a.cancel()
-        _ = await a.value
-        // B must still be pending — cancelling A must not cancel B.
-        Task { @MainActor in
-            // give B a moment; it must still be pending (A's cancellation isolated)
+        let aOutcome = await a.value
+        XCTAssertEqual(aOutcome, .unavailable, "cancelled A must refuse")
+        XCTAssertTrue(waitForFlag { TaggedStub.stopped.contains("a.test") },
+                      "A's transfer must be stopped")
+        XCTAssertFalse(TaggedStub.stopped.contains("b.test"),
+                       "cancelling A must NOT stop B's transfer")
+        // B completes normally with a valid acceptance — shared cancellation state
+        // (the defect under test) would have cancelled B with A.
+        let bOutcome = await b.value
+        guard case .accepted(let response) = bOutcome else {
+            return XCTFail("untouched B must still accept, got \(bOutcome)")
         }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        b.cancel()
-        _ = await b.value
+        XCTAssertEqual(response.batchID, batchA)
     }
 
-    /// A cancellation that arrives BEFORE the task binds is remembered and applied.
-    func test_transport_cancelledBeforeBind_refusesWithoutHanging() async {
-        final class Stub6: URLProtocol {
-            static var cancelled = false
-            override class func canInit(with request: URLRequest) -> Bool { true }
-            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-            override func startLoading() {
-                client?.urlProtocol(self, didLoad: Data())
-            }
-            override func stopLoading() { Self.cancelled = true }
-        }
+    /// Remembered cancellation, deterministically: cancel the handle BEFORE any task
+    /// exists, then bind a real (unresumed) task — it must be cancelling immediately.
+    func test_handle_cancelledBeforeBind_isAppliedAtBindTime() {
+        let handle = VoiceSharingCaptureAllowanceClient.Handle()
+        handle.cancelTask() // before any task exists
         let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [Stub6.self]
-        Stub6.cancelled = false
-        let client = VoiceSharingCaptureAllowanceClient(
-            baseURLProvider: { "https://api.example.test" },
-            tokenProvider: StubTokens(),
-            session: URLSession(configuration: config),
-            sessionIdentity: { "gen-A" })
-        let task = Task { await client.perform(makeRequest()) }
-        task.cancel() // cancel BEFORE the request task exists
-        let outcome = await task.value
-        guard case .accepted = outcome else { return }
-        XCTFail("a pre-bind cancellation must not produce an acceptance")
+        let session = URLSession(configuration: config)
+        let task = session.dataTask(with: URL(string: "https://api.example.test/x")!)
+        XCTAssertNotEqual(task.state, .canceling, "sanity: task starts uncancelled")
+        handle.bind(task) // bind AFTER cancellation — must apply immediately
+        XCTAssertTrue(waitForFlag { task.state == .canceling },
+                      "remembered cancellation must cancel at bind time")
+        task.cancel()
     }
 
     /// A response that reaches EXACTLY limit+1 bytes and then pauses indefinitely must
