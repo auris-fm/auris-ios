@@ -474,9 +474,25 @@ final class VoiceSharingCoordinator {
     /// "true" — and the switch could never turn on at all. The faithful signals are the payload bytes
     /// plus the source.
     private static func readSDKValue() -> RemoteValueSource {
+        // Named secondary app FIRST (activation slice): when the Voice Sharing
+        // Firebase app exists, its config is the policy source; otherwise the
+        // default-app read is preserved byte-for-byte (and nil apps still yield
+        // the local default).
+        if let named = VoiceSharingFirebaseApp.existing() {
+            let value = RemoteConfig.remoteConfig(app: named)
+                .configValue(forKey: Constants.RemoteParams.voiceSharingEnabled)
+            return RemoteValueSource(data: value.dataValue as Data, sourceIsRemote: value.source == .remote)
+        }
         guard FirebaseApp.app() != nil else { return RemoteValueSource(data: nil, sourceIsRemote: false) }
         let value = RemoteConfig.remoteConfig().configValue(forKey: Constants.RemoteParams.voiceSharingEnabled)
         return RemoteValueSource(data: value.dataValue as Data, sourceIsRemote: value.source == .remote)
+    }
+
+    /// The FirebaseApp the policy flag reads through: the named secondary app when
+    /// configured, else the default app (nil before any Firebase exists). Exposed
+    /// for the activation-slice routing control.
+    static func policyFirebaseApp() -> FirebaseApp? {
+        VoiceSharingFirebaseApp.existing() ?? FirebaseApp.app()
     }
 }
 
