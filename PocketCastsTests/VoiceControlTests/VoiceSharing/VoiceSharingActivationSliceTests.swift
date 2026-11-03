@@ -68,6 +68,8 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
     /// A missing or invalid config degrades to nil — honest unavailability, never
     /// a launch crash (mirrors the AppDelegate stub-guard).
     func test_missingOrInvalidPlistYieldsNilWithoutCrash() {
+        // Test isolation: remove any named app a prior control in this suite configured.
+        VoiceSharingFirebaseApp.existing()?.delete { _ in }
         XCTAssertNil(VoiceSharingFirebaseApp.configure(plistPath: "/nonexistent/plist.plist"))
         let junk = TestSupport.makeJunkFile()
         defer { try? FileManager.default.removeItem(atPath: junk) }
@@ -200,21 +202,89 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         }
     }
 
-    /// Launch + normal lease renewal use the same connected exchange: both entries
-    /// are installed by connectIdentityRecoveryRefresh and drive performPolicyExchange.
-    func test_productionEntriesAreConnectedToTheNamedExchange() {
-        withCoordinator { coordinator in
-            XCTAssertNotNil(coordinator.initiateIdentityRecoveryRefresh)
-            XCTAssertNotNil(coordinator.leaseRenewalAfterExpiry)
-            // Firing the renewal entry on an absent/any authority completes and
-            // reports through the same outcome seam.
-            VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
-            let outcome = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                VoiceSharingFirebaseApp.lastPolicyRefreshOutcome != nil
-            }, object: self)
-            coordinator.leaseRenewalAfterExpiry()
-            wait(for: [outcome], timeout: 30)
+    /// POSITIVE INSTALL CONTROL (reviewer 0c3168fe): a fully stubbed exchange — fetch
+    /// success, activate success, freshness advanced, an authoritative enrolled
+    /// projection, the switch value enabled — MUST install the policy lease through
+    /// the settlement call. Removing the settlement (membership never applies, no
+    /// lease) makes this control fail. No live-network claim is made.
+    func test_exchangeWithAuthoritativeEnrollmentInstallsTheLease() async throws {
+        let store = VoiceSharingEnrollmentStore(
+            sessionIdentityProvider: { "gen-A" })
+        store.setLocalOptIn(true)
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            lastFetchTime: { nil },
+            valueSource: { VoiceSharingCoordinator.RemoteValueSource(
+                data: Data("true".utf8), sourceIsRemote: true) },
+            enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in }
+        coordinator.policy.identityBecameReadable()
+
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: [
+                "schema_version": 1,
+                "membership_revision": "r1",
+                "plan": "pro",
+                "voice_sharing_enrolled": true,
+                "withdrawal_state": "active",
+                "enrollment_epoch": "e1" as Any,
+                "accepted_disclosure_version": "voice-sharing-v1" as Any,
+            ])
+        defer { VoiceSharingStubProtocol.replies.removeAll() }
+
+        let firApp = try XCTUnwrap(
+            VoiceSharingFirebaseApp.configure(plistPath: TestSupport.makeVoiceSharingPlist()))
+        let advanced = LockedFlag()
+        let originalFreshness = coordinator.lastFetchTimeProvider
+        coordinator.lastFetchTimeProvider = { advanced.value ? Date() : nil }
+        defer { coordinator.lastFetchTimeProvider = originalFreshness }
+        VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                advanced.set(true)
+                handler(.success, nil as Error?)
+            }
         }
+        VoiceSharingFirebaseApp.policyActivateActor = { handler in handler(true, nil) }
+        defer {
+            VoiceSharingFirebaseApp.policyFetchActor = nil
+            VoiceSharingFirebaseApp.policyActivateActor = nil
+            VoiceSharingFirebaseApp.existing()?.delete { _ in }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        let session = URLSession(configuration: config)
+        let client = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: session,
+            sessionIdentity: { "gen-A" },
+            membershipStore: store)
+
+        let settled = expectation(description: "exchange settles")
+        VoiceSharingFirebaseApp.performPolicyExchange(
+            coordinator: coordinator, accountClient: client) { fresh in
+                XCTAssertTrue(fresh, "a fully-stubbed successful exchange must report install")
+                settled.fulfill()
+        }
+        await fulfillment(of: [settled], timeout: 10)
+        XCTAssertTrue(store.currentEffectiveEnrolled,
+                      "authoritative membership must have applied through the settlement")
+
+        // FIRST settlement applies a CHANGED membership, so by contract it schedules a
+        // follow-up exchange rather than installing on its own lookup. The follow-up is
+        // the second run of the SAME exchange; it now sees unchanged membership and is
+        // the run that installs the lease.
+        let followUp = expectation(description: "follow-up exchange settles")
+        VoiceSharingFirebaseApp.performPolicyExchange(
+            coordinator: coordinator, accountClient: client) { fresh in
+                XCTAssertTrue(fresh)
+                followUp.fulfill()
+        }
+        await fulfillment(of: [followUp], timeout: 10)
+
+        XCTAssertTrue(coordinator.policy.permitsCollection,
+                      "enabled switch + enrolled account + fresh lease ⇒ collection permitted")
     }
 
     /// PRODUCTION ENTRY control (reviewer 45479ac1): the connected identity-recovery
@@ -253,6 +323,13 @@ private final class LockedFlag {
     var value: Bool { lock.lock(); defer { lock.unlock() }; return stored }
     func set(_ newValue: Bool) { lock.lock(); stored = newValue; lock.unlock() }
     init(value: Bool = false) { stored = value }
+}
+
+/// Trust-on-first-use stub credential, mirroring AccountClientTests' provider.
+private final class StubTokens: CloudTokenProviding {
+    func token() async -> String? { "test-bearer" }
+    func prepare() async {}
+    func handleUnauthorized(rejectedToken: String?) async {}
 }
 
 private enum TestSupport {

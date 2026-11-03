@@ -279,6 +279,10 @@ class VoiceControlAssembly {
         // PRODUCTION-connected entry — identity recovery runs the named fetch→activate→value
         // path (with failure reporting); the default-app refresh above stays for its own consumers.
         VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh()
+        // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
+        // recovery event nor an expiring lease — run one named exchange now so the policy
+        // lease installs at launch. Failure reports through the exchange's own path.
+        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared)
         installVoiceSharingGateLoss(
             collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
             queue: contributionQueue, coordinator: .shared)
