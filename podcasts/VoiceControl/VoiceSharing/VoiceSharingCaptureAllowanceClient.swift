@@ -236,6 +236,7 @@ struct VoiceSharingCaptureAllowanceClient {
         private var task: URLSessionTask?
         private var cancelled = false
         func cancelTask() {
+            print("DBGHANDLE cancelTask", ObjectIdentifier(self))
             lock.lock(); cancelled = true
             let task = self.task
             lock.unlock()
@@ -260,7 +261,9 @@ struct VoiceSharingCaptureAllowanceClient {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, HTTPURLResponse, Bool), Error>) in
                 let delegate = Delegate(limit: limit, continuation: continuation, handle: handle)
                 let delegateSession = URLSession(configuration: session.configuration, delegate: delegate, delegateQueue: OperationQueue())
+                print("DBGSESSION create", ObjectIdentifier(delegateSession))
                 let task = delegateSession.dataTask(with: request)
+                print("DBGBIND", request.url?.host ?? "?", ObjectIdentifier(task))
                 delegate.bind(task: task, session: delegateSession)
                 task.resume()
             }
@@ -286,6 +289,7 @@ struct VoiceSharingCaptureAllowanceClient {
         }
 
         func bind(task: URLSessionTask, session: URLSession) {
+            print("DBGDELEGATE bind", task.currentRequest?.url?.host ?? "?", ObjectIdentifier(self))
             self.task = task
             self.owningSession = session
             handle.bind(task)
@@ -299,13 +303,14 @@ struct VoiceSharingCaptureAllowanceClient {
             if !finished { finished = true }
             resumeLock.unlock()
             let session = owningSession
+            print("DBGSETTLE", (response?.url?.host ?? "?"), "finished:", finished, ObjectIdentifier(session ?? URLSession()), "delegate:", ObjectIdentifier(self), "cont-nil:", continuation == nil)
             task = nil
             session?.finishTasksAndInvalidate()
             owningSession = nil
             guard let continuation else { return }
             switch result {
             case .success(let value): continuation.resume(returning: value)
-            case .failure(let error): continuation.resume(throwing: error)
+            case .failure(let error): print("DBGFAIL", error); continuation.resume(throwing: error)
             }
         }
 
