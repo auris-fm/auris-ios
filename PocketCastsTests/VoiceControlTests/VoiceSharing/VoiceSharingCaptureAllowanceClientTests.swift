@@ -123,6 +123,23 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
 
     // MARK: Transport
 
+    /// A transport that only COUNTS, for the missing-origin controls: a request built without an
+    /// origin must never reach it, and a configured origin must reach exactly one real route.
+    final class CountingTransport: URLProtocol {
+        static var seen: [URLRequest] = []
+        static func reset() { seen = [] }
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            Self.seen.append(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("{}".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
     private func stubbedClient(replies: @escaping (URLRequest) -> (Int, Data),
                                monotonicNowMS: @escaping () -> Int = { 0 }) -> VoiceSharingCaptureAllowanceClient {
         final class Stub: URLProtocol {
@@ -213,6 +230,73 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                        "no caller-supplied capacity, identity, day or object keys")
         XCTAssertEqual(object["request_id"] as? String, requestID)
         XCTAssertEqual(object["enrollment_epoch"] as? String, "epoch-1")
+    }
+
+    /// MISSING ORIGIN, observed at the TRANSPORT (spec's open item; @cloud: a request that never
+    /// leaves the device is invisible server-side, so the check has to watch the client).
+    ///
+    /// Two failing shapes are controlled here, and both are the kind that would look fine from a
+    /// server log:
+    ///  * a missing origin that still DIALS something (an empty base + path is a relative URL that
+    ///    URLSession can resolve against nothing, or worse, against a stale host);
+    ///  * a missing origin that reports the same outcome as a transport failure, so the caller cannot
+    ///    tell "never asked" from "asked and failed" — those have different retry rules.
+    func test_missingOrigin_isRefusedBeforeTheTransportIsTouched() async {
+        CountingTransport.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingTransport.self]
+        let session = URLSession(configuration: config)
+        for origin in ["", "   ", "not a url"] {
+            let client = VoiceSharingCaptureAllowanceClient(
+                baseURLProvider: { origin },
+                tokenProvider: StubTokens(),
+                session: session,
+                sessionIdentity: { "gen-A" })
+            let outcome = await client.perform(makeRequest())
+            XCTAssertEqual(outcome, .unavailable,
+                           "origin [\(origin)] has nowhere to dial: the outcome must be unavailability")
+        }
+        XCTAssertTrue(CountingTransport.seen.isEmpty,
+                      "no origin means NO request is issued - asserted at the transport, not from a body")
+    }
+
+    /// The rule is shared, so one control covers every sharing route that builds a URL from the
+    /// configured origin: the allowance client, the account client and the upload transport.
+    /// Each of the three previously concatenated the origin and accepted whatever `URL` returned.
+    func test_sharedOriginRule_refusesEverySharingRouteWithoutADialableOrigin() {
+        for path in ["/api/v1/account/voice-sharing/capture-allowance",
+                     "/api/v1/account/voice-sharing",
+                     "/api/v1/account/voice-sharing/utterances"] {
+            XCTAssertNil(VoiceSharingOrigin.url(origin: "", path: path), "no origin ⇒ no URL")
+            XCTAssertNil(VoiceSharingOrigin.url(origin: "  ", path: path), "blank origin ⇒ no URL")
+            XCTAssertNil(VoiceSharingOrigin.url(origin: "api.example.test", path: path),
+                         "a host without a scheme is not dialable")
+            XCTAssertNil(VoiceSharingOrigin.url(origin: "ftp://api.example.test", path: path),
+                         "only http(s) is a sharing origin")
+            XCTAssertEqual(VoiceSharingOrigin.url(origin: "https://api.example.test", path: path)?.absoluteString,
+                           "https://api.example.test" + path, "a real origin resolves the real path")
+            XCTAssertEqual(VoiceSharingOrigin.url(origin: " https://api.example.test ", path: path)?.absoluteString,
+                           "https://api.example.test" + path, "surrounding whitespace is not part of the origin")
+        }
+    }
+
+    /// The positive half of the same control: a configured origin DOES reach the transport, so the
+    /// assertion above cannot pass merely because this client never dials anything.
+    func test_configuredOrigin_reachesTheTransport() async {
+        CountingTransport.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingTransport.self]
+        let session = URLSession(configuration: config)
+        let client = VoiceSharingCaptureAllowanceClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: session,
+            sessionIdentity: { "gen-A" })
+        _ = await client.perform(makeRequest())
+        XCTAssertEqual(CountingTransport.seen.count, 1, "a configured origin issues exactly one request")
+        XCTAssertEqual(CountingTransport.seen.first?.url?.absoluteString,
+                       "https://api.example.test/api/v1/account/voice-sharing/capture-allowance",
+                       "and it is the real route, not a placeholder")
     }
 
     func test_transport_refusals_classify() async {

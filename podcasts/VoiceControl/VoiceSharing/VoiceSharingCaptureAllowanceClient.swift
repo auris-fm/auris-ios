@@ -196,7 +196,13 @@ struct VoiceSharingCaptureAllowanceClient {
     func perform(_ request: VoiceSharingCaptureAllowanceRequest) async -> Outcome {
         guard let identity = sessionIdentity() else { return .unavailable }
         guard let body = request.body else { return .unavailable }
-        guard let url = URL(string: baseURLProvider() + Self.path) else { return .unavailable }
+        // NO ORIGIN, NO REQUEST. `URL(string: "" + path)` succeeds as a RELATIVE url, so a bare
+        // concatenation would hand the transport something with nowhere to go and let the caller
+        // see an ordinary transport failure. Measured: that request is issued and answered, which
+        // makes "never asked" indistinguishable from "asked and failed" - two different retry rules.
+        guard let url = VoiceSharingOrigin.url(origin: baseURLProvider(), path: Self.path) else {
+            return .unavailable
+        }
         let start = monotonicNowMS()
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
