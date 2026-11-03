@@ -42,3 +42,31 @@ CORRECTION (spec a91a907e) — A TIMESTAMP/OUTCOME MATCH IS A CANDIDATE, NOT AN 
   candidate into an identification is to inspect origin logs against the client's
   attempt, which spec has offered and which needs no build change from me.
   Everything else in this protocol stands; this bounds what the evidence will support.
+
+SCOPE RULE FOR SEAMED RECEIPTS (cloud d7615dbf, adopting reviewer a459dbd5)
+  When a control replaces a production collaborator with a closure or stub, the receipt
+  covers ONLY what the closure still exercises. The stub does not merely stand in for a
+  dependency - it removes a whole downstream domain from the claim. Every receipt written
+  over a seam must say which domain it stopped at.
+
+  Applied to the three receipts this protocol governs:
+    ad14b43e4 (unresolved ticks) - domain stops at LOCAL settlement. The seam
+      `initiateIdentityRecoveryRefresh` is substituted, so transport calls are OUTSIDE
+      the claim. It must never be cited as evidence about request volume.
+    bb5b5ff38 (signed-update persistence) - domain stops at the simulator Keychain with
+      a synthetic credential. Production-credential durability is outside the claim.
+    e7730a5fd (installed build state) - domain stops at static artifact inspection plus
+      one read-only launch. No request was observed; nothing here speaks to the network.
+
+  THE GAP NOBODY CAN CLOSE ALONE (cloud): between a client-side local count and a
+  server-side arrival count there is a domain - "left the device, never arrived" - that
+  neither side can observe. It is closed only by a scope statement plus, where it matters,
+  origin logs; never by either side extrapolating.
+
+STALE-BINARY TRAP (android c48561c1, checked here)
+  Android had a build-system up-to-date skip reported as success. The equivalent hazard on
+  this lane is a red-verification that replays a cached binary instead of rebuilding, which
+  would make a "red" receipt prove nothing. Checked: both unresolved-tick red receipts show
+  ~4829 compile lines and an actual test start, and the gate log starts 9 real test suites.
+  Rule going forward: a red receipt must show compilation of the changed file, or it is not
+  evidence that the defect was present when the test ran.
