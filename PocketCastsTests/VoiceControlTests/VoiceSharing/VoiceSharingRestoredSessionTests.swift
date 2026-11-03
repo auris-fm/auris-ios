@@ -570,6 +570,51 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
                       "so the in-flight operation's answer can still be applied")
     }
 
+    /// (c) reviewer on the Android lane (f77aaa69), applied here as a control rather than an
+    /// argument: a flag set by failure and cleared by consumption is a retry counter wearing the
+    /// name of an event. The question is whether this coordinator's unresolved path re-fires work,
+    /// or merely keeps asking the state.
+    ///
+    /// The distinguishing control is unresolved -> unresolved with ATTEMPTS COUNTED: if repeated
+    /// unresolved ticks each produced a side effect, the side-effect count would climb with the
+    /// tick count. It must not. Only an actual change of state may produce work.
+    func test_repeatedUnresolvedTicks_produceNoWork_untilReadinessActuallyChanges() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        let lifecycles = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+
+        // UNRESOLVED: a signed-in-looking process with no readable credential to present. The
+        // owner holds nothing, so there is no identity to settle under.
+        coordinator.ownerAccountIdentityProvider = { nil }
+        coordinator.ownerCredentialIsPresent = { false }
+        coordinator.storedCredentialIdentityProvider = { nil }
+
+        for _ in 0..<25 { coordinator.settleFromOwnerReadiness() }
+        XCTAssertEqual(settlements.value, 0,
+                       "25 unresolved settles must produce ZERO settlements, not 25 retries")
+        XCTAssertNil(coordinator.settledAccountIdentityForTesting,
+                     "and no identity may be invented from an unresolved state")
+
+        // STILL UNRESOLVED after a change attempt that also resolves nothing: still zero work.
+        coordinator.ownerCredentialIsPresent = { true }
+        coordinator.storedCredentialIdentityProvider = { nil }
+        for _ in 0..<25 { coordinator.settleFromOwnerReadiness() }
+        XCTAssertEqual(settlements.value, 0,
+                       "present-but-unnameable is still unresolved; it must not be consumed as progress")
+
+        // READINESS ACTUALLY CHANGES: now exactly one settlement, and only one, however many more
+        // ticks follow.
+        coordinator.storedCredentialIdentityProvider = { "account-A" }
+        for _ in 0..<25 {
+            coordinator.settleFromOwnerReadiness()
+            lifecycles.mutate { $0 += 1 }
+        }
+        XCTAssertEqual(settlements.value, 1,
+                       "a single change of readiness settles ONCE; repeated ticks do not re-fire it")
+        XCTAssertEqual(coordinator.settledAccountIdentityForTesting, "account-A")
+    }
+
     /// (b) The poll must survive past the old 20-attempt bound: a session that restores late is
     /// otherwise permanently unsettled. Bound the run by cancelling through the invalidate
     /// closure, which is also what production teardown does.
