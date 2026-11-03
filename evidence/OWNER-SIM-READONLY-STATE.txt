@@ -21,16 +21,16 @@ AURIS CONFIGURATION
 SESSION STATE — READ-ONLY, MEASURED AT LAUNCH
   A read-only launch (simctl launch, then relaunch of the existing install) emitted:
     03:06:27  [VoiceSharing] capture allowance provision skipped: no account identity
-  while  is EMPTY and no refresh token is present in that container.
+  while `SJSyncingEmail` is EMPTY and no refresh token is present in that container.
   -> The installed app currently holds NO readable owner credential, so it cannot issue an
      allowance request. This is a signed-out state.
 
 HONEST LIMIT ON THE ABOVE
   The same debug_log also contains lines from my test-host runs on this simulator
-  (), because the test host and the app share the
+  (`identity settled from owner readiness`), because the test host and the app share the
   container. Those lines are NOT evidence about the app's session and must not be read as
   "the app has a settled identity". The line I rely on is the app-launch-only
-  , which fits the empty email field and the absent token.
+  `no account identity`, which fits the empty email field and the absent token.
 
 CONSEQUENCE FOR HANDOFF
   The in-place update itself is compatible and data-preserving (measured separately on a
