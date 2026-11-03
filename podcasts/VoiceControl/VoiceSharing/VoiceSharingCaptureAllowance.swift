@@ -180,7 +180,6 @@ final class VoiceSharingCaptureLedger {
         let account: String
         let binding: String
         let window: String
-        let batch: String
         let incarnation: String
     }
 
@@ -270,7 +269,7 @@ final class VoiceSharingCaptureLedger {
             try synchronize(root, true)
             try barrier(.claimDurable)
             let identity = Identity(schema: 1, account: authority.accountDigest, binding: authority.accountBinding,
-                                    window: authority.window, batch: authority.batchId, incarnation: UUID().uuidString)
+                                    window: authority.window, incarnation: UUID().uuidString)
             try write(Genesis(identity: identity, established: false), to: genesisURL)
             try barrier(.genesisInitializing)
             try write(Usage(identity: identity, records: 0, bytes: 0, transaction: nil), to: usageURL)
@@ -316,10 +315,12 @@ final class VoiceSharingCaptureLedger {
         return true
     }
 
+    /// Batch binding is enforced by AREA: the distinct batch directory scopes the whole ledger,
+    /// so the persisted identity itself needs no batch field — the format is byte-compatible
+    /// with the pre-batch ledger (reviewer 80ef8b5f follow-up).
     private func matches<Scope: VoiceSharingCaptureAccountScope>(_ identity: Identity, _ authority: Scope) -> Bool {
         identity.schema == 1 && identity.account == authority.accountDigest && identity.binding == authority.accountBinding
-            && identity.window == authority.window && identity.batch == authority.batchId
-            && UUID(uuidString: identity.incarnation) != nil
+            && identity.window == authority.window && UUID(uuidString: identity.incarnation) != nil
     }
 
     private func createDirectoriesDurably(_ directory: URL) throws {
