@@ -163,6 +163,7 @@ enum VoiceSharingFirebaseApp {
                         freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)
                     lastPolicyRefreshOutcome = fresh
                     completion?(fresh)
+                    if fresh { Self.allowanceRefresh?() }
                 }
             }
         }
@@ -186,4 +187,15 @@ enum VoiceSharingFirebaseApp {
             performPolicyExchange(coordinator: coordinator)
         }
     }
+
+    /// PRODUCTION DRIVER: connects the capture-allowance refresh to every settled policy exchange, so a
+    /// renewed lease also settles the allowance. Without this the allowance was only ever fetched at
+    /// launch, and a batch the client had proved exhausted could not advance without a relaunch.
+    static func connectAllowanceRefresh(_ refresh: @escaping () -> Void) {
+        allowanceRefresh = refresh
+    }
+
+    /// Called after every exchange that installs a snapshot. Optional: an unset hook (tests, the
+    /// secondary app) leaves the provider path exactly as it was.
+    private static var allowanceRefresh: (() -> Void)?
 }
