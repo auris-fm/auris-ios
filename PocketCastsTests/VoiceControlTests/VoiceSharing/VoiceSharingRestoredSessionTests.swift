@@ -60,6 +60,82 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         XCTAssertEqual(settlements.value, 1, "and the settlement must not repeat")
     }
 
+    /// (c) IDEMPOTENT SETTLEMENT (reviewer on ac82eab04): a login notification arriving AFTER
+    /// the poll already settled the same account must be a no-op — `beginNewLifecycle()`
+    /// unconditionally replaced the settled lifecycle and superseded its in-flight work. The
+    /// refresh counter is the observable: the settled lifecycle initiated exactly one recovery
+    /// refresh, and the repeat adds none.
+    func test_notificationAfterPollSettlement_isANoop() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        var readable = false
+        coordinator.restoredSessionAuthReadable = { readable }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
+
+        // The poll settles the restored session late.
+        coordinator.startRestoredSessionRetry()
+        let deadline = Date().addingTimeInterval(2)
+        while settlements.value == 0 && Date() < deadline {
+            if !readable { readable = true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(settlements.value, 1, "the late-restored session settles exactly once")
+
+        // A login notification for the SAME account lands afterwards (production shape:
+        // some other observer posts .userLoginDidChange while signed in).
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1,
+                       "a repeat settlement for the same account must not begin a new lifecycle")
+    }
+
+    /// (d) Two login notifications for the same session, no poll involved: the second is a
+    /// no-op. And a real account change (A→B) still settles.
+    func test_repeatNotification_noop_newAccount_settles() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        var account: String? = "account-A"
+        coordinator.settledAccountIdentityProvider = { account }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1)
+        coordinator.handleLoginStateDidChange(signedIn: true) // duplicate notification
+        XCTAssertEqual(settlements.value, 1, "duplicate settlement for the same session is a no-op")
+
+        account = "account-B" // real account switch
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 2, "a genuinely different account settles again")
+    }
+
+    /// (e) Sign-out while restoration is pending: the lifecycle clears, the pending poll
+    /// remains the late-coverage, and a later settle for the new account still lands exactly
+    /// once.
+    func test_signOutWhileRestorationPending_thenNewAccountSettles() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        var readable = false
+        var account: String? = nil
+        coordinator.restoredSessionAuthReadable = { readable }
+        coordinator.settledAccountIdentityProvider = { account }
+
+        coordinator.startRestoredSessionRetry() // polling while unreadable
+        // Sign-out arrives while restoration is still pending.
+        coordinator.handleLoginStateDidChange(signedIn: false)
+
+        // Later the session becomes readable, for a new account.
+        readable = true
+        account = "account-B"
+        let deadline = Date().addingTimeInterval(2)
+        while settlements.value == 0 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(settlements.value, 1,
+                       "the pending poll must still settle after a pending sign-out, exactly once")
+    }
+
     /// (b) The poll must survive past the old 20-attempt bound: a session that restores late is
     /// otherwise permanently unsettled. Bound the run by cancelling through the invalidate
     /// closure, which is also what production teardown does.

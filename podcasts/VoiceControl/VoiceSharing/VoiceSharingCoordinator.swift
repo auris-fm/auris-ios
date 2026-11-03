@@ -508,6 +508,13 @@ final class VoiceSharingCoordinator {
         restoredSessionPollGeneration += 1
     }
 
+    /// The account identity the CURRENT lifecycle was settled under; nil while signed out. The
+    /// idempotence key for settlement (see handleLoginStateDidChange).
+    private var settledAccountIdentity: String?
+
+    /// Injectable so controls control what "same account" means. Production: the server account id.
+    var settledAccountIdentityProvider: () -> String? = { ServerSettings.userId }
+
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
     /// prompted it. Split out so a composition test can drive the real producer sequence and still assert
     /// the decision, and so `SignOutHelper`'s trailing post cannot be mistaken for a sign-in.
@@ -517,15 +524,29 @@ final class VoiceSharingCoordinator {
         FileLog.shared.addMessage("[VoiceSharing] identity changed: signedIn=\(signedIn)")
         enrollmentStore.transitionToAccount(signedIn: signedIn)
         if signedIn {
+            // IDEMPOTENT SETTLEMENT (reviewer ac82eab04): settlement is keyed on the account
+            // identity. A second settlement for the SAME account — a repeat login notification,
+            // or a notification landing after the poll already settled the restored session —
+            // must be a no-op: `beginNewLifecycle()` unconditionally replaced the lifecycle and
+            // superseded the settled account's in-flight work. A genuinely different account
+            // settles again (sign-out clears the key first; a direct A→B switch has a distinct
+            // identity).
+            let account = settledAccountIdentityProvider() ?? "unknown-account"
+            if account == settledAccountIdentity {
+                FileLog.shared.addMessage("[VoiceSharing] identity settlement: same account, no-op")
+                return
+            }
+            settledAccountIdentity = account
             // A login settlement cancels the poll. A pending poll tick after a normal login
             // notification settled the identity must not re-derive and supersede the settled
-            // lifecycle (reviewer 30630d31). The SIGNED-OUT branch deliberately leaves a running
-            // poll alone: its ticks only settle when auth state says signed in, so it remains
-            // the coverage for a session that restores late without any notification.
+            // lifecycle. The SIGNED-OUT branch deliberately leaves a running poll alone: its
+            // ticks only settle when auth state says signed in, so it remains the coverage for
+            // a session that restores late without any notification.
             cancelRestoredSessionRetry()
             VoiceSharingSessionGeneration.shared.beginNewLifecycle()
             identityBecameReadable()
         } else {
+            settledAccountIdentity = nil
             VoiceSharingSessionGeneration.shared.clear()
             policy.invalidateForIdentityChange()
             consentGateLost()
