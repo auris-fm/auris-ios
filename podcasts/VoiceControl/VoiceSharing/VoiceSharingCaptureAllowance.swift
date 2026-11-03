@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import PocketCastsUtils
 
 /// Capture admission only. These are not transferred-byte counters or a replacement for server quotas.
 struct VoiceSharingCaptureLimits: Equatable {
@@ -69,7 +70,7 @@ struct VoiceSharingCaptureAuthorization: Equatable, VoiceSharingCaptureAccountSc
     /// Opaque server-issued UUIDs only — never a caller-chosen label.
     static func isValidBatchId(_ value: String) -> Bool { UUID(uuidString: value) != nil }
 
-    fileprivate static func digest(_ value: String) -> String {
+    static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
@@ -82,11 +83,19 @@ struct VoiceSharingCaptureProvisioningAuthority: VoiceSharingCaptureAccountScope
     let window: String
     let batchId: String
 
+    /// Set only when the server's own freshness interval for THIS batch has already elapsed. It is the
+    /// sole condition under which an existing zero-usage ledger may be re-established instead of
+    /// adopted: expiry is not permission, so re-establishing grants no capacity the batch did not
+    /// have, while adoption would keep charging captures to a batch the server no longer honours.
+    let expiredOnFreshness: Bool
+
     /// Caller must have independent first-provisioning proof; a normal admission snapshot is insufficient.
-    init?(verifiedFirstProvisioningAccount account: String, establishedWindow: String, batchId: String) {
+    init?(verifiedFirstProvisioningAccount account: String, establishedWindow: String, batchId: String,
+          expiredOnFreshness: Bool = false) {
         guard !account.isEmpty, account.utf8.count <= 512,
               !establishedWindow.isEmpty, establishedWindow.utf8.count <= 512,
               VoiceSharingCaptureAuthorization.isValidBatchId(batchId) else { return nil }
+        self.expiredOnFreshness = expiredOnFreshness
         accountDigest = VoiceSharingCaptureAuthorization.digest(account)
         accountBinding = VoiceSharingCaptureAuthorization.digest("auris-capture-allowance-account-v1:" + account)
         window = establishedWindow
@@ -222,65 +231,128 @@ final class VoiceSharingCaptureLedger {
 
     /// Initializes zero accounting only; never charges or issues a capture reservation.
     func provision(_ authority: VoiceSharingCaptureProvisioningAuthority) -> Bool {
-        access(authority, limits: nil)
+        access(authority, limits: nil, createIfMissing: true,
+               expiredOnFreshness: authority.expiredOnFreshness)
     }
 
-    private func access<Scope: VoiceSharingCaptureAccountScope>(_ authority: Scope, limits: VoiceSharingCaptureLimits?) -> Bool {
+    /// A batch about to be installed that already has durable accounting takes that accounting over
+    /// instead of being charged as new capacity. Returns false when this batch has no ledger at all —
+    /// the caller must then establish one explicitly, because a REPLAY of a batch whose accounting was
+    /// lost must refuse rather than fabricate a full fresh allowance.
+    func adoptExisting(_ authority: VoiceSharingCaptureProvisioningAuthority) -> Bool {
         guard Self.processLock.try() else { return false }
         defer { Self.processLock.unlock() }
-        do { return try chargeLocked(authority, limits: limits) } catch { return false }
+        let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
+            .appendingPathComponent(authority.batchId, isDirectory: true)
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
+        // `limits == nil` with an existing ledger re-opens it, settling any interrupted transaction and
+        // confirming its identity, without adding a record.
+        return access(authority, limits: nil)
     }
 
-    private func chargeLocked<Scope: VoiceSharingCaptureAccountScope>(_ authority: Scope, limits: VoiceSharingCaptureLimits?) throws -> Bool {
+    private func access<Scope: VoiceSharingCaptureAccountScope>(
+        _ authority: Scope, limits: VoiceSharingCaptureLimits?, createIfMissing: Bool = false,
+        expiredOnFreshness: Bool = false
+    ) -> Bool {
+        guard Self.processLock.try() else { return false }
+        defer { Self.processLock.unlock() }
+        do {
+            return try chargeLocked(authority, limits: limits, createIfMissing: createIfMissing,
+                                    expiredOnFreshness: expiredOnFreshness)
+        } catch { return false }
+    }
+
+    private func chargeLocked<Scope: VoiceSharingCaptureAccountScope>(
+        _ authority: Scope, limits: VoiceSharingCaptureLimits?, createIfMissing: Bool = false,
+        expiredOnFreshness: Bool = false
+    ) throws -> Bool {
         let firstProvisioning = limits == nil
+
         // Consumption is persisted PER ACCOUNT AND BATCH (spec): distinct directory per batch so a
         // refreshed batch reopens its own ledger and a different batch can never reuse its usage.
         let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
             .appendingPathComponent(authority.batchId, isDirectory: true)
-        // Ordinary admission/recovery must not mistake lost accounting for first use.
-        if firstProvisioning { try createDirectoriesDurably(directory) }
+        // Ordinary admission/recovery must not mistake lost accounting for first use; only an explicit
+        // provisioning call may create the batch's directory, and it may establish accounting only for
+        // a batch that has none (a touched or ambiguous ledger is never re-established).
+        if createIfMissing { try createDirectoriesDurably(directory) }
+
         let lockURL = directory.appendingPathComponent("claim.lock")
-        var created = false
         var descriptor: Int32
-        if firstProvisioning {
-            descriptor = open(lockURL.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
-            if descriptor >= 0 { created = true }
+        if createIfMissing {
+            descriptor = open(lockURL.path, O_RDWR | O_CREAT | O_NOFOLLOW, S_IRUSR | S_IWUSR)
         } else {
             descriptor = open(lockURL.path, O_RDWR | O_NOFOLLOW)
         }
         guard descriptor >= 0 else { throw Failure.unavailable }
         defer { close(descriptor) }
+        // The lock FILE may pre-exist on a restart: O_CREAT above opens it either way.
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
               flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw Failure.unavailable }
         defer { flock(descriptor, LOCK_UN) }
         // Never infer initializer ownership from an earlier directory check; re-read under both locks.
         let names = try boundedNames(directory)
-        let allowed: Set<String> = ["claim.lock", "genesis.json", "usage.json", "intent.json"]
+        let allowed: Set<String> = ["init.lock", "claim.lock", "genesis.json", "usage.json", "intent.json"]
         guard names.isSubset(of: allowed) else { throw Failure.unavailable }
         let genesisURL = directory.appendingPathComponent("genesis.json")
         let usageURL = directory.appendingPathComponent("usage.json")
         let intentURL = directory.appendingPathComponent("intent.json")
-        let genesis: Genesis
-        if created {
-            guard names == ["claim.lock"] else { throw Failure.unavailable }
+        var existing: Genesis?
+        var establish = false
+        if createIfMissing {
+            // Ownership is a property of TAKING the start lock, never of the directory listing: the
+            // claim lock always exists here (just created, or already present on a restart), so the
+            // listing cannot distinguish a fresh ledger from a restart over a committed one.
+            let initURL = directory.appendingPathComponent("init.lock")
+            let initializer = open(initURL.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            // `access` cannot classify "no ledger yet" as anything but failure, so a genuinely NEW
+            // batch's zero-usage ledger is established here rather than reported as lost accounting.
+            // A ledger that has been touched (or is ambiguous) is NOT re-established.
+            if initializer >= 0 {
+                close(initializer)
+                guard names == ["claim.lock"] else { throw Failure.unavailable }
+                establish = true
+            } else if errno == EEXIST, names.contains("genesis.json") {
+                let current = try read(Genesis.self, from: genesisURL)
+                existing = current
+                establish = try isUntouched(genesis: current, usage: try read(Usage.self, from: usageURL),
+                                            names: names, authority: authority)
+            } else {
+                throw Failure.unavailable
+            }
+        }
+        if establish {
+            if let prior = existing {
+                // Re-establishing an UNTOUCHED ledger (zero records, zero bytes, no interrupted
+                // transaction) is safe because it grants no capacity the batch did not already hold.
+                // Any consumed or ambiguous state refuses: missing or corrupt accounting must never
+                // reconstruct unused capacity.
+                try write(Genesis(identity: prior.identity, established: false), to: genesisURL)
+                try barrier(.genesisInitializing)
+            }
             try synchronize(lockURL, false)
             try synchronize(directory, true)
             try synchronize(root, true)
             try barrier(.claimDurable)
-            let identity = Identity(schema: 1, account: authority.accountDigest, binding: authority.accountBinding,
+            let identity: Identity
+            if let existing {
+                identity = existing.identity
+            } else {
+                identity = Identity(schema: 1, account: authority.accountDigest, binding: authority.accountBinding,
                                     window: authority.window, incarnation: UUID().uuidString)
+            }
             try write(Genesis(identity: identity, established: false), to: genesisURL)
             try barrier(.genesisInitializing)
             try write(Usage(identity: identity, records: 0, bytes: 0, transaction: nil), to: usageURL)
             try barrier(.initialUsage)
-            genesis = Genesis(identity: identity, established: true)
-            try write(genesis, to: genesisURL)
+            let established = Genesis(identity: identity, established: true)
+            try write(established, to: genesisURL)
             try barrier(.genesisEstablished)
             return true
-        } else {
-            genesis = try read(Genesis.self, from: genesisURL)
         }
+        let genesis = try read(Genesis.self, from: genesisURL)
         guard genesis.established, matches(genesis.identity, authority) else { throw Failure.unavailable }
         var usage = try read(Usage.self, from: usageURL)
         guard usage.identity == genesis.identity else { throw Failure.unavailable }
@@ -299,7 +371,9 @@ final class VoiceSharingCaptureLedger {
             try removeIntent(intentURL, directory: directory)
             usage = intent.target
         }
-        guard let limits else { throw Failure.unavailable }
+        // A recovery/refresh opener names no limits: it reopens the batch's accounting (settling any
+        // interrupted transaction) and consumes nothing.
+        guard let limits else { return true }
         let (records, recordOverflow) = usage.records.addingReportingOverflow(1)
         let (bytes, byteOverflow) = usage.bytes.addingReportingOverflow(limits.reservationBytes)
         guard !recordOverflow, !byteOverflow,
@@ -313,6 +387,18 @@ final class VoiceSharingCaptureLedger {
         try removeIntent(intentURL, directory: directory)
         try barrier(.intentSettled)
         return true
+    }
+
+    /// True only for a ledger with this authority's identity and NO consumed capacity and no
+    /// interrupted transaction. Anything else is uncertainty, which refuses.
+    private func isUntouched<Scope: VoiceSharingCaptureAccountScope>(
+        genesis: Genesis, usage: Usage, names: Set<String>, authority: Scope) throws -> Bool {
+        guard genesis.established, matches(genesis.identity, authority),
+              usage.identity == genesis.identity,
+              usage.records == 0, usage.bytes == 0, usage.transaction == nil,
+              !names.contains("intent.json") else { return false }
+        let allowed: Set<String> = ["init.lock", "claim.lock", "genesis.json", "usage.json"]
+        return names.isSubset(of: allowed)
     }
 
     /// Batch binding is enforced by AREA: the distinct batch directory scopes the whole ledger,
