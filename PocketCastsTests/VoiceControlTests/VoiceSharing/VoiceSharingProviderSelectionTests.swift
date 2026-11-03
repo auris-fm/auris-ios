@@ -62,6 +62,21 @@ final class VoiceSharingProviderSelectionTests: XCTestCase {
         XCTAssertEqual(config(origin: nil).configuredOrigin, "", "no configured origin")
     }
 
+    /// REVIEWER on f37893cd0: the first fix built a SECOND CloudAuthTokenProvider for sharing. Its
+    /// cache, refresh chain and single-flight handle are instance state, so two instances fork the chain
+    /// and revoke each other — the exact `refresh_reused` defect the sharing rule exists to prevent.
+    /// Identity is the property: there must be exactly one Auris provider in the process.
+    func test_voiceSharing_andAssistant_shareOneAurisProviderInstance() {
+        let origin = "https://api-staging.auris.fm"
+        let sharing = CloudTokenProviderRouter.voiceSharingProvider(aurisBaseURL: origin)
+        let assistant = CloudTokenProviderRouter.provider(aurisBaseURL: origin, edgeTokensEnabled: true)
+        func isSameInstance(_ a: any CloudTokenProviding, _ b: any CloudTokenProviding) -> Bool {
+            (a as AnyObject) === (b as AnyObject)
+        }
+        XCTAssertTrue(isSameInstance(sharing!, assistant),
+                      "sharing and the assistant must hold the SAME Auris provider instance")
+    }
+
     /// The assistant's own gated behaviour is deliberately unchanged by this work.
     func test_assistantRoutingBehaviourIsUnchanged() {
         let origin = "https://api-staging.auris.fm"

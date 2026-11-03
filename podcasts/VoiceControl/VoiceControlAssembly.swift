@@ -209,8 +209,9 @@ class VoiceControlAssembly {
         // configured origin there is no credential to present, so sharing is unavailable rather than
         // falling back to a static identity the account route must refuse.
         // Sharing endpoints use the CONFIGURED origin (not the cutover-gated one) so authentication and
-        // the requests it authorizes agree, per reviewer on b658801c6.
-        let sharingOrigin = CloudConfig.shared.configuredOrigin
+        // the requests it authorizes agree, per reviewer on b658801c6. Resolved LIVE per request, not
+        // captured once: a captured origin lets auth mint for the new origin while upload still targets
+        // the old one after an origin change (reviewer on f37893cd0).
         let voiceSharingTokenProvider = CloudTokenProviderRouter.voiceSharingProvider()
         if voiceSharingTokenProvider == nil {
             FileLog.shared.addMessage("[VoiceSharing] sharing unavailable: no Auris origin configured")
@@ -218,7 +219,7 @@ class VoiceControlAssembly {
         let uploadTrigger = voiceSharingTokenProvider.map { provider in
             makeVoiceSharingUploadTrigger(
                 queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity,
-                baseURLProvider: { sharingOrigin },
+                baseURLProvider: { CloudConfig.shared.configuredOrigin },
                 tokenProvider: provider)
         }
         // The settings MODEL is wired here, in production, with the real live reads (reviewer

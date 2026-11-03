@@ -17,15 +17,13 @@ import PocketCastsUtils
 /// review). The provider keys its cache to the origin as well as the account, so
 /// sharing it across an origin change cannot replay a token minted elsewhere.
 enum CloudTokenProviderRouter {
+    // ONE Auris provider for every caller. Its cache, rotating refresh chain and single-flight handle
+    // are instance state, so a second instance would rotate the same refresh token and revoke the
+    // other's chain (`refresh_reused`). It dials the CONFIGURED origin, not the cutover-gated one: the
+    // two differ only when the assistant's direct-upstream kill switch is set, and in that state the
+    // assistant's own selection gate picks the static provider anyway — so this changes no assistant
+    // behaviour while making the origin consistent for sharing (reviewer on f37893cd0).
     private static let sharedAurisProvider = CloudAuthTokenProvider(
-        authBaseURLProvider: { CloudConfig.shared.baseUrl },
-        credentialProvider: { CloudAccountSessionCredentialProvider().credential() }
-    )
-
-    /// The Auris provider as Voice Sharing sees it: the SAME instance and refresh chain, but dialled at
-    /// the configured origin rather than the cutover-gated one. Sharing the instance matters — a second
-    /// instance would rotate the same refresh token and revoke the other's chain (`refresh_reused`).
-    private static let sharedVoiceSharingProvider = CloudAuthTokenProvider(
         authBaseURLProvider: { CloudConfig.shared.configuredOrigin },
         credentialProvider: { CloudAccountSessionCredentialProvider().credential() }
     )
@@ -57,7 +55,7 @@ enum CloudTokenProviderRouter {
     static func voiceSharingProvider(aurisBaseURL: String? = nil) -> (any CloudTokenProviding)? {
         let resolved = aurisBaseURL ?? CloudConfig.shared.configuredOrigin
         guard nonEmpty(resolved) != nil else { return nil }
-        return sharedVoiceSharingProvider
+        return sharedAurisProvider
     }
 
     private static func nonEmpty(_ value: String) -> String? {
