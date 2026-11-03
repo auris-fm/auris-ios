@@ -64,24 +64,44 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             .appendingPathExtension("request")
     }
 
+    /// An identity is usable only when it is both readable AND confirmed durable. A file whose
+    /// directory entry was never successfully fsynced (a crash after `link`, or a failed directory
+    /// sync) may not survive a restart, so sending it would take a charge the device cannot reconstruct.
     private func existingRequestID(account: String, epoch: String) -> String? {
         let url = fileURL(account: account, epoch: epoch)
         guard let data = try? Data(contentsOf: url),
               data.count <= 64,
               let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
               UUID(uuidString: value) != nil else { return nil }
+        // Re-confirm durability on every read, not just after creation: this is also the repair path for
+        // an identity whose directory sync failed after it was linked.
+        do {
+            try synchronize(url, false)
+            try synchronize(url.deletingLastPathComponent(), true)
+        } catch {
+            return nil
+        }
         return value
     }
 
-    /// Returns the identity this device will send, minting one only if none exists. The result is
-    /// durable BEFORE the request leaves: a crash after the server charged the request must never lose
-    /// the identity that charge belongs to. Creation is serialized under `identityLock` and is exclusive
-    /// (`.withoutOverwriting` + `link`), so two overlapping provisions cannot each install a different
-    /// identity and silently abandon the batch the server already allocated for the loser.
-    private func requestIDForSending(account: String, epoch: String) -> String? {
+    /// The single serialized identity decision: keep, advance, or mint. Returns the identity this device
+    /// will send, and the result is durable BEFORE the request leaves — a crash after the server charged
+    /// the request must never lose the identity that charge belongs to.
+    ///
+    /// Advancing happens here and only here: the current identity is replaced by a NEW one exactly when
+    /// its own batch is proven exhausted in the durable ledger. Everything is decided against the
+    /// expected current identity under one lock, so two overlapping provisions cannot each advance and
+    /// each charge a batch.
+    private func nextRequestIDForSending(account: String, epoch: String) -> String? {
         identityLock.lock()
         defer { identityLock.unlock() }
-        if let existing = existingRequestID(account: account, epoch: epoch) { return existing }
+        if let existing = existingRequestID(account: account, epoch: epoch) {
+            guard let consumed = consumedBatch(forRequestID: existing, account: account, epoch: epoch)
+            else { return existing } // no proof of exhaustion: replay this identity
+            log("capture allowance batch \(consumed) is exhausted in the durable ledger; advancing")
+            discardRequestID(account: account, epoch: epoch)
+            clearInstallation()
+        }
         let url = fileURL(account: account, epoch: epoch)
         let value = UUID().uuidString
         do {
@@ -97,6 +117,8 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             guard link(temporary.path, url.path) == 0 || errno == EEXIST else { return nil }
             try? FileManager.default.removeItem(at: temporary)
             try synchronize(requestIdentityRoot, true)
+            // The exclusive link happened; confirm it is durable before this identity may be sent.
+            try synchronize(url, false)
         } catch {
             return nil
         }
@@ -117,9 +139,46 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         let window = issuedWindowByRequestID[requestID] ?? binding.windowID
         lock.unlock()
         guard let authority = VoiceSharingCaptureProvisioningAuthority(
-            verifiedFirstProvisioningAccount: account, establishedWindow: window, batchId: batch)
-        else { return nil }
-        return ledger.isExhausted(authority) ? batch : nil
+            verifiedFirstProvisioningAccount: account, establishedWindow: window, batchId: batch),
+            binding.maxRecords > 0, binding.maxBytes > 0 else { return nil }
+        let caps = VoiceSharingCaptureLedger.BatchCaps(records: binding.maxRecords, bytes: binding.maxBytes)
+        return ledger.isExhausted(authority, caps: caps) ? batch : nil
+    }
+
+    /// True when the batch behind the installed authority has no capacity left in the durable ledger.
+    private func installedBatchIsExhausted() -> Bool {
+        guard let authorization = currentAuthorization(),
+              let binding = existingBinding(account: authorizationAccount() ?? "",
+                                            epoch: authorization.consent.epoch),
+              binding.batchID == authorization.batchId else { return false }
+        let caps = VoiceSharingCaptureLedger.BatchCaps(records: binding.maxRecords, bytes: binding.maxBytes)
+        let authority = VoiceSharingCaptureProvisioningAuthority(
+            verifiedFirstProvisioningAccount: authorizationAccount() ?? "",
+            establishedWindow: binding.windowID, batchId: authorization.batchId)
+        guard let authority else { return false }
+        return ledger.isExhausted(authority, caps: caps)
+    }
+
+    private func authorizationAccount() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return installedAccount
+    }
+
+    private func clearInstallation() {
+        lock.lock()
+        installedResponse = nil
+        installedAccount = nil
+        lock.unlock()
+    }
+
+    /// Drop an installed response that no longer produces an authority (account/epoch/policy moved).
+    private func clearStaleInstallation() {
+        lock.lock()
+        let installed = installedResponse
+        lock.unlock()
+        guard installed != nil else { return }
+        clearInstallation()
     }
 
     /// The durable record of what the current identity was issued for.
@@ -127,6 +186,31 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         let requestID: String
         let batchID: String
         let windowID: String
+        /// The caps THIS batch was issued with. Exhaustion is judged against them, not the compiled
+        /// ceiling: a batch the server capped lower is spent sooner, and treating it as unspent would
+        /// leave the client asking to replay a batch it cannot use.
+        let maxRecords: UInt64
+        let maxBytes: UInt64
+
+        init(requestID: String, batchID: String, windowID: String, maxRecords: UInt64 = 0,
+             maxBytes: UInt64 = 0) {
+            self.requestID = requestID
+            self.batchID = batchID
+            self.windowID = windowID
+            self.maxRecords = maxRecords
+            self.maxBytes = maxBytes
+        }
+
+        init(from decoder: Decoder) throws {
+            // A binding written before caps were recorded carries zeros: that is "unknown", and an
+            // unknown cap must not authorize a mint.
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            requestID = try container.decode(String.self, forKey: .requestID)
+            batchID = try container.decode(String.self, forKey: .batchID)
+            windowID = try container.decode(String.self, forKey: .windowID)
+            maxRecords = try container.decodeIfPresent(UInt64.self, forKey: .maxRecords) ?? 0
+            maxBytes = try container.decodeIfPresent(UInt64.self, forKey: .maxBytes) ?? 0
+        }
     }
 
     private func bindingURL(account: String, epoch: String) -> URL {
@@ -142,9 +226,11 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     /// Records which batch an identity resolved to, durably, so a later process can judge that batch's
     /// exhaustion from the ledger alone.
     private func recordBinding(requestID: String, batchID: String, windowID: String,
+                               maxRecords: UInt64, maxBytes: UInt64,
                                account: String, epoch: String) {
         guard let data = try? JSONEncoder().encode(
-            Binding(requestID: requestID, batchID: batchID, windowID: windowID)) else { return }
+            Binding(requestID: requestID, batchID: batchID, windowID: windowID,
+                    maxRecords: maxRecords, maxBytes: maxBytes)) else { return }
         let url = bindingURL(account: account, epoch: epoch)
         let temporary = url.appendingPathExtension("next")
         do {
@@ -182,7 +268,11 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     /// reopens only if intact — reviewer 80ef8b5f.5). Every other outcome is
     /// surfaced and installs nothing.
     func provision() async {
-        if currentAuthorization() != nil { return } // installed — no second request
+        // An installed authority with capacity left means there is nothing to do. An installed verdict
+        // whose batch is EXHAUSTED does not: the client must be able to advance to the next batch within
+        // the same process, not only after a restart.
+        if currentAuthorization() != nil, !installedBatchIsExhausted() { return }
+        if currentAuthorization() == nil { clearStaleInstallation() }
         guard let account = accountProvider(), !account.isEmpty else {
             log("capture allowance provision skipped: no account identity")
             return
@@ -197,15 +287,11 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         // and never because of a local admission or transport failure. Anything else would let twelve
         // launches buy twelve batches out of one day's budget, which is exactly what this device did
         // before this fix.
-        // PROVEN exhaustion of the batch this identity belongs to: the durable ledger is intact and
-        // fully consumed. Only then is a NEW identity persisted and a further batch requested, which is
-        // the one case where the client may ask the server to charge more of the day's budget.
-        if let current = existingRequestID(account: account, epoch: epoch),
-           let consumed = consumedBatch(forRequestID: current, account: account, epoch: epoch) {
-            log("capture allowance batch \(consumed) is exhausted in the durable ledger")
-            discardRequestID(account: account, epoch: epoch)
-        }
-        guard let requestID = requestIDForSending(account: account, epoch: epoch),
+        // ONE serialized decision: read the current identity, prove (or fail to prove) that its batch is
+        // exhausted, and persist the replacement under the same lock. Split across lock boundaries, two
+        // concurrent calls both observe the old batch and the later discard removes the identity the
+        // first call just created — minting a second batch for one exhaustion event.
+        guard let requestID = nextRequestIDForSending(account: account, epoch: epoch),
               let request = VoiceSharingCaptureAllowanceRequest(requestID: requestID,
                                                                enrollmentEpoch: epoch) else {
             log("capture allowance provision skipped: invalid request inputs")
@@ -258,6 +344,8 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             issuedWindowByRequestID[requestID] = response.windowID
             lock.unlock()
             recordBinding(requestID: requestID, batchID: response.batchID, windowID: response.windowID,
+                          maxRecords: UInt64(response.batchMaxRecords),
+                          maxBytes: UInt64(response.batchMaxBytes),
                           account: account, epoch: epoch)
             log("capture allowance installed: batch \(response.batchID) (epoch \(response.enrollmentEpoch), \(response.disposition.rawValue))")
         case .refused(let refusal):

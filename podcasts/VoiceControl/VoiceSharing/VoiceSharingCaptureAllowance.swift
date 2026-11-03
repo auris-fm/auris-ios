@@ -214,10 +214,13 @@ final class VoiceSharingCaptureLedger {
     /// One bounded process-wide exclusion also covers separate opens/instances; flock adds process isolation.
     private static let processLock = NSLock()
 
-    /// The compiled per-batch ceilings. The ledger never stores a capacity the day did not grant, and a
-    /// response may only lower it, so exhaustion is judged against the compiled ceiling: a batch that
-    /// consumed four records is spent regardless of what a later replay advertises.
-    static let compiledLimits: (records: UInt64, bytes: UInt64) = (4, UInt64(4 * 1_985_580))
+    /// What this batch was issued with. A response may lower the compiled ceiling, never raise it, so
+    /// exhaustion is judged against the batch's OWN caps — a batch capped lower is spent sooner, and
+    /// judging it against the compiled ceiling would leave the client replaying a batch it cannot use.
+    struct BatchCaps: Equatable {
+        let records: UInt64
+        let bytes: UInt64
+    }
     private static let maximumDocumentBytes = 8 * 1024
     private let root: URL
     private let synchronize: (URL, Bool) throws -> Void
@@ -261,7 +264,7 @@ final class VoiceSharingCaptureLedger {
     /// the same caps however much of the batch was spent, and only this ledger can prove the batch is
     /// used up. Any doubt — no ledger, corrupt accounting, an interrupted transaction — answers false,
     /// because minting on doubt reserves capacity that is never used.
-    func isExhausted(_ authority: VoiceSharingCaptureProvisioningAuthority) -> Bool {
+    func isExhausted(_ authority: VoiceSharingCaptureProvisioningAuthority, caps: BatchCaps) -> Bool {
         guard Self.processLock.try() else { return false }
         defer { Self.processLock.unlock() }
         let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
@@ -276,8 +279,8 @@ final class VoiceSharingCaptureLedger {
               let usage = try? read(Usage.self, from: directory.appendingPathComponent("usage.json")),
               genesis.established, matches(genesis.identity, authority), usage.identity == genesis.identity,
               usage.records > 0 else { return false }
-        let (recordCeiling, byteCeiling) = Self.compiledLimits
-        return usage.records >= recordCeiling || usage.bytes >= byteCeiling
+        guard caps.records > 0, caps.bytes > 0 else { return false }
+        return usage.records >= caps.records || usage.bytes >= caps.bytes
     }
 
     private func access<Scope: VoiceSharingCaptureAccountScope>(
